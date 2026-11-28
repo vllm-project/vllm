@@ -3073,3 +3073,98 @@ async def test_streaming_derender_logprob_override(
     else:
         assert choice["logprobs"]["tokens"] == [expected]
         assert choice["logprobs"]["top_logprobs"] == [{expected: -0.5}]
+
+
+_QWEN_DEFERRAL_MODEL = "Qwen/Qwen3-0.6B"
+
+
+@pytest.fixture(scope="module")
+def qwen_deferral_server():
+    with RemoteLaunchRenderServer(
+        _QWEN_DEFERRAL_MODEL,
+        [
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "qwen3_xml",
+            "--reasoning-parser",
+            "qwen3",
+            "--max-model-len",
+            "2048",
+        ],
+    ) as server:
+        yield server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_end", [False, True])
+async def test_qwen3_quoted_tool_derender_http(qwen_deferral_server, explicit_end):
+    """The real HTTP derender entrypoint agrees across batch and token deltas."""
+    tokenizer = get_tokenizer(_QWEN_DEFERRAL_MODEL)
+    chat_request = {
+        "model": _QWEN_DEFERRAL_MODEL,
+        "messages": [{"role": "user", "content": "Weather?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        "tool_choice": "auto",
+    }
+    call = (
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>Paris</parameter>\n</function>\n</tool_call>"
+    )
+    prefix = "Example: "
+    text = prefix + call + (" done</think>Answer." if explicit_end else "")
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    prompt_ids = tokenizer.encode(
+        "<|im_start|>assistant\n<think>\n", add_special_tokens=False
+    )
+    async with httpx.AsyncClient(
+        base_url=qwen_deferral_server.url_for(""), timeout=60.0
+    ) as client:
+        streamed = await stream_chat_derender(
+            client, ids, [1] * len(ids), chat_request, len(prompt_ids), prompt_ids
+        )
+        response = await client.post(
+            "/v1/chat/completions/derender",
+            json={
+                "model": _QWEN_DEFERRAL_MODEL,
+                "generate_response": {
+                    "request_id": "qwen-deferral",
+                    "choices": [
+                        {"index": 0, "token_ids": ids, "finish_reason": "stop"}
+                    ],
+                },
+                "prompt_token_ids": prompt_ids,
+                "chat_request": chat_request,
+            },
+        )
+    assert response.status_code == 200, response.text
+    choice = response.json()["choices"][0]
+    message = choice["message"]
+    if explicit_end:
+        assert streamed["reasoning"] == message["reasoning"] == prefix + call + " done"
+        assert streamed["content"] == message["content"] == "Answer."
+        assert not streamed["tool_calls"]
+        assert not message.get("tool_calls")
+        assert streamed["finish_reason"] == choice["finish_reason"] == "stop"
+    else:
+        assert streamed["reasoning"] == prefix
+        assert message["reasoning"] == prefix
+        assert [call["name"] for call in streamed["tool_calls"]] == ["get_weather"]
+        assert json.loads(streamed["tool_calls"][0]["arguments"]) == {"city": "Paris"}
+        assert [call["function"]["name"] for call in message["tool_calls"]] == [
+            "get_weather"
+        ]
+        assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {
+            "city": "Paris"
+        }
+        assert streamed["finish_reason"] == choice["finish_reason"] == "tool_calls"

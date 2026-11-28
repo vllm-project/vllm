@@ -909,6 +909,7 @@ class OnlineRenderer:
                     request.tools,
                     model_config=self.model_config,
                     chat_template_kwargs=chat_params.chat_template_kwargs,
+                    tool_choice=request.tool_choice,
                 )
                 prompt_token_ids = extract_prompt_components(
                     self.model_config, engine_input

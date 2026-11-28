@@ -550,6 +550,7 @@ class OnlineDerenderer:
             self.renderer.get_tokenizer(),
             chat_request.tools,
             chat_template_kwargs=chat_request.chat_template_kwargs or {},
+            tool_choice=chat_request.tool_choice,
             model_config=self.model_config,
         )
         parser.set_history_tool_call_count(history_tool_call_cnt)
@@ -612,6 +613,7 @@ class OnlineDerenderer:
             tokenizer,
             chat_request.tools,
             chat_template_kwargs=chat_template_kwargs,
+            tool_choice=chat_request.tool_choice,
             model_config=self.model_config,
         )
         if prompt_token_ids is not None:
@@ -928,6 +930,7 @@ class OnlineDerenderer:
             tokenizer,
             chat_request.tools,
             chat_template_kwargs=self._resolve_chat_template_kwargs(chat_request),
+            tool_choice=chat_request.tool_choice,
             model_config=self.model_config,
         )
         processor = ChatStreamProcessor(

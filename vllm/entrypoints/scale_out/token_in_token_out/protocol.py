@@ -268,6 +268,9 @@ class ReasoningParserKwargs(BaseModel):
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
     """The effective chat template kwargs the prompt was rendered with."""
 
+    tool_choice: Literal["auto"] | None = None
+    """Whether Qwen3 may defer ambiguous tool starts without a tool grammar."""
+
 
 class GenerateRequest(BaseModel):
     request_id: str = Field(

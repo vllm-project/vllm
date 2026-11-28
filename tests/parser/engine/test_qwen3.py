@@ -11,6 +11,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+import regex as re
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
@@ -19,12 +20,28 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
+from vllm.parser import ParserManager
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.registered_adapters import (
+    Gemma4ParserReasoningAdapter,
+    InklingParserReasoningAdapter,
+    Qwen3ParserReasoningAdapter,
+)
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.engine.token_id_scanner import TextChunk
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    Qwen3Parser,
     qwen3_config,
 )
+from vllm.tokenizers import get_tokenizer
 
 
 @pytest.fixture
@@ -1534,3 +1551,705 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+@pytest.fixture(scope="module")
+def recovered_real_tokenizer():
+
+    return get_tokenizer("Qwen/Qwen3-0.6B")
+
+
+@pytest.mark.parametrize("chunking", ["character", "token", "tag"])
+@pytest.mark.parametrize("explicit_end", [False, True])
+@pytest.mark.parametrize("trailing", ["", "\nAfter."])
+@pytest.mark.parametrize("composed", [False, True])
+def test_recovered_deferral_small_delta_order(
+    recovered_real_tokenizer, chunking, explicit_end, trailing, composed
+):
+
+    tokenizer = recovered_real_tokenizer
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tool_choice="auto",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    )
+    parser_cls = Qwen3Parser
+    if composed:
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="qwen3_xml",
+            reasoning_parser_name="qwen3",
+            enable_auto_tools=True,
+            tokenizer=tokenizer,
+        )
+    parser = parser_cls(tokenizer, tools=request.tools, tool_choice=request.tool_choice)
+    call = (
+        "<tool_call>\n<function=get_weather>\n<parameter=city>Paris</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    text = (
+        "Thinking... " + call + (" done</think>Answer." if explicit_end else trailing)
+    )
+    chunks: list[tuple[str, list[int]]]
+    if chunking == "character":
+        chunks = [(ch, []) for ch in text]
+    elif chunking == "token":
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        chunks = [
+            (tokenizer.decode([tid], skip_special_tokens=False), [tid]) for tid in ids
+        ]
+    else:
+        chunks = [(part, []) for part in re.findall(r"<[^>]+>|[^<]+", text)]
+    deltas = []
+    for i, (chunk, ids) in enumerate(chunks):
+        delta = parser.parse_delta(
+            chunk,
+            ids,
+            request,
+            tokenizer.encode("<think>", add_special_tokens=False) if i == 0 else None,
+            finished=i == len(chunks) - 1,
+        )
+        if delta:
+            deltas.append(delta)
+    reasoning = "".join(d.reasoning or "" for d in deltas)
+    content = "".join(d.content or "" for d in deltas)
+    calls = [tc for d in deltas for tc in d.tool_calls or []]
+    if explicit_end:
+        assert reasoning == "Thinking... " + call + " done"
+        assert content == "Answer."
+        assert not calls
+    else:
+        assert reasoning == "Thinking... "
+        assert content == trailing
+        assert [
+            tc.function.name for tc in calls if tc.function and tc.function.name
+        ] == ["get_weather"]
+        assert json.loads(
+            "".join(tc.function.arguments or "" for tc in calls if tc.function)
+        ) == {"city": "Paris"}
+
+
+@pytest.mark.parametrize("prior", [False, True])
+@pytest.mark.parametrize("raises", [False, True])
+def test_recovered_batch_gate_restores_state(recovered_real_tokenizer, raises, prior):
+    parser = Qwen3Parser(recovered_real_tokenizer, tool_choice="auto")
+    parser._engine.defer_reasoning_tool_start = prior
+    try:
+        with parser._batch_deferral_gate():
+            assert parser._engine.defer_reasoning_tool_start is True
+            if raises:
+                raise ValueError("test restoration")
+    except ValueError:
+        assert raises
+    assert parser._engine.defer_reasoning_tool_start is prior
+
+
+class TestQuotedToolCallsInReasoning:
+    @pytest.fixture
+    def thinking_parser(self, mock_request):
+
+        # Offer the quoted name so name validation alone cannot hide the bug.
+        tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            )
+        ]
+        mock_request.tools = tools
+
+        # This class needs thinking enabled, unlike the file's parser fixture.
+        tokenizer = make_mock_tokenizer(
+            {
+                "<think>": 500,
+                "</think>": 501,
+                TOOL_CALL_START: 502,
+                TOOL_CALL_END: 503,
+            }
+        )
+        return Qwen3Parser(tokenizer, tools=tools)
+
+    @staticmethod
+    def _encode_chunk(text):
+        markers = {
+            "<think>": 500,
+            "</think>": 501,
+            TOOL_CALL_START: 502,
+            TOOL_CALL_END: 503,
+        }
+        ids = []
+        offset = 0
+        while offset < len(text):
+            marker = next((m for m in markers if text.startswith(m, offset)), None)
+            if marker is not None:
+                ids.append(markers[marker])
+                offset += len(marker)
+            else:
+                ids.append(ord(text[offset]))
+                offset += 1
+        return ids
+
+    @pytest.fixture
+    def quoted_reasoning(self):
+        # This complete block is an example in reasoning, not an emitted call.
+        return (
+            "I am quoting an example, not calling a tool:\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Paris</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+            "That was only an example."
+        )
+
+    def test_quoted_markup_does_not_emit_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        reasoning, content, calls = thinking_parser.parse(text, mock_request)
+
+        assert reasoning == quoted_reasoning
+        assert content == "Done."
+        assert calls is None
+
+    def test_quoted_markup_survives_in_reasoning(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        reasoning, content, calls = thinking_parser.parse(text, mock_request)
+
+        # Prevent a fix that suppresses the phantom by deleting the example.
+        assert reasoning == quoted_reasoning
+        assert content == "Done."
+        assert calls is None
+
+    def test_streaming_quoted_markup_in_reasoning_is_not_a_tool_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        chunks = [text[:15], text[15:61], text[61:104], text[104:]]
+        reasoning_parts = []
+        content_parts = []
+        tool_call_deltas = []
+        previous_text = ""
+        for index, chunk in enumerate(chunks):
+            delta = thinking_parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == len(chunks) - 1,
+            )
+            previous_text += chunk
+            if delta is not None:
+                if delta.reasoning:
+                    reasoning_parts.append(delta.reasoning)
+                if delta.content:
+                    content_parts.append(delta.content)
+                if delta.tool_calls:
+                    tool_call_deltas.extend(delta.tool_calls)
+        assert tool_call_deltas == []
+        assert "".join(reasoning_parts) == quoted_reasoning
+        assert "".join(content_parts) == "Done."
+
+    def test_streaming_quoted_markup_with_reasoning_adapter_skip_mode(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        # The serving-layer reasoning adapter runs with tool parsing skipped.
+        # It must still defer the opener, or it would mistake this example for
+        # an implicit reasoning end before </think> arrives.
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        parser = thinking_parser
+        parser.skip_tool_parsing = True
+        reasoning_parts = []
+        for index, chunk in enumerate((text[:51], text[51:104], text[104:])):
+            delta = parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == 2,
+            )
+            if delta is not None and delta.reasoning:
+                reasoning_parts.append(delta.reasoning)
+        assert "".join(reasoning_parts) == quoted_reasoning
+
+    def test_empty_held_span_is_preserved_as_reasoning(
+        self, thinking_parser, mock_request
+    ):
+        text = "<think><tool_call></think>Done."
+        delta = thinking_parser.parse_delta(
+            delta_text=text,
+            delta_token_ids=self._encode_chunk(text),
+            request=mock_request,
+            prompt_token_ids=[500],
+            finished=True,
+        )
+        assert delta is not None
+        assert delta.reasoning == TOOL_CALL_START
+        assert delta.content == "Done."
+        assert delta.tool_calls == []
+
+    def test_multiple_quoted_blocks_remain_reasoning(
+        self, thinking_parser, mock_request
+    ):
+        quoted = "<tool_call>first</tool_call> then <tool_call>second</tool_call>"
+        text = "<think>" + quoted + "</think>Done."
+        delta = thinking_parser.parse_delta(
+            delta_text=text,
+            delta_token_ids=self._encode_chunk(text),
+            request=mock_request,
+            prompt_token_ids=[500],
+            finished=True,
+        )
+        assert delta is not None
+        assert delta.reasoning == quoted
+        assert delta.content == "Done."
+        assert delta.tool_calls == []
+
+    def test_reasoning_adapter_skip_mode_preserves_implicit_tool_markup(
+        self, thinking_parser, mock_request
+    ):
+        text = (
+            "<think>Reasoning <tool_call><function=get_weather></function></tool_call>"
+        )
+        parser = thinking_parser
+        parser.skip_tool_parsing = True
+        deltas = []
+        for index, chunk in enumerate((text[:29], text[29:47], text[47:])):
+            delta = parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == 2,
+            )
+            if delta is not None:
+                deltas.append(delta)
+        combined = "".join(delta.content or "" for delta in deltas)
+        assert "<tool_call>" in combined
+        assert "<function=get_weather>" in combined
+        assert all(not delta.tool_calls for delta in deltas)
+
+    def test_streaming_tool_start_split_across_chunks(
+        self, thinking_parser, mock_request
+    ):
+        text = "<think>Quoted: <tool_call><tool_call></tool_call></think>Done."
+        split = text.index(TOOL_CALL_START) + len("<tool_")
+        chunks = [text[:split], text[split:]]
+        reasoning_parts = []
+        tool_call_deltas = []
+        for index, chunk in enumerate(chunks):
+            delta = thinking_parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == len(chunks) - 1,
+            )
+            if delta is not None:
+                if delta.reasoning:
+                    reasoning_parts.append(delta.reasoning)
+                if delta.tool_calls:
+                    tool_call_deltas.extend(delta.tool_calls)
+        assert "".join(reasoning_parts) == "Quoted: <tool_call><tool_call></tool_call>"
+        assert tool_call_deltas == []
+
+    def test_reset_clears_a_held_quoted_tool_span(self, thinking_parser, mock_request):
+        parser = thinking_parser
+        parser.parse_delta(
+            delta_text="<think>Before <tool_call>",
+            delta_token_ids=self._encode_chunk("<think>Before <tool_call>"),
+            request=mock_request,
+            prompt_token_ids=[500],
+            finished=False,
+        )
+        parser._reset()
+        parser.skip_tool_parsing = False
+        delta = parser.parse_delta(
+            delta_text="ordinary answer",
+            delta_token_ids=self._encode_chunk("ordinary answer"),
+            request=mock_request,
+            prompt_token_ids=[500],
+            finished=True,
+        )
+        assert delta is not None
+        assert delta.reasoning == "ordinary answer"
+        assert delta.content is None
+        assert delta.tool_calls == []
+
+    def test_streaming_quoted_markup_then_real_call_emits_only_real_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = (
+            "<think>" + quoted_reasoning + "</think>"
+            "\n<tool_call><function=get_weather>"
+            "<parameter=city>Tokyo</parameter></function></tool_call>"
+        )
+        # Split both the quoted example and actual call across chunk boundaries.
+        chunks = [text[:49], text[49:97], text[97:151], text[151:190], text[190:]]
+        names = []
+        arguments = []
+        reasoning_parts = []
+        parser = thinking_parser
+        for index, chunk in enumerate(chunks):
+            delta = parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == len(chunks) - 1,
+            )
+            if delta is None:
+                continue
+            if delta.reasoning:
+                reasoning_parts.append(delta.reasoning)
+            for call in delta.tool_calls or []:
+                if call.function and call.function.name:
+                    names.append(call.function.name)
+                if call.function and call.function.arguments:
+                    arguments.append(call.function.arguments)
+        assert "".join(reasoning_parts) == quoted_reasoning
+        assert names == ["get_weather"]
+        assert json.loads("".join(arguments)) == {"city": "Tokyo"}
+
+    def test_implicit_reasoning_end_still_parses_tool_call(
+        self, thinking_parser, mock_request
+    ):
+        text = (
+            "<think>Reasoning before an implicit tool call.\n"
+            "<tool_call><function=get_weather>"
+            "<parameter=city>Tokyo</parameter></function></tool_call>"
+        )
+        chunks = [text[:37], text[37:68], text[68:]]
+        tool_call_deltas = []
+        for index, chunk in enumerate(chunks):
+            delta = thinking_parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == len(chunks) - 1,
+            )
+            if delta is not None and delta.tool_calls:
+                tool_call_deltas.extend(delta.tool_calls)
+        assert tool_call_deltas
+        assert any(
+            tc.function and tc.function.name == "get_weather" for tc in tool_call_deltas
+        )
+
+    def test_partial_deferred_span_flushes_as_tool_call_from_adapter(
+        self, thinking_parser
+    ):
+
+        parser = Qwen3ParserReasoningAdapter(
+            thinking_parser.model_tokenizer,
+            tools=thinking_parser._tools,
+            tool_choice="auto",
+        )
+        parser.adjust_initial_state_from_prompt([500])
+        chunk = "Reasoning <tool_call><function=get_weather>"
+        ids = self._encode_chunk(chunk)
+        delta = parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text=chunk,
+            delta_text=chunk,
+            previous_token_ids=(),
+            current_token_ids=ids,
+            delta_token_ids=ids,
+        )
+        assert delta is not None and delta.reasoning == "Reasoning "
+        assert delta.tool_calls == []
+
+        delta = parser.finish_streaming()
+        assert delta is not None
+        assert len(delta.tool_calls) == 1
+        assert delta.tool_calls[0].function is not None
+        assert delta.tool_calls[0].function.name == "get_weather"
+        assert delta.tool_calls[0].function.arguments == "{}"
+
+    def test_implicit_reasoning_end_flushes_through_reasoning_adapter(
+        self, thinking_parser, mock_request
+    ):
+
+        reasoning_parser = Qwen3ParserReasoningAdapter(
+            thinking_parser.model_tokenizer,
+            tools=thinking_parser._tools,
+            tool_choice="auto",
+        )
+        reasoning_parser.adjust_initial_state_from_prompt([500])
+        chunks = [
+            "Reasoning ",
+            "<tool_call>",
+            "<function=get_weather>",
+            "<parameter=city>Tokyo</parameter>",
+            "</function>",
+            "</tool_call>",
+        ]
+        deltas = []
+        for chunk in chunks:
+            ids = self._encode_chunk(chunk)
+            delta = reasoning_parser.extract_reasoning_streaming(
+                previous_text="",
+                current_text=chunk,
+                delta_text=chunk,
+                previous_token_ids=(),
+                current_token_ids=ids,
+                delta_token_ids=ids,
+            )
+            if delta is not None:
+                deltas.append(delta)
+        delta = reasoning_parser.finish_streaming()
+        if delta is not None:
+            deltas.append(delta)
+
+        calls = [tc for delta in deltas for tc in delta.tool_calls or []]
+        assert any(
+            call.function and call.function.name == "get_weather" for call in calls
+        )
+        assert "".join(delta.reasoning or "" for delta in deltas) == "Reasoning "
+
+    def test_quoted_markup_then_real_call_emits_only_real_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        # Different cities make an accidental substitution visible.
+        text = (
+            "<think>" + quoted_reasoning + "</think>\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        reasoning, content, calls = thinking_parser.parse(text, mock_request)
+
+        assert reasoning == quoted_reasoning
+        assert content is None
+        assert calls is not None and len(calls) == 1
+        assert calls[0].name == "get_weather"
+        args = json.loads(calls[0].arguments)
+        assert args == {"city": "Tokyo"}
+
+    def test_thinking_config_includes_tool_call_as_reasoning_end(self, thinking_parser):
+        """Thinking Qwen3 still lists <tool_call> as an implicit reasoning end."""
+        assert thinking_parser.thinking_enabled
+        tool_call_id = thinking_parser.vocab[TOOL_CALL_START]
+        assert tool_call_id in thinking_parser.reasoning_end_token_ids
+        assert tool_call_id in thinking_parser.implicit_reasoning_end_token_ids
+
+    def test_quoted_tool_call_in_open_think_is_not_implicit_end(self, thinking_parser):
+        """A quoted <tool_call> is not an implicit end while think deferral applies.
+
+        Prompt ids end in an open <think>. find_reasoning_end must not treat
+        the quoted opener as an implicit reasoning end.
+        """
+        think_id = thinking_parser.vocab["<think>"]
+        tool_call_id = thinking_parser.vocab[TOOL_CALL_START]
+        adapter = Qwen3ParserReasoningAdapter(
+            thinking_parser.model_tokenizer,
+            tools=thinking_parser._tools,
+            tool_choice="auto",
+        )
+        assert isinstance(thinking_parser, Qwen3Parser)
+        assert isinstance(adapter, ParserEngineReasoningAdapter)
+        assert isinstance(adapter._parser_engine, Qwen3Parser)
+
+        prompt_ids = self._encode_chunk("Answer the user.<think>")
+        assert prompt_ids[-1] == think_id
+        adapter.adjust_initial_state_from_prompt(prompt_ids)
+        assert adapter._parser_engine._engine.defer_reasoning_tool_start
+
+        generated = self._encode_chunk("quoting <tool_call> inside the think block")
+        tool_at = generated.index(tool_call_id)
+        end = adapter.find_reasoning_end(generated)
+        assert end is None or end.offset != tool_at or not end.implicit
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
+@pytest.mark.parametrize("composed", [False, True])
+def test_public_prompt_setter_preserves_auto_only_gate(
+    recovered_real_tokenizer, tool_choice, composed
+):
+    tokenizer = recovered_real_tokenizer
+    tools = [{"type": "function", "function": {"name": "get_weather"}}]
+    choice = (
+        {"type": "function", "function": {"name": "get_weather"}}
+        if tool_choice == "named"
+        else tool_choice
+    )
+    request = ChatCompletionRequest(
+        messages=[], model="m", tools=tools, tool_choice=choice
+    )
+    parser_cls = Qwen3Parser
+    if composed:
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="qwen3_xml",
+            reasoning_parser_name="qwen3",
+            enable_auto_tools=True,
+            tokenizer=tokenizer,
+        )
+    parser = parser_cls(tokenizer, tools=request.tools, tool_choice=request.tool_choice)
+    parser.set_prompt_token_ids(tokenizer.encode("<think>", add_special_tokens=False))
+    text = "quoted <tool_call>example</tool_call></think>Answer."
+    delta = parser.parse_delta(text, [], request, finished=True)
+    assert delta is not None
+    if tool_choice == "auto":
+        assert delta.reasoning == "quoted <tool_call>example</tool_call>"
+        assert delta.content == "Answer."
+    else:
+        assert delta.reasoning == "quoted "
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
+def test_reasoning_adapter_only_defers_auto(recovered_real_tokenizer, tool_choice):
+    tokenizer = recovered_real_tokenizer
+    adapter = Qwen3ParserReasoningAdapter(tokenizer, tool_choice=tool_choice)
+    adapter.set_prompt_token_ids(tokenizer.encode("<think>", add_special_tokens=False))
+    ids = tokenizer.encode("<tool_call>", add_special_tokens=False)
+    end = adapter.find_reasoning_end(ids)
+    assert end is not None
+    assert end.offset == (len(ids) if tool_choice == "auto" else 0)
+    assert end.implicit is (tool_choice != "auto")
+
+
+def test_promptless_stream_keeps_legacy_boundary(recovered_real_tokenizer):
+    tokenizer = recovered_real_tokenizer
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tool_choice="auto",
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    text = "quoted <tool_call>example</tool_call></think>Answer."
+    batch = Qwen3Parser(tokenizer)
+    assert batch.parse(text, request)[0] == "quoted <tool_call>example</tool_call>"
+    streaming = Qwen3Parser(tokenizer)
+    delta = streaming.parse_delta(text, [], request, finished=True)
+    assert delta is not None
+    assert delta.reasoning == "quoted "
+
+
+def test_reasoning_adapter_legacy_finish_override_needs_no_keyword(mock_tokenizer):
+    class LegacyFinishParser(Qwen3Parser):
+        CONFIG_NAME = "legacy-test"
+
+        # Intentionally model an existing downstream no-keyword override.
+        def finish_streaming(self):  # type: ignore[override]
+            return None
+
+    class LegacyFinishAdapter(ParserEngineReasoningAdapter):
+        _parser_engine_cls = LegacyFinishParser
+
+    assert LegacyFinishAdapter(mock_tokenizer).finish_streaming() is None
+
+
+@pytest.mark.parametrize(
+    "adapter_cls", [InklingParserReasoningAdapter, Gemma4ParserReasoningAdapter]
+)
+def test_other_engine_reasoners_do_not_opt_into_prompt_priming(
+    recovered_real_tokenizer, adapter_cls
+):
+    adapter = adapter_cls(recovered_real_tokenizer)
+    assert adapter.requires_prompt_token_ids is False
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    ["<think>", "<think></think>", "", "<think><|im_end|><|im_start|>assistant\n"],
+)
+def test_deferral_prompt_gate_matches_streaming_and_batch(
+    recovered_real_tokenizer, prompt
+):
+    tokenizer = recovered_real_tokenizer
+    request = ChatCompletionRequest(messages=[], model="m")
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    text = "quoted <tool_call>example</tool_call></think>Answer."
+    batch = Qwen3Parser(tokenizer)
+    batch.set_prompt_token_ids(prompt_ids)
+    expected = batch.parse(text, request)
+    streaming = Qwen3Parser(tokenizer)
+    actual = streaming.parse_delta(text, [], request, prompt_ids, finished=True)
+    assert actual is not None
+    assert (actual.reasoning or None, actual.content or None) == expected[:2]
+    assert (
+        streaming._engine.defer_reasoning_tool_start
+        == batch._engine.defer_reasoning_tool_start
+    )
+
+
+def test_deferral_holds_empty_text_token_counts(recovered_real_tokenizer):
+
+    tokenizer = recovered_real_tokenizer
+    engine = StreamingParserEngine(
+        dataclasses.replace(
+            qwen3_config(thinking=True), defer_reasoning_tool_start=True
+        ),
+        tokenizer,
+    )
+    tool_id = tokenizer.convert_tokens_to_ids("<tool_call>")
+    close_id = tokenizer.convert_tokens_to_ids("</tool_call>")
+    end_id = tokenizer.convert_tokens_to_ids("</think>")
+
+    assert engine.feed("<tool_call>", [tool_id]) == []
+    # Exercise the scanner-item dispatcher directly: token-only chunks
+    # must use the same pending buffer as ordinary content.
+    assert engine._process_scanner_items([TextChunk("", token_count=1)]) == []
+    assert engine.feed("</tool_call>", [close_id]) == []
+    assert engine.reasoning_token_count == 0
+    events = engine.feed("</think>", [end_id])
+    reasoning = [event for event in events if event.type == EventType.REASONING_CHUNK]
+    assert "".join(event.value for event in reasoning) == "<tool_call></tool_call>"
+    assert any(event.value == "" and event.token_count == 1 for event in reasoning)
+    assert sum(event.token_count for event in reasoning) == 1
+    assert engine.reasoning_token_count == 1
+
+
+def test_empty_text_token_counts_without_deferral_keep_legacy_behavior(
+    recovered_real_tokenizer,
+):
+
+    tokenizer = recovered_real_tokenizer
+    engine = StreamingParserEngine(qwen3_config(thinking=True), tokenizer)
+
+    events = engine._process_scanner_items([TextChunk("", token_count=1)])
+    reasoning = [event for event in events if event.type == EventType.REASONING_CHUNK]
+    assert [(event.value, event.token_count) for event in reasoning] == [("", 1)]
+
+
+@pytest.mark.parametrize("api", ["extract_reasoning", "parse"])
+def test_promptless_stream_reuse_preserves_batch_lookahead(
+    recovered_real_tokenizer, api
+):
+    tokenizer = recovered_real_tokenizer
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tool_choice="auto",
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    text = "quoted <tool_call>example</tool_call> done</think>Answer."
+    fresh = Qwen3Parser(tokenizer, tools=request.tools, tool_choice="auto")
+    reused = Qwen3Parser(tokenizer, tools=request.tools, tool_choice="auto")
+    assert (
+        reused.parse_delta("earlier response", [], request, finished=True) is not None
+    )
+    expected = getattr(fresh, api)(text, request)
+    actual = getattr(reused, api)(text, request)
+    assert expected[:2] == ("quoted <tool_call>example</tool_call> done", "Answer.")
+    assert actual == expected

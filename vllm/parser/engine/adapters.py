@@ -47,6 +47,9 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs) -> None:
         super().__init__(tokenizer, *args, **kwargs)
         self._parser_engine = self._parser_engine_cls(tokenizer, **kwargs)  # type: ignore[call-arg]
+        self.requires_prompt_token_ids = (
+            self._parser_engine.parser_engine_config.defer_reasoning_tool_start
+        )
         self._parser_engine_kwargs = kwargs
         self._counting_parser_engine: ParserEngine | None = None
         # TODO: Remove once Responses finalization reuses accumulated streaming
@@ -143,6 +146,10 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     def finish_streaming(self) -> DeltaMessage | None:
         with self._skip_tool_parsing():
+            if self._parser_engine._engine.defer_reasoning_tool_start:
+                return self._parser_engine.finish_streaming(
+                    resolve_deferred_tool_start=True
+                )
             return self._parser_engine.finish_streaming()
 
     def get_streaming_fallback_content(

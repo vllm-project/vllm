@@ -138,6 +138,10 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Hold ambiguous tool starts inside reasoning until an explicit end or EOF.
+    # Disabled by default; Qwen3 opts in with request and prompt metadata.
+    defer_reasoning_tool_start: bool = False
+
     def __post_init__(self) -> None:
         if self.arg_value_extender is not None and (
             self.arg_converter is None or not self.stream_arg_deltas

@@ -126,6 +126,10 @@ class StructuredOutputManager:
                 tokenizer=self.tokenizer,
                 **parser_kwargs,
             )
+            # Match the frontend's request-local reasoning/grammar boundary.
+            reasoner = structured_req.reasoner
+            if reasoner.requires_prompt_token_ids:
+                reasoner.set_prompt_token_ids(request.prompt_token_ids or [])
         return structured_req.reasoner
 
     def _get_backend(self, backend_name: str) -> StructuredOutputBackend:

@@ -522,6 +522,35 @@ Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_temp
     The base model provides general function calling capabilities, but best results
     are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
+### Qwen3 Thinking and Tool Calls
+
+With the Qwen3 reasoning parser and `tool_choice="auto"`, a prompt ending
+in an open `<think>` block keeps tool-looking text in reasoning until an
+explicit `</think>` arrives. A quoted `<tool_call>` example before that closer
+is not an executable call. If the response ends without `</think>`, the first
+tool opener instead acts as the implicit reasoning end and the held span is
+parsed as a tool call. Text after that call is retained.
+
+Streaming delays the ambiguous span until the closer or the end of the
+response. The buffer grows with that span; there is no separate parser-side
+size limit beyond the response length limit. This applies only to Qwen3
+thinking mode with automatic tool choice. Required and named tool choice keep
+the existing implicit-end behavior so their argument grammar starts at the
+tool opener. Quoted tool markup inside reasoning is therefore still not fixed
+for required and named tool choice. Parsers that reuse Qwen3's tool format and
+prompts with thinking already closed are unchanged.
+
+Serving must supply prompt token IDs to identify an open reasoning block.
+The derender streaming API rejects parser-configured requests without them.
+Standalone prompt-less streaming keeps the legacy implicit-end behavior;
+standalone batch extraction can use full-output lookahead instead. These
+prompt-less modes do not have matching quoted-markup behavior.
+
+Prompt-embedding inputs without real prompt token IDs are also outside this
+fix. Their synthetic placeholder IDs cannot identify an open `<think>` block,
+so they keep the legacy implicit-end behavior, including the quoted-markup
+limitation.
+
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:

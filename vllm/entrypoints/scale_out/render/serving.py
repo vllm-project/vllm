@@ -184,7 +184,9 @@ class ServingRender(BaseServing):
         chat_template_kwargs = self.online_renderer.effective_chat_template_kwargs(
             request
         )
-        reasoning_parser_kwargs = self._reasoning_parser_kwargs(chat_template_kwargs)
+        reasoning_parser_kwargs = self._reasoning_parser_kwargs(
+            chat_template_kwargs, request.tool_choice
+        )
         parser = None
         if reasoning_parser_kwargs is not None:
             assert self.online_renderer.parser is not None
@@ -192,6 +194,7 @@ class ServingRender(BaseServing):
                 self.online_renderer.renderer.get_tokenizer(),
                 request.tools,
                 chat_template_kwargs=reasoning_parser_kwargs.chat_template_kwargs,
+                tool_choice=reasoning_parser_kwargs.tool_choice,
                 model_config=self.model_config,
             )
         reasoning_ended = request.resolve_reasoning_ended(parser, token_ids)
@@ -392,7 +395,8 @@ class ServingRender(BaseServing):
             sampling_params=params,
             model=request.model,
             reasoning_parser_kwargs=self._reasoning_parser_kwargs(
-                self.online_renderer.effective_chat_template_kwargs(request)
+                self.online_renderer.effective_chat_template_kwargs(request),
+                request.tool_choice,
             ),
             stream=bool(request.stream),
             cache_salt=request.cache_salt,
@@ -403,12 +407,15 @@ class ServingRender(BaseServing):
         )
 
     def _reasoning_parser_kwargs(
-        self, chat_template_kwargs: dict[str, Any]
+        self, chat_template_kwargs: dict[str, Any], tool_choice=None
     ) -> ReasoningParserKwargs | None:
         parser_cls = self.online_renderer.parser
         if parser_cls is None or parser_cls.reasoning_parser_cls is None:
             return None
-        return ReasoningParserKwargs(chat_template_kwargs=chat_template_kwargs)
+        return ReasoningParserKwargs(
+            chat_template_kwargs=chat_template_kwargs,
+            tool_choice="auto" if tool_choice == "auto" else None,
+        )
 
     def _placeholder_metadata_fields(self, modality: str) -> set[str]:
         """Fields the EC consumer still requires after embeddings transfer."""

@@ -222,6 +222,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tokenizer,
             request.tools,
             chat_template_kwargs=chat_template_kwargs,
+            tool_choice=request.tool_choice,
             model_config=self.model_config,
         )
 
@@ -257,6 +258,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 "chat_template_kwargs": self._engine_chat_template_kwargs(
                     chat_template_kwargs
                 ),
+                "tool_choice": "auto" if request.tool_choice == "auto" else None,
             }
         return {
             "reasoning_ended": request.resolve_reasoning_ended(

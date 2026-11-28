@@ -6,6 +6,7 @@
 import json
 from http import HTTPStatus
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -434,8 +435,9 @@ async def test_render_responses_rejects_empty_token_ids(
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "none"])
 async def test_render_responses_carries_reasoning_parser_kwargs(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tool_choice: Literal["auto", "required", "none"]
 ):
     """/v1/responses gives the engine's reasoning parser the effective template
     kwargs, so the rendered request must carry them to generate."""
@@ -461,12 +463,23 @@ async def test_render_responses_carries_reasoning_parser_kwargs(
         model=MODEL_NAME,
         input="Test prompt",
         chat_template_kwargs={"enable_thinking": False},
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object"},
+            }
+        ],
+        tool_choice=tool_choice,
     )
 
     response = await serving.render_responses_request(request)
 
     assert not isinstance(response, ErrorResponse)
     assert response.reasoning_parser_kwargs is not None
+    assert response.reasoning_parser_kwargs.tool_choice == (
+        "auto" if tool_choice == "auto" else None
+    )
     kwargs = response.reasoning_parser_kwargs.chat_template_kwargs
     assert kwargs["enable_thinking"] is False
 

@@ -651,7 +651,8 @@ REASONING_PARSER = "kimi_k3"
 
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
-async def test_batched_reasoning_wiring_matches_single_chat() -> None:
+@pytest.mark.parametrize("tool_choice", ["auto", "required", "none"])
+async def test_batched_reasoning_wiring_matches_single_chat(tool_choice) -> None:
     """`/v1/chat/completions/batch` must hand the engine the same reasoning
     wiring as `/v1/chat/completions`.
 
@@ -687,6 +688,8 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             chat_template=CHAT_TEMPLATE,
             chat_template_content_format="auto",
             reasoning_parser=REASONING_PARSER,
+            enable_auto_tools=True,
+            tool_parser="qwen3_xml",
         )
         return mock_engine, cls(
             mock_engine,
@@ -697,6 +700,8 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             chat_template_content_format="auto",
             request_logger=None,
             reasoning_parser=REASONING_PARSER,
+            enable_auto_tools=True,
+            tool_parser="qwen3_xml",
         )
 
     conversation = [{"role": "user", "content": "What is the capital of France?"}]
@@ -708,9 +713,17 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             model=MOCK_MODEL_NAME,
             messages=conversation,
             chat_template_kwargs=chat_template_kwargs,
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+            tool_choice=tool_choice,
         )
     )
     single_call = single_engine.generate.call_args_list[-1]
+    assert single_call.kwargs["reasoning_parser_kwargs"]["tool_choice"] == (
+        "auto" if tool_choice == "auto" else None
+    )
+    # The batch API itself only supports tool_choice="none".
+    if tool_choice != "none":
+        return
 
     batch_engine, batch_serving = _build_serving(OpenAIServingChatBatch)
     await batch_serving.create_batch_chat_completion(
@@ -718,9 +731,15 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             model=MOCK_MODEL_NAME,
             messages=[conversation],
             chat_template_kwargs=chat_template_kwargs,
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+            tool_choice=tool_choice,
         )
     )
     batch_call = batch_engine.generate.call_args_list[-1]
+
+    assert single_call.kwargs["reasoning_parser_kwargs"]["tool_choice"] == (
+        "auto" if tool_choice == "auto" else None
+    )
 
     # Guard against a vacuous comparison: the reference path must be wired up.
     assert single_call.kwargs["reasoning_ended"] is not None
