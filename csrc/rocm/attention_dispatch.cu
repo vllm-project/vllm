@@ -23,10 +23,10 @@
 // set onto a single core. Those translation units, their prototypes and the
 // dispatch below are all emitted from the variant list in
 // csrc/rocm/generate_paged_attn.py.
-#include <torch/all.h>
+#include <string>
 
 #include "attention_kernels.cuh"
-#include "ops.h"
+#include "ops_stable.h"
 
 // One prototype per generated entry point.
 #include "attention_paged_attn_entries.inc"
@@ -54,23 +54,23 @@ bool is_navi_gpu() {
 
 // clang-format off
 void paged_attention(
-    torch::Tensor& out,         // [num_seqs, num_heads, head_size]
-    torch::Tensor& exp_sums,    // [num_seqs, num_heads, max_num_partitions]
-    torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
-    torch::Tensor& tmp_out,     // [num_seqs, num_heads, max_num_partitions, head_size]
-    torch::Tensor& query,       // [num_seqs, num_heads, head_size]
-    torch::Tensor& key_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
-    torch::Tensor& value_cache, // [num_blocks, num_heads, head_size, block_size]
+    torch::stable::Tensor& out,         // [num_seqs, num_heads, head_size]
+    torch::stable::Tensor& exp_sums,    // [num_seqs, num_heads, max_num_partitions]
+    torch::stable::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
+    torch::stable::Tensor& tmp_out,     // [num_seqs, num_heads, max_num_partitions, head_size]
+    torch::stable::Tensor& query,       // [num_seqs, num_heads, head_size]
+    torch::stable::Tensor& key_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
+    torch::stable::Tensor& value_cache, // [num_blocks, num_heads, head_size, block_size]
     int64_t num_kv_heads, 
     double scale,
-    torch::Tensor& block_tables, // [num_seqs, max_num_blocks_per_seq]
-    torch::Tensor& seq_lens, // [num_seqs]
-    const std::optional<torch::Tensor>& query_start_loc, // [num_seqs]
+    torch::stable::Tensor& block_tables, // [num_seqs, max_num_blocks_per_seq]
+    torch::stable::Tensor& seq_lens, // [num_seqs]
+    const std::optional<torch::stable::Tensor>& query_start_loc, // [num_seqs]
     int64_t block_size, int64_t max_seq_len,
-    const std::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
-    torch::Tensor& v_scale,
-    const std::optional<torch::Tensor>& fp8_out_scale,
+    const std::optional<torch::stable::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale,
+    const std::optional<torch::stable::Tensor>& fp8_out_scale,
     const std::string& mfma_type,
     bool use_interleaved_v_cache) {
   // clang-format on

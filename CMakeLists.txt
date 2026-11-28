@@ -270,6 +270,21 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" AND
 endif()
 
 #
+# Compress the offloaded device binaries for ROCm.
+#
+# The 9-arch release build packs ~2 GiB of .hip_fatbin into _rocm_C.abi3.so,
+# which pushes the module past the 2 GiB reach of the 32-bit PC-relative
+# relocations in crtbegin's .text and makes both mold and lld fail with
+# "relocation R_X86_64_PC32 against .eh_frame out of range". Every ROCm
+# extension has the same limit. --offload-compress keeps the device debug info
+# (so the RelWithDebInfo build type is unchanged) while shrinking the fatbin
+# ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
+#
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  list(APPEND VLLM_GPU_FLAGS "--offload-compress")
+endif()
+
+#
 # Set CUDA include flags for CXX compiler.
 #
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -1789,18 +1804,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
-    ${VLLM_SKINNY_SRC}
-    "csrc/rocm/attention_dispatch.cu"
-    ${VLLM_ATTENTION_PAGED_ATTN_SRC})
-
-  # Compress the offloaded device binaries. The 9-arch release build packs
-  # ~2 GiB of .hip_fatbin into _rocm_C.abi3.so, which pushes the module past
-  # the 2 GiB reach of the 32-bit PC-relative relocations in crtbegin's .text
-  # and makes both mold and lld fail with "relocation R_X86_64_PC32 against
-  # .eh_frame out of range". --offload-compress keeps the device debug info
-  # (so the RelWithDebInfo build type is unchanged) while shrinking the
-  # fatbin ~20x (2103 MiB -> 95.8 MiB, module ~2200 MiB -> 125.9 MiB).
-  set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
+    ${VLLM_SKINNY_SRC})
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
@@ -1821,12 +1825,50 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       POSITION_INDEPENDENT_CODE ON)
     target_include_directories(_rocm_C_skinny PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc)
     target_compile_options(_rocm_C_skinny PRIVATE
-      $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>)
+      $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_GPU_FLAGS}>)
     target_compile_definitions(_rocm_C_skinny PRIVATE "-DTORCH_EXTENSION_NAME=_rocm_C")
     target_link_libraries(_rocm_C_skinny PRIVATE torch)
   else()
     message(STATUS "Only gfx1250, skipping skinny_gemms")
-    list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
+  endif()
+
+  # Paged attention only uses the stable ABI, so it is built into
+  # _rocm_C_paged_attn against _C_stable_libtorch's TORCH_TARGET_VERSION and
+  # linked into _C_stable_libtorch. paged_attention_torch_bindings.cpp still
+  # registers its op into the _rocm_C namespace.
+  set(VLLM_PAGED_ATTN_SRC
+    "csrc/rocm/attention_dispatch.cu"
+    "csrc/rocm/paged_attention_torch_bindings.cpp"
+    ${VLLM_ATTENTION_PAGED_ATTN_SRC})
+  hipify_sources_target(VLLM_PAGED_ATTN_HIP_SRCS _rocm_C_paged_attn "${VLLM_PAGED_ATTN_SRC}")
+  unset(_VLLM_LAST_HIPIFY_TARGET)
+  add_library(_rocm_C_paged_attn OBJECT ${VLLM_PAGED_ATTN_HIP_SRCS})
+  add_dependencies(_rocm_C_paged_attn hipify_all)
+  set_source_files_properties(${VLLM_PAGED_ATTN_HIP_SRCS} PROPERTIES LANGUAGE ${VLLM_GPU_LANG})
+  set_target_properties(_rocm_C_paged_attn PROPERTIES
+    ${VLLM_GPU_LANG}_ARCHITECTURES "${VLLM_GPU_ARCHES}"
+    POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(_rocm_C_paged_attn PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  target_compile_options(_rocm_C_paged_attn PRIVATE
+    $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_GPU_FLAGS}>)
+  target_compile_definitions(_rocm_C_paged_attn PRIVATE
+    TORCH_TARGET_VERSION=0x020B000000000000ULL USE_ROCM)
+  target_link_libraries(_rocm_C_paged_attn PRIVATE torch)
+  target_link_libraries(_C_stable_libtorch PRIVATE _rocm_C_paged_attn)
+
+  # The paged attention units are identical whatever the arch list is; whether the
+  # Navi (gfx11/gfx12) kernel set is needed is decided here, as a compile
+  # definition, so no generated file has to be rewritten for a different build
+  # directory. Keep this predicate in sync with is_navi_gpu() in
+  # csrc/rocm/attention_dispatch.cu.
+  set(_ROCM_NAVI_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _ROCM_NAVI_ARCHS INCLUDE REGEX "gfx1[12]")
+  set(_ROCM_NO_NAVI_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _ROCM_NO_NAVI_ARCHS EXCLUDE REGEX "gfx1[12]")
+  if(_ROCM_NO_NAVI_ARCHS AND NOT _ROCM_NAVI_ARCHS)
+    message(STATUS "paged attention: CDNA only (${VLLM_GPU_ARCHES}), "
+                   "Navi kernels not instantiated")
+    target_compile_definitions(_rocm_C_paged_attn PRIVATE VLLM_ROCM_ATTN_NO_NAVI)
   endif()
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)
@@ -1869,7 +1911,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_ROCM_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_ROCM_EXT_FLAGS}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
@@ -1878,21 +1920,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)
   else()
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
-  endif()
-
-  # The paged attention units are identical whatever the arch list is; whether the
-  # Navi (gfx11/gfx12) kernel set is needed is decided here, as a compile
-  # definition, so no generated file has to be rewritten for a different build
-  # directory. Keep this predicate in sync with is_navi_gpu() in
-  # csrc/rocm/attention_dispatch.cu.
-  set(_ROCM_NAVI_ARCHS ${VLLM_GPU_ARCHES})
-  list(FILTER _ROCM_NAVI_ARCHS INCLUDE REGEX "gfx1[12]")
-  set(_ROCM_NO_NAVI_ARCHS ${VLLM_GPU_ARCHES})
-  list(FILTER _ROCM_NO_NAVI_ARCHS EXCLUDE REGEX "gfx1[12]")
-  if(_ROCM_NO_NAVI_ARCHS AND NOT _ROCM_NAVI_ARCHS)
-    message(STATUS "paged attention: CDNA only (${VLLM_GPU_ARCHES}), "
-                   "Navi kernels not instantiated")
-    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_ATTN_NO_NAVI)
   endif()
 
   if(VLLM_ROCM_HAS_GFX1100)

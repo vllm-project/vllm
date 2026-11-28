@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Generate the ROCm paged attention translation units and their dispatch.
 
-Instantiating these kernels dominates the _rocm_C build: one file holding every
+Instantiating these kernels dominates the ROCm build: one file holding every
 (dtype, kv-cache dtype, head size, block size, ...) combination serialized
 ~10 min of device code generation onto one core.
 
@@ -40,7 +40,8 @@ BLOCK_SIZES = [16, 32]
 #                       spellings hipify produces; `__half` is a distinct type
 #                       from `_Float16` for the MFMA builtins.
 #   kv_cache_enum/head_size/mfma: Fp8KVCacheDataType, head size and MFMAType
-#   query_scalar_type:  at::ScalarType of the query this variant serves
+#   query_scalar_type:  torch::headeronly::ScalarType of the query this variant
+#                       serves
 #   kv_cache_dtype/mfma_type: the runtime strings this variant serves; mfma_type
 #                       is None when the kv-cache dtype does not split on it.
 VARIANTS = [
@@ -263,14 +264,14 @@ def block_size_switch(variants, indent_level):
             lines.append(f"{inner}    break;")
         lines.append(f"{inner}  default:")
         lines.append(
-            f'{inner}    TORCH_CHECK(false, "Unsupported head size: ", head_size);'
+            f'{inner}    STD_TORCH_CHECK(false, "Unsupported head size: ", head_size);'
         )
         lines.append(f"{inner}    break;")
         lines.append(f"{inner}}}")
         lines.append(f"{indent}    break;")
     lines.append(f"{indent}  default:")
     lines.append(
-        f'{indent}    TORCH_CHECK(false, "Unsupported block size: ", block_size);'
+        f'{indent}    STD_TORCH_CHECK(false, "Unsupported block size: ", block_size);'
     )
     lines.append(f"{indent}    break;")
     lines.append(f"{indent}}}")
@@ -312,8 +313,8 @@ def generate_dispatch():
         ):
             dtype_keyword = "if" if dtype_index == 0 else "else if"
             lines.append(
-                f"    {dtype_keyword} (query.dtype() == "
-                f"at::ScalarType::{query_scalar_type}) {{"
+                f"    {dtype_keyword} (query.scalar_type() == "
+                f"torch::headeronly::ScalarType::{query_scalar_type}) {{"
             )
 
             mfma_types = list(by_mfma)
@@ -346,14 +347,15 @@ def generate_dispatch():
 
         lines.append("    else {")
         lines.append(
-            '      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());'
+            "      STD_TORCH_CHECK(false, "
+            '"Unsupported data type: ", query.scalar_type());'
         )
         lines.append("    }")
         lines.append("  }")
 
     lines.append("  else {")
     lines.append(
-        '    TORCH_CHECK(false, "Unsupported KV cache dtype: ", kv_cache_dtype);'
+        '    STD_TORCH_CHECK(false, "Unsupported KV cache dtype: ", kv_cache_dtype);'
     )
     lines.append("  }")
     return "\n".join(lines) + "\n"

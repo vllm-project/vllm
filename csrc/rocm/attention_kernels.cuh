@@ -16,14 +16,13 @@
 
 #pragma once
 
-// Only the ATen/c10 surface is needed here (at::Tensor, the CUDA stream/guard
-// helpers and TORCH_CHECK). <torch/all.h> also drags in autograd, nn and jit,
-// which is ~7 s of the ~9.5 s frontend of every attention translation unit.
-#include <ATen/DeviceGuard.h>
-#include <ATen/core/Tensor.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/util/Exception.h>
+// Only the LibTorch stable ABI is used here (the kernels are linked into
+// _C_stable_libtorch).
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include "torch_utils.h"
 
 #include <optional>
 #include <hip/hip_fp8.h>
@@ -3446,13 +3445,15 @@ template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
           bool ALIBI_ENABLED, MFMAType MFMA_TYPE, bool USE_INTERLEAVED_V_CACHE>
 void paged_attention_custom_launcher(
-    at::Tensor& out, at::Tensor& exp_sums, at::Tensor& max_logits,
-    at::Tensor& tmp_out, at::Tensor& query, at::Tensor& key_cache,
-    at::Tensor& value_cache, const int num_kv_heads, float scale,
-    at::Tensor& block_tables, at::Tensor& seq_lens,
-    const std::optional<at::Tensor>& query_start_loc, int max_seq_len,
-    const std::optional<at::Tensor>& alibi_slopes, at::Tensor& k_scale,
-    at::Tensor& v_scale, const std::optional<at::Tensor>& fp8_out_scale) {
+    torch::stable::Tensor& out, torch::stable::Tensor& exp_sums,
+    torch::stable::Tensor& max_logits, torch::stable::Tensor& tmp_out,
+    torch::stable::Tensor& query, torch::stable::Tensor& key_cache,
+    torch::stable::Tensor& value_cache, const int num_kv_heads, float scale,
+    torch::stable::Tensor& block_tables, torch::stable::Tensor& seq_lens,
+    const std::optional<torch::stable::Tensor>& query_start_loc,
+    int max_seq_len, const std::optional<torch::stable::Tensor>& alibi_slopes,
+    torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale,
+    const std::optional<torch::stable::Tensor>& fp8_out_scale) {
   int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -3480,8 +3481,8 @@ void paged_attention_custom_launcher(
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   KVT* key_cache_ptr = reinterpret_cast<KVT*>(key_cache.data_ptr());
   KVT* value_cache_ptr = reinterpret_cast<KVT*>(value_cache.data_ptr());
-  int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* seq_lens_ptr = seq_lens.data_ptr<int>();
+  int* block_tables_ptr = block_tables.mutable_data_ptr<int>();
+  int* seq_lens_ptr = seq_lens.mutable_data_ptr<int>();
   const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
   const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
   // NOTE: fp8_out_scale is optional.
@@ -3504,8 +3505,9 @@ void paged_attention_custom_launcher(
   constexpr int NTHR = 256;
   dim3 grid(num_seqs, max_num_partitions, num_kv_heads);
   dim3 block(NTHR);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      query.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
 
   // mfma4 kernel is faster than mfma16 for gqa_ratio <= 4
   switch (gqa_ratio) {
@@ -3558,7 +3560,7 @@ void paged_attention_custom_launcher(
       LAUNCH_CUSTOM_ATTENTION_MFMA16(16);
       break;
     default:
-      TORCH_CHECK(false, "Unsupported gqa ratio: ", gqa_ratio);
+      STD_TORCH_CHECK(false, "Unsupported gqa ratio: ", gqa_ratio);
       break;
   }
 
@@ -3593,7 +3595,7 @@ void paged_attention_custom_launcher(
       LAUNCH_CUSTOM_REDUCTION(8);
       break;
     default:
-      TORCH_CHECK(false, "Unsupported npar_loops: ", npar_loops);
+      STD_TORCH_CHECK(false, "Unsupported npar_loops: ", npar_loops);
       break;
   }
 }
@@ -3602,13 +3604,14 @@ template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
           bool ALIBI_ENABLED, MFMAType MFMA_TYPE, bool USE_INTERLEAVED_V_CACHE>
 void paged_attention_custom_launcher_navi(
-    at::Tensor& out, at::Tensor& exp_sums, at::Tensor& max_logits,
-    at::Tensor& tmp_out, at::Tensor& query, at::Tensor& key_cache,
-    at::Tensor& value_cache, const int num_kv_heads, float scale,
-    at::Tensor& block_tables, at::Tensor& seq_lens,
-    const std::optional<at::Tensor>& query_start_loc, int max_seq_len,
-    const std::optional<at::Tensor>& alibi_slopes, at::Tensor& k_scale,
-    at::Tensor& v_scale) {
+    torch::stable::Tensor& out, torch::stable::Tensor& exp_sums,
+    torch::stable::Tensor& max_logits, torch::stable::Tensor& tmp_out,
+    torch::stable::Tensor& query, torch::stable::Tensor& key_cache,
+    torch::stable::Tensor& value_cache, const int num_kv_heads, float scale,
+    torch::stable::Tensor& block_tables, torch::stable::Tensor& seq_lens,
+    const std::optional<torch::stable::Tensor>& query_start_loc,
+    int max_seq_len, const std::optional<torch::stable::Tensor>& alibi_slopes,
+    torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale) {
   int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -3633,8 +3636,8 @@ void paged_attention_custom_launcher_navi(
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   KVT* key_cache_ptr = reinterpret_cast<KVT*>(key_cache.data_ptr());
   KVT* value_cache_ptr = reinterpret_cast<KVT*>(value_cache.data_ptr());
-  int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* seq_lens_ptr = seq_lens.data_ptr<int>();
+  int* block_tables_ptr = block_tables.mutable_data_ptr<int>();
+  int* seq_lens_ptr = seq_lens.mutable_data_ptr<int>();
 
   const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
   const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
@@ -3653,8 +3656,9 @@ void paged_attention_custom_launcher_navi(
   constexpr int NTHR = 256;
   dim3 grid(num_seqs, max_num_partitions, num_kv_heads);
   dim3 block(NTHR);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      query.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
 
   switch (gqa_ratio) {
     case 1:
@@ -3706,7 +3710,7 @@ void paged_attention_custom_launcher_navi(
       LAUNCH_CUSTOM_ATTENTION_MFMA16(16);
       break;
     default:
-      TORCH_CHECK(false, "Unsupported gqa ratio: ", gqa_ratio);
+      STD_TORCH_CHECK(false, "Unsupported gqa ratio: ", gqa_ratio);
       break;
   }
 
@@ -3766,7 +3770,7 @@ void paged_attention_custom_launcher_navi(
       LAUNCH_CUSTOM_REDUCTION(16);
       break;
     default:
-      TORCH_CHECK(false, "Unsupported npar_loops: ", npar_loops);
+      STD_TORCH_CHECK(false, "Unsupported npar_loops: ", npar_loops);
       break;
   }
 }
@@ -3776,7 +3780,7 @@ void paged_attention_custom_launcher_navi(
 // actual interleaved V-fetch logic implemented.  The GFX11 (RDNA 3) and
 // GFX12 (RDNA 4) mfma16 kernels do NOT support interleaved V-cache addressing.
 // The template parameter is carried on all variants for compilation
-// compatibility; a TORCH_CHECK prevents dispatch to NAVI with interleaved V.
+// compatibility; a runtime check prevents dispatch to NAVI with interleaved V.
 // TODO: implement interleaved V-cache support in the NAVI (GFX11/GFX12)
 // kernels if shuffle KV cache layout is needed on RDNA GPUs.
 //
@@ -3784,37 +3788,38 @@ void paged_attention_custom_launcher_navi(
 // generate_paged_attn.py); ALIBI_ENABLED, the out dtype,
 // use_interleaved_v_cache and is_navi stay runtime branches, see the NOTE
 // below.
-#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,  \
-                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)              \
-  if (use_interleaved_v_cache) {                                           \
-    TORCH_CHECK(!is_navi,                                                  \
-                "Reading interleaved V-cache layout from paged decode "    \
-                "attention not supported on NAVI GPUs");                   \
-    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
-                                    true>(                                 \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
-        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);       \
-  } else {                                                                 \
-    ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, \
-                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)             \
+#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,   \
+                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)               \
+  if (use_interleaved_v_cache) {                                            \
+    STD_TORCH_CHECK(!is_navi,                                               \
+                    "Reading interleaved V-cache layout from paged decode " \
+                    "attention not supported on NAVI GPUs");                \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,  \
+                                    true>(                                  \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
+  } else {                                                                  \
+    ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,  \
+                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)              \
   }
 
 // The non-interleaved path picks the CDNA or the Navi launcher at runtime. With
 // no gfx11/gfx12 arch CMake defines VLLM_ROCM_ATTN_NO_NAVI: is_navi_gpu() can
 // then never be true, so the Navi set is dead weight and is not instantiated.
 #ifdef VLLM_ROCM_ATTN_NO_NAVI
-  #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)  \
-    TORCH_CHECK(!is_navi,                                                   \
-                "Navi (gfx11/gfx12) GPUs are not supported by this build: " \
-                "its arch list has no Navi code objects");                  \
-    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,  \
-                                    false>(                                 \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+  #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE) \
+    STD_TORCH_CHECK(                                                       \
+        !is_navi,                                                          \
+        "Navi (gfx11/gfx12) GPUs are not supported by this build: "        \
+        "its arch list has no Navi code objects");                         \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
+                                    false>(                                \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
         max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);
 #else
   #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
@@ -3850,7 +3855,7 @@ void paged_attention_custom_launcher_navi(
   #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
                                    MFMA_TYPE)                              \
     if (fp8_out_scale) {                                                   \
-      TORCH_CHECK(false, "fp8 out scale unsupported for gfx90a");          \
+      STD_TORCH_CHECK(false, "fp8 out scale unsupported for gfx90a");      \
     } else {                                                               \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T, \
                                  256, MFMA_TYPE);                          \
@@ -3892,15 +3897,18 @@ void paged_attention_custom_launcher_navi(
 // it is part of the entry point name, so that each translation unit only
 // instantiates the kernels of one block size and paged_attention() switches on
 // it.
-#define ATTN_PARAMS                                                         \
-  at::Tensor &out, at::Tensor &exp_sums, at::Tensor &max_logits,            \
-      at::Tensor &tmp_out, at::Tensor &query, at::Tensor &key_cache,        \
-      at::Tensor &value_cache, int64_t num_kv_heads, double scale,          \
-      at::Tensor &block_tables, at::Tensor &seq_lens,                       \
-      const std::optional<at::Tensor>&query_start_loc, int64_t max_seq_len, \
-      const std::optional<at::Tensor>&alibi_slopes, at::Tensor &k_scale,    \
-      at::Tensor &v_scale, const std::optional<at::Tensor>&fp8_out_scale,   \
-      bool is_navi, bool use_interleaved_v_cache
+#define ATTN_PARAMS                                                           \
+  torch::stable::Tensor &out, torch::stable::Tensor &exp_sums,                \
+      torch::stable::Tensor &max_logits, torch::stable::Tensor &tmp_out,      \
+      torch::stable::Tensor &query, torch::stable::Tensor &key_cache,         \
+      torch::stable::Tensor &value_cache, int64_t num_kv_heads, double scale, \
+      torch::stable::Tensor &block_tables, torch::stable::Tensor &seq_lens,   \
+      const std::optional<torch::stable::Tensor>&query_start_loc,             \
+      int64_t max_seq_len,                                                    \
+      const std::optional<torch::stable::Tensor>&alibi_slopes,                \
+      torch::stable::Tensor &k_scale, torch::stable::Tensor &v_scale,         \
+      const std::optional<torch::stable::Tensor>&fp8_out_scale, bool is_navi, \
+      bool use_interleaved_v_cache
 
 #define ATTN_FWD                                                           \
   out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,       \
