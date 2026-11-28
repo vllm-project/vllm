@@ -107,6 +107,7 @@ class _OffloadEventMetadata(
     parent_block_hash: BlockHash | None
     token_ids: tuple[int, ...]
     block_size: int
+    chunk_size: int
     lora_id: int | None
     lora_name: str | None
     # Deferred: needs the same incremental curr_mm_idx handling as GPU events.
@@ -351,6 +352,7 @@ class OffloadingEventsTracker:
                 req.all_token_ids, chunk_start, boundary_tokens, tokens_per_hash
             ),
             block_size=tokens_per_hash,
+            chunk_size=boundary_tokens - chunk_start,
             lora_id=lora_id,
             lora_name=lora_name,
             extra_keys=None,
@@ -478,6 +480,7 @@ class OffloadingEventsTracker:
                 req.all_token_ids, tok_start, tok_end, group_config.tokens_per_block
             ),
             block_size=group_config.tokens_per_block,
+            chunk_size=group_config.tokens_per_chunk,
             lora_id=lora_id,
             lora_name=lora_name,
             extra_keys=None,
@@ -576,6 +579,7 @@ class OffloadingEventsTracker:
                     else None
                 ),
                 block_size=meta.block_size,
+                chunk_size=meta.chunk_size,
                 lora_id=meta.lora_id,
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 lora_name=meta.lora_name,
