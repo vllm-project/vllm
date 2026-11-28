@@ -61,11 +61,14 @@ impl OpenAIResponsesBackend {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Ok(failed(if body.is_empty() {
-                format!("HTTP {status}")
-            } else {
-                format!("HTTP {status}: {body}")
-            }));
+            return Ok(RequestFuncOutput {
+                status_code: Some(status.as_u16()),
+                ..failed(if body.is_empty() {
+                    format!("HTTP {status}")
+                } else {
+                    format!("HTTP {status}: {body}")
+                })
+            });
         }
 
         let mut stream = ResponsesStream::new(input, st);
