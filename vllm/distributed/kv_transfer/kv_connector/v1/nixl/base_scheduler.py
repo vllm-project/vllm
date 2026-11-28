@@ -110,7 +110,7 @@ class NixlBaseConnectorScheduler:
         self._kv_cache_manager: KVCacheManager
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
-        if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+        if not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             logger.info("Hybrid Memory Allocator is enabled with NIXL")
 
         # Background thread for handling new handshake requests.
