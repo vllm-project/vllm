@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
@@ -19,6 +20,14 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+# gfx1100 autotunes to num_stages=1 here, which the default space never offers.
+# No other measured arch selects it, so widening the space elsewhere would only
+# lengthen autotuning.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1100
+
+    if on_gfx1100():
+        _CHUNK_DELTA_H_NUM_STAGES = [1, *_CHUNK_DELTA_H_NUM_STAGES]
 
 
 @triton.heuristics(
