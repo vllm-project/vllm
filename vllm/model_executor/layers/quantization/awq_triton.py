@@ -290,13 +290,24 @@ def awq_gemm_triton(
     scales: torch.Tensor,
     qzeros: torch.Tensor,
     split_k_iters: int,
-    block_size_m: int = 32,
-    block_size_n: int = 32,
-    block_size_k: int = 32,
+    block_size_m: int | None = None,
+    block_size_n: int | None = None,
+    block_size_k: int | None = None,
 ) -> torch.Tensor:
     M, K = input.shape
     N = qweight.shape[1] * 8
     group_size = qweight.shape[0] // qzeros.shape[0]
+
+    # Small M (decode) is bound by weight reads: a short M tile and a wider
+    # N tile keep fewer redundant rows in tl.dot and issue larger loads.
+    if block_size_m is None:
+        block_size_m = 16 if M <= 16 else 32
+    if block_size_n is None:
+        block_size_n = 64 if M <= 16 else 32
+    if block_size_k is None:
+        # Each K block loads a single row of scales/zeros, so it must not
+        # span more than one quantization group.
+        block_size_k = min(64, group_size) if M <= 16 else 32
 
     assert N > 0 and K > 0 and M > 0
     assert qweight.shape[0] == K and qweight.shape[1] == N // 8
