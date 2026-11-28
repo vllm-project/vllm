@@ -720,7 +720,7 @@ class ModelConfig:
         hf_config = get_config(
             self.hf_config_path or self.model,
             self.trust_remote_code,
-            self._hf_config_revision or self.revision,
+            self.hf_config_revision,
             self.code_revision,
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
@@ -2057,7 +2057,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
-                revision=self._hf_config_revision or self.revision,
+                revision=self.hf_config_revision,
                 code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
@@ -2209,6 +2209,11 @@ class ModelConfig:
     @property
     def mrope_num_dims(self) -> int:
         return mrope_num_dims(self.hf_config)
+
+    @property
+    def hf_config_revision(self) -> str | None:
+        """Revision of the repo the HF config is loaded from."""
+        return self._hf_config_revision or self.revision
 
     @property
     def is_multimodal_model(self) -> bool:

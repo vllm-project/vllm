@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """E2E tests for render endpoints via `vllm launch` (GPU-less serving)."""
 
+import hashlib
+
 import httpx
 import numpy as np
 import pytest
@@ -486,3 +488,42 @@ async def test_models_endpoint(client):
     assert "data" in data
     model_ids = [m["id"] for m in data["data"]]
     assert MODEL_NAME in model_ids
+
+
+# -- Render fingerprint --
+
+
+@pytest.mark.asyncio
+async def test_render_fingerprint_matches_its_manifest(client):
+    """The digest must be recomputable from the manifest the server exposes,
+    so a mismatch can be diagnosed by diffing two manifests."""
+    from vllm.renderers.fingerprint import canonical_json
+
+    response = await client.get("/inference/v1/render_fingerprint")
+
+    assert response.status_code == 200
+    data = response.json()
+    layout, digest, tag = data["render_fingerprint"].split(":")
+    assert layout == "rf1"
+    assert digest == hashlib.sha256(canonical_json(data["manifest"])).hexdigest()
+    assert tag.startswith("vllm-py/") and ";renderer=hf;tokenizer=" in tag
+    assert data["manifest"]["files"]["tokenizer.json"] is not None
+    assert data["manifest"]["flags"]["max_model_len"] is None
+    assert data["manifest"]["flags"]["video_pruning_method"] is None
+    # Server-side defaults the operator did not pass must stay out, or a
+    # frontend without that flag could never produce the same manifest.
+    assert data["manifest"]["flags"]["default_chat_template_kwargs"] is None
+
+
+def test_render_fingerprint_keeps_a_long_inline_chat_template():
+    """An inline `--chat-template` longer than a file name must not be probed
+    as a path: the server would fail to start."""
+    template = (
+        "{# " + "x" * 300 + " #}{% for m in messages %}{{ m.content }}{% endfor %}"
+    )
+    args = ["--chat-template", template]
+
+    with RemoteLaunchRenderServer(MODEL_NAME, args, max_wait_seconds=120) as srv:
+        response = httpx.get(srv.url_for("inference/v1/render_fingerprint"))
+
+    assert response.json()["manifest"]["flags"]["chat_template"] == template

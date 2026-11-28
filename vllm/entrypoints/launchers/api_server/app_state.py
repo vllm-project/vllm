@@ -152,6 +152,20 @@ async def init_app_state(
 
         init_scale_out_state(state, args, engine_client, request_logger)
 
+        has_tokenizer = engine_client.renderer.tokenizer is not None
+        if (args.enable_scale_out or args.tokens_only) and has_tokenizer:
+            from vllm.entrypoints.scale_out.render.fingerprint import (
+                compute_render_fingerprint,
+            )
+
+            state.render_fingerprint = compute_render_fingerprint(
+                engine_client.model_config,
+                args,
+                engine_client.renderer,
+                chat_template=resolved_chat_template,
+                default_chat_template_kwargs=default_chat_template_kwargs,
+            )
+
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
 

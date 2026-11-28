@@ -103,6 +103,15 @@ async def client(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
+async def test_worker_serves_its_render_fingerprint(client):
+    """A worker must report the fingerprint a render server is compared with."""
+    response = await client.get("/inference/v1/render_fingerprint")
+
+    assert response.status_code == 200
+    assert response.json()["render_fingerprint"].startswith("rf1:")
+
+
+@pytest.mark.asyncio
 async def test_generate_endpoint(client):
     payload = {
         "model": MODEL_NAME,

@@ -1,0 +1,57 @@
+{
+  "digest": "9a8252033def7ef197cde19b6265a506ad3df0166126988ee3527b382aa0b84a",
+  "manifest": {
+    "schema": 1,
+    "files": {
+      "tokenizer.json": "e0e77b70ca77d0be8f321590c0deb449d364cc3c4edaeaa6eef40636d56a298e",
+      "tokenizer_config.json": "a222d683c8513ebc66848a6d870b77d1993fa35392bfceaa8519c9c93c8276d2",
+      "special_tokens_map.json": null,
+      "added_tokens.json": null,
+      "vocab.json": null,
+      "merges.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "vocab.txt": null,
+      "tokenizer.model": null,
+      "spiece.model": null,
+      "sentencepiece.bpe.model": null,
+      "spm.model": null,
+      "tekken.json": null,
+      "tiktoken.model": null,
+      "chat_template.jinja": "d1c49e4693a0cad32e002f4fc25fef46be01084b9ee7b3e9c013d27df1642643",
+      "chat_template.json": null,
+      "config.json": "84fdc66cf449ad6dcfa57f16000bb02ee801d70613c7c063e16ef4f8a5a27c7c",
+      "params.json": null,
+      "preprocessor_config.json": null,
+      "video_preprocessor_config.json": null,
+      "processor_config.json": null,
+      "additional_chat_templates/rag.jinja": "b05ec776f11ab765ea912404ec7cb95c13a09abd8c70a21da41b9b6b32300f53"
+    },
+    "flags": {
+      "tokenizer_mode": "auto",
+      "config_format": "auto",
+      "trust_remote_code": false,
+      "chat_template": "{% for m in messages %}[{{ m.content }}]{% endfor %}\r\n",
+      "chat_template_fallback": null,
+      "chat_template_content_format": "string",
+      "default_chat_template_kwargs": {
+        "b": {
+          "z": 1,
+          "a": 1e-07
+        },
+        "a": true,
+        "é": "x"
+      },
+      "reasoning_parser": "qwen3",
+      "reasoning_effort_map": null,
+      "exclude_tools_when_tool_choice_none": false,
+      "hf_overrides": null,
+      "mm_processor_kwargs": null,
+      "media_io_kwargs": null,
+      "language_model_only": false,
+      "interleave_mm_strings": false,
+      "video_pruning_rate": null,
+      "video_pruning_method": null,
+      "max_model_len": null,
+      "trust_request_chat_template": true
+    }
+  }
+}

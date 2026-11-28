@@ -10,6 +10,7 @@ from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.scale_out.factories import init_render_state
+from vllm.entrypoints.scale_out.render.fingerprint import compute_render_fingerprint
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
@@ -98,6 +99,14 @@ async def init_render_app_state(
         reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+    )
+
+    state.render_fingerprint = compute_render_fingerprint(
+        vllm_config.model_config,
+        args,
+        renderer,
+        chat_template=resolved_chat_template,
+        default_chat_template_kwargs=default_chat_template_kwargs,
     )
 
     state.openai_serving_models = model_registry
