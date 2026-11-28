@@ -18,6 +18,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.utils.mem_constants import MiB_bytes
 
 from .protocol import (
     ErrorEvent,
@@ -47,7 +48,10 @@ class RealtimeConnection:
         self.websocket = websocket
         self.connection_id = f"ws-{uuid4()}"
         self.serving = serving
-        self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
+        self._max_audio_queue_chunks = envs.VLLM_MAX_REALTIME_AUDIO_QUEUE_SIZE
+        self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(
+            maxsize=self._max_audio_queue_chunks + 1
+        )
         self.generation_task: asyncio.Task | None = None
         self.request_id: str | None = None
 
@@ -55,6 +59,7 @@ class RealtimeConnection:
         self._is_model_validated = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        self._accumulated_audio_bytes = 0
 
     async def handle_connection(self):
         """Main connection loop."""
@@ -125,17 +130,24 @@ class RealtimeConnection:
                     / 32768.0
                 )
 
-                if len(audio_array) / 1024**2 > self._max_audio_filesize_mb:
+                self._accumulated_audio_bytes += len(audio_bytes)
+                max_bytes = self._max_audio_filesize_mb * MiB_bytes
+                if self._accumulated_audio_bytes > max_bytes:
                     raise VLLMValidationError(
                         "Maximum file size exceeded",
                         parameter="audio_filesize_mb",
-                        value=len(audio_array) / 1024**2,
+                        value=self._accumulated_audio_bytes / MiB_bytes,
                     )
                 if len(audio_array) == 0:
                     raise VLLMValidationError("Can't process empty audio.")
 
-                # Put audio chunk in queue
-                self.audio_queue.put_nowait(audio_array)
+                if self.audio_queue.qsize() >= self._max_audio_queue_chunks:
+                    # The chunk was not buffered, so don't count it toward
+                    # the cumulative byte limit.
+                    self._accumulated_audio_bytes -= len(audio_bytes)
+                    await self.send_error("Audio buffer full", "buffer_full")
+                else:
+                    self.audio_queue.put_nowait(audio_array)
 
             except Exception as e:
                 logger.error("Failed to decode audio: %s", e)
@@ -156,7 +168,7 @@ class RealtimeConnection:
             commit_event = InputAudioBufferCommit(**event)
             # final signals that the audio is finished
             if commit_event.final:
-                self.audio_queue.put_nowait(None)
+                self._enqueue_end_sentinel()
             else:
                 await self.start_generation()
         else:
@@ -260,15 +272,17 @@ class RealtimeConnection:
             # Send final completion event
             await self.send(TranscriptionDone(text=full_text, usage=usage))
 
-            # Clear queue for next utterance
-            while not self.audio_queue.empty():
-                self.audio_queue.get_nowait()
-
         except Exception as e:
             logger.exception("Error in generation: %s", e)
             # The socket may already be closed; nothing more we can do.
             with contextlib.suppress(Exception):
                 await self.send_error(sanitize_message(str(e)), "processing_error")
+        finally:
+            # Clear the queue and reset the byte counter for the next
+            # utterance, even if generation errored or was cancelled.
+            while not self.audio_queue.empty():
+                self.audio_queue.get_nowait()
+            self._accumulated_audio_bytes = 0
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
@@ -282,10 +296,19 @@ class RealtimeConnection:
         error_event = ErrorEvent(error=message, code=code)
         await self.websocket.send_text(error_event.model_dump_json())
 
+    def _enqueue_end_sentinel(self):
+        """Enqueue the end-of-stream sentinel without blocking.
+
+        Audio leaves one reserved slot, so a full queue already contains
+        a sentinel.
+        """
+        with contextlib.suppress(asyncio.QueueFull):
+            self.audio_queue.put_nowait(None)
+
     async def cleanup(self):
         """Cleanup resources."""
         # Signal audio stream to stop
-        self.audio_queue.put_nowait(None)
+        self._enqueue_end_sentinel()
 
         # Abort the engine request. Cancelling the asyncio task alone does NOT
         # abort the underlying engine request: a request parked in the
