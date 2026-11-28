@@ -706,6 +706,12 @@ class DiffusionGemmaDiffusionOptions(DiffusionModelOptions):
     """Number of previous steps a prediction must match before it is
     committed."""
 
+    canvas_swap_capacity: int = Field(default=0, ge=0)
+    """Canvas swap: the number of preempted requests whose unfinished block is
+    kept on the device and resumed once their prompt is prefilled again,
+    instead of being denoised again from noise. Each kept block takes about
+    4 MB at a 256-token canvas. 0, the default, disables it."""
+
 
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
     @classmethod

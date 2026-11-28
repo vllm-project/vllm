@@ -23,7 +23,9 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 DEVICE = "cuda"
 
 
-def _make_sampler(num_reqs, canvas_len, vocab, hidden, weight, top_k=0, params=None):
+def _make_sampler(
+    num_reqs, canvas_len, vocab, hidden, weight, top_k=0, params=None, swap_capacity=0
+):
     states = dg.DiffusionGemmaRequestStates(
         max_num_reqs=num_reqs,
         canvas_length=canvas_len,
@@ -32,6 +34,7 @@ def _make_sampler(num_reqs, canvas_len, vocab, hidden, weight, top_k=0, params=N
         device=torch.device(DEVICE),
         hidden_size=hidden,
         stability_threshold=2,
+        swap_capacity=swap_capacity,
     )
     base = SimpleNamespace(
         sampling_states=SamplingStates(num_reqs, vocab),
@@ -63,15 +66,16 @@ def _make_sampler(num_reqs, canvas_len, vocab, hidden, weight, top_k=0, params=N
     return sampler, states
 
 
-def _make_batch(num_reqs, valid_lens):
+def _make_batch(num_reqs, valid_lens, slots=None):
     cu = np.zeros(num_reqs + 1, dtype=np.int64)
     cu[1:] = np.cumsum(valid_lens)
     qsl_np = cu.astype(np.int32)
+    slots_np = np.asarray(slots or range(num_reqs), dtype=np.intp)
     return SimpleNamespace(
         num_reqs=num_reqs,
         num_draft_tokens=int(max(valid_lens)),
-        idx_mapping_np=np.arange(num_reqs, dtype=np.intp),
-        idx_mapping=torch.arange(num_reqs, dtype=torch.int64, device=DEVICE),
+        idx_mapping_np=slots_np,
+        idx_mapping=torch.from_numpy(slots_np).to(DEVICE),
         cu_num_logits_np=cu,
         query_start_loc_np=qsl_np,
         query_start_loc=torch.from_numpy(qsl_np).to(DEVICE),
@@ -255,3 +259,128 @@ def test_full_vocab_logprobs_come_on_the_commit_step(sync_check_error):
         assert lp.logprob_token_ids[:, 0].tolist() == tokens
         assert np.isfinite(lp.logprobs[:, :num_cols]).all()
         assert np.isneginf(lp.logprobs[:, num_cols:]).all()
+
+
+def _swap_sampler(swap_capacity=1):
+    canvas_len, vocab, hidden = 16, 1024, 32
+    set_random_seed(0)
+    weight = torch.randn(vocab, hidden, device=DEVICE)
+    sampler, states = _make_sampler(
+        2, canvas_len, vocab, hidden, weight, swap_capacity=swap_capacity
+    )
+    return sampler, states, torch.randn(canvas_len, hidden, device=DEVICE)
+
+
+def _admit(sampler, states, req_id, slot, params=None):
+    """Add a request at `slot` and finish its prefill, as the runner does for
+    a new request and for a preempted one that resumes."""
+    states.add_request(slot, req_id)
+    sampler.add_request(slot, params or SamplingParams())
+    sampler.apply_staged_writes()
+    last_prefill_step = SimpleNamespace(
+        num_reqs=1,
+        num_draft_tokens=0,
+        idx_mapping_np=np.array([slot], dtype=np.intp),
+        num_computed_prefill_tokens_np=np.zeros(1, dtype=np.int32),
+        num_scheduled_tokens=np.ones(1, dtype=np.int32),
+        prefill_len_np=np.ones(1, dtype=np.int32),
+    )
+    with_gpu_sync_check(sampler)(torch.empty(0, device=DEVICE), last_prefill_step)
+
+
+def _preempt(states, req_id, slot):
+    with_gpu_sync_check(states.swap_out)(req_id, slot)
+    states.remove_request(slot)
+
+
+def _denoise(sampler, hs, slot):
+    return sampler(hs, _make_batch(1, [len(hs)], slots=[slot]))
+
+
+def test_preempted_block_resumes_in_another_slot(sync_check_error):
+    """A block preempted after the first of the two denoise steps it needs
+    converges on its first step in the new slot. Keeping and resuming it
+    never syncs with the GPU."""
+    sampler, states, hs = _swap_sampler()
+    _admit(sampler, states, "a", 0)
+    _denoise(sampler, hs, 0)
+    kept = states.canvas[0].clone()
+
+    _preempt(states, "a", 0)
+    _admit(sampler, states, "a", 1)
+    assert torch.equal(states.canvas[1], kept)
+    _denoise(sampler, hs, 1)
+    assert bool(states.is_encoder_phase[1])
+
+
+def test_converged_block_resumes_at_its_commit_with_logprobs():
+    """A block preempted between converging and committing emits right after
+    the request's prefill, with the logprobs it converged with."""
+    params = SamplingParams(logprobs=2, extra_args={"diffusion_max_steps": 1})
+    sampler, states, hs = _swap_sampler()
+    _admit(sampler, states, "a", 0, params)
+    _denoise(sampler, hs, 0)
+    tokens = states.argmax_canvas[0].tolist()
+
+    _preempt(states, "a", 0)
+    _admit(sampler, states, "a", 1, params)
+    out = _denoise(sampler, hs, 1)
+
+    assert out.num_sampled.tolist() == [16]
+    assert out.sampled_token_ids[0, :16].tolist() == tokens
+    lp = out.logprobs_tensors.tolists().slice_request(0, 16)
+    assert lp.logprob_token_ids[:, 0].tolist() == tokens
+
+
+def test_kept_block_survives_a_preemption_during_its_prefill():
+    sampler, states, hs = _swap_sampler()
+    _admit(sampler, states, "a", 0)
+    _denoise(sampler, hs, 0)
+    kept = states.canvas[0].clone()
+
+    _preempt(states, "a", 0)
+    # Resumed, then preempted again before its prompt was prefilled.
+    states.add_request(0, "a")
+    _preempt(states, "a", 0)
+    _admit(sampler, states, "a", 1)
+    assert torch.equal(states.canvas[1], kept)
+
+
+def test_oldest_kept_block_restarts_past_capacity():
+    sampler, states, hs = _swap_sampler(swap_capacity=1)
+    for req_id, slot in (("a", 0), ("b", 1)):
+        _admit(sampler, states, req_id, slot)
+        _denoise(sampler, hs, slot)
+
+    _preempt(states, "a", 0)
+    _preempt(states, "b", 1)
+    _admit(sampler, states, "a", 0)
+    _admit(sampler, states, "b", 1)
+    assert states.step.tolist() == [0, 1]
+
+
+def test_block_with_full_vocab_logprobs_restarts():
+    """The full-vocabulary logprobs of a converged block are too large to
+    keep, so the block is denoised again instead of committing without them."""
+    wide = SamplingParams(logprobs=-1, extra_args={"diffusion_max_steps": 1})
+    sampler, states, hs = _swap_sampler()
+    _admit(sampler, states, "a", 0, wide)
+    _denoise(sampler, hs, 0)
+    assert 0 in states.wide_logprobs
+
+    _preempt(states, "a", 0)
+    _admit(sampler, states, "a", 1, wide)
+    assert int(states.step[1]) == 0 and not states.wide_logprobs
+
+
+def test_block_of_a_finished_request_is_not_resumed():
+    """A request that ends while preempted frees its block: a later request
+    with the same id starts from noise."""
+    sampler, states, hs = _swap_sampler()
+    _admit(sampler, states, "a", 0)
+    _denoise(sampler, hs, 0)
+    _preempt(states, "a", 0)
+
+    states.swap_drop("a")
+    _admit(sampler, states, "a", 1)
+    assert int(states.step[1]) == 0

@@ -134,6 +134,16 @@ class ModelState(ABC):
     def remove_request(self, req_id: str) -> None:
         return None
 
+    def on_requests_preempted(self, req_ids: set[str]) -> None:
+        """Called for the requests the scheduler preempted, before their
+        `remove_request`. They may be added again later."""
+        return None
+
+    def on_requests_finished(self, req_ids: set[str]) -> None:
+        """Called for the requests that ended, running or preempted, after
+        `on_requests_preempted` and before their `remove_request`."""
+        return None
+
     def apply_staged_writes(self) -> None:
         return None
 

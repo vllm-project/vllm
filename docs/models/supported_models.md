@@ -719,6 +719,16 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     meta-actions, pass the id of `<|traj_future_start|>` in `stop_token_ids`.
 
 !!! note
+    `DiffusionGemmaForBlockDiffusion` takes its options through `--diffusion-config`:
+    `canvas_length`, `max_denoising_steps`, and `model_options` such as `entropy_bound`.
+    Canvas swap (`canvas_swap_capacity` in `model_options`, default `0`: disabled) keeps
+    the unfinished block of a preempted request on the GPU. Once its prompt is prefilled
+    again, the request resumes at the denoising step it had reached instead of denoising
+    the block again from noise.
+    `--diffusion-config '{"model_options": {"canvas_swap_capacity": 64}}'` keeps up to 64
+    such blocks, about 4 MB each at a 256-token canvas.
+
+!!! note
     For `Dots3NoteForCausalLM`, the vision and audio towers are only loaded when the
     corresponding modality is enabled via `--limit-mm-per-prompt`. Video inputs are
     decoded into frames and audio, so they require both towers. The checkpoint also

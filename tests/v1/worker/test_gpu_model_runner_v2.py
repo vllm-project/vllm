@@ -787,3 +787,41 @@ def test_speculator_request_hooks(gpu_model_runner_for_requests):
     runner.finish_requests(scheduler_output)
 
     assert events == [("add", "a"), ("add", "b"), ("finished", "a")]
+
+
+def test_model_state_request_hooks(gpu_model_runner_for_requests):
+    """The model state hears of a preempted request before it loses its slot,
+    and of that request ending later, while it holds none."""
+    runner = gpu_model_runner_for_requests
+    slots = runner.req_states.req_id_to_index
+    events: list[tuple[str, str, bool]] = []
+
+    class RecordingModelState(DefaultModelState):
+        def on_requests_preempted(self, req_ids):
+            events.extend(("preempted", r, r in slots) for r in sorted(req_ids))
+
+        def on_requests_finished(self, req_ids):
+            events.extend(("finished", r, r in slots) for r in sorted(req_ids))
+
+    runner.model_state = RecordingModelState(
+        runner.vllm_config, torch.nn.Module(), None, runner.device
+    )
+
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_new_reqs = [
+        NewRequestData(r, [1], [], None, None, ([0],), 0, None, prefill_token_ids=[1])
+        for r in ("a", "b")
+    ]
+    runner.add_requests(scheduler_output)
+    scheduler_output.finished_req_ids = {"a"}
+    scheduler_output.preempted_req_ids = {"b"}
+    runner.finish_requests(scheduler_output)
+    scheduler_output.finished_req_ids = {"b"}
+    scheduler_output.preempted_req_ids = None
+    runner.finish_requests(scheduler_output)
+
+    assert events == [
+        ("preempted", "b", True),
+        ("finished", "a", True),
+        ("finished", "b", False),
+    ]
