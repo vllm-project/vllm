@@ -24,6 +24,7 @@ RMS-normalizes V per head and writes both to the paged KV cache.
 
 import torch
 
+import vllm.envs as envs
 from vllm.models.inkling2.nvidia.ops.norm import qr_clip_rel_tokens, rsqrt
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -832,6 +833,10 @@ _PROLOGUE_SPLIT_MIN_TOKENS = 2048
 
 
 def _prologue_block_t(num_tokens: int) -> int:
+    # Doubling BT to 8 alters Triton's 2D tl.sum(y * y, axis=1) reduction
+    # tree in _kv_conv_tile by up to 1 ULP in key_cache.
+    if envs.VLLM_BATCH_INVARIANT:
+        return 4
     return 8 if num_tokens >= _PROLOGUE_SPLIT_MIN_TOKENS else 4
 
 

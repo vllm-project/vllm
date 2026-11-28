@@ -20,6 +20,7 @@ from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import (
     use_qkv_bmm,
     use_sm12x_bf16_ll_gemm,
 )
+from vllm.models.inkling2.nvidia.ops.sconv import _prologue_block_t
 
 
 def test_sconv_backend_supports_batch_invariance():
@@ -32,6 +33,8 @@ def test_attention_planners_and_ll_gemm_disabled_under_batch_invariant(monkeypat
     assert plan_attention(True, np.array([64]), np.array([2048]), 32, 4) == (1, False)
     assert plan_decode_attention(False, 1, 1, 32, 4, 1024) == 0
     assert plan_decode_attention(True, 1, 1, 32, 4, 1024) == 0
+    assert _prologue_block_t(2048) == 4
+    assert _prologue_block_t(4096) == 4
 
     if torch.cuda.is_available():
         x = torch.empty((1, 2304), device="cuda", dtype=torch.bfloat16)

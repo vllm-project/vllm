@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 import vllm.models.inkling2.nvidia.ops.sconv as sconv_ops
 from tests.models.inkling2.test_attention import shear_rel_logits
 from vllm.models.inkling2.nvidia.ops.attn_res import attn_res
@@ -656,11 +657,19 @@ def test_sm12x_ll_gemm_projection_and_graph(tokens, shape, dtype):
 
 
 def test_sm12x_linear_large_batch_fallback():
-    """Rows beyond the GEMV tile must retain the complete cuBLAS output."""
+    """Rows beyond the GEMV tile must retain the complete cuBLAS output (or the
+    batch-invariant Triton output when VLLM_BATCH_INVARIANT is enabled)."""
+    from vllm.model_executor.determinism.batch_invariant import (
+        linear_batch_invariant,
+    )
     from vllm.models.inkling2.nvidia.ops.linear import linear
 
     torch.manual_seed(0)
     x = torch.randn(33, 256, device=DEVICE).bfloat16()
     weight = torch.randn(129, 256, device=DEVICE).bfloat16()
-    expected = torch.nn.functional.linear(x, weight)
+    expected = (
+        linear_batch_invariant(x, weight)
+        if envs.VLLM_BATCH_INVARIANT
+        else torch.nn.functional.linear(x, weight)
+    )
     torch.testing.assert_close(linear(x, weight), expected, atol=0, rtol=0)
