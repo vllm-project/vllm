@@ -541,6 +541,104 @@ def test_checkpoint_metadata_preserves_non_spec_order(
     )
 
 
+def _create_replayssm_gdn_builder(
+    enable_prefix_caching: bool = False,
+    full_cuda_graph: bool = False,
+    block_size: int = BLOCK_SIZE,
+) -> GDNAttentionMetadataBuilder:
+    """Create a GDNAttentionMetadataBuilder with ReplaySSM cached decode on."""
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B",
+        block_size=block_size,
+    )
+    if full_cuda_graph:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    # Enable after config construction so validate_mamba_cached_kernel (Triton
+    # only) does not run; the builder reads the flags in __init__.
+    vllm_config.cache_config.use_replayssm = True
+    vllm_config.cache_config.replayssm_buffer_len = 16
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+    )
+    return GDNAttentionMetadataBuilder(
+        kv_cache_spec=mamba_spec,
+        layer_names=["layer.0"],
+        vllm_config=vllm_config,
+        device=DEVICE,
+    )
+
+
+def _build_replayssm(
+    builder: GDNAttentionMetadataBuilder,
+    seq_lens: list[int],
+    query_lens: list[int],
+    is_prefilling: list[bool],
+) -> GDNAttentionMetadata:
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    block_size = builder.kv_cache_spec.block_size
+    common = create_common_attn_metadata(batch, block_size, DEVICE).replace(
+        is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool),
+    )
+    return builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+
+def _assert_plans_into_persistent_buffers(
+    builder: GDNAttentionMetadataBuilder, meta: GDNAttentionMetadata, num_rows: int
+) -> None:
+    # The planner writes inside the captured graph, so the cursor must live in
+    # the builder's buffers, not a fresh allocation.
+    assert meta.write_pos_d is not None and meta.is_flush_d is not None
+    assert meta.write_pos_d.data_ptr() == builder.decode_write_pos_d.data_ptr()
+    assert meta.is_flush_d.data_ptr() == builder.decode_is_flush_d.data_ptr()
+    assert meta.write_pos_d.numel() == meta.is_flush_d.numel() == num_rows
+
+
+def test_replayssm_single_token_prefill_runs_as_decode():
+    # A final single-token prefill chunk continues from the state its earlier
+    # chunks left, so it decodes on the ring that their prefill reset.
+    builder = _create_replayssm_gdn_builder(full_cuda_graph=True)
+    meta = _build_replayssm(builder, [106, 100], [1, 1], [False, True])
+
+    assert meta.num_decodes == 2
+    assert meta.num_prefills == 0
+    _assert_plans_into_persistent_buffers(builder, meta, 2)
+
+
+def test_replayssm_first_token_prefill_stays_prefill():
+    # A first-token prefill has no prior GDN state, so it must not be pulled
+    # into the decode group.
+    builder = _create_replayssm_gdn_builder()
+    meta = _build_replayssm(builder, [1], [1], [True])
+
+    assert meta.num_decodes == 0
+    assert meta.num_prefills == 1
+    assert meta.write_pos_d is None
+
+
+@pytest.mark.parametrize(
+    "enable_prefix_caching", [False, True], ids=["no_prefix_caching", "prefix_caching"]
+)
+def test_replayssm_decode_plan_inputs(enable_prefix_caching: bool):
+    """Prefix caching hands the planner each row's sequence length and the block
+    size, so it restarts the ring per block and flushes on block completion."""
+    builder = _create_replayssm_gdn_builder(enable_prefix_caching, block_size=64)
+    seq_lens = [151, 192, 201]
+    meta = _build_replayssm(builder, seq_lens, [1, 1, 1], [False, False, False])
+
+    assert meta.num_decodes == 3
+    _assert_plans_into_persistent_buffers(builder, meta, 3)
+    if enable_prefix_caching:
+        assert meta.replayssm_seq_lens_d is not None
+        assert meta.replayssm_seq_lens_d.tolist() == seq_lens
+        assert meta.replayssm_align_block_size == 64
+    else:
+        assert meta.replayssm_seq_lens_d is None
+        assert meta.replayssm_align_block_size == 0
+
+
 @pytest.mark.parametrize("num_spec", [0, 3])
 def test_update_block_table_regathers_checkpoint(num_spec):
     """Checkpoint pages come from the target group's block table, not the
