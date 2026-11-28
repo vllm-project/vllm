@@ -3,7 +3,8 @@
 """Checkpoint weights that are stored in FP8 but run in BF16.
 
 - `DequantLinearMethod` (GLM5-next MLA projections): the checkpoint's own
-  FP8 `weight` and its block or per-tensor scale, dequantized after loading.
+  FP8 `weight` and its block (2-D, or ModelOpt's 4-D) or per-tensor scale,
+  dequantized after loading.
 - The sparse-attention indexer: `wk` in the checkpoint's layout (block,
   per-channel or MX scales), `weights_proj` in BF16, fused into one BF16
   weight after loading.
@@ -49,8 +50,13 @@ _DEVICE = torch.device("cuda")
 # q_a / kv_a-like shards of unequal sizes; the last ends in a partial block
 _OUT = [1280, 192]
 # MLA checkpoint schemes and their scale's name: one scale per 128x128 block,
-# or per tensor (one per merged shard)
-_SCALE = {"block": "weight_scale_inv", "tensor": "weight_scale"}
+# per tensor (one per merged shard), or ModelOpt FP8_PB_WO's 128x128 blocks
+# stored 4-D as [out_blocks, 1, in_blocks, 1]
+_SCALE = {
+    "block": "weight_scale_inv",
+    "tensor": "weight_scale",
+    "modelopt_block": "weight_scale",
+}
 
 
 @pytest.fixture
@@ -74,6 +80,8 @@ def _block_fp8(rows: int, cols: int, seed: int) -> tuple[torch.Tensor, torch.Ten
 
 def _dequant(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     rows, cols = weight.shape
+    if scale.ndim == 4:  # ModelOpt's per-block layout
+        scale = scale[:, 0, :, 0]
     if scale.ndim == 2:  # per block
         scale = scale.repeat_interleave(128, 0)[:rows]
         scale = scale.repeat_interleave(128, 1)[:, :cols]
@@ -95,14 +103,28 @@ def _reload(model, ckpt, mode, model_config, monkeypatch, reverse=False):
     finish_reload(model, model_config, _DEVICE)
 
 
+def _mla_quant_config(scheme: str):
+    if scheme == "modelopt_block":  # e.g. nvidia/GLM-5.3-Flash-FP4-Local's MLA
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptFp8Config,
+        )
+
+        return ModelOptFp8Config(
+            quant_method="FP8_PB_WO",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=None,
+            exclude_modules=[],
+        )
+    return Fp8Config(weight_block_size=[128, 128] if scheme == "block" else None)
+
+
 class _MlaModel(torch.nn.Module):
     """A fused (q_a / kv_a-like) and a row-parallel projection that an FP8
     checkpoint stores in FP8 and the model runs in BF16."""
 
     def __init__(self, scheme: str):
         super().__init__()
-        block = [128, 128] if scheme == "block" else None
-        config = Fp8Config(weight_block_size=block)
+        config = _mla_quant_config(scheme)
         with _DEVICE:
             self.qkv_a = MergedColumnParallelLinear(
                 256, _OUT, bias=False, params_dtype=torch.bfloat16, quant_config=config
@@ -127,9 +149,11 @@ def _mla_checkpoint(seed: int, scheme: str) -> dict[str, torch.Tensor]:
     shards = [(f"qkv_a.{i}", rows) for i, rows in enumerate(_OUT)] + [("o.-", 128)]
     for i, (prefix, rows) in enumerate(shards):
         weight, scale = _block_fp8(rows, 256, seed * 10 + i)
-        ckpt[f"{prefix}.{_SCALE[scheme]}"] = (
-            scale if scheme == "block" else scale[0, :1]
-        )
+        if scheme == "tensor":
+            scale = scale[0, :1]
+        elif scheme == "modelopt_block":
+            scale = scale[:, None, :, None]
+        ckpt[f"{prefix}.{_SCALE[scheme]}"] = scale
         ckpt[f"{prefix}.weight"] = weight
     return ckpt
 

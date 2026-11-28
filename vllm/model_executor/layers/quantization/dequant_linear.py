@@ -101,8 +101,9 @@ def bf16_linear(
 
 def _dequantize(layer: torch.nn.Module) -> torch.Tensor:
     """The FP8 weight times its scale, in the layer's dtype. A block scale
-    covers `weight_block_size` (the last blocks may be partial); a 1-D scale
-    covers a channel or a merged shard (per-tensor)."""
+    covers `weight_block_size` (the last blocks may be partial; ModelOpt
+    registers it 4-D as `[out_blocks, 1, in_blocks, 1]`); a 1-D scale covers a
+    channel or a merged shard (per-tensor)."""
     weight = layer.weight
     rows, cols = weight.shape
     scale = getattr(layer, "weight_scale_inv", None)
@@ -111,6 +112,8 @@ def _dequantize(layer: torch.nn.Module) -> torch.Tensor:
     if scale.dtype == torch.uint8:  # MX: E8M0 exponents
         scale = scale.view(torch.float8_e8m0fnu)
     scale = scale.to(torch.float32)
+    if scale.ndim == 4:
+        scale = scale.squeeze(3).squeeze(1)
     if scale.ndim < 2:
         if scale.numel() != rows:  # per tensor: one scale per merged shard
             widths = torch.tensor(layer.logical_widths, device=scale.device)
