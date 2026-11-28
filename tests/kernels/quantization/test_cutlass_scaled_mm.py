@@ -234,10 +234,11 @@ def test_cutlass_fp8_gemm_padded(
 # the tile scheduler to a swizzled CTA order once the weight exceeds the L2
 # (16384x2560 = 40 MiB and 5120x5120 = 25 MiB on a 24 MiB L2 part); the odd M
 # also covers the non-swap-AB dispatch. Elsewhere they run the default order
-# like the rest of the list.
+# like the rest of the list. The last case covers the SM 11.0 large-K path.
 BLOCKWISE_PREFILL_FACTORS = [
     (8193, 16384, 2560),
     (5120, 5120, 5120),
+    (2048, 5120, 17408),
 ]
 
 
