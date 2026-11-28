@@ -4,6 +4,10 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
+## Attention
+
+- [MXFP8 causal prefill](mxfp8_prefill.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.

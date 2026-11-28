@@ -82,6 +82,7 @@ steps:
     - vllm/model_executor/layers/attention
     - vllm/model_executor/layers/sparse_attn_indexer.py
     - vllm/v1/attention
+    - vllm/triton_utils/tensor_descriptor.py
     - vllm/models/glm5next/nvidia/ops/kpool_compress.py
     - vllm/v1/hisparse/
     - csrc/hisparse_kernels.cu

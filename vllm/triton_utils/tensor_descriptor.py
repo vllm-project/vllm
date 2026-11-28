@@ -44,3 +44,10 @@ def tensor_descriptor_compatible(*tensors: "torch.Tensor | None") -> bool:
         ):
             return False
     return True
+
+
+def get_tensor_descriptor():
+    """Load the host descriptor API only for kernels that require TMA."""
+    from triton.tools.tensor_descriptor import TensorDescriptor
+
+    return TensorDescriptor
