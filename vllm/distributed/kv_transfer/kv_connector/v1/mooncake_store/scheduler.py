@@ -347,13 +347,16 @@ class MooncakeStoreScheduler:
         # Handle new requests
         for request in scheduler_output.scheduled_new_reqs:
             load_spec = self.load_specs.pop(request.req_id, None)
-            num_tokens_to_compute = (
-                request.num_computed_tokens
-                + scheduler_output.num_scheduled_tokens[request.req_id]
-            )
             assert request.req_id in self._unfinished_requests
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
+            # Scheduled spec-decode drafts are not tokens yet; count only real
+            # tokens, as the cached branch does by slicing all_token_ids.
+            num_tokens_to_compute = min(
+                request.num_computed_tokens
+                + scheduler_output.num_scheduled_tokens[request.req_id],
+                request_real.num_tokens,
+            )
 
             unfolded_block_ids = tuple(
                 request.block_ids[group_id].copy() for group_id in self._store_group_ids
