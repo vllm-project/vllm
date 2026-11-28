@@ -41,9 +41,9 @@ logger = init_logger(__name__)
 def is_rdna() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx1x
+    from vllm.platforms.rocm import on_rdna
 
-    return on_gfx1x()
+    return on_rdna()
 
 
 class RocmSegmentedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
@@ -92,7 +92,7 @@ class RocmSegmentedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [64, 128, 256]
+        return [64, 128, 256, 512]
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -178,10 +178,10 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             kv_sharing_target_layer_name,
             sinks,
         )
-        from vllm.platforms.rocm import on_gfx1x, on_gfx12x
+        from vllm.platforms.rocm import on_gfx12x, on_rdna
 
         fp8 = kv_cache_dtype in ("fp8", "fp8_e4m3")
-        arch_supported = on_gfx12x() if fp8 else on_gfx1x()
+        arch_supported = on_gfx12x() if fp8 else on_rdna()
         gqa_ratio_supported = (
             num_kv_heads > 0
             and num_heads % num_kv_heads == 0
@@ -190,14 +190,14 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         if not (
             arch_supported
             and attn_type == AttentionType.DECODER
-            and head_size in (64, 128, 256)
+            and head_size in RocmSegmentedAttentionBackend.get_supported_head_sizes()
             and gqa_ratio_supported
             and kv_cache_dtype in ("auto", "float16", "bfloat16", "fp8", "fp8_e4m3")
             and alibi_slopes is None
         ):
             raise ValueError(
-                "ROCM_SEGMENTED_ATTN requires decoder attention on gfx1x "
-                "(gfx12 for FP8), head size 64, 128 or 256, GQA ratio 1-16, and "
+                "ROCM_SEGMENTED_ATTN requires decoder attention on RDNA "
+                "(gfx12 for FP8), head size 64, 128, 256 or 512, GQA ratio 1-16, and "
                 "does not support ALiBi."
             )
         # Startup tuning and target/draft compilation must share a Triton cache.
@@ -254,8 +254,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         kv_cache: torch.Tensor,
         attn_metadata: RocmAttentionMetadata,
         output: torch.Tensor,
@@ -283,8 +283,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
 
         segmented_attention(
             query=query[:num_actual_tokens],
-            key=key[:num_actual_tokens],
-            value=value[:num_actual_tokens],
+            key=key[:num_actual_tokens] if key is not None else None,
+            value=value[:num_actual_tokens] if value is not None else None,
             output=output[:num_actual_tokens],
             kv_cache_dtype=self.kv_cache_dtype,
             key_cache=key_cache,
