@@ -15,8 +15,14 @@ from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.third_party.kda import fused_recurrent_kda
+    from vllm.models.glm5next.amd.ops.third_party.kda.fused_recurrent import (
+        fused_recurrent_gated_delta_rule,
+    )
 else:
     from vllm.models.glm5next.nvidia.ops.third_party.kda import fused_recurrent_kda
+    from vllm.models.glm5next.nvidia.ops.third_party.kda.fused_recurrent import (
+        fused_recurrent_gated_delta_rule,
+    )
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
@@ -162,6 +168,45 @@ def test_fused_recurrent_kda_strided_inputs_bit_identical_to_contiguous(
     out = run_kernel(inputs, state)
     torch.testing.assert_close(out, out_ref, rtol=0, atol=0)
     torch.testing.assert_close(state, state_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("run", "g_shape"),
+    [
+        (fused_recurrent_kda, (3, 4, H, D)),
+        (fused_recurrent_gated_delta_rule, (3, 4, H)),
+    ],
+    ids=["kda", "gdn"],
+)
+@torch.inference_mode()
+def test_non_inplace_dense_batch_matches_varlen(run, g_shape: tuple[int, ...]):
+    """With ``inplace_final_state=False`` the kernels return the state after
+    every token. A dense ``[B, T]`` batch must return the same rows as the
+    same tokens packed into a varlen batch.
+    """
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    B, T = g_shape[:2]
+    q, k, v = (torch.randn(B, T, H, D, device=device) for _ in range(3))
+    g = -torch.rand(g_shape, device=device)
+    beta = torch.rand(B, T, H, device=device)
+    kwargs = dict(
+        initial_state=torch.randn(B + 1, H, D, D, device=device),
+        inplace_final_state=False,
+        ssm_state_indices=torch.arange(1, B + 1, dtype=torch.int32, device=device),
+        use_qk_l2norm_in_kernel=True,
+    )
+    o, states = run(q, k, v, g, beta, **kwargs)
+
+    def flat(x):
+        return x.reshape(1, B * T, *x.shape[2:])
+
+    cu_seqlens = torch.arange(0, B * T + 1, T, dtype=torch.int32, device=device)
+    o_ref, states_ref = run(
+        *map(flat, (q, k, v, g, beta)), cu_seqlens=cu_seqlens, **kwargs
+    )
+    torch.testing.assert_close(states, states_ref)
+    torch.testing.assert_close(flat(o), o_ref)
 
 
 @pytest.mark.skipif(
