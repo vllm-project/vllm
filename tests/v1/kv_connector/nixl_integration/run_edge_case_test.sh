@@ -28,6 +28,14 @@ else
   KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
 fi
 
+# ROCM_AITER_FA computes P's full prefill and D's recomputed last token with
+# different kernels, which can flip greedy near-ties. Use the unified backend
+# so outputs only differ if the KV transfer itself is wrong.
+ATTN_ARGS=""
+if [[ "${VLLM_ROCM_USE_AITER:-0}" == "1" ]]; then
+  ATTN_ARGS="--attention-backend ROCM_AITER_UNIFIED_ATTN"
+fi
+
 # Models to run
 MODELS=(
     "Qwen/Qwen3-0.6B"
@@ -71,7 +79,7 @@ run_tests_for_model() {
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
   --max-model-len 8192 \
-  --kv-transfer-config '$KV_CONFIG'"
+  --kv-transfer-config '$KV_CONFIG' $ATTN_ARGS"
 
   FULL_CMD="$BASE_CMD"
 
@@ -86,7 +94,7 @@ run_tests_for_model() {
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
   --max-model-len 8192 \
-  --kv-transfer-config '$KV_CONFIG'"
+  --kv-transfer-config '$KV_CONFIG' $ATTN_ARGS"
 
   FULL_CMD="$BASE_CMD"
 
