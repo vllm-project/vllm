@@ -84,6 +84,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -1376,22 +1377,41 @@ class Gemma4ForConditionalGeneration(
         return mm_input_by_modality
 
     @staticmethod
+    def _encoder_chunk_item_bytes(
+        patches_per_item: int, vision_config: Gemma4VisionConfig
+    ) -> int:
+        """Upper bound on the encoder activation one item adds to a chunk.
+
+        Since transformers 5.10.1 the patch embedder looks positions up
+        with `F.embedding`, so no `position_embedding_size`-wide
+        one-hot is allocated. What scales with the chunk is the encoder:
+        the MLP's gate/up/activation outputs (3 x intermediate, bf16) and
+        a few hidden-size tensors (residual, norm, projections), linear in
+        patches, plus a term quadratic in patches from attention. SDPA only
+        holds the `(chunk, 1, patches, patches)` bool mask and its copy in
+        the activation dtype (3 bytes per patch pair). Eager attention
+        materializes `(chunk, heads, patches, patches)` scores in bf16 and
+        float32 for the softmax, measured at under `10 * heads + 2` bytes
+        per patch pair. The two terms peak at different points of a layer,
+        so their sum is an upper bound.
+        """
+        per_patch = 2 * (
+            3 * vision_config.intermediate_size + 4 * vision_config.hidden_size
+        )
+        if getattr(vision_config, "_attn_implementation", None) == "eager":
+            per_pair = 10 * vision_config.num_attention_heads + 2
+        else:
+            per_pair = 3
+        return patches_per_item * per_patch + per_pair * patches_per_item**2
+
+    @staticmethod
     def _encoder_chunk(
         patches_per_item: int,
         free_bytes: int,
         total_bytes: int,
-        position_embedding_size: int,
+        vision_config: Gemma4VisionConfig,
     ) -> int:
-        """Max chunk size whose F.one_hot transient fits in the budget.
-
-        The dominant transient inside HF's `Gemma4VisionPatchEmbedder.
-        _position_embeddings` is
-        `F.one_hot(clamped_positions, num_classes=position_embedding_size)`
-        with shape `(chunk, patches, 2, position_embedding_size)`,
-        int64, plus its simultaneous cast to the position embedding
-        table dtype. That, not the encoder residual stream, sets peak
-        memory.
-        """
+        """Max chunk size whose encoder activations fit in the budget."""
         if patches_per_item <= 0:
             return 1
         # Half of currently-free, capped at 10% of total so we leave room
@@ -1399,12 +1419,22 @@ class Gemma4ForConditionalGeneration(
         budget = min(free_bytes // 2, total_bytes // 10)
         if budget <= 0:
             return 1
-        # F.one_hot allocates (chunk, patches, 2, pos_emb_size) int64
-        # (the inner 2 is the (x, y) coordinate axis, 8 is sizeof(int64)).
-        # Outer 2x covers the int64 buffer and its concurrent bf16 cast
-        # plus the matmul output that live alongside it at peak.
-        cost = patches_per_item * 4 * position_embedding_size * 8
-        return max(1, budget // cost) if cost > 0 else 1
+        cost = Gemma4ForConditionalGeneration._encoder_chunk_item_bytes(
+            patches_per_item, vision_config
+        )
+        if cost > budget:
+            logger.warning_once(
+                "Gemma4 vision encoder needs about %.1f GiB per item of %d "
+                "patches with %s attention, more than the %.1f GiB chunk "
+                "budget. Even one item per chunk reserves that much, which "
+                "shrinks the KV cache or runs out of memory. Use SDPA "
+                "attention for the vision tower or lower max_soft_tokens.",
+                cost / GiB_bytes,
+                patches_per_item,
+                getattr(vision_config, "_attn_implementation", None),
+                budget / GiB_bytes,
+            )
+        return max(1, budget // cost)
 
     def _normalize_pixel_values(
         self, pixel_values: torch.Tensor, dtype: torch.dtype
@@ -1658,9 +1688,7 @@ class Gemma4ForConditionalGeneration(
                 free, total = torch.accelerator.get_memory_info()
                 max_batch_size = min(
                     len(items),
-                    self._encoder_chunk(
-                        patches, free, total, vision_cfg.position_embedding_size
-                    ),
+                    self._encoder_chunk(patches, free, total, vt.config),
                 )
 
             for chunk_idx in range(0, len(items), max_batch_size):
@@ -1795,12 +1823,7 @@ class Gemma4ForConditionalGeneration(
         free, total = torch.accelerator.get_memory_info()
         max_batch_size = min(
             total_frames,
-            self._encoder_chunk(
-                pixel_values.shape[1],
-                free,
-                total,
-                vision_cfg.position_embedding_size,
-            ),
+            self._encoder_chunk(pixel_values.shape[1], free, total, vt.config),
         )
 
         padding_positions = (pixel_position_ids == -1).all(dim=-1)

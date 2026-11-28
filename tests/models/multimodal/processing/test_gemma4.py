@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
-from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
+from transformers.models.gemma4 import Gemma4AudioFeatureExtractor, Gemma4VisionConfig
 
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
@@ -459,60 +459,102 @@ def test_limit_mm_per_prompt(
 
 
 # Regression guard for PR #43169 follow-up: the batched Gemma4 vision encoder
-# admitted ``chunk ~= 53`` on a 22 GiB L4 with a 26B AWQ model loaded,
-# allocating 2.43 GiB int64 inside
-# ``F.one_hot(num_classes=position_embedding_size)`` and OOMing because only
-# 2.41 GiB was actually free.  The fix sizes ``chunk`` from currently-free GPU
-# memory and counts the ``F.one_hot`` transient as the dominant cost.
+# admitted ``chunk ~= 53`` on a 22 GiB L4 with a 26B AWQ model loaded and
+# OOMed, so ``chunk`` is sized from currently-free GPU memory. The per-item
+# cost was then a ``F.one_hot(num_classes=position_embedding_size)``
+# transient; transformers 5.10.1 replaced that one-hot with ``F.embedding``, so
+# the cost is now the encoder's own activations (see
+# ``_encoder_chunk_item_bytes``).
 
 _encoder_chunk = Gemma4ForConditionalGeneration._encoder_chunk
+_item_bytes = Gemma4ForConditionalGeneration._encoder_chunk_item_bytes
 
-# Gemma4 vision config default (HF: configuration_gemma4.py).
-_POSITION_EMBEDDING_SIZE = 10240
 # Video frame: max_soft_tokens=70, pooling_kernel_size=2 -> 70 * 4 patches.
 _VIDEO_PATCHES_PER_FRAME = 280
 
 
+def _vision_config(attn_implementation: str = "sdpa", **kwargs) -> Gemma4VisionConfig:
+    config = Gemma4VisionConfig(**kwargs)
+    config._attn_implementation = attn_implementation
+    return config
+
+
 def test_encoder_chunk_tight_budget_fits_in_free():
     free = 3 * GiB_bytes  # L4 22 GiB after 26B AWQ load.
-    total = 22 * GiB_bytes
-    chunk = _encoder_chunk(
-        _VIDEO_PATCHES_PER_FRAME, free, total, _POSITION_EMBEDDING_SIZE
-    )
-    one_hot_bytes = chunk * _VIDEO_PATCHES_PER_FRAME * 2 * _POSITION_EMBEDDING_SIZE * 8
-    assert one_hot_bytes <= free // 2
+    config = _vision_config()
+    chunk = _encoder_chunk(_VIDEO_PATCHES_PER_FRAME, free, 22 * GiB_bytes, config)
+    assert chunk * _item_bytes(_VIDEO_PATCHES_PER_FRAME, config) <= free // 2
 
 
 def test_encoder_chunk_roomy_gpu_keeps_batching():
     chunk = _encoder_chunk(
-        _VIDEO_PATCHES_PER_FRAME,
-        60 * GiB_bytes,
-        80 * GiB_bytes,
-        _POSITION_EMBEDDING_SIZE,
+        _VIDEO_PATCHES_PER_FRAME, 60 * GiB_bytes, 80 * GiB_bytes, _vision_config()
     )
     assert chunk > 8
 
 
 def test_encoder_chunk_zero_patches_is_safe():
-    assert (
-        _encoder_chunk(0, 60 * GiB_bytes, 80 * GiB_bytes, _POSITION_EMBEDDING_SIZE) == 1
-    )
-
-
-def test_encoder_chunk_zero_position_embedding_size_is_safe():
-    # Degenerate config: must not raise ZeroDivisionError.
-    assert (
-        _encoder_chunk(_VIDEO_PATCHES_PER_FRAME, 60 * GiB_bytes, 80 * GiB_bytes, 0) == 1
-    )
+    assert _encoder_chunk(0, 60 * GiB_bytes, 80 * GiB_bytes, _vision_config()) == 1
 
 
 def test_encoder_chunk_no_free_memory_falls_back_to_one():
-    assert (
-        _encoder_chunk(
-            _VIDEO_PATCHES_PER_FRAME, 0, 22 * GiB_bytes, _POSITION_EMBEDDING_SIZE
-        )
-        == 1
+    chunk = _encoder_chunk(
+        _VIDEO_PATCHES_PER_FRAME, 0, 22 * GiB_bytes, _vision_config()
     )
+    assert chunk == 1
+
+
+# Peak extra memory of one image, measured as the caching allocator's
+# peak-allocated delta on H100, bf16, gemma-4-26B-A4B vision tower (hidden 1152,
+# intermediate 4304, 16 heads), images padded to max_soft_tokens * 9 patches.
+# SDPA: `vision_tower.patch_embedder` + `vision_tower.encoder`, transformers
+# 5.20.2. Eager: `vision_tower.encoder` alone, transformers 5.24.1, slope over
+# 1-3 images per call.
+@pytest.mark.parametrize(
+    ("attn_implementation", "patches", "measured_mib"),
+    [
+        ("sdpa", 280 * 9, 91.9),
+        ("sdpa", 1120 * 9, 448.7),
+        ("eager", 280 * 9, 997.5),
+        ("eager", 1120 * 9, 15617.0),
+    ],
+)
+def test_encoder_chunk_item_bytes_bounds_measured_peak(
+    attn_implementation: str, patches: int, measured_mib: float
+):
+    config = _vision_config(
+        attn_implementation,
+        hidden_size=1152,
+        intermediate_size=4304,
+        num_attention_heads=16,
+    )
+    estimate_mib = _item_bytes(patches, config) / 2**20
+    # An upper bound, but a tight one: the one-hot estimate was 7-9x too large
+    # under SDPA and up to 5x too small under eager.
+    assert measured_mib <= estimate_mib <= 1.5 * measured_mib
+
+
+def test_encoder_chunk_eager_budgets_attention_scores():
+    # gemma-4-26B-A4B at 280 soft tokens with 4.5 GiB free. Sized as SDPA, eager
+    # would get 22 images per chunk, whose float32 softmax alone needs 8.33 GiB.
+    config = _vision_config(
+        "eager", hidden_size=1152, intermediate_size=4304, num_attention_heads=16
+    )
+    free = int(4.5 * GiB_bytes)
+    chunk = _encoder_chunk(280 * 9, free, 80 * GiB_bytes, config)
+    assert chunk == 2
+    # 997.5 MiB: measured eager peak per image (see above).
+    assert chunk * 997.5 * 2**20 <= free // 2
+
+
+def test_encoder_chunk_warns_when_one_item_exceeds_budget(caplog_vllm):
+    # A 1120-token image under eager attention needs ~15 GiB, more than a
+    # serving-time budget; chunking cannot go below one item.
+    config = _vision_config(
+        "eager", hidden_size=1152, intermediate_size=4304, num_attention_heads=16
+    )
+    assert _encoder_chunk(1120 * 9, 10 * GiB_bytes, 80 * GiB_bytes, config) == 1
+    assert "more than the 5.0 GiB chunk budget" in caplog_vllm.text
 
 
 def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
