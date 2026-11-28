@@ -15,10 +15,12 @@ from vllm.utils.host_memory import (
     unpin_tensor,
 )
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.host_buffer import alloc_host_buffer
 from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadHandshake,
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
@@ -45,6 +47,7 @@ class SimpleCPUOffloadWorker:
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
         cpu_hugepage_size: int | None = None,
+        cpu_offload_shared: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -56,6 +59,9 @@ class SimpleCPUOffloadWorker:
         self.use_page_cache = use_page_cache
         self.disk_mode = kv_offload_backend == "disk"
         self.cpu_hugepage_size = cpu_hugepage_size
+        self.cpu_offload_shared = cpu_offload_shared
+        self.shared_region: SharedOffloadRegion | None = None
+        self.handshake_metadata: SimpleCPUOffloadHandshake | None = None
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -250,8 +256,12 @@ class SimpleCPUOffloadWorker:
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
 
-        self.cpu_kv_caches = self._alloc_cpu_caches(unique_gpu_caches, pin_memory)
+        if self.cpu_offload_shared:
+            self._init_shared_cpu_mode(unique_gpu_caches, pin_memory)
+        else:
+            self.cpu_kv_caches = self._alloc_cpu_caches(unique_gpu_caches, pin_memory)
 
+        assert self.cpu_kv_caches is not None
         self._backend = DmaCopyBackend()
         self._backend.init(
             unique_gpu_caches,
@@ -296,6 +306,26 @@ class SimpleCPUOffloadWorker:
             self._pinned_host_ranges = registered
         return cpu_kv_caches
 
+    def _init_shared_cpu_mode(
+        self, gpu_caches: dict[str, torch.Tensor], pin_memory: bool
+    ) -> None:
+        from vllm.v1.simple_kv_offload.shared_offload import allocate_shared_offload
+
+        assert self.kv_cache_config is not None
+        if self.num_cpu_blocks < 2:
+            raise ValueError("Shared CPU offload needs at least two slots per DP rank.")
+        self.shared_region, self.cpu_kv_caches, self.handshake_metadata = (
+            allocate_shared_offload(
+                self.vllm_config,
+                self.kv_cache_config,
+                gpu_caches,
+                self.num_cpu_blocks,
+            )
+        )
+        if pin_memory:
+            pin_tensor(self.shared_region.base_tensor)
+            self.shared_region.is_pinned = True
+
     def shutdown(self) -> None:
         """Stop the copy thread and unregister the pinned CPU caches.
 
@@ -305,6 +335,15 @@ class SimpleCPUOffloadWorker:
         """
         if self._backend is not None:
             self._backend.shutdown()
+            # DmaCopyBackend's timed join may leave a busy submission thread.
+            # Keep the mmap alive in that case until process teardown.
+            if (
+                self.shared_region is not None
+                and isinstance(self._backend, DmaCopyBackend)
+                and self._backend._thread is not None
+                and self._backend._thread.is_alive()
+            ):
+                return
         self._flush_and_sync_all()
         for tensor in reversed(self._pinned_host_ranges):
             try:
@@ -312,6 +351,14 @@ class SimpleCPUOffloadWorker:
             except RuntimeError as e:
                 logger.warning("Failed to unpin a CPU KV cache range: %s", e)
         self._pinned_host_ranges = []
+        if self.shared_region is not None:
+            if self.load_stream is not None:
+                self.load_stream.synchronize()
+            if self.store_stream is not None:
+                self.store_stream.synchronize()
+            self.cpu_kv_caches = None
+            self.shared_region.cleanup()
+            self.shared_region = None
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
