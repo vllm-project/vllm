@@ -947,8 +947,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             kv_cache_dtype,
             k_scale,
-            kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
-            and self._k_scale_float == 1.0,
         )
 
     def _gather_pcp_cache_inputs(
@@ -1591,6 +1589,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)
+        # The KV-cache quant method has set this layer's scales by now.
+        cast(MLAAttentionImpl, self.impl).process_kv_scales_after_loading(self)
 
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both
@@ -3218,6 +3218,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
 
+    def host_bmm_scales(self, layer: AttentionLayer) -> tuple[float, float]:
+        """Decode bmm1 (softmax) and bmm2 (output) scales from `layer`'s host
+        q/k scales. V is the latent kv_c, quantized with k_scale."""
+        bmm1_scale = self.scale
+        bmm2_scale = 1.0
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+            bmm2_scale *= layer._k_scale_float
+        return bmm1_scale, bmm2_scale
+
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> torch.Tensor:
@@ -3345,6 +3355,11 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
             # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
             if use_fp8_prefill:
+                if self.kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla"):
+                    # cp_gather_cache copied raw values, still divided by k_scale.
+                    scale = k_scale.to(kv_nope.dtype)
+                    kv_nope = kv_nope * scale
+                    k_pe = k_pe.to(scale.dtype) * scale
                 kv_nope = kv_nope.to(prefill_metadata.q_data_type)
                 k_pe = k_pe.to(prefill_metadata.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)

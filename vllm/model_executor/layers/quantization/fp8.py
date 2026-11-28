@@ -16,7 +16,7 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
@@ -212,7 +212,7 @@ class Fp8Config(QuantizationConfig):
 
                 return Fp8BlockExpertsAsMxfp4FusedMoE(self, layer)
             return Fp8MoEMethod(self, layer)
-        elif isinstance(layer, Attention):
+        elif isinstance(layer, (Attention, MLAAttention)):
             return Fp8KVCacheMethod(self)
         return None
 

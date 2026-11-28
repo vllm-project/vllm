@@ -43,8 +43,8 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
     import vllm.v1.attention.backends.mla.flashinfer_mla as flashinfer_mla
 
     impl = MagicMock()
-    impl.bmm1_scale = 1.0
-    impl.bmm2_scale = 1.0
+    impl.host_bmm_scales.return_value = (1.0, 1.0)
+    impl._bmm1_scale_device = None
     impl.need_to_return_lse_for_decode = True
     impl.dcp_world_size = 1
     impl.dcp_rank = 0
@@ -92,8 +92,8 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal, query_l
     import vllm.v1.attention.backends.mla.flashinfer_mla as flashinfer_mla
 
     impl = MagicMock()
-    impl.bmm1_scale = 1.0
-    impl.bmm2_scale = 1.0
+    impl.host_bmm_scales.return_value = (1.0, 1.0)
+    impl._bmm1_scale_device = None
     impl.need_to_return_lse_for_decode = True
     impl.num_heads = 6
     impl.qk_nope_head_dim = 128

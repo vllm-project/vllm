@@ -411,7 +411,10 @@ def _bare_mla_layer(
     layer.quant_config = None
     layer.layer_name = "test"
     layer.act_dtype = torch.float32
-    layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
+    layer.impl = SimpleNamespace(
+        process_weights_after_loading=lambda act_dtype: None,
+        process_kv_scales_after_loading=lambda layer: None,
+    )
 
     monkeypatch.setattr(
         mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
@@ -1424,8 +1427,7 @@ def test_tokenspeed_mla_decode_contract(
     impl.qk_rope_head_dim = qk_rope_head_dim
     impl.num_heads = num_heads
     impl.scale = 1.0
-    impl.softmax_scale = 1.0
-    impl.output_scale = 1.0
+    impl.kv_cache_dtype = "fp8"
     impl._min_split_kv = min_split_kv
     impl._max_decode_tokens = num_decode_tokens
     workspace = torch.empty(1, dtype=torch.int8)
@@ -1593,8 +1595,7 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(
         impl.qk_rope_head_dim = qk_rope_head_dim
         impl.num_heads = num_heads
         impl.scale = head_size**-0.5
-        impl.softmax_scale = None
-        impl.output_scale = None
+        impl.kv_cache_dtype = "fp8"
         impl._min_split_kv = 1
         impl._max_decode_tokens = query.shape[1]
         metadata = SimpleNamespace(
@@ -2626,7 +2627,8 @@ def test_chunked_context_backend_correctness(
         tensor_parallel_size=16,
         kv_cache_dtype=kv_cache_dtype,
         q_scale=1.0,
-        k_scale=1.0,
+        # The FP8 prefill context gather must apply k_scale.
+        k_scale=0.5 if use_prefill_query_quantization else 1.0,
         prefill_backend=prefill_backend,
         qk_nope_head_dim=qk_nope_head_dim,
         v_head_dim=v_head_dim,
