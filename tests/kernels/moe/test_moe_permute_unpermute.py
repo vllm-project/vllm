@@ -477,6 +477,21 @@ def test_moe_permute_ignores_invalid_expert_ids_with_scratch() -> None:
     torch.testing.assert_close(expert_offsets, expected_offsets)
 
 
+def test_moe_prepare_scatter_empty_with_fresh_scratch() -> None:
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    scratch = MoEPermuteScratch(
+        num_experts=8, num_local_experts=8, device=torch.device("cuda")
+    )
+    topk_ids = torch.empty((0, 2), dtype=torch.int32, device="cuda")
+
+    expert_offsets, indices = moe_prepare_scatter(topk_ids, None, scratch)
+
+    torch.testing.assert_close(expert_offsets, torch.zeros_like(expert_offsets))
+    assert indices.shape == (0, 2)
+
+
 def test_moe_permute_scratch_grows_until_workspace_lock(workspace_init) -> None:
     """Capacity follows the inputs seen in warmup, whatever their topk or size."""
     if not moe_permute_unpermute_supported():

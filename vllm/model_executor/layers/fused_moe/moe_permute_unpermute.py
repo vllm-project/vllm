@@ -22,7 +22,7 @@ class MoEPermuteScratch:
     num_experts: int
     num_local_experts: int
     device: torch.device
-    max_expanded_rows: int = field(init=False, default=0)
+    max_expanded_rows: int = field(init=False, default=-1)
     token_expert_indices: torch.Tensor = field(init=False)
     expert_first_token_offset: torch.Tensor = field(init=False)
     permuted_idx: torch.Tensor = field(init=False)
