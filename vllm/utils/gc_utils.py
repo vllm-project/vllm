@@ -119,6 +119,27 @@ def freeze_gc_for_cudagraph_capture():
                     gc.disable()
 
 
+@contextmanager
+def gc_paused_for_imports():
+    """Skip cyclic collections during imports, then freeze the tracked heap.
+
+    Imported objects are mostly long-lived; freezing keeps later collections
+    from repeatedly scanning them. Skipping `gc.collect()` before `gc.freeze()`
+    permanently pins any cyclic garbage created during imports in exchange for
+    avoiding a full collection pause on the startup path.
+    """
+    if not gc.isenabled():
+        yield
+        return
+
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.freeze()
+        gc.enable()
+
+
 def freeze_gc_heap() -> None:
     """Collect garbage, then freeze all GC-tracked objects so that later
     collections skip them. Used during startup to make init-time collections

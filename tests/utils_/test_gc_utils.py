@@ -5,10 +5,14 @@ from array import array
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
+from tests.utils import spawn_new_process_for_each_test
 from vllm.utils.gc_utils import (
     GCDebugConfig,
     _compute_detailed_type,
     _compute_top_gc_collected_objects,
+    gc_paused_for_imports,
     gc_untrack,
     untracked_list,
 )
@@ -101,3 +105,35 @@ def test_untracked_list_stays_untracked():
 def test_gc_untrack_ignores_untracked_objects():
     ids = array("i", range(4))
     assert gc_untrack(ids) is ids and gc_untrack(None) is None
+
+
+@spawn_new_process_for_each_test
+def test_gc_paused_for_imports_freezes_and_resumes():
+    gc.enable()
+    gc.unfreeze()
+    with gc_paused_for_imports():
+        assert not gc.isenabled()
+        assert gc.get_freeze_count() == 0
+    assert gc.isenabled()
+    assert gc.get_freeze_count() > 0
+
+
+@spawn_new_process_for_each_test
+def test_gc_paused_for_imports_freezes_and_resumes_on_exception():
+    gc.enable()
+    gc.unfreeze()
+    with pytest.raises(ImportError), gc_paused_for_imports():
+        assert not gc.isenabled()
+        raise ImportError
+    assert gc.isenabled()
+    assert gc.get_freeze_count() > 0
+
+
+@spawn_new_process_for_each_test
+def test_gc_paused_for_imports_leaves_disabled_gc_alone():
+    gc.disable()
+    gc.unfreeze()
+    with gc_paused_for_imports():
+        assert not gc.isenabled()
+    assert not gc.isenabled()
+    assert gc.get_freeze_count() == 0
