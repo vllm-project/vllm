@@ -114,10 +114,32 @@ function (vllm_finalize_hipify_target)
 
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
   set(HIPIFY_MANIFEST ${CMAKE_CURRENT_BINARY_DIR}/hipify-source-map.json)
+
+  # hipify rewrites the build-tree copies of csrc/ headers that the compiled
+  # objects depend on. Ninja only re-stats files after a command when they are
+  # declared outputs of it, so list every file hipify may write; otherwise an
+  # edited header is picked up one build late.
+  file(GLOB_RECURSE _CSRC_FILES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/csrc/*)
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py
+      -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} --list-outputs
+    OUTPUT_VARIABLE _HIPIFY_OUTPUTS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  string(REPLACE "\n" ";" _HIPIFY_OUTPUTS "${_HIPIFY_OUTPUTS}")
+  list(APPEND ALL_BYPRODUCTS ${_HIPIFY_OUTPUTS})
+  list(REMOVE_DUPLICATES ALL_BYPRODUCTS)
+  # Absolute, so a relative `csrc/x.cu` cannot resolve to its build-tree copy,
+  # which is now a byproduct of this same target.
+  set(_HIPIFY_SRC_DEPS)
+  foreach(_SRC ${ALL_SRCS})
+    get_filename_component(_SRC "${_SRC}" ABSOLUTE BASE_DIR ${CMAKE_SOURCE_DIR})
+    list(APPEND _HIPIFY_SRC_DEPS "${_SRC}")
+  endforeach()
   add_custom_target(
     hipify_all
     COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} --manifest ${HIPIFY_MANIFEST} ${ALL_SRCS}
-    DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${ALL_SRCS}
+    DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${_HIPIFY_SRC_DEPS}
     BYPRODUCTS ${ALL_BYPRODUCTS} ${HIPIFY_MANIFEST}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     VERBATIM
