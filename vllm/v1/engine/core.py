@@ -3003,6 +3003,15 @@ class DPEngineCoreProc(EngineCoreProc):
         self.process_input_queue_block = False
         logger.info("[Elastic EP] Committing prepared reconfiguration")
 
+    def abort_prepared_elastic_ep(self) -> None:
+        """Abort any in-flight Elastic EP reconfiguration and reset state."""
+        state = self.eep_scaling_state
+        if state is not None:
+            state.abort()
+            self.eep_scaling_state = None
+        self.process_input_queue_block = False
+        logger.info("[Elastic EP] Aborted prepared reconfiguration")
+
     def _eep_send_engine_core_notification(
         self, notification_type: EEPNotificationType
     ):

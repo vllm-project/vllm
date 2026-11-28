@@ -90,6 +90,7 @@ class ElasticEPScalingState:
             max_workers=1, thread_name_prefix="ElasticEPPrepare"
         )
         self._prepare_future: Future[Any] | None = None
+        self._aborted = False
         self._new_dp_sync: tuple[object, Any] | None = None
         self.state: EngineState
         if scale_type == "scale_up":
@@ -123,6 +124,8 @@ class ElasticEPScalingState:
         return self.model_executor.collective_rpc(*args, **kwargs)
 
     def _execute_async(self, execute_method: str, *args) -> bool:
+        if self._aborted:
+            return False
         if self._prepare_future is None:
             done_keys = self._collective_rpc(
                 "elastic_ep_execute",
@@ -144,7 +147,26 @@ class ElasticEPScalingState:
         self._prepare_future = None
         return True
 
+    def abort(self) -> None:
+        """Cancel any in-flight preparation and release scaling state."""
+        self._aborted = True
+        if self._prepare_future is not None:
+            self._prepare_future.cancel()
+            self._prepare_future = None
+        self._prepare_executor.shutdown(wait=False, cancel_futures=True)
+        if self.worker_type != "new" and self.new_dp_group is not None:
+            try:
+                stateless_destroy_torch_distributed_process_group(self.new_dp_group)
+            except Exception:
+                logger.exception(
+                    "[Elastic EP] Failed to destroy new_dp_group during abort"
+                )
+            self.new_dp_group = None
+            self.new_dp_store = None
+
     def progress(self) -> bool:
+        if self._aborted:
+            return False
         if self.scale_type == "scale_up":
             return (
                 self._progress_new_engine()
@@ -316,6 +338,8 @@ class ElasticEPScalingState:
         return self.new_parallel_config.stateless_init_dp_group(return_store=True)
 
     def _ensure_new_dp_group(self) -> bool:
+        if self._aborted:
+            return False
         if self.new_dp_group is not None:
             return True
 

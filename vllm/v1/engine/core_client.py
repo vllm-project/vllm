@@ -2124,25 +2124,37 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
             reconfig_futures.append(asyncio.create_task(coro))
 
-        # Phase 2: Create new engines
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
-        start_new_worker_future = asyncio.to_thread(
-            self.resources.engine_manager.scale_up_elastic_ep,
-            self.vllm_config,
-            new_data_parallel_size,
-            num_redundant_experts,
-        )
+        try:
+            # Phase 2: Create new engines
+            assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+            start_new_worker_future = asyncio.to_thread(
+                self.resources.engine_manager.scale_up_elastic_ep,
+                self.vllm_config,
+                new_data_parallel_size,
+                num_redundant_experts,
+            )
 
-        # Phase 3: Wait for new engines to be created
-        # and reconfig messages to be received
-        await asyncio.gather(start_new_worker_future, *reconfig_futures)
-        ready_keys = [future.result() for future in reconfig_futures]
-        ready_keys.extend(
-            f"eep_ready/{rank}"
-            for rank in range(len(self.core_engines), new_data_parallel_size)
-        )
-        await asyncio.to_thread(self._coord_store.wait, ready_keys)
-        logger.info("[Elastic EP] Successfully started new engines")
+            # Phase 3: Wait for new engines to be created
+            # and reconfig messages to be received
+            await asyncio.gather(start_new_worker_future, *reconfig_futures)
+            ready_keys = [future.result() for future in reconfig_futures]
+            ready_keys.extend(
+                f"eep_ready/{rank}"
+                for rank in range(len(self.core_engines), new_data_parallel_size)
+            )
+            await asyncio.to_thread(self._coord_store.wait, ready_keys)
+            logger.info("[Elastic EP] Successfully started new engines")
+        except Exception:
+            await asyncio.gather(
+                *(
+                    self._call_utility_async(
+                        "abort_prepared_elastic_ep", engine=engine
+                    )
+                    for engine in self.core_engines
+                ),
+                return_exceptions=True,
+            )
+            raise
 
     async def _commit_scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
         new_core_engines = [
