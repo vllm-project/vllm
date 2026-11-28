@@ -42,6 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.utils import read_safetensors_header
 from vllm.utils.hashing import safe_hash
 from vllm.utils.network_utils import split_host_port
 
@@ -290,18 +291,6 @@ def hash_rope_parameters(model_config: ModelConfig) -> str:
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
-def _safetensors_header(path: str) -> bytes:
-    """Return the raw safetensors header (length prefix + JSON) of a file.
-
-    The header carries tensor names, dtypes, shapes and byte offsets, so it is
-    a content fingerprint of the shard without reading any weight bytes.
-    """
-    with open(path, "rb") as f:
-        size_bytes = f.read(8)
-        (header_len,) = struct.unpack("<Q", size_bytes)
-        return size_bytes + f.read(header_len)
-
-
 def hash_checkpoint(model: str) -> str | None:
     """Fingerprint checkpoint content from local safetensors metadata.
 
@@ -322,7 +311,7 @@ def hash_checkpoint(model: str) -> str | None:
     hasher = safe_hash(b"", usedforsecurity=False)
     for path in sorted(files, key=os.path.basename):
         hasher.update(os.path.basename(path).encode())
-        hasher.update(_safetensors_header(path))
+        hasher.update(read_safetensors_header(path))
     return hasher.hexdigest()
 
 

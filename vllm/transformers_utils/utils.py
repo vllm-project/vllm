@@ -14,6 +14,41 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+MAX_SAFETENSORS_HEADER_BYTES = 64 << 20
+"""Upper bound on a safetensors JSON header. Real headers are a few KB even
+for large shards; a larger declared length means a corrupt or hostile file."""
+
+
+def read_safetensors_header(path: str | PathLike) -> bytes:
+    """Read a safetensors length prefix and JSON header with size checks."""
+    with open(path, "rb") as f:
+        size_bytes = f.read(8)
+        if len(size_bytes) != 8:
+            raise ValueError(
+                f"Invalid safetensors header in {path}: expected an 8-byte "
+                f"length prefix, got {len(size_bytes)} bytes"
+            )
+        (header_len,) = struct.unpack("<Q", size_bytes)
+        file_size = os.fstat(f.fileno()).st_size
+        if header_len > file_size - 8:
+            raise ValueError(
+                f"Invalid safetensors header in {path}: declared length "
+                f"{header_len} exceeds the {file_size}-byte file"
+            )
+        if header_len > MAX_SAFETENSORS_HEADER_BYTES:
+            raise ValueError(
+                f"Invalid safetensors header in {path}: declared length "
+                f"{header_len} exceeds the maximum of "
+                f"{MAX_SAFETENSORS_HEADER_BYTES} bytes"
+            )
+        header = f.read(header_len)
+        if len(header) != header_len:
+            raise ValueError(
+                f"Invalid safetensors header in {path}: expected {header_len} "
+                f"bytes, got {len(header)}"
+            )
+        return size_bytes + header
+
 
 def is_s3(model_or_path: str) -> bool:
     return model_or_path.lower().startswith("s3://")
@@ -108,10 +143,7 @@ def maybe_model_redirect(model: str) -> str:
 
 
 def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
-    with open(path, "rb") as f:
-        length_of_metadata = struct.unpack("<Q", f.read(8))[0]
-        metadata = json.loads(f.read(length_of_metadata).decode("utf-8"))
-        return metadata
+    return json.loads(read_safetensors_header(path)[8:].decode("utf-8"))
 
 
 def convert_model_repo_to_path(model_repo: str) -> str:

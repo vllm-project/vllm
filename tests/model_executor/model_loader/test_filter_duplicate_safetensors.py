@@ -3,6 +3,7 @@
 
 import json
 import os
+import struct
 import tempfile
 from types import SimpleNamespace
 
@@ -251,3 +252,25 @@ def test_finds_shards_listed_by_the_index(tmp_path, monkeypatch, shard_names, is
     assert use_safetensors == shard_names[0].endswith(".safetensors")
     assert len(fetched) == (use_safetensors and not is_local)
     assert (hash_checkpoint(str(tmp_path)) is not None) == use_safetensors
+
+
+def _write_safetensors_shard(path, declared_len: int, payload: bytes = b"{}") -> None:
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", declared_len))
+        f.write(payload)
+
+
+def test_hash_checkpoint_with_valid_header(tmp_path):
+    shard = tmp_path / "model.safetensors"
+    payload = b'{"__metadata__": {}}'
+    _write_safetensors_shard(shard, len(payload), payload)
+
+    assert hash_checkpoint(str(tmp_path)) is not None
+
+
+def test_hash_checkpoint_rejects_bogus_header_length(tmp_path):
+    shard = tmp_path / "model.safetensors"
+    _write_safetensors_shard(shard, 2**63)
+
+    with pytest.raises(ValueError, match="exceeds the 10-byte file"):
+        hash_checkpoint(str(tmp_path))
