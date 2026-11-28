@@ -16,6 +16,7 @@
 
 #include "torch_utils.h"
 #include "ops.h"
+#include "core/cuda_compat.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -28,7 +29,23 @@
 
 namespace {
 
+// Logical 32-lane warps everywhere: on wave64 CDNA each wavefront holds two,
+// and the shuffles and ballots below stay within a lane's own 32-lane half.
 constexpr int kWarpSize = 32;
+
+#ifdef USE_ROCM
+typedef unsigned int vec16_t __attribute__((ext_vector_type(4)));
+  #define HISPARSE_LOAD_CG(ptr) __builtin_nontemporal_load(ptr)
+  #define HISPARSE_STORE_CG(ptr, val) __builtin_nontemporal_store(val, ptr)
+  #define HISPARSE_TRAP() __builtin_trap()
+#else
+typedef uint4 vec16_t;
+  #define HISPARSE_LOAD_CG(ptr) __ldcg(ptr)
+  #define HISPARSE_STORE_CG(ptr, val) __stcg(ptr, val)
+  #define HISPARSE_TRAP() __trap()
+#endif
+static_assert(sizeof(vec16_t) == 16, "vec16_t must be a 16-byte vector");
+#define HISPARSE_BALLOT(pred) VLLM_BALLOT_SYNC_32(0xFFFFFFFFu, pred)
 // Empty key in the shared open-addressing table of host rows.
 constexpr int32_t kHashEmpty = -1;
 
@@ -41,6 +58,21 @@ bool is_pinned_cpu_tensor(const torch::stable::Tensor& tensor) {
     return false;
   }
   return attributes.type == cudaMemoryTypeHost;
+}
+
+// Device address of the pinned host pool. CUDA UVA uses the host pointer
+// as is; ROCm needs the mapping of the registered range.
+const char* host_device_pointer(const torch::stable::Tensor& tensor) {
+#ifdef USE_ROCM
+  void* device_ptr = nullptr;
+  const auto status = cudaHostGetDevicePointer(
+      &device_ptr, const_cast<void*>(tensor.const_data_ptr()), 0);
+  STD_TORCH_CHECK(status == cudaSuccess, "Failed to map HiSparse host cache: ",
+                  cudaGetErrorString(status));
+  return static_cast<const char*>(device_ptr);
+#else
+  return static_cast<const char*>(tensor.const_data_ptr());
+#endif
 }
 
 __device__ __forceinline__ int32_t hash_slot(int32_t key, int size) {
@@ -63,10 +95,10 @@ __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
                          static_cast<uintptr_t>(row_bytes);
   if ((alignment & 15) == 0) {
     const int64_t num_vec = row_bytes / 16;
-    const uint4* src4 = reinterpret_cast<const uint4*>(src);
-    uint4* dst4 = reinterpret_cast<uint4*>(dst);
+    const vec16_t* src4 = reinterpret_cast<const vec16_t*>(src);
+    vec16_t* dst4 = reinterpret_cast<vec16_t*>(dst);
     for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-      __stcg(dst4 + j, __ldcg(src4 + j));
+      HISPARSE_STORE_CG(dst4 + j, HISPARSE_LOAD_CG(src4 + j));
     }
     return;
   }
@@ -76,13 +108,13 @@ __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
     const unsigned int* src_words = reinterpret_cast<const unsigned int*>(src);
     unsigned int* dst_words = reinterpret_cast<unsigned int*>(dst);
     for (int64_t j = lane_id; j < num_words; j += kWarpSize) {
-      __stcg(dst_words + j, __ldcg(src_words + j));
+      HISPARSE_STORE_CG(dst_words + j, HISPARSE_LOAD_CG(src_words + j));
     }
     return;
   }
 
   for (int64_t j = lane_id; j < row_bytes; j += kWarpSize) {
-    __stcg(dst + j, __ldcg(src + j));
+    HISPARSE_STORE_CG(dst + j, HISPARSE_LOAD_CG(src + j));
   }
 }
 
@@ -94,12 +126,10 @@ __device__ __forceinline__ void zero_row_warp(int lane_id, char* dst,
       reinterpret_cast<uintptr_t>(dst) | static_cast<uintptr_t>(row_bytes);
   if ((alignment & 15) == 0) {
     const int64_t num_vec = row_bytes / 16;
-    uint64_t* dst8 = reinterpret_cast<uint64_t*>(dst);
+    vec16_t* dst4 = reinterpret_cast<vec16_t*>(dst);
+    const vec16_t zero = {0u, 0u, 0u, 0u};
     for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-      uint64_t* d = dst8 + j * 2;
-      asm volatile("st.global.cg.v2.b64 [%0],{%1,%2};" ::"l"(d), "l"(0ULL),
-                   "l"(0ULL)
-                   : "memory");
+      HISPARSE_STORE_CG(dst4 + j, zero);
     }
     return;
   }
@@ -108,13 +138,13 @@ __device__ __forceinline__ void zero_row_warp(int lane_id, char* dst,
     const int64_t num_words = row_bytes / 4;
     unsigned int* dst_words = reinterpret_cast<unsigned int*>(dst);
     for (int64_t j = lane_id; j < num_words; j += kWarpSize) {
-      __stcg(dst_words + j, 0u);
+      HISPARSE_STORE_CG(dst_words + j, 0u);
     }
     return;
   }
 
   for (int64_t j = lane_id; j < row_bytes; j += kWarpSize) {
-    __stcg(dst + j, static_cast<char>(0));
+    HISPARSE_STORE_CG(dst + j, static_cast<char>(0));
   }
 }
 
@@ -154,14 +184,14 @@ __device__ __forceinline__ int warp_inclusive_scan(int32_t* s_data, int lane_id,
   int val = (idx < count) ? s_data[idx] : 0;
 #pragma unroll
   for (int i = 1; i < 32; i *= 2) {
-    int n = __shfl_up_sync(0xffffffff, val, i);
+    int n = VLLM_SHFL_UP_SYNC_WIDTH(val, i, kWarpSize);
     if (lane_id >= i) val += n;
   }
   val += accumulator;
   if (idx < count) {
     s_data[idx] = val;
   }
-  return __shfl_sync(0xffffffff, val, 31);
+  return VLLM_SHFL_SYNC_WIDTH(val, kWarpSize - 1, kWarpSize);
 }
 
 // Non-negative x only. Block sizes are powers of two in practice, and integer
@@ -568,7 +598,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
           "configured bound of %d\n",
           request_row, s_counters[1], max_union_rows);
     }
-    __trap();
+    HISPARSE_TRAP();
   }
 
   // Phase 2: scan hot slots in slot order so device_global_indices is read
@@ -593,7 +623,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       int32_t k = s_hash_keys[h];
       bool is_hit = g >= 0 && k == g;
       bool probing = g >= 0 && !is_hit && k != kHashEmpty;
-      while (__any_sync(0xFFFFFFFF, probing)) {
+      while (HISPARSE_BALLOT(probing) != 0) {
         if (probing) h = next_slot(h, table_size);
         k = probing ? s_hash_keys[h] : kHashEmpty;
         const bool found = probing && k == g;
@@ -601,7 +631,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         probing = probing && !found && k != kHashEmpty;
       }
       if (is_hit) s_hash_vals[h] = kEntryHit | slot;
-      const unsigned int hit_bits = __ballot_sync(0xFFFFFFFF, is_hit);
+      const unsigned int hit_bits = HISPARSE_BALLOT(is_hit);
       if (lane_id == 0 && slot < hot_size) {
         s_done[slot / kWarpSize] = hit_bits;
       }
@@ -634,8 +664,8 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     int local_hit_off = 0;
     int local_evict_off = 0;
     if (has_valid_chunk) {
-      const unsigned int hit_mask = __ballot_sync(0xFFFFFFFF, is_hit);
-      const unsigned int evict_mask = __ballot_sync(0xFFFFFFFF, is_evictable);
+      const unsigned int hit_mask = HISPARSE_BALLOT(is_hit);
+      const unsigned int evict_mask = HISPARSE_BALLOT(is_evictable);
       local_hit_off = __popc(hit_mask & lanes_before);
       local_evict_off = __popc(evict_mask & lanes_before);
       if (lane_id == 0) {
@@ -710,7 +740,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
 
     int local_miss_off = 0;
     if (has_valid_chunk) {
-      const unsigned int miss_mask_bits = __ballot_sync(0xFFFFFFFF, is_miss);
+      const unsigned int miss_mask_bits = HISPARSE_BALLOT(is_miss);
       local_miss_off = __popc(miss_mask_bits & lanes_before);
       if (lane_id == 0) {
         s_chunk_off[chunk_idx + 1] = __popc(miss_mask_bits);
@@ -769,7 +799,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
           is_miss, entry_hits, entry_misses);
     }
     if (has_valid_chunk) {
-      const unsigned int done_bits = __ballot_sync(0xFFFFFFFF, resolved);
+      const unsigned int done_bits = HISPARSE_BALLOT(resolved);
       if (lane_id == 0) {
         s_done[chunk_idx] = done_bits;
       }
@@ -1079,8 +1109,6 @@ void hisparse_resolve_residency(
                   "hot-cache rows must be contiguous");
   const int64_t hot_block_size = hot_cache.size(1);
   const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
-  const int64_t hot_block_stride =
-      hot_cache.stride(0) * hot_cache.element_size();
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
   const auto launch_rows = static_cast<int32_t>(num_rows);
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
@@ -1308,7 +1336,8 @@ void hisparse_resolve_residency(
     }
     if (configured[device_index] < smem_bytes) {
       const cudaError_t attribute_error = cudaFuncSetAttribute(
-          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+          reinterpret_cast<const void*>(kernel),
+          cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
       STD_TORCH_CHECK(attribute_error == cudaSuccess,
                       "failed to configure HiSparse swap-in shared memory: ",
                       cudaGetErrorString(attribute_error));
@@ -1394,7 +1423,7 @@ void hisparse_gather_plan(torch::stable::Tensor const& host_cache,
       hot_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   hisparse_gather_plan_kernel<<<grid, kBlockSize, 0, stream>>>(
-      static_cast<const char*>(host_cache.const_data_ptr()),
+      host_device_pointer(host_cache),
       static_cast<char*>(hot_cache.mutable_data_ptr()),
       global_indices.const_data_ptr<int32_t>(),
       hot_indices.const_data_ptr<int32_t>(),
@@ -1452,7 +1481,7 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
       hot_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   hisparse_gather_compact_kernel<<<grid, kBlockSize, 0, stream>>>(
-      static_cast<const char*>(host_cache.const_data_ptr()),
+      host_device_pointer(host_cache),
       static_cast<char*>(hot_cache.mutable_data_ptr()),
       miss_global_indices.const_data_ptr<int32_t>(),
       miss_hot_indices.const_data_ptr<int32_t>(),

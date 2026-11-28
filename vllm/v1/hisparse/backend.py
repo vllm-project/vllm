@@ -128,6 +128,39 @@ class CUDAHiSparseBackend(HiSparseBackend):
         ops.swap_blocks_batch(src, dst, sizes)
 
 
+_NO_IPC_EVENTS = "HIP interprocess events do not order async copies."
+
+
+class ROCmHiSparseBackend(CUDAHiSparseBackend):
+    """The CUDA backend through HIP, with one private host pool per rank.
+
+    Local TP ranks do not share one host pool: on ROCm 10 (HIP 7.15) a wait
+    on an interprocess event returns before an earlier async device-to-host
+    copy on the recording stream completes, so readers could see partial
+    mirror writes. Each rank registers its own contiguous pool instead.
+    """
+
+    supports_shared_host_pool = False
+
+    def validate_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
+        # The ROCm sparse MLA kernels have no fp8_ds_mla layout.
+        for group in kv_cache_config.kv_cache_groups:
+            for spec in group.kv_cache_specs.values():
+                if getattr(spec, "cache_dtype_str", None) == "fp8_ds_mla":
+                    raise ValueError(
+                        "HiSparse on ROCm does not support kv_cache_dtype=fp8_ds_mla."
+                    )
+
+    def create_ipc_event(self) -> Any:
+        raise NotImplementedError(_NO_IPC_EVENTS)
+
+    def export_event(self, event: Any) -> Any:
+        raise NotImplementedError(_NO_IPC_EVENTS)
+
+    def import_event(self, device: torch.device, handle: Any) -> Any:
+        raise NotImplementedError(_NO_IPC_EVENTS)
+
+
 def get_hisparse_backend() -> HiSparseBackend:
     backend_cls = current_platform.get_hisparse_backend_cls()
     if backend_cls is None:
