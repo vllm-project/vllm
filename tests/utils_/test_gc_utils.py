@@ -9,6 +9,7 @@ from vllm.utils.gc_utils import (
     GCDebugConfig,
     _compute_detailed_type,
     _compute_top_gc_collected_objects,
+    freeze_gc_heap,
     gc_untrack,
     untracked_list,
 )
@@ -87,6 +88,17 @@ def test_gc_debug_config():
     config = GCDebugConfig('{"top_objects":5}')
     assert config.enabled
     assert config.top_objects == 5
+
+
+def test_freeze_gc_heap_applies_thresholds(monkeypatch):
+    original = gc.get_threshold()
+    monkeypatch.setenv("VLLM_GC_THRESHOLDS", "50000,20,100")
+    try:
+        freeze_gc_heap()
+        assert gc.get_threshold() == (50000, 20, 100)
+    finally:
+        gc.unfreeze()
+        gc.set_threshold(*original)
 
 
 def test_untracked_list_stays_untracked():
