@@ -38,9 +38,9 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
     ) -> bool:
         if not current_platform.is_rocm():
             return False
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import on_gfx1250, on_mi3xx
 
-        return on_mi3xx()
+        return on_mi3xx() or on_gfx1250()
 
     @classmethod
     def is_available(cls) -> bool:

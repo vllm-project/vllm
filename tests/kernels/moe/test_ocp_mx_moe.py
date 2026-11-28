@@ -1719,6 +1719,7 @@ class RocmBackendConfig(TypedDict):
     requires_gfx950: bool
     requires_gfx1250: NotRequired[bool]
     requires_gfx942: NotRequired[bool]
+    requires_gfx950_or_gfx1250: NotRequired[bool]
     interleaved_layout: NotRequired[bool]
     act_type: NotRequired[str]
 
@@ -1769,7 +1770,8 @@ ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
         "rtol": 1.0,
         "percent": 0.8,
         "requires_aiter": True,
-        "requires_gfx950": True,
+        "requires_gfx950": False,
+        "requires_gfx950_or_gfx1250": True,
     },
     "AITER_TRITON_MXFP4_MXFP4": {
         "activation": "SILU",
@@ -1821,6 +1823,8 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires GFX950")
     if config.get("requires_gfx1250") and not ROCM_GFX1250:
         pytest.skip(f"Backend {backend_name} requires GFX1250")
+    if config.get("requires_gfx950_or_gfx1250") and not (ROCM_GFX950 or ROCM_GFX1250):
+        pytest.skip(f"Backend {backend_name} requires GFX950 or GFX1250")
 
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
