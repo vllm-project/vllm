@@ -469,6 +469,22 @@ class FlashAttentionBackend(AttentionBackend):
             return max(default_block_size, block_size)
         if current_platform.is_xpu():
             return max(default_block_size, 64)
+        config = get_current_vllm_config_or_none()
+        if (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability(89)
+            and config is not None
+            and config.cache_config.enable_prefix_caching
+            and config.cache_config.prefix_match_unit is None
+            and config.cache_config.num_gpu_blocks_override is None
+            and config.kv_transfer_config is None
+            and config.parallel_config.world_size == 1
+            and config.model_config is not None
+            and config.model_config.attn_type == "decoder"
+            and config.model_config.get_sliding_window() is None
+        ):
+            # Parallel samples each prefill the tail after the last full block.
+            return 16
         return super().get_preferred_block_size(default_block_size)
 
     @staticmethod

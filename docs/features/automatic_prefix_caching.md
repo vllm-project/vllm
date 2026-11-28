@@ -12,6 +12,12 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+## Parallel sampling
+
+For full-attention models, the candidates in a request with `n > 1` can reuse complete KV blocks from the same prompt. Each candidate computes the remaining prompt tokens to produce its first output. For example, with a 3,700-token prompt, each additional candidate processes 52 prompt tokens with 64-token blocks and four with 16-token blocks.
+
+On NVIDIA Ada GPUs such as the L40S and RTX 4090, FlashAttention prefers 16-token blocks when a full-attention decoder runs on one GPU per replica with local prefix caching, automatic block count, and the default prefix match unit. You can set `--block-size` explicitly to tune this tradeoff. Smaller blocks improve prefix reuse while increasing the number of entries in the block table.
+
 ## Hybrid Mamba models
 
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.

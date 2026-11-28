@@ -8,6 +8,7 @@ import pytest
 
 from vllm import LLM, TokensPrompt
 from vllm.exceptions import ProfilerAlreadyActiveError
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
@@ -222,6 +223,48 @@ def test_compatibility_with_skip_tokenizer_init(
     llm: LLM = vllm_model_skip_tokenizer_init.llm
     with pytest.raises(ValueError):
         _ = llm.generate(example_prompts, sampling_params_list)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
+    reason="tests the Ada FlashAttention block size preference",
+)
+@pytest.mark.parametrize(
+    ("block_size", "cache_options", "expected_hits"),
+    [
+        pytest.param(None, {}, 112, id="automatic"),
+        pytest.param(64, {}, 64, id="explicit-block"),
+        pytest.param(None, {"prefix_match_unit": 64}, 64, id="explicit-match-unit"),
+        pytest.param(None, {"num_gpu_blocks_override": 64}, 64, id="fixed-block-count"),
+    ],
+)
+def test_parallel_sampling_prefix_cache_hits(
+    vllm_runner, block_size, cache_options, expected_hits
+):
+    with vllm_runner(
+        MODEL,
+        load_format="dummy",
+        dtype=DTYPE,
+        attention_config={"backend": "FLASH_ATTN"},
+        block_size=block_size,
+        enable_prefix_caching=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+        max_model_len=2048,
+        disable_log_stats=False,
+        **cache_options,
+    ) as runner:
+        (output,) = runner.llm.generate(
+            {"prompt_token_ids": list(range(117))},
+            SamplingParams(n=2, max_tokens=1, seed=42),
+        )
+        assert len(output.outputs) == 2
+        (hits,) = (
+            m for m in runner.llm.get_metrics() if m.name == "vllm:prefix_cache_hits"
+        )
+        assert isinstance(hits, Counter)
+        # The second child reuses complete blocks from the first child's prompt.
+        assert hits.value == expected_hits
 
 
 def test_parallel_sampling(vllm_model, example_prompts) -> None:
