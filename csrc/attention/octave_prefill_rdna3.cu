@@ -740,8 +740,9 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   TORCH_CHECK(cache.stride(2) % align == 0 && cache.stride(1) % align == 0 &&
                   cache.stride(0) % align == 0,
               "octave_prefill: misaligned slots");
+  const at::cuda::OptionalCUDAGuard guard(device_of(q));
   // 0: gfx1100 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna.cu).
-  static const int arch = [] {
+  const int arch = [] {
     const std::string name =
         at::cuda::getCurrentDeviceProperties()->gcnArchName;
     if (name.rfind("gfx1100", 0) == 0) return 0;
@@ -751,7 +752,6 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   TORCH_CHECK(arch >= 0, "octave_prefill: gfx1100 or gfx942 only");
   const int num_seqs = seq_lens.size(0);
   if (num_seqs == 0 || q.size(0) == 0) return;
-  const at::cuda::OptionalCUDAGuard guard(device_of(q));
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const int hq = q.size(1), hkv = cache.size(1);
   TORCH_CHECK(hq % hkv == 0);

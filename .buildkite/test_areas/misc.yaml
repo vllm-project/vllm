@@ -667,6 +667,8 @@ steps:
   - vllm/utils/
   - vllm/v1/
   - tests/detokenizer
+  - tests/kernels/attention/__init__.py
+  - tests/kernels/attention/test_rocm_octave.py
   - tests/multimodal
   - tests/utils_
   commands:

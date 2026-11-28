@@ -4,10 +4,12 @@
 vllm/v1/attention/ops/rocm_octave.py."""
 
 import math
+from contextlib import nullcontext
 
 import pytest
 import torch
 
+from tests.utils import spawn_new_process_for_each_test
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.rocm_octave_attn import RocmOctaveAttentionBackend
@@ -26,7 +28,12 @@ def _arch() -> str | None:
 
 
 pytestmark = pytest.mark.skipif(
-    _arch() is None or not hasattr(torch.ops._C, "octave_decode"),
+    not current_platform.is_rocm() or not hasattr(torch.ops._C, "octave_decode"),
+    reason="Octave HIP operators require a ROCm build with Octave support",
+)
+
+requires_native_octave = pytest.mark.skipif(
+    _arch() is None,
     reason="Octave kernels need RDNA3 or CDNA3",
 )
 
@@ -60,6 +67,7 @@ def _fill(cache, block_ids, k, v, k_signs, v_signs, fmt):
     return slots
 
 
+@requires_native_octave
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 def test_store_matches_reference(cache_dtype):
     torch.manual_seed(0)
@@ -85,6 +93,7 @@ def test_store_matches_reference(cache_dtype):
     assert _rel(v_got, v) < (0.12 if fmt.v_bits == 4 else 0.22)
 
 
+@requires_native_octave
 @pytest.mark.parametrize(
     "cache_dtype,slot_bytes",
     [("octave_k3v4", 248), ("octave_k3v3", 216), ("octave_k3v3_compact", 196)],
@@ -95,6 +104,7 @@ def test_slot_bytes_match_kernel_layout(cache_dtype, slot_bytes):
     assert _format(cache_dtype).slot_bytes == slot_bytes
 
 
+@requires_native_octave
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 def test_store_skips_padding_slots(cache_dtype):
     """Tokens with slot -1 (cudagraph padding) leave every byte unchanged."""
@@ -117,6 +127,7 @@ def test_store_skips_padding_slots(cache_dtype):
     assert not torch.equal(cache[written], before[written])
 
 
+@requires_native_octave
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("query_group", [1, 4])
 @pytest.mark.parametrize("num_splits", [1, 7, 64])
@@ -190,6 +201,7 @@ def test_decode_matches_reference(
     assert out[-1].abs().max().item() == 0
 
 
+@requires_native_octave
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("query_lens", [[300], [129, 1, 517]])
 def test_prefill_matches_reference(cache_dtype, query_lens):
@@ -265,6 +277,60 @@ def test_prefill_matches_reference(cache_dtype, query_lens):
     assert _rel(out, ref) < 2e-2
 
 
+@spawn_new_process_for_each_test
+def test_prefill_query_device_dispatch():
+    """Check guard order, then reject an unsupported query despite a prior call.
+
+    Empty inputs reach target validation without launching a kernel. A fresh
+    process prevents earlier tests from populating the original static cache.
+    """
+    supported, unsupported = [], []
+    for device in range(torch.accelerator.device_count()):
+        name = torch.cuda.get_device_properties(device).gcnArchName
+        if name.startswith(("gfx1100", "gfx942")):
+            supported.append(device)
+        else:
+            unsupported.append(device)
+    if not supported or not unsupported:
+        pytest.skip("Requires an Octave-supported GPU and an unsupported GPU")
+
+    fmt = _format("octave_k3v3")
+    for query_device, caller_device in (
+        (supported[0], unsupported[0]),
+        (unsupported[0], supported[0]),
+    ):
+        with torch.accelerator.device_index(caller_device):
+            dev = f"cuda:{query_device}"
+            q = torch.empty(0, 6, HEAD, dtype=torch.float16, device=dev)
+            kv = torch.empty(0, 1, HEAD, dtype=torch.float16, device=dev)
+            cache = torch.empty(
+                0, 1, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev
+            )
+            block_table = torch.empty(0, 0, dtype=torch.int32, device=dev)
+            qsl = torch.empty(1, dtype=torch.int32, device=dev)
+            seq_lens = torch.empty(0, dtype=torch.int32, device=dev)
+            expected = (
+                nullcontext()
+                if query_device == supported[0]
+                else pytest.raises(RuntimeError, match="gfx1100 or gfx942 only")
+            )
+            with expected:
+                torch.ops._C.octave_prefill(
+                    torch.empty_like(q),
+                    q,
+                    kv,
+                    kv,
+                    cache,
+                    block_table,
+                    qsl,
+                    seq_lens,
+                    0,
+                    1 / 16,
+                    fmt.kernel_code,
+                )
+            assert torch.accelerator.current_device_index() == caller_device
+
+
 def _decode(cache, q, block_table, q_to_req, q_to_klen, signs, fmt, use_wmma):
     out = torch.zeros_like(q)
     mid = torch.empty(*q.shape[:2], 8, HEAD + 2, dtype=torch.float32, device=q.device)
@@ -305,6 +371,7 @@ def _prefill(cache, q, k, v, block_table, qsl, seq_lens, signs, fmt):
     return out
 
 
+@requires_native_octave
 @pytest.mark.parametrize(
     "layout", RocmOctaveAttentionBackend.supported_kv_cache_layouts()
 )
@@ -376,6 +443,7 @@ def _window_tables(entries, hkv, dev):
     )
 
 
+@requires_native_octave
 @pytest.mark.skipif(_arch() != "rdna3", reason="sparse decode is RDNA3-only")
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("hkv,group", [(1, 6), (2, 6)])
