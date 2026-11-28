@@ -432,12 +432,15 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
     torch.testing.assert_close(adaptive_inputs[2], spec.sample_col)
 
 
-def test_lilicorr_config_preserves_architecture():
+@pytest.mark.parametrize("architecture", ["LiLiCorrDraftModel", "DSpineDraftModel"])
+def test_dflash_config_prefixes_draft_architecture(architecture):
     from transformers import Qwen3Config
 
-    config = Qwen3Config(architectures=["LiLiCorrDraftModel"])
+    config = Qwen3Config(architectures=[architecture])
     wrapped = EAGLEConfig(config, method="dflash")
-    assert wrapped.architectures == ["LiLiCorrDraftModel"]
+    assert wrapped.architectures == [f"DFlash{architecture}"]
+    assert config.architectures == [architecture]
+    assert EAGLEConfig(wrapped, method="dflash").architectures == wrapped.architectures
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

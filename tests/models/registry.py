@@ -1527,8 +1527,22 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,
         max_num_seqs=32,
     ),
+    "DFlashDSpineDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3.8-27B",
+        speculative_model="tencent/Qwen3.8-27B-DSpine-b16",
+        is_available_online=False,
+        use_original_num_layers=True,
+        max_model_len=8192,
+        max_num_seqs=32,
+    ),
     # LiLiCorr checkpoints are not published yet.
     "LiLiCorrDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="LiLiCorrDraftModel",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
+    "DFlashLiLiCorrDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_model="LiLiCorrDraftModel",
         is_available_online=False,
