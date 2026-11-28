@@ -12,6 +12,8 @@ sets the GEMM reduction order and can make near-ties flip. A real sharding
 bug — rows routed to the wrong request, misaligned gathers — produces
 many-nats divergence and scrambled top-k sets."""
 
+import json
+
 import pytest
 import torch
 
@@ -64,7 +66,8 @@ def _is_sharded_sampling_active(worker) -> bool:
 def _local_logits_match_full(worker) -> dict[str, bool]:
     """Reassemble rank-local logits and compare with the full path."""
     model = worker.model_runner.model
-    hidden_size = model.config.hidden_size
+    config = model.config.get_text_config()
+    hidden_size = config.hidden_size
     dtype = model.lm_head.weight.dtype
     hidden_states = torch.linspace(
         -1,
@@ -78,7 +81,7 @@ def _local_logits_match_full(worker) -> dict[str, bool]:
     local_logits = model.compute_logits_local(hidden_states)
     assert local_logits.shape[-1] == model.lm_head.num_embeddings_per_partition
     gathered_logits = tensor_model_parallel_all_gather(local_logits)
-    gathered_logits = gathered_logits[..., : model.config.vocab_size]
+    gathered_logits = gathered_logits[..., : config.vocab_size]
 
     has_full_logits = full_logits is not None
     return {
@@ -98,6 +101,7 @@ def _generate(
     sampling_params: list[SamplingParams],
     revision: str | None,
     model_impl: str,
+    **llm_kwargs,
 ):
     llm = LLM(
         model=model,
@@ -116,6 +120,7 @@ def _generate(
         # Timing-based kernel selection is the dominant source of cross-boot
         # numeric noise; disable it so the comparison bounds stay tight.
         enable_flashinfer_autotune=False,
+        **llm_kwargs,
     )
     try:
         # Guard against a vacuous comparison: verify every worker is in the
@@ -332,3 +337,37 @@ def test_sharded_sampling_outputs_match(
 
     expected_params = sampling_params + sampling_params[::-1]
     _assert_outputs_match(ref_outputs, shard_outputs, expected_params)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_inkling2_sharded_sampling_outputs_match(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """Inkling2 (random weights) samples the same with batch sharding."""
+    from tests.models.inkling2.test_model import TINY_CONFIG
+
+    _configure_test_environment(monkeypatch)
+    (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
+    prompts = [
+        {"prompt_token_ids": list(range(2 + 100 * i, 10 + 100 * i + i))}
+        for i in range(len(PROMPTS))
+    ]
+    sampling_params = _sampling_params(len(prompts))
+    ref_outputs, shard_outputs = (
+        _generate(
+            disable_sharding=disable_sharding,
+            model=str(tmp_path),
+            prompts=prompts,
+            sampling_params=sampling_params,
+            revision=None,
+            model_impl="auto",
+            load_format="dummy",
+            skip_tokenizer_init=True,
+            tokenizer_mode="hf",
+            limit_mm_per_prompt={"image": 0},
+        )
+        for disable_sharding in (True, False)
+    )
+    _assert_outputs_match(
+        ref_outputs, shard_outputs, sampling_params + sampling_params[::-1]
+    )
