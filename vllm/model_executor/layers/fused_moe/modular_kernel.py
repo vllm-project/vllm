@@ -606,6 +606,20 @@ class FusedMoEExperts(ABC):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
+    @staticmethod
+    def convert_fp8_weights(
+        layer: torch.nn.Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Convert FP8 weights and scales to the layout of an out-of-tree
+        backend's experts. In-tree layouts live in the FP8 oracle."""
+        return w13, w2, w13_scale, w2_scale
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
