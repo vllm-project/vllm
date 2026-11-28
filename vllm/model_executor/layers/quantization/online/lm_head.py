@@ -12,7 +12,7 @@ from typing import ClassVar, Literal
 from weakref import WeakKeyDictionary
 
 import torch
-from torch.nn import Module, Parameter
+from torch.nn import Module
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -35,11 +35,52 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.scalar_type import ScalarType
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
+
+
+def _set_mp_param(
+    layer: Module,
+    name: str,
+    tensor: torch.Tensor,
+    attrs: dict[str, object],
+) -> None:
+    """Register or replace a quantized parameter as a `BasevLLMParameter`.
+
+    Mixed-precision kernels (`MarlinLinearKernel`, `MacheteLinearKernel`,
+    `ConchLinearKernel`, `ExllamaLinearKernel`, `RDNA3W4A16LinearKernel`)
+    require `BasevLLMParameter` instances for layout permutation.
+    """
+    existing = getattr(layer, name, None)
+    if (
+        isinstance(existing, BasevLLMParameter)
+        and not getattr(existing, "requantization_source", False)
+        and not (existing.is_meta and not tensor.is_meta)
+    ):
+        # Avoid overwriting read-only @property dims on subclasses such as
+        # ModelWeightParameter when they already match.
+        extra_attrs = {
+            k: v
+            for k, v in attrs.items()
+            if not (hasattr(existing, k) and getattr(existing, k) == v)
+        }
+        set_weight_attrs(tensor, extra_attrs)
+        replace_parameter(layer, name, tensor)
+        return
+    param = BasevLLMParameter(data=tensor, weight_loader=default_weight_loader)
+    del param.weight_loader
+    tp_rank = getattr(layer, "tp_rank", None)
+    tp_size = getattr(layer, "tp_size", None)
+    if isinstance(tp_rank, int) and isinstance(tp_size, int):
+        param.tp_rank = tp_rank
+        param.tp_size = tp_size
+    set_weight_attrs(param, attrs)
+    layer.register_parameter(name, param)
 
 
 class OnlineLMHeadMethodBase(OnlineLinearBase):
@@ -155,16 +196,11 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
         weight = self.get_weight_for_quantization(layer)
         n, k = weight.shape
         packed, scales, zero_points = self.quantize(weight)
-        set_weight_attrs(packed, {"packed_dim": 1})
-        set_weight_attrs(scales, {"input_dim": 1, "output_dim": 0})
         if tied:
             # `weight` is the input embeddings' parameter, which they keep: the
             # head drops it, since kernels may re-register their packed weight
             # under that name.
             del layer.weight
-            w_q = Parameter(packed, requires_grad=False)
-            set_weight_attrs(w_q, {"input_dim": 1, "output_dim": 0, "packed_dim": 1})
-            layer.register_parameter("weight", w_q)
             added = packed.nbytes + scales.nbytes
             if zero_points is not None:
                 added += zero_points.nbytes
@@ -176,18 +212,23 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
                 self.scheme,
                 added / 2**30,
             )
-        else:
-            # The loaded parameter already reports input_dim=1, output_dim=0.
-            replace_parameter(layer, "weight", packed)
         w_q_name = "weight"
-        replace_parameter(layer, "weight_scale", scales)
+        _set_mp_param(
+            layer,
+            w_q_name,
+            packed,
+            {"input_dim": 1, "output_dim": 0, "packed_dim": 1},
+        )
+        _set_mp_param(layer, "weight_scale", scales, {"input_dim": 1, "output_dim": 0})
         w_zp_name = None
         if zero_points is not None:
-            set_weight_attrs(
-                zero_points, {"input_dim": 1, "output_dim": 0, "packed_dim": 0}
-            )
             w_zp_name = "weight_zero_point"
-            replace_parameter(layer, w_zp_name, zero_points)
+            _set_mp_param(
+                layer,
+                w_zp_name,
+                zero_points,
+                {"input_dim": 1, "output_dim": 0, "packed_dim": 0},
+            )
 
         self.kernel = self.kernel_cls(
             self.mp_config,
