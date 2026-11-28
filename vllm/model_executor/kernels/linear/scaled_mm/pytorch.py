@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
@@ -159,6 +160,11 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
             return False, "cannot be used with per tensor activation and weight scales."
 
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        if self.config.activation_quant_key == kFp8DynamicTokenSym:
+            return kFp8DynamicTokenSym
+        return None
 
     def apply_scaled_mm(
         self,
