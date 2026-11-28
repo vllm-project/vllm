@@ -2089,6 +2089,58 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(
         return torch.empty((a.size(0), b_q.size(0)), dtype=a.dtype, device=a.device)
 
 
+def fused_moe_wvSplitK_int4_gemm(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    scales: torch.Tensor,
+    c: torch.Tensor,
+    expert_ids: torch.Tensor,
+    block_size_m: int,
+    cu_count: int,
+    group_size: int,
+    sorted_token_ids: torch.Tensor | None = None,
+    top_k: int = 1,
+) -> None:
+    torch.ops._rocm_C.fused_moe_wvSplitK_int4_gemm(
+        a,
+        w,
+        scales,
+        c,
+        expert_ids,
+        sorted_token_ids,
+        block_size_m,
+        top_k,
+        cu_count,
+        group_size,
+    )
+
+
+def fused_moe_wmma_int4_gemm(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    scales: torch.Tensor,
+    c: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    n_valid_tokens: int,
+    top_k: int,
+    block_size_m: int,
+    num_blocks: int,
+) -> None:
+    torch.ops._rocm_C.fused_moe_wmma_int4_gemm(
+        a,
+        w,
+        scales,
+        c,
+        sorted_token_ids,
+        expert_ids,
+        n_valid_tokens,
+        top_k,
+        block_size_m,
+        num_blocks,
+    )
+
+
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
