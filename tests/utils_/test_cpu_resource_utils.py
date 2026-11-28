@@ -19,6 +19,8 @@ _V2_LIMIT_PATH = "/sys/fs/cgroup/memory.max"
 _V2_USAGE_PATH = "/sys/fs/cgroup/memory.current"
 _V1_LIMIT_PATH = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 _V1_USAGE_PATH = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+_V2_STAT_PATH = "/sys/fs/cgroup/memory.stat"
+_V1_STAT_PATH = "/sys/fs/cgroup/memory/memory.stat"
 
 
 @pytest.fixture(autouse=True)
@@ -369,3 +371,87 @@ def test_omp_envs_keep_user_kmp_settings(monkeypatch):
         assert os.environ["OMP_NUM_THREADS"] == "4"
     assert os.environ["KMP_BLOCKTIME"] == "0"
     assert os.environ["KMP_TPAUSE"] == "1"
+
+
+# A 24 GiB container right after loading Qwen2.5-7B (bf16): 18.7 GiB of
+# anonymous memory, 4.6 GiB of page cache from reading the weights.
+_LOADED_V2_FILES = {
+    _V2_LIMIT_PATH: f"{24 * GiB_bytes}\n",
+    _V2_USAGE_PATH: f"{int(23.4 * GiB_bytes)}\n",
+    _V2_STAT_PATH: (
+        f"anon {int(18.7 * GiB_bytes)}\n"
+        f"file {int(4.6 * GiB_bytes)}\n"
+        f"active_file {int(3.4 * GiB_bytes)}\n"
+        f"inactive_file {int(1.2 * GiB_bytes)}\n"
+        f"slab_reclaimable {int(0.1 * GiB_bytes)}\n"
+        "pgfault 123\n"
+    ),
+}
+
+
+def test_cgroup_v2_reclaimable_memory(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(monkeypatch, _LOADED_V2_FILES)
+    assert cru.get_cgroup_reclaimable_memory() == (
+        int(3.4 * GiB_bytes) + int(1.2 * GiB_bytes) + int(0.1 * GiB_bytes)
+    )
+
+
+def test_cgroup_v1_reclaimable_memory(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            _V2_LIMIT_PATH: None,
+            _V1_STAT_PATH: (
+                f"cache {3 * GiB_bytes}\n"
+                f"total_active_file {2 * GiB_bytes}\n"
+                f"total_inactive_file {1 * GiB_bytes}\n"
+            ),
+        },
+    )
+    assert cru.get_cgroup_reclaimable_memory() == 3 * GiB_bytes
+
+
+def test_cgroup_reclaimable_memory_without_stat_file(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(monkeypatch, {_V2_LIMIT_PATH: f"{GiB_bytes}\n", _V2_STAT_PATH: None})
+    assert cru.get_cgroup_reclaimable_memory() == 0
+
+
+def test_available_memory_counts_cgroup_page_cache(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(monkeypatch, _LOADED_V2_FILES)
+    monkeypatch.setattr(
+        cru.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=32 * GiB_bytes, available=28 * GiB_bytes),
+    )
+    # limit - (usage - reclaimable) = 24 - (23.4 - 4.7) = 5.3 GiB, not 0.6 GiB.
+    assert cru.get_available_memory() == pytest.approx(5.3 * GiB_bytes, rel=1e-3)
+
+
+def test_memory_node_info_counts_cgroup_page_cache(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    meminfo_path = "/sys/devices/system/node/node0/meminfo"
+    kb = lambda b: int(b) // 1024  # noqa: E731
+    files = dict(_LOADED_V2_FILES)
+    files[meminfo_path] = (
+        f"Node 0 MemTotal:       {kb(31 * GiB_bytes)} kB\n"
+        f"Node 0 MemFree:        {kb(7 * GiB_bytes)} kB\n"
+        f"Node 0 Active(file):   {kb(3.4 * GiB_bytes)} kB\n"
+        f"Node 0 Inactive(file): {kb(1.2 * GiB_bytes)} kB\n"
+        f"Node 0 SReclaimable:   {kb(0.1 * GiB_bytes)} kB\n"
+    )
+    _stub_files(monkeypatch, files)
+    real_exists = cru.os.path.exists
+    monkeypatch.setattr(
+        cru.os.path, "exists", lambda p: p == meminfo_path or real_exists(p)
+    )
+
+    info = cru.get_memory_node_info(0)
+
+    assert info.total_memory == 24 * GiB_bytes
+    # A 4 GiB KV cache fits once the page cache is reclaimed.
+    assert info.available_memory == pytest.approx(5.3 * GiB_bytes, rel=1e-3)
+    assert info.available_memory > 4 * GiB_bytes
