@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import patch
+import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from openai_harmony import Author, Message, Role, TextContent
@@ -107,7 +108,10 @@ class FakeHarmonyParser(HarmonyParser):
 
 
 def make_harmony_context(
-    messages=None, available_tools=None, function_tool_names=None
+    messages=None,
+    available_tools=None,
+    function_tool_names=None,
+    enable_tool_json_retry=False,
 ) -> tuple[HarmonyContext, FakeHarmonyParser]:
     fake_parser = FakeHarmonyParser()
     context = HarmonyContext(
@@ -115,6 +119,7 @@ def make_harmony_context(
         available_tools=[] if available_tools is None else available_tools,
         function_tool_names=function_tool_names,
         response_parser=fake_parser,
+        enable_tool_json_retry=enable_tool_json_retry,
     )
     return context, fake_parser
 
@@ -938,3 +943,49 @@ def test_simple_context_output_messages_no_mutation():
     assert len(msgs3) == 1
     assert msgs3[0].message == "hello world"
     assert msgs3[0].tokens == [1, 2]
+
+
+def _malformed_builtin_tool_call(recipient: str) -> Message:
+    return (
+        Message.from_role_and_content(Role.ASSISTANT, "{not valid json")
+        .with_recipient(recipient)
+        .with_channel("commentary")
+    )
+
+
+_BUILTIN_TOOL_CALLS = [
+    ("call_search_tool", "browser.search"),
+    ("call_container_tool", "container.exec"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "recipient"), _BUILTIN_TOOL_CALLS)
+async def test_harmony_tool_json_retry_returns_error_to_model(method, recipient):
+    context, _ = make_harmony_context(enable_tool_json_retry=True)
+    tool_session = AsyncMock()
+
+    messages = await getattr(context, method)(
+        tool_session, _malformed_builtin_tool_call(recipient)
+    )
+
+    tool_session.call_tool.assert_not_called()
+    assert len(messages) == 1
+    assert messages[0].author.role == Role.TOOL
+    assert messages[0].author.name == recipient
+    assert (
+        messages[0].content[0].text.startswith("Error parsing tool arguments as JSON")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "recipient"), _BUILTIN_TOOL_CALLS)
+async def test_harmony_tool_json_retry_disabled_raises(method, recipient):
+    context, _ = make_harmony_context()
+    tool_session = AsyncMock()
+
+    with pytest.raises(json.JSONDecodeError):
+        await getattr(context, method)(
+            tool_session, _malformed_builtin_tool_call(recipient)
+        )
+    tool_session.call_tool.assert_not_called()

@@ -1707,6 +1707,7 @@ def _make_serving_instance(
     reasoning_parser: str = "",
     tool_parser: str | None = None,
     enable_per_request_metrics: bool = False,
+    enable_tool_json_retry: bool = False,
 ) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
@@ -1729,7 +1730,36 @@ def _make_serving_instance(
         enable_auto_tools=tool_parser is not None,
         tool_parser=tool_parser,
         enable_per_request_metrics=enable_per_request_metrics,
+        enable_tool_json_retry=enable_tool_json_retry,
     )
+
+
+@pytest.mark.parametrize(
+    ("flag", "env_value", "expected"),
+    [
+        (False, None, False),
+        (True, None, True),
+        # Deprecated env var still enables retry when the flag is unset.
+        (False, "1", True),
+        (False, "0", False),
+        # The flag wins over a disabling env var.
+        (True, "0", True),
+    ],
+)
+def test_enable_tool_json_retry_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    flag: bool,
+    env_value: str | None,
+    expected: bool,
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", env_value)
+
+    serving = _make_serving_instance(enable_tool_json_retry=flag)
+
+    assert serving.enable_tool_json_retry is expected
 
 
 async def _empty_context_generator():
