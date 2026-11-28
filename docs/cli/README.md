@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,launch,bench,collect-env,download-kernels,run-batch,preload}
+vllm {chat,complete,serve,launch,bench,collect-env,download-kernels,run-batch,preload,snapshot}
 ```
 
 ## serve
@@ -131,7 +131,7 @@ To use benchmark commands, please install with extra dependencies using `pip ins
 Available Commands:
 
 ```bash
-vllm bench {forward, latency, serve, throughput}
+vllm bench {forward, latency, mm-processor, serve, startup, sweep, throughput}
 ```
 
 ### forward
