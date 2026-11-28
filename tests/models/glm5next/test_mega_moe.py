@@ -10,9 +10,8 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-    MEGA_MOE_FP8_BLOCK_SM90,
     MegaMoEActivation,
-    check_deep_gemm_mega_moe_supported,
+    mega_moe_weight_format,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     requant_block_fp8_to_ue8m0,
@@ -28,7 +27,6 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import round_up
 
-BLOCK = (128, 128)
 # Two 128-row blocks each of gate and up, so the SM90 block-row interleave shows.
 HIDDEN, INTER = 256, 256
 FP8 = torch.float8_e4m3fn
@@ -80,7 +78,7 @@ def test_requant_is_exact_for_power_of_two_block_scales():
     assert torch.equal(_dequant_ue8m0(requant, sf), _dequant_block(weight, scale))
 
 
-def _experts(weight_block_size=BLOCK) -> Glm5NextMegaMoEExperts:
+def _experts(checkpoint_format="fp8_block") -> Glm5NextMegaMoEExperts:
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -93,7 +91,7 @@ def _experts(weight_block_size=BLOCK) -> Glm5NextMegaMoEExperts:
         top_k=2,
         hidden_size=HIDDEN,
         intermediate_size=INTER,
-        weight_block_size=weight_block_size,
+        weight_format=mega_moe_weight_format(checkpoint_format),
         activation=MegaMoEActivation("swiglu", clamp=10.0),
         num_shared_experts=1,
         prefix="model.layers.3.mlp.experts",
@@ -231,15 +229,15 @@ def test_weight_update_split_across_calls(first):
     other half and requantizes each shard once both are in."""
     experts = _experts()
     _load_shuffled(experts, _checkpoint(seed=0), seed=0)
-    experts.requantize_block_fp8()
+    experts.process_weights_after_loading()
 
     ckpt = _checkpoint(seed=1)
     second = "weight_scale_inv" if first == "weight" else "weight"
     _load_shuffled(experts, ckpt, seed=1, suffix=first)
-    with pytest.raises(ValueError, match="without their weight or block scale"):
-        experts.requantize_block_fp8()
+    with pytest.raises(ValueError, match="without their weight or scale"):
+        experts.process_weights_after_loading()
     _load_shuffled(experts, ckpt, seed=2, suffix=second)
-    experts.requantize_block_fp8()
+    experts.process_weights_after_loading()
 
     _assert_layout(_routed(experts), _expected_routed(ckpt))
 
@@ -281,14 +279,11 @@ def _shared(experts):
 
 
 class _Model(torch.nn.Module):
-    """Finishes a load the way the GLM model, wrapper and MTP drafter do."""
+    """A model around the experts; their own post-load hook finishes a load."""
 
     def __init__(self):
         super().__init__()
         self.experts = _experts()
-
-    def process_weights_after_loading(self):
-        self.experts.finalize_block_fp8_weights()
 
 
 @pytest.mark.parametrize(
@@ -302,7 +297,7 @@ class _Model(torch.nn.Module):
 )
 @pytest.mark.parametrize("mode", ["layerwise", "direct"])
 def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode, sm90):
-    """A reload writes the block-FP8 shards and finishes with the model's
+    """A reload writes the block-FP8 shards and finishes with the experts'
     process_weights_after_loading; the kernel tensors keep their storage."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     monkeypatch.setattr(
@@ -320,7 +315,7 @@ def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode, sm90):
     _load_shared(experts, shared_ckpt)
     process_weights_after_loading(model, model_config, device)  # type: ignore[arg-type]
     # A second call leaves the kernel tensors as they are.
-    experts.finalize_block_fp8_weights()
+    experts.process_weights_after_loading()
     _assert_layout(_routed(experts), _expected_routed(ckpt, sm90), sm90)
     _assert_layout(_shared(experts), _expected_shared(shared_ckpt, sm90), sm90)
     storage = {n: p.data_ptr() for n, p in experts.named_parameters()}
@@ -355,23 +350,10 @@ def test_sm90_eplb_views_cover_padded_block_scales(monkeypatch):
         assert (param[0].float() == 0).all(), name
 
 
-def test_sm90_format_rejected_on_sm100(monkeypatch):
-    monkeypatch.setattr(
-        current_platform, "is_device_capability", lambda *args, **kwargs: False
-    )
-    monkeypatch.setattr(
-        current_platform, "is_device_capability_family", lambda *args, **kwargs: True
-    )
-    with pytest.raises(NotImplementedError, match="requires SM90"):
-        check_deep_gemm_mega_moe_supported(
-            torch.device("cpu"), HIDDEN, INTER, MEGA_MOE_FP8_BLOCK_SM90
-        )
-
-
 def test_bf16_checkpoint_loads_as_is():
-    """Without a weight block size the experts take BF16 shards straight into
-    the BF16 kernel layout, the shared expert included, and stage no scales."""
-    experts = _experts(weight_block_size=None)
+    """A BF16 checkpoint loads straight into the BF16 kernel layout, the
+    shared expert included, and stages no scales."""
+    experts = _experts("bf16")
     generator = torch.Generator().manual_seed(0)
 
     def rand(*shape):

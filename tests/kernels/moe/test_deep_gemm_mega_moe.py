@@ -16,10 +16,10 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP4,
     MEGA_MOE_MXFP4_SM90,
     MEGA_MOE_NVFP4,
-    MEGA_MOE_WEIGHT_FORMATS,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
     MegaMoEWeightSpec,
+    mega_moe_weight_format,
 )
 from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
@@ -62,6 +62,8 @@ requires_sm90_or_sm100 = pytest.mark.skipif(
     not (is_sm90 or is_sm100),
     reason="MegaMoE input staging only feeds the SM90 and SM100 kernels",
 )
+# The MXFP4 row of this GPU (the SM100 one off SM90).
+MXFP4 = mega_moe_weight_format("mxfp4")
 # Hidden-state quantizations of the SM100 and SM90 fp8_fp4_mega_moe kernels.
 FP8_HIDDEN_QUANTS = pytest.mark.parametrize(
     "hidden_quant",
@@ -86,7 +88,7 @@ def _make_experts(**kwargs) -> DeepGemmMegaMoEExperts:
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     kwargs.setdefault("activation", MegaMoEActivation())
-    kwargs.setdefault("weight_format", MEGA_MOE_MXFP4)
+    kwargs.setdefault("weight_format", MXFP4)
     return DeepGemmMegaMoEExperts(vllm_config, **kwargs)
 
 
@@ -225,9 +227,7 @@ def _reference_mega_moe_layout(w13, s13, w2, s2):
     )
 
 
-def _make_mega_moe_experts(
-    num_local_experts, num_logical_experts, weight_format=MEGA_MOE_MXFP4
-):
+def _make_mega_moe_experts(num_local_experts, num_logical_experts, weight_format=MXFP4):
     return _make_experts(
         num_experts=num_local_experts,
         num_local_experts=num_local_experts,
@@ -343,7 +343,7 @@ def _assert_mega_moe_layout(experts, expected):
 
 
 @requires_sm90_mega_moe_on_sm90
-@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
+@pytest.mark.parametrize("weight_format", [MXFP4, MEGA_MOE_NVFP4])
 def test_deep_gemm_mega_moe_loads_shards_into_kernel_layout(weight_format):
     """Shards in any order, including EPLB replicas, land in DeepGEMM's layout."""
     experts = _make_mega_moe_experts(4, 3, weight_format)
@@ -361,7 +361,7 @@ def test_deep_gemm_mega_moe_loads_shards_into_kernel_layout(weight_format):
 
 
 @requires_sm90_mega_moe_on_sm90
-@pytest.mark.parametrize("weight_format", [MEGA_MOE_MXFP4, MEGA_MOE_NVFP4])
+@pytest.mark.parametrize("weight_format", [MXFP4, MEGA_MOE_NVFP4])
 def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place(weight_format):
     """A second load must update the live kernel tensors without reallocating."""
     experts = _make_mega_moe_experts(2, 2, weight_format)
@@ -1416,7 +1416,10 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     return (1 - 2 * (x * y).sum() / (x * x + y * y).sum()).item()
 
 
-KERNEL_FORMATS = {"mxfp4": MEGA_MOE_MXFP4_SM90} if is_sm90 else MEGA_MOE_WEIGHT_FORMATS
+KERNEL_FORMATS = {
+    name: mega_moe_weight_format(name)
+    for name in (("mxfp4",) if is_sm90 else ("mxfp4", "mxfp8", "nvfp4", "bf16"))
+}
 
 
 @pytest.mark.skipif(
@@ -1611,7 +1614,7 @@ def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
     with torch.device(device):
         experts = Glm5NextMegaMoEExperts(
             vllm_config,  # type: ignore[arg-type]
-            weight_block_size=(128, 128),
+            weight_format=fmt,
             num_shared_experts=int(fuse_shared),
             num_experts=NUM_EXPERTS,
             num_local_experts=NUM_EXPERTS,
@@ -1666,7 +1669,7 @@ def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
             prefix = f"mlp.shared_experts.{projs[shard_id]}"
             experts.load_shared_expert_weight(f"{prefix}.weight", weight)
             experts.load_shared_expert_weight(f"{prefix}.weight_scale_inv", scale)
-    experts.finalize_block_fp8_weights()
+    experts.process_weights_after_loading()
 
     hidden_states = torch.randn(NUM_TOKENS, HIDDEN, device=device).bfloat16()
     scores = torch.randn(NUM_TOKENS, NUM_EXPERTS, device=device)

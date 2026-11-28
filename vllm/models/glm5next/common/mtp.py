@@ -460,7 +460,3 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
-
-    def process_weights_after_loading(self) -> None:
-        for mlp in self.moe_mlp_layers:
-            mlp.finalize_mega_moe_weights()

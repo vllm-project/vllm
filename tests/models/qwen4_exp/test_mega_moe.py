@@ -10,10 +10,12 @@ import torch
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_BF16,
+    MEGA_MOE_FP8_BLOCK,
     MEGA_MOE_MXFP4,
     MEGA_MOE_MXFP8,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
+    mega_moe_weight_format,
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
@@ -25,10 +27,13 @@ from vllm.model_executor.model_loader.reload import (
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+from vllm.model_executor.utils import weights_already_processed
 from vllm.models.qwen4_exp.nvidia.mega_moe import (
     Qwen4ExpMegaMoEExperts,
     mega_moe_expert_formats,
 )
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 HIDDEN, INTER = 512, 256
@@ -104,6 +109,9 @@ def _experts(cls, fmt, num_local, start, num_logical, checkpoint_format=None):
 def _expected(checkpoint_format, fmt, ckpt, num_local, start, num_logical):
     """Experts written shard by shard through the generic MegaMoE loader,
     requantized with DeepGEMM's own casts."""
+    if fmt is MEGA_MOE_FP8_BLOCK:
+        # SM100 runs block FP8 as MXFP8: check it against DeepGEMM's cast.
+        fmt = MEGA_MOE_MXFP8
     expected = _experts(DeepGemmMegaMoEExperts, fmt, num_local, start, num_logical)
     shard_ids = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
     for (e, proj), (weight, scale) in ckpt.items():
@@ -125,12 +133,14 @@ def _expected(checkpoint_format, fmt, ckpt, num_local, start, num_logical):
             weight, sf = CASTS[fmt.name](x, use_ue8m0=True, gran_k=32)
             scale = (sf.view(torch.int32) >> 23).to(torch.uint8)
         prefix = "w2" if proj == "down_proj" else "w13"
-        for suffix, value in (("weight", weight), ("weight_scale", scale)):
+        scale_suffix = "weight_scale_inv" if fmt.stages_block_scales else "weight_scale"
+        for suffix, value in (("weight", weight), (scale_suffix, scale)):
             if value is not None:
                 name = f"{prefix}_{suffix}"
                 expected.weight_loader(
                     getattr(expected, name), value, name, shard_ids[proj], e
                 )
+    expected.process_weights_after_loading()
     return expected
 
 
@@ -155,17 +165,20 @@ def _with_online(config, **online) -> SimpleNamespace:
     return SimpleNamespace(quant_config=config)
 
 
-def test_expert_formats_follow_checkpoint_and_quantization_config():
+def test_expert_formats_follow_checkpoint_and_quantization_config(monkeypatch):
+    monkeypatch.setattr(
+        current_platform, "is_device_capability", lambda *args, **kwargs: False
+    )
     prefix, other = "model.layers.3.mlp.experts", "model.layers.47.mlp.experts"
     fp8 = Fp8Config(weight_block_size=[128, 128])
-    # Block FP8 has no MegaMoE kernel: MXFP8 unless a format is forced.
+    # Block FP8 runs as stored (as MXFP8 on SM100) unless a format is forced.
     assert mega_moe_expert_formats(SimpleNamespace(quant_config=fp8), prefix) == (
         "fp8_block",
-        MEGA_MOE_MXFP8,
+        MEGA_MOE_FP8_BLOCK,
     )
     config = _with_online(fp8, moe="mxfp4", ignore=["*.layers.47.*"])
     assert mega_moe_expert_formats(config, prefix)[1] is MEGA_MOE_MXFP4
-    assert mega_moe_expert_formats(config, other)[1] is MEGA_MOE_MXFP8
+    assert mega_moe_expert_formats(config, other)[1] is MEGA_MOE_FP8_BLOCK
     # Only the forced layer shows in the online quantization summary.
     assert list(config.quant_config.online_quantization_config.quantized_layers) == [
         prefix
@@ -174,7 +187,7 @@ def test_expert_formats_follow_checkpoint_and_quantization_config():
         Fp8Config(weight_block_size=[128, 128]), targets={prefix: "mxfp4"}
     )
     assert mega_moe_expert_formats(config, prefix)[1] is MEGA_MOE_MXFP4
-    assert mega_moe_expert_formats(config, other)[1] is MEGA_MOE_MXFP8
+    assert mega_moe_expert_formats(config, other)[1] is MEGA_MOE_FP8_BLOCK
     config = _with_online(Fp8Config(weight_block_size=[128, 128]), moe="mxfp8")
     assert mega_moe_expert_formats(config, prefix) == ("fp8_block", MEGA_MOE_MXFP8)
 
@@ -200,6 +213,9 @@ def test_expert_formats_follow_checkpoint_and_quantization_config():
 @pytest.mark.parametrize(
     "checkpoint_format,fmt",
     [
+        # Block FP8 as MXFP8 (SM100), and this GPU's block-FP8 row.
+        ("fp8_block", MEGA_MOE_FP8_BLOCK),
+        ("fp8_block", mega_moe_weight_format("fp8_block")),
         ("fp8_block", MEGA_MOE_MXFP8),
         ("mxfp8", MEGA_MOE_MXFP8),
         ("mxfp4", MEGA_MOE_MXFP4),
@@ -233,8 +249,11 @@ def test_experts_load_checkpoint_into_kernel_layout(
     # EP rank 1 of 2 owns logical experts 2 and 3.
     experts = _experts(Qwen4ExpMegaMoEExperts, fmt, 2, 2, 4, checkpoint_format)
     loaded = experts.load_weights(names)
-    assert loaded == {n for n, _ in experts.named_parameters()}
-    experts.quant_method.process_weights_after_loading(experts)
+    # Every parameter but the block-FP8 kernel scales, derived after loading.
+    assert loaded == {
+        n for n, p in experts.named_parameters() if getattr(p, "weight_loader_numel", 1)
+    }
+    experts.process_weights_after_loading()
     _assert_same_experts(experts, _expected(checkpoint_format, fmt, ckpt, 2, 2, 4))
 
 
@@ -248,10 +267,31 @@ def test_weight_and_scale_may_arrive_in_separate_calls(any_device_mega_moe):
     first = [n for n in names if n[0].startswith("0.") or n[0].endswith(".weight")]
     experts.load_weights(first)
     with pytest.raises(ValueError, match="without both weight and scale"):
-        experts.quant_method.process_weights_after_loading(experts)
+        experts.process_weights_after_loading()
     experts.load_weights([n for n in names if n not in first])
-    experts.quant_method.process_weights_after_loading(experts)
+    experts.process_weights_after_loading()
     _assert_same_experts(experts, _expected("fp8_block", MEGA_MOE_MXFP8, ckpt, 2, 0, 2))
+
+
+def test_kernel_format_reload_keeps_kernel_tensors(any_device_mega_moe):
+    """`is_checkpoint_format=False` reloads copy kernel tensors in and then run
+    the post-load hooks, which must not rebuild them from staged scales."""
+    generator = torch.Generator().manual_seed(7)
+    fmt = mega_moe_weight_format("fp8_block")
+    old = _checkpoint("fp8_block", 2, generator)
+    new = _expected("fp8_block", fmt, _checkpoint("fp8_block", 2, generator), 2, 0, 2)
+    experts = _experts(Qwen4ExpMegaMoEExperts, fmt, 2, 0, 2, "fp8_block")
+    experts.load_weights(_names("fp8_block", old, generator))
+    experts.process_weights_after_loading()
+
+    kernel_tensors = ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
+    for name in kernel_tensors:
+        getattr(experts, name).copy_(getattr(new, name))
+    with weights_already_processed():
+        finalize_model_weights(experts)
+
+    for name in kernel_tensors:
+        assert torch.equal(getattr(experts, name), getattr(new, name)), name
 
 
 def test_layerwise_reload_replaces_routed_experts(any_device_mega_moe):
@@ -265,7 +305,7 @@ def test_layerwise_reload_replaces_routed_experts(any_device_mega_moe):
     with torch.device("cuda"):
         record_metadata_for_reloading(experts)
     experts.load_weights(_names(checkpoint_format, old, generator))
-    experts.quant_method.process_weights_after_loading(experts)
+    experts.process_weights_after_loading()
     pointers = {n: p.data_ptr() for n, p in experts.named_parameters()}
 
     initialize_layerwise_reload(experts)

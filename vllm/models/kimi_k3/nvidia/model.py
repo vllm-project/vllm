@@ -24,9 +24,9 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-    MEGA_MOE_MXFP4,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
+    mega_moe_weight_format,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
@@ -546,7 +546,7 @@ class KimiMoE(nn.Module):
                     alpha=activation_situ_beta or 1.0,
                     beta=activation_situ_linear_beta or 0.0,
                 ),
-                weight_format=MEGA_MOE_MXFP4,
+                weight_format=mega_moe_weight_format("mxfp4"),
                 prefix=f"{prefix}.experts",
             )
         else:

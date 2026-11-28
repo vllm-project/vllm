@@ -32,9 +32,9 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-    MEGA_MOE_MXFP4,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
+    mega_moe_weight_format,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -397,7 +397,7 @@ class DeepseekV4MoE(nn.Module):
             top_k=self.n_activated_experts,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            weight_format=MEGA_MOE_MXFP4,
+            weight_format=mega_moe_weight_format("mxfp4"),
             activation=MegaMoEActivation(
                 "swiglu",
                 clamp=None if self.swiglu_limit is None else float(self.swiglu_limit),
