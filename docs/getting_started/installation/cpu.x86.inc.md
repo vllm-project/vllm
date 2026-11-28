@@ -43,6 +43,56 @@ uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_V
     export LD_PRELOAD="$IOMP_PATH:$LD_PRELOAD"
     ```
 
+#### Add vLLM to a uv project
+
+This example uses the vLLM 0.33.0 CPU wheel on Linux x86-64 with glibc 2.39 or later and Python 3.12.
+Save the following as `pyproject.toml` in a new project directory.
+
+```toml
+[project]
+name = "vllm-cpu-example"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["torch", "torchaudio", "torchvision", "torchcodec"]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+constraint-dependencies = [
+    "triton @ https://github.com/triton-lang/triton-cpu/releases/download/v3.8.0/triton-3.8.0+cpu-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+]
+
+[tool.uv.sources]
+vllm = { index = "vllm-cpu" }
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+torchcodec = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "vllm-cpu"
+url = "https://wheels.vllm.ai/0.33.0/cpu/"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+```
+
+The explicit indexes apply only to the packages assigned to them in `[tool.uv.sources]`, so ordinary dependencies still resolve from PyPI.
+The vLLM wheel depends on a CPU Triton wheel by URL. Listing that URL in `constraint-dependencies` allows uv to resolve it when creating the lockfile.
+When updating vLLM, match the release index and Triton constraint to the selected CPU wheel.
+
+From the project directory, add vLLM and verify the installed versions.
+
+```bash
+uv add 'vllm==0.33.0+cpu'
+uv run --locked python -c 'from importlib.metadata import version; import torch; print(version("vllm"), torch.__version__)'
+```
+
+The output should show `0.33.0+cpu` for vLLM and `2.14.0+cpu` for PyTorch.
+To recreate the environment from `pyproject.toml` and `uv.lock`, run `uv sync --locked`.
+
 #### Install the latest code
 
 To install the wheel built from the latest main branch:
