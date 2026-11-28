@@ -1167,5 +1167,71 @@ def test_decode_bench_connector_startup_fill_keeps_circular_buffer_zero_fill():
     assert torch.equal(ring_cache, expected_ring)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
+def test_circular_zero_fusion_preserves_unselected_rows_and_fallback(monkeypatch):
+    from vllm.v1.worker import utils as worker_utils
+
+    launches = []
+    kernel = worker_utils._zero_kv_blocks_kernel
+
+    class RecordingKernel:
+        def __getitem__(self, grid):
+            launches.append(grid)
+            return kernel[grid]
+
+    monkeypatch.setattr(worker_utils, "_zero_kv_blocks_kernel", RecordingKernel())
+    config = create_vllm_config(
+        block_size=16, max_num_batched_tokens=1000, kv_connector="DecodeBenchConnector"
+    )
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    group = make_kv_cache_group(
+        ["dense0", "dense1", "strided", "alias"],
+        circular_buffer_layer(
+            block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
+    )
+    cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[group, make_kv_cache_group(["untouched"], spec)],
+    )
+    connector = DecodeBenchConnector(config, KVConnectorRole.WORKER, cache_config)
+    backing = torch.full((8, 12), 7, dtype=torch.uint8, device="cuda")
+    packed = torch.full((8, 32), 7, dtype=torch.uint8, device="cuda")
+    caches = {
+        "dense0": packed[:, :8],
+        "dense1": packed[:, 8:20],
+        "strided": backing[:, ::2],
+        "alias": backing[:, 2::2],
+        "untouched": packed[:, 24:],
+    }
+    connector.register_kv_caches(caches)
+    context = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    for ids, expected_ids in [([1, 4, -1, 8], [1, 4, 6]), ([4], [4, 6])]:
+        for cache in caches.values():
+            cache.fill_(7)
+        launches.clear()
+        connector.bind_connector_metadata(
+            DecodeBenchConnectorMetadata(
+                reqs_to_fill={"a": ((ids, []), 16), "b": (([4, 6], []), 16)}
+            )
+        )
+        connector.start_load_kv(context)
+        connector.clear_connector_metadata()
+        assert launches == [(len(expected_ids), 2, 1)]
+        for key in ("dense0", "dense1"):
+            expected = torch.full_like(caches[key], 7)
+            expected[expected_ids] = 0
+            assert torch.equal(caches[key], expected)
+        expected = torch.full_like(backing, 7)
+        expected[expected_ids, ::2] = 0
+        assert torch.equal(backing, expected)
+        assert torch.all(packed[:, 20:] == 7)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
