@@ -25,12 +25,12 @@ class XRequestIdMiddleware:
 
         async def send_with_request_id(message: Message) -> None:
             """Custom send function to mutate the response headers
-            and append X-Request-Id to it.
+            and set X-Request-Id on it.
             """
             if message["type"] == "http.response.start":
                 response_headers = MutableHeaders(raw=message["headers"])
                 request_id = request_headers.get("X-Request-Id", uuid.uuid4().hex)
-                response_headers.append("X-Request-Id", request_id)
+                response_headers["X-Request-Id"] = request_id
             await send(message)
 
         return self.app(scope, receive, send_with_request_id)
