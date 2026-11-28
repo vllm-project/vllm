@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.registry import (
 )
 
 from .interface import DeviceCapability, Platform, PlatformEnum
+from .xpu_utils import maybe_apply_battlemage_xccl_workaround
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
@@ -507,6 +508,12 @@ class XPUPlatform(Platform):
         # spawn is the only supported multiprocessing method on XPU
         if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        maybe_apply_battlemage_xccl_workaround(
+            get_device_count=torch.xpu.device_count,
+            get_device_name=torch.xpu.get_device_name,
+            environ=os.environ,
+        )
 
         # XPU requires graceful shutdown to allow oneCCL/Level Zero resources
         # to be properly released. Without this, subsequent server startups on
