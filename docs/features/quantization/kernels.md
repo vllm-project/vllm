@@ -79,3 +79,11 @@ kernels:
   automatic selection and a warning is logged.
 - If the backend has a kernel but it cannot run on the device or implement the
   layer, startup fails.
+
+## NVFP4 emulation rounding
+
+NVFP4 emulation (`--linear-backend emulation`) uses FP8 E4M3 activation block
+scales rounded to nearest, with ties to even. On Ada GPUs (SM89) with Triton
+before 3.9, vLLM avoids FP16 double rounding when computing these scales.
+Corrected scales can change generated tokens; re-evaluate model quality for
+your checkpoint and workload.

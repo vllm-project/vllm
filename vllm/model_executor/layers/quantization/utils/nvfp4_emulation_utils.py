@@ -8,6 +8,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.fp8 import to_fp8
 from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = [
@@ -421,7 +422,7 @@ def _nvfp4_quant_dequant_kernel(
     vec_max = tl.max(tl.abs(x), axis=1)
     scale = global_scale * (vec_max * FP4_MAX_RECIPROCAL)
     scale = tl.clamp(scale, -448.0, 448.0)
-    scale = scale.to(tl.float8e4nv).to(tl.float32)
+    scale = to_fp8(scale, tl.float8e4nv).to(tl.float32)
 
     # Safe reciprocal, broadcast to [TILE_BLOCKS, 1]
     output_scale = tl.where(scale == 0.0, 0.0, global_scale / scale)[:, None]

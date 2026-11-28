@@ -410,6 +410,43 @@ def test_triton_dequantize_nvfp4(monkeypatch, loaded_model_files) -> None:
 
 
 @pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="Native E4M3 conversion requires CUDA SM89 or newer.",
+)
+@pytest.mark.parametrize(
+    "scale_value,past_midpoint,expected_value",
+    [(3.0, False, 6.0), (3.125, False, 5.75), (3.125, True, 6.25)],
+    ids=["exact-scale", "exact-midpoint", "past-midpoint"],
+)
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
+def test_triton_nvfp4_quant_dequant_rounds_block_scale_to_nearest_even(
+    compiled: bool, scale_value: float, past_midpoint: bool, expected_value: float
+) -> None:
+    """Block-scale rounding preserves signs and a zero group in both modes."""
+    global_scale = torch.tensor(scale_value, dtype=torch.float32)
+    if past_midpoint:
+        global_scale = torch.nextafter(
+            global_scale, torch.full_like(global_scale, torch.inf)
+        )
+
+    x = torch.zeros((1, 32), dtype=torch.bfloat16, device="cuda")
+    x[0, :2] = torch.tensor([6.0, -6.0], dtype=x.dtype, device=x.device)
+    # max(abs(x)) / 6 is exactly 1, so the first block scale is global_scale.
+    quant_dequant = (
+        torch.compile(ref_nvfp4_quant_dequant, fullgraph=True)
+        if compiled
+        else ref_nvfp4_quant_dequant
+    )
+    actual = quant_dequant(x, global_scale.to(x.device), block_size=16)
+
+    expected = torch.zeros((1, 32), dtype=torch.bfloat16)
+    expected[0, :2] = torch.tensor(
+        [expected_value, -expected_value], dtype=expected.dtype
+    )
+    torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Triton NVFP4 kernel requires CUDA.",
 )

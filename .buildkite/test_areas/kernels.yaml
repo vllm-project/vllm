@@ -631,8 +631,10 @@ steps:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - vllm/model_executor/kernels/linear/
+  - vllm/triton_utils/fp8.py
   - tests/kernels/quantization
   - tests/models/quantization/test_mxfp8.py
+  - tests/models/quantization/test_nvfp4.py
   commands:
     # test_cutlass_scaled_mm.py and test_fp8_quant.py each run in their own
     # pytest: test_fp8_quant.py ran 2.4x slower after test_cutlass_scaled_mm.py
@@ -641,6 +643,10 @@ steps:
     - pytest -v -s kernels/quantization/test_cutlass_scaled_mm.py
     - pytest -v -s kernels/quantization/test_fp8_quant.py
     - pytest -v -s models/quantization/test_mxfp8.py::test_quark_mxfp8_weight_only_checkpoint
+    - >-
+      pytest -v -s
+      models/quantization/test_nvfp4.py::test_nvfp4
+      -k "emulation and True"
   mirror:
     amd:
       automatic_shard: true
