@@ -7,6 +7,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
@@ -95,6 +96,8 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.prefix = prefix
+        self.quant = envs.VLLM_ROCM_AITER_MEGA_MOE_QUANT
+        self.p2p_quant = envs.VLLM_ROCM_AITER_MEGA_MOE_P2P_QUANT
 
         def make_param(rows: int, cols: int) -> nn.Parameter:
             param = nn.Parameter(
@@ -183,6 +186,8 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
 
         return build_mega_moe_bundle_plan(
             max_tok_per_rank,
+            a_dtype="fp4" if self.quant == "a4w4" else "fp8",
+            p2p_quant=self.p2p_quant,
             experts_per_rank=self.num_local_experts,
             model_dim=self.hidden_size,
             inter_dim=self.intermediate_size,
@@ -199,6 +204,8 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
             self.intermediate_size,
             max_tok_per_rank,
             self.swiglu_limit,
+            self.quant,
+            self.p2p_quant,
         )
         runtime = self._runtime_cache.get(key)
         if runtime is None:
@@ -211,12 +218,13 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
                 inter_dim=self.intermediate_size,
                 experts=self.num_experts,
                 topk=self.top_k,
-                quant="a8w4",
+                quant=self.quant,
                 w1=self.w13_weight,
                 w1_scale=self.w13_weight_scale,
                 w2=self.w2_weight,
                 w2_scale=self.w2_weight_scale,
                 max_tok_per_rank=max_tok_per_rank,
+                stage2_p2p_quant=self.p2p_quant,
                 swiglu_limit=self.swiglu_limit,
             )
             self._runtime_cache[key] = runtime

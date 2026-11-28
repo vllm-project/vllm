@@ -327,6 +327,8 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
+    VLLM_ROCM_AITER_MEGA_MOE_QUANT: str = "a8w4"
+    VLLM_ROCM_AITER_MEGA_MOE_P2P_QUANT: str = "auto"
     VLLM_SKINNY_GEMM_MAX_WEIGHT_BYTES: int = 0
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
@@ -2261,6 +2263,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # SM100 kernel as the routed FP4 experts.
     "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
+    ),
+    # Activation quant of the DeepSeek-V4 AITER MegaMoE experts
+    # (--moe-backend aiter_mega_moe): "a8w4" dispatches MXFP8 activations,
+    # "a4w4" MXFP4. The weights are MXFP4 either way.
+    "VLLM_ROCM_AITER_MEGA_MOE_QUANT": env_with_choices(
+        "VLLM_ROCM_AITER_MEGA_MOE_QUANT", "a8w4", ["a8w4", "a4w4"]
+    ),
+    # Row format the AITER MegaMoE combine sends between ranks: "auto" (AITER
+    # picks FP8 from 1024 tokens per rank, else BF16), "none" (BF16),
+    # "fp8_blockwise_1x32" or "fp4_blockwise_1x32".
+    "VLLM_ROCM_AITER_MEGA_MOE_P2P_QUANT": env_with_choices(
+        "VLLM_ROCM_AITER_MEGA_MOE_P2P_QUANT",
+        "auto",
+        ["auto", "none", "fp8_blockwise_1x32", "fp4_blockwise_1x32"],
     ),
     # Size cap for the lm_head skinny-GEMM (wvSplitK) weight guard: weights
     # larger than this skip the skinny path at 1 < n <= 5 (see
