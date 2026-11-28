@@ -1060,6 +1060,13 @@ def rocm_fp8_mqa_logits(
             q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
         )
 
+    if get_cdna_version() >= 4 and rocm_aiter_ops.is_enabled():
+        from aiter.mqa_logits import mqa_logits
+
+        return mqa_logits(
+            q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=False
+        )
+
     aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
         aiter_mqa_logits_module = mqa_logits_module()

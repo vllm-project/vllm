@@ -28,6 +28,7 @@ def test_rocm_fp8_mqa_logits_disables_clean_logits(monkeypatch):
         return expected
 
     monkeypatch.setattr(sparse_mod, "_ON_GFX942", False)
+    monkeypatch.setattr(sparse_mod, "get_cdna_version", lambda: 0)
     monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
     monkeypatch.setattr(
         sparse_mod,
