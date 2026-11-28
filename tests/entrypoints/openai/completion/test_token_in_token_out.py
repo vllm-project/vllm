@@ -4,6 +4,7 @@
 import os
 import tempfile
 
+import openai
 import pytest
 
 from tests.utils import RemoteOpenAIServer
@@ -70,3 +71,22 @@ async def test_token_in_token_out_and_logprobs(server):
             prompt_text = tokenizer.decode(completion.choices[0].prompt_token_ids)
             # The decoded prompt should match or close to original prompt
             assert prompt_text == text
+
+
+@pytest.mark.asyncio
+async def test_stop_strings_rejected_without_tokenizer(server):
+    """Stop strings need a tokenizer. Without one they must be rejected rather
+    than silently ignored while stop_token_ids keep working."""
+    async with server.get_async_client() as client:
+        with pytest.raises(openai.BadRequestError, match="stop strings") as exc_info:
+            await client.completions.create(
+                model=MODEL_PATH, prompt=[1, 2, 3], max_tokens=5, stop=["never"]
+            )
+        assert exc_info.value.param == "stop"
+
+        await client.completions.create(
+            model=MODEL_PATH,
+            prompt=[1, 2, 3],
+            max_tokens=5,
+            extra_body={"stop_token_ids": [4]},
+        )

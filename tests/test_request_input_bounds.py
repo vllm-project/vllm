@@ -211,6 +211,15 @@ def _process_inputs_with_max_model_len(
     )
 
 
+def test_stop_strings_rejected_without_tokenizer():
+    """Stop strings are matched on detokenized text. Without a tokenizer they
+    would silently never apply."""
+    with pytest.raises(VLLMValidationError, match="require a tokenizer") as exc_info:
+        _process_inputs_with_max_model_len(SamplingParams(stop=["foo"]))
+
+    assert exc_info.value.parameter == "stop"
+
+
 def test_unset_max_tokens_rejects_oversized_min_tokens():
     """Reject min_tokens that only becomes invalid after max_tokens is filled."""
     params = SamplingParams(max_tokens=None, min_tokens=2147483648)
