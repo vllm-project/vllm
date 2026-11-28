@@ -552,7 +552,7 @@ def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
     assert not glm52_gemm._is_supported_row_major(multiple_rows)
 
 
-def test_glm52_sm107_warp_splitk_rows() -> None:
+def test_glm52_warp_splitk_rows() -> None:
     small, large = (16, 8, 256, 16, 2), (32, 16, 256, 9, 2)
     assert dict(glm52_gemm._warp_splitk_rows({2: small, 4: large})) == {
         1: small,
@@ -564,25 +564,50 @@ def test_glm52_sm107_warp_splitk_rows() -> None:
         range(9, 17)
     )
 
-    covered = {}
-    for spec in glm52_gemm.GLM52_PROJECTIONS_SM107.values():
-        plan = spec.build_plan()
-        tokens_by_backend = {
-            "cute": {num_tokens for num_tokens, _ in spec.cute_configs},
-            "dsv3_fused_a": set(spec.dsv3_tokens),
-            "fi_warp_splitk": {
-                num_tokens for num_tokens, _ in spec.warp_splitk_configs
+    for table, expected_covered in (
+        (
+            glm52_gemm.GLM52_PROJECTIONS_SM107,
+            {
+                (2048, 2048): set(range(1, 17)),
+                (6144, 512): set(range(1, 25)),
+                **{
+                    key: set(range(1, 33))
+                    for key in glm52_gemm.GLM52_PROJECTIONS_SM107
+                    if key not in {(2048, 2048), (6144, 512)}
+                },
             },
-        }
-        # Each M has one backend: a later backend must not hide another's row.
-        assert sum(map(len, tokens_by_backend.values())) == len(plan)
-        for backend, tokens in tokens_by_backend.items():
-            assert {m for m, (b, _) in plan.items() if b == backend} == tokens
-        covered[(spec.n, spec.k)] = set(plan)
-    # q_b at TP8 is the SM103 entry; the shared expert down uses cuBLAS from M=25.
-    assert covered.pop((2048, 2048)) == set(range(1, 17))
-    assert covered.pop((6144, 512)) == set(range(1, 25))
-    assert all(tokens == set(range(1, 33)) for tokens in covered.values())
+        ),
+        (
+            glm52_gemm.GLM52_PROJECTIONS_SM100,
+            {
+                (2624, 6144): set(range(1, 25)),
+                (2048, 2048): set(range(1, 33)),
+                (4096, 2048): set(range(1, 17)),
+                (6144, 2048): {1, 2},
+                (160, 6144): set(range(1, 33)),
+                (512, 6144): set(range(1, 33)),
+                (1024, 6144): set(range(1, 33)),
+                (6144, 512): set(range(1, 9)),
+                (6144, 12288): set(range(1, 17)),
+            },
+        ),
+    ):
+        covered = {}
+        for spec in table.values():
+            plan = spec.build_plan()
+            tokens_by_backend = {
+                "cute": {num_tokens for num_tokens, _ in spec.cute_configs},
+                "dsv3_fused_a": set(spec.dsv3_tokens),
+                "fi_warp_splitk": {
+                    num_tokens for num_tokens, _ in spec.warp_splitk_configs
+                },
+            }
+            # Each M has one backend: a later backend must not hide another's row.
+            assert sum(map(len, tokens_by_backend.values())) == len(plan)
+            for backend, tokens in tokens_by_backend.items():
+                assert {m for m, (b, _) in plan.items() if b == backend} == tokens
+            covered[(spec.n, spec.k)] = set(plan)
+        assert covered == expected_covered
 
 
 def test_glm52_warp_splitk_warmup_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1295,12 +1320,21 @@ def test_glm_warp_splitk_selected_shapes(
     )
 
 
+@pytest.mark.parametrize(
+    "capability,table",
+    [
+        pytest.param((10, 0), glm52_gemm.GLM52_PROJECTIONS_SM100, id="sm100"),
+        pytest.param((10, 7), glm52_gemm.GLM52_PROJECTIONS_SM107, id="sm107"),
+    ],
+)
 def test_glm_warp_splitk_warmup_matches_launch(
     monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    table: dict[tuple[int, int], glm52_gemm.GLM52ProjectionSpec],
 ) -> None:
     """Warmup compiles the FlashInfer cache entries the planned calls look up, so
     no planned call compiles at its first use (e.g. during CUDA graph capture)."""
-    _require_capability_and_warp_splitk((10, 7))
+    _require_capability_and_warp_splitk(capability)
     module = glm52_gemm._warp_splitk_module()
     assert module is not None
     compile_kernel = module._compile
@@ -1311,11 +1345,7 @@ def test_glm_warp_splitk_warmup_matches_launch(
         return compile_kernel(*args)
 
     monkeypatch.setattr(module, "_compile", record_compile)
-    specs = [
-        spec
-        for spec in glm52_gemm.GLM52_PROJECTIONS_SM107.values()
-        if spec.warp_splitk_configs
-    ]
+    specs = [spec for spec in table.values() if spec.warp_splitk_configs]
     kernel = glm52_gemm._WarpSplitKGemm()
     kernel.compile_many(
         kernel.get_warmup_keys(
