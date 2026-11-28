@@ -309,18 +309,41 @@ class SparseIndexerTopk(torch.nn.Module):
             and self.resolve_backend(logits, topk_tokens, num_rows) == "persistent"
         )
 
+    def prefill_ranks_bf16(
+        self, logits_dtype: torch.dtype, dcp_world_size: int
+    ) -> bool:
+        """Whether dense prefill ranks `logits_dtype` logits with DeepSelect
+        instead of an FP32 copy: BF16 logits, for "deep_select", and for "auto"
+        unless batch-invariant mode is on. The DCP top-k merge reads FP32
+        logits."""
+        return (
+            self._prefill_deep_select
+            and logits_dtype == torch.bfloat16
+            and dcp_world_size == 1
+        )
+
+    def prefill_logit_bytes(
+        self, logits_dtype: torch.dtype, dcp_world_size: int
+    ) -> int:
+        """Bytes per dense prefill logit: DeepGEMM's output in `logits_dtype`,
+        plus the FP32 copy the top-k reads unless the logits are FP32 or ranked
+        in place. The chunk planner and the indexer split the logits budget by
+        it."""
+        if logits_dtype == torch.float32 or self.prefill_ranks_bf16(
+            logits_dtype, dcp_world_size
+        ):
+            return logits_dtype.itemsize
+        return logits_dtype.itemsize + torch.float32.itemsize
+
     def prefill_takes_bf16_logits(
         self, logits: torch.Tensor, topk_tokens: int, dcp_world_size: int
     ) -> bool:
         """Whether a prefill chunk ranks its BF16 logits with DeepSelect instead
-        of an FP32 copy: for "deep_select", and for "auto" unless batch-invariant
-        mode is on. The DCP top-k merge reads FP32 logits."""
-        return (
-            self._prefill_deep_select
-            and logits.dtype == torch.bfloat16
-            and dcp_world_size == 1
-            and is_deep_select_supported(logits, topk_tokens)
-        )
+        of an FP32 copy (`prefill_ranks_bf16`), given DeepSelect takes its
+        shape."""
+        return self.prefill_ranks_bf16(
+            logits.dtype, dcp_world_size
+        ) and is_deep_select_supported(logits, topk_tokens)
 
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
