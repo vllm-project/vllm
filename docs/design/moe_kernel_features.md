@@ -18,6 +18,10 @@ Certain models require the topk weights to be applied to the input activations r
 
 Unless otherwise specified, backends are controlled via the `--all2all-backend` command-line argument (or the `all2all_backend` parameter in `ParallelConfig`). All backends except `flashinfer` only work with EP+DP or EP+TP. `Flashinfer` can work with EP or DP without EP.
 
+### PCIe IPC AG/RS
+
+On a single node with PCIe-connected NVIDIA GPUs, `allgather_reducescatter` can use FlashInfer's CUDA IPC workspaces for EP MoE dispatch and combine. Set `VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1` to opt in and use FlashInfer 0.7.1 or later. The fast path supports BF16, FP16, and FP32 rank-2 tensors when every rank has the same shape. FP8 activations are copied through a BF16 bit view without changing their bit pattern or numerical values. Other tensors, including ragged batches, continue to use NCCL. Workspace setup and tuning happen before CUDA Graph capture. Restarts reuse tuning results only when all configuration metadata matches; any version, topology, dtype, or capture-shape change triggers a fresh tune. DBO and batch-invariant execution do not use this path.
+
 <style>
 td {
   padding: 0.5rem !important;
