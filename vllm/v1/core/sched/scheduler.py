@@ -184,6 +184,8 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
+        # Computed tokens lost to failed KV loads since the last stats.
+        self.num_kv_load_failed_tokens = 0
         self.defer_block_free = False
         self.defer_async_loads = False
         # Whether a preempted request's in-flight output must be dropped; see
@@ -2444,6 +2446,7 @@ class Scheduler(SchedulerInterface):
                 self._handle_invalid_blocks(
                     kv_connector_output.invalid_block_ids,
                     num_scheduled_tokens,
+                    failed_kv_load_req_ids,
                 )
             )
         if kv_connector_output and kv_connector_output.mrope_position_deltas:
@@ -3591,6 +3594,8 @@ class Scheduler(SchedulerInterface):
         queued_workload = None
         if self.queued_workload_tally is not None:
             queued_workload = self.queued_workload_tally.summary()
+        num_kv_load_failed_tokens = self.num_kv_load_failed_tokens
+        self.num_kv_load_failed_tokens = 0
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
@@ -3601,6 +3606,7 @@ class Scheduler(SchedulerInterface):
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
+            num_kv_load_failed_tokens=num_kv_load_failed_tokens,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
@@ -4022,6 +4028,7 @@ class Scheduler(SchedulerInterface):
     def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
         """Fail closed for layouts whose block IDs are not globally unique."""
         affected_req_ids: set[str] = set()
+        num_failed_tokens = 0
         for req_id in failed_req_ids:
             request = self.requests.get(req_id)
             if (
@@ -4029,14 +4036,37 @@ class Scheduler(SchedulerInterface):
                 and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
             ):
                 affected_req_ids.add(req_id)
+                num_failed_tokens += request.num_computed_tokens
                 if self.recompute_kv_load_failures:
                     request.num_computed_tokens = 0
                     self._refresh_queued_workload(request)
                     self.failed_recving_kv_req_ids.add(req_id)
-        return set() if self.recompute_kv_load_failures else affected_req_ids
+        if not affected_req_ids:
+            return set()
+        if self.collect_stats:
+            self.num_kv_load_failed_tokens += num_failed_tokens
+        if self.recompute_kv_load_failures:
+            logger.warning(
+                "Recovered from KV load failure: "
+                "%d request(s) rescheduled (%d tokens affected).",
+                len(affected_req_ids),
+                num_failed_tokens,
+            )
+            return set()
+        logger.error(
+            "Failing %d request(s) due to KV load failure "
+            "(failure_policy=fail, %d tokens affected). Request IDs: %s",
+            len(affected_req_ids),
+            num_failed_tokens,
+            affected_req_ids,
+        )
+        return affected_req_ids
 
     def _handle_invalid_blocks(
-        self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
+        self,
+        invalid_block_ids: set[int],
+        num_scheduled_tokens: dict[str, int],
+        already_failed_req_ids: set[str] | None = None,
     ) -> set[str]:
         """Handle requests affected by invalid KV cache blocks.
 
@@ -4062,6 +4092,10 @@ class Scheduler(SchedulerInterface):
             req
             for req in self.kv_holding_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            and (
+                already_failed_req_ids is None
+                or req.request_id not in already_failed_req_ids
+            )
         )
         async_failed_req_ids, num_failed_tokens, _ = (
             self._update_requests_with_invalid_blocks(
@@ -4087,6 +4121,9 @@ class Scheduler(SchedulerInterface):
 
         if not total_failed_requests:
             return set()
+
+        if self.collect_stats:
+            self.num_kv_load_failed_tokens += total_failed_tokens
 
         # evict invalid blocks and downstream dependent blocks from cache
         # only when not using recompute policy (where blocks will be recomputed
