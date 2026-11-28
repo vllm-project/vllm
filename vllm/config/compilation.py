@@ -33,6 +33,12 @@ else:
 logger = init_logger(__name__)
 
 
+def _inductor_supports_batch_invariant() -> bool:
+    from torch._inductor import config as inductor_config
+
+    return hasattr(inductor_config, "batch_invariant")
+
+
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
     model."""
@@ -1158,6 +1164,11 @@ class CompilationConfig:
             # MRoPE is not an IR op yet; its fusion still matches the custom op.
             self.custom_ops.append("+rotary_embedding")
 
+        if envs.VLLM_BATCH_INVARIANT and _inductor_supports_batch_invariant():
+            # Pin generated reduction kernel configs instead of autotuning
+            # them on the device, which can pick a different config per run.
+            self.inductor_compile_config.setdefault("batch_invariant", True)
+
         if (
             "combo_kernels" not in self.inductor_compile_config
             and "benchmark_combo_kernel" not in self.inductor_compile_config
@@ -1173,7 +1184,10 @@ class CompilationConfig:
             deterministic = self.inductor_compile_config.get(
                 "deterministic", getattr(inductor_config, "deterministic", False)
             )
-            self.inductor_compile_config["benchmark_combo_kernel"] = not deterministic
+            batch_invariant = self.inductor_compile_config.get("batch_invariant", False)
+            self.inductor_compile_config["benchmark_combo_kernel"] = not (
+                deterministic or batch_invariant
+            )
 
         for op in self.custom_ops:
             if op not in {"all", "none"} and (len(op) < 2 or op[0] not in {"+", "-"}):
