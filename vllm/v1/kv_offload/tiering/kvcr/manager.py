@@ -137,6 +137,11 @@ def _kvcr_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
             documentation="KV blocks transferred by successful KVCR operations.",
             labelnames=("operation",),
         ),
+        # Literal name: kvcr 0.2.0 does not export UNSERVED_BLOCKS_METRIC.
+        _vllm_metric_name("kvcr_unserved_blocks"): OffloadingCounterMetadata(
+            documentation="KV blocks a KVCR remote operation could not serve.",
+            labelnames=("scope", "reason"),
+        ),
         _vllm_metric_name(STATE_METRIC): OffloadingGaugeMetadata(
             documentation="Current KVCR metadata and operation counts.",
             labelnames=("resource",),
