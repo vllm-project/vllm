@@ -546,9 +546,12 @@ def qsa_prepare(
     """Normalize Q, compress K, then update the circular raw state.
 
     Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
-    and returns its gate. Main Q rows go to `main_decode_q_out`, then to
-    `main_prefill_q_out`, each cast to its buffer's dtype (FP8 at unit scale).
-    For one contiguous Q, pass two views of one buffer.
+    and returns its gate. The main Q rows are split by position only: the
+    first `main_decode_q_out.shape[0]` rows go to `main_decode_q_out` and the
+    rest to `main_prefill_q_out`, each cast to its buffer's dtype (FP8 at unit
+    scale). Nothing here checks which rows are decodes; the names follow the
+    caller, whose batches put decode tokens first. For one contiguous Q, pass
+    two views of one buffer.
     """
     num_tokens = q.shape[0]
     main_head_dim = main_kv_cache.shape[-1] // 2
