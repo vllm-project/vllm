@@ -2274,6 +2274,11 @@ _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
 _GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
 _GFX950_DSA_AITER_MIN_PREFILL_SEQ_LEN = 32 * 1024
+# gfx942 at 304 CUs is MI300X and MI325X. The DSA decode bounds below were
+# measured on MI325X, so other gfx942 parts keep the in-tree kernel.
+_GFX942_FLYDSL_TOP_K_CU_COUNT = 304
+_GFX942_DSA_FLYDSL_MIN_DECODE_SEQ_LEN = 16 * 1024
+_GFX942_DSA_FLYDSL_MAX_DECODE_ROWS = 1024
 
 
 def _flat_sigmoid_bias_topk_is_profitable(
@@ -3279,6 +3284,21 @@ class rocm_aiter_ops:
         return cls._AITER_ENABLED and on_gfx950()
 
     @classmethod
+    @if_aiter_supported
+    def is_gfx942_dsa_decode_top_k_enabled(cls) -> bool:
+        """MI300X/MI325X (gfx942, 304 CUs) have one tuned AITER indexer top-k:
+        FlyDSL's multi-block kernel, for the uncompressed DSA indexer's
+        decode."""
+        from vllm.platforms.rocm import get_cdna_version
+        from vllm.utils.platform_utils import num_compute_units
+
+        return (
+            cls._AITER_ENABLED
+            and get_cdna_version() == 3
+            and num_compute_units() == _GFX942_FLYDSL_TOP_K_CU_COUNT
+        )
+
+    @classmethod
     def is_indexer_top_k_supported(
         cls,
         *,
@@ -3290,6 +3310,16 @@ class rocm_aiter_ops:
     ) -> bool:
         """Whether AITER's sparse indexer top-k beats the in-tree kernel for
         this shape."""
+        if cls.is_gfx942_dsa_decode_top_k_enabled():
+            return (
+                compress_ratio == 1
+                and not is_prefill
+                and topk_tokens == 2048
+                and num_rows <= _GFX942_DSA_FLYDSL_MAX_DECODE_ROWS
+                and max_valid_seq_len is not None
+                and max_valid_seq_len >= _GFX942_DSA_FLYDSL_MIN_DECODE_SEQ_LEN
+            )
+
         if compress_ratio < 1 or not cls.is_indexer_top_k_enabled():
             return False
 
@@ -3334,8 +3364,9 @@ class rocm_aiter_ops:
             and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
         )
 
-    @staticmethod
+    @classmethod
     def indexer_top_k_decode(
+        cls,
         logits: torch.Tensor,
         next_n: int,
         seq_lens: torch.Tensor,
@@ -3346,6 +3377,9 @@ class rocm_aiter_ops:
         values: torch.Tensor | None = None,
     ) -> None:
         """Select each row's top-`topk_tokens` logits.
+
+        On MI300X/MI325X, unstable calls without `values` run AITER's FlyDSL
+        kernel; callers bound them with `is_indexer_top_k_supported`.
 
         Args:
             logits: Per-row scores of shape `[num_rows, max_model_len]`.
@@ -3359,6 +3393,24 @@ class rocm_aiter_ops:
                 receives the selected logits; short rows pad with `-inf`.
 
         """
+        if not stable and values is None and cls.is_gfx942_dsa_decode_top_k_enabled():
+            # AITER's own gfx942 routing sends most long-row decode to its
+            # one-block kernel, which is slower than in-tree there. Remove once
+            # the pinned AITER routes it to the multi-block kernel.
+            from aiter.ops.flydsl.topk.topk_per_row import flydsl_top_k_per_row_decode
+
+            flydsl_top_k_per_row_decode(
+                logits,
+                next_n,
+                seq_lens,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+            return
+
         from aiter.ops.topk import top_k_per_row_decode
 
         top_k_per_row_decode(

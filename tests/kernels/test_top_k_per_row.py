@@ -850,17 +850,62 @@ def _distinct_logits(rows: int, num_columns: int) -> torch.Tensor:
     return torch.rand(rows, num_columns, device="cuda").argsort(dim=1).float()
 
 
-@pytest.mark.parametrize("num_columns", [16_384, 133_120, 1_048_576])
+def _force_aiter_dsa_decode_topk(monkeypatch) -> bool:
+    """Turn AITER on, which CI leaves off, and report whether this device runs
+    AITER's DSA decode top-k. On MI300X/MI325X, a call that reaches AITER's own
+    routing rather than FlyDSL fails."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    if not rocm_aiter_ops.is_gfx942_dsa_decode_top_k_enabled():
+        return bool(rocm_aiter_ops.is_indexer_top_k_enabled())
+    import aiter.ops.topk
+
+    def dispatcher(*args, **kwargs):
+        raise AssertionError("the call went through AITER's own routing")
+
+    monkeypatch.setattr(aiter.ops.topk, "top_k_per_row_decode", dispatcher)
+    return True
+
+
+def _assert_matches_in_tree(
+    logits: torch.Tensor,
+    next_n: int,
+    seq_lens: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+) -> None:
+    native = torch.full_like(indices, -777)
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        native,
+        logits.shape[0],
+        logits.stride(0),
+        logits.stride(1),
+        indices.shape[1],
+    )
+    for out in (native, indices):
+        _assert_leading_topk(out, row_ends)
+    assert torch.equal(native.sort(1).values, indices.sort(1).values)
+
+
+@pytest.mark.parametrize("num_columns", [16_384, 40_960, 133_120, 1_048_576])
 @pytest.mark.parametrize("next_n", [1, 2])
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
-def test_aiter_dsa_decode_topk_matches_per_row(num_columns: int, next_n: int) -> None:
+def test_aiter_dsa_decode_topk_matches_per_row(
+    monkeypatch, num_columns: int, next_n: int
+) -> None:
     """DeepSeek-V3.2 / GLM-5 decode (uncompressed, k=2048): AITER must select
-    the in-tree kernel's indices, in the leading slots of each row."""
+    the in-tree kernel's indices, in the leading slots of each row. MI300X and
+    MI325X run FlyDSL: its one-workgroup kernel at 16,384 columns, one
+    workgroup per row at 40,960, and its split kernel on the wider ones."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     top_k = 2048
-    if not rocm_aiter_ops.is_indexer_top_k_enabled():
+    if not _force_aiter_dsa_decode_topk(monkeypatch):
         pytest.skip("AITER top-k is unavailable")
 
     lengths = torch.tensor(
@@ -878,23 +923,9 @@ def test_aiter_dsa_decode_topk_matches_per_row(num_columns: int, next_n: int) ->
     columns = torch.arange(num_columns, device="cuda")
     logits.masked_fill_(columns[None, :] >= row_ends.reshape(-1, 1), 1e20)
 
-    native = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
-    torch.ops._C.top_k_per_row_decode(
-        logits,
-        next_n,
-        seq_lens,
-        native,
-        rows,
-        logits.stride(0),
-        logits.stride(1),
-        top_k,
-    )
-    aiter = torch.full_like(native, -777)
+    aiter = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
     rocm_aiter_ops.indexer_top_k_decode(logits, 1, seq_lens.reshape(-1), aiter, top_k)
-
-    for indices in (native, aiter):
-        _assert_leading_topk(indices, row_ends)
-    assert torch.equal(native.sort(1).values, aiter.sort(1).values)
+    _assert_matches_in_tree(logits, next_n, seq_lens, row_ends, aiter)
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
@@ -942,12 +973,121 @@ def test_aiter_dsa_prefill_topk_matches_per_row() -> None:
     assert torch.equal(native.sort(1).values, aiter.sort(1).values)
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_gfx942_dsa_decode_topk_replays_under_graphs(monkeypatch) -> None:
+    """On MI300X/MI325X, a captured graph replays FlyDSL's DSA decode top-k on
+    new logits and lengths."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _force_aiter_dsa_decode_topk(monkeypatch)
+    if not rocm_aiter_ops.is_gfx942_dsa_decode_top_k_enabled():
+        pytest.skip("Requires gfx942 at 304 CUs and AITER's FlyDSL top-k")
+
+    top_k, num_columns = 2048, 262_144
+    lengths = torch.tensor(
+        [0, 1, 2047, 2048, 2049, 5000, 131_072, num_columns],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    rows = lengths.numel()
+    logits = torch.empty(rows, num_columns, device="cuda")
+    seq_lens = torch.empty_like(lengths)
+    indices = torch.empty(rows, top_k, dtype=torch.int32, device="cuda")
+    columns = torch.arange(num_columns, device="cuda")
+
+    def fill(seed: int) -> None:
+        set_random_seed(seed)
+        seq_lens.copy_(lengths[torch.randperm(rows, device="cuda")])
+        logits.copy_(_distinct_logits(rows, num_columns))
+        logits.masked_fill_(columns[None, :] >= seq_lens[:, None], 1e20)
+        indices.fill_(-777)
+
+    def run() -> None:
+        rocm_aiter_ops.indexer_top_k_decode(logits, 1, seq_lens, indices, top_k)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.stream(stream):
+        fill(0)
+        run()
+    with torch.cuda.graph(graph, stream=stream):
+        run()
+    torch.cuda.current_stream().wait_stream(stream)
+    for seed in (1, 2):
+        fill(seed)
+        graph.replay()
+        torch.accelerator.synchronize()
+        _assert_matches_in_tree(logits, 1, seq_lens, seq_lens, indices)
+
+
 def _enable_aiter_topk(monkeypatch, enabled: bool = True) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
 
     monkeypatch.setattr(
         rocm_aiter_ops, "is_indexer_top_k_enabled", lambda: enabled, raising=True
     )
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_gfx942_dsa_decode_top_k_enabled",
+        lambda: False,
+        raising=True,
+    )
+
+
+def _enable_gfx942_dsa_topk(monkeypatch, enabled: bool = True) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_indexer_top_k_enabled", lambda: False, raising=True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_gfx942_dsa_decode_top_k_enabled",
+        lambda: enabled,
+        raising=True,
+    )
+
+
+def test_gfx942_dsa_topk_kernel_selection(monkeypatch) -> None:
+    """MI300X/MI325X take AITER only for DSA decode at k=2048, within the
+    measured length bound and row count; everything else stays in-tree."""
+    from vllm import _aiter_ops
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _enable_gfx942_dsa_topk(monkeypatch)
+    is_supported = rocm_aiter_ops.is_indexer_top_k_supported
+    min_len = _aiter_ops._GFX942_DSA_FLYDSL_MIN_DECODE_SEQ_LEN
+    max_rows = _aiter_ops._GFX942_DSA_FLYDSL_MAX_DECODE_ROWS
+
+    decode = dict(is_prefill=False, compress_ratio=1, topk_tokens=2048)
+    for num_rows, max_valid_seq_len in (
+        (1, min_len),
+        (max_rows, 262_144),
+        (8, 1 << 20),
+    ):
+        assert (
+            is_supported(
+                num_rows=num_rows, max_valid_seq_len=max_valid_seq_len, **decode
+            )
+            is True
+        )
+
+    long_row = dict(decode, num_rows=1, max_valid_seq_len=262_144)
+    for kwargs in (
+        dict(long_row, max_valid_seq_len=min_len - 1),
+        dict(long_row, max_valid_seq_len=None),
+        dict(long_row, num_rows=max_rows + 1),
+        dict(long_row, topk_tokens=1024),
+        dict(long_row, topk_tokens=None),
+        dict(long_row, is_prefill=True),
+        dict(long_row, compress_ratio=4),
+    ):
+        assert is_supported(**kwargs) is False, kwargs
+
+    _enable_gfx942_dsa_topk(monkeypatch, enabled=False)
+    assert is_supported(**long_row) is False
 
 
 def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
