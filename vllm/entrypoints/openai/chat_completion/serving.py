@@ -68,6 +68,7 @@ from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
+from vllm.renderers.inkling import InklingRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.renderers.params import TokenizeParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -218,11 +219,29 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs: dict[str, Any] | None,
     ) -> Parser:
         assert self.parser_cls is not None
+        parser_kwargs = {}
+        if (
+            isinstance(getattr(self, "renderer", None), InklingRenderer)
+            and request.truncate_prompt_tokens is None
+            and request.kv_transfer_params is None
+            and not request.tools
+        ):
+            from vllm.reasoning.inkling_reasoning_parser import (
+                InklingParserReasoningAdapter,
+            )
+            from vllm.tool_parsers.inkling_tool_parser import InklingEngineToolParser
+
+            if (
+                self.parser_cls.reasoning_parser_cls is InklingParserReasoningAdapter
+                and self.parser_cls.tool_parser_cls in (None, InklingEngineToolParser)
+            ):
+                parser_kwargs["prompt_is_untruncated"] = True
         return self.parser_cls(
             tokenizer,
             request.tools,
             chat_template_kwargs=chat_template_kwargs,
             model_config=self.model_config,
+            **parser_kwargs,
         )
 
     def _engine_chat_template_kwargs(

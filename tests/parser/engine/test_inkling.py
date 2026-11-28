@@ -194,24 +194,25 @@ class _TwoPassInklingParser(DelegatingParser):
     tool_parser_cls = InklingParserToolAdapter
 
 
-def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
-    """Stream `text` through `DelegatingParser.parse_delta`, `chunk_size`
-    tokens per delta; return `(content, reasoning, ordered tool names,
-    ordered tool arguments)`. Arguments arrive in fragments, so they are
-    concatenated per tool index."""
+def _stream_deltas(parser, request, text, chunk_size, prompt_token_ids):
     tokens = _tokenize(text)
-    content, reasoning = "", ""
-    tools: dict[int, str] = {}
-    args: dict[int, str] = {}
     for start in range(0, len(tokens), chunk_size):
         batch = tokens[start : start + chunk_size]
-        delta = parser.parse_delta(
+        yield parser.parse_delta(
             "".join(t for _, t in batch),
             [tid for tid, _ in batch],
             request,
             prompt_token_ids=prompt_token_ids if start == 0 else None,
             finished=(start + chunk_size >= len(tokens)),
         )
+
+
+def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
+    """Collect content, reasoning, tool names and arguments in tool-index order."""
+    content, reasoning = "", ""
+    tools: dict[int, str] = {}
+    args: dict[int, str] = {}
+    for delta in _stream_deltas(parser, request, text, chunk_size, prompt_token_ids):
         if delta and delta.content:
             content += delta.content
         if delta and delta.reasoning:
@@ -1127,6 +1128,68 @@ class TestToolParserWithoutReasoningParser:
 
 
 _INKLING2_VOCAB = {**_TML_VOCAB, "<|content_xml|>": 200024}
+
+
+class TestPlainTextStreaming:
+    XML = 200024
+    V1 = {**_TML_VOCAB, "<|unused_200024|>": XML}
+    MODEL = _TML_VOCAB[MSG_MODEL]
+    # Left truncation removed the leading XML marker but retained its payload.
+    TRUNCATED = [*map(ord, '{"name":"get_weather"}'), _TML_VOCAB[END_MESSAGE], MODEL]
+
+    @staticmethod
+    def _content_deltas(text, effort, prompt, vocab, complete, **request_kwargs):
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "Weather?"}],
+            stream=True,
+            reasoning_effort=effort,
+            **request_kwargs,
+        )
+        kwargs = {} if complete is None else {"prompt_is_untruncated": complete}
+        parser = _TwoPassInklingParser(
+            make_mock_tokenizer(vocab),
+            request.tools,
+            chat_template_kwargs={"reasoning_effort": effort},
+            **kwargs,
+        )
+        deltas = _stream_deltas(parser, request, text, 1, prompt)
+        return [delta.content if delta and delta.content else "" for delta in deltas]
+
+    @pytest.mark.parametrize("effort", ["none", "minimal"])
+    @pytest.mark.parametrize("closer", [END_MESSAGE, ""], ids=["end_message", "eos"])
+    def test_bare_text_streams_incrementally(self, effort, closer):
+        answer = "the answer is 42"
+        deltas = self._content_deltas(
+            answer + closer, effort, [self.MODEL], self.V1, True
+        )
+        assert deltas == list(answer) + ([""] if closer else [])
+
+    @pytest.mark.parametrize(
+        ("effort", "prompt", "vocab", "complete"),
+        [
+            pytest.param("none", [XML, MODEL], V1, True, id="tools-none"),
+            pytest.param("minimal", [XML, MODEL], V1, True, id="tools-minimal"),
+            pytest.param("low", [MODEL], V1, True, id="low-effort"),
+            pytest.param("none", [MODEL], V1, None, id="unknown-provenance"),
+            pytest.param("none", [MODEL, ord("g")], V1, True, id="partial-header"),
+            pytest.param("none", TRUNCATED, V1, False, id="left-truncation"),
+            pytest.param("minimal", [MODEL], _INKLING2_VOCAB, True, id="inkling2"),
+        ],
+    )
+    def test_keeps_message_header(self, effort, prompt, vocab, complete):
+        request_kwargs = {}
+        if complete is False:
+            request_kwargs = dict(
+                tools=[_function_tool()],
+                tool_choice="auto",
+                truncate_prompt_tokens=len(prompt),
+                truncation_side="left",
+            )
+        text = f"get_weather{TEXT_START}sunny{END_MESSAGE}"
+        deltas = self._content_deltas(
+            text, effort, prompt, vocab, complete, **request_kwargs
+        )
+        assert "".join(deltas) == "sunny"
 
 
 class _ToolOnlyInklingParser(DelegatingParser):

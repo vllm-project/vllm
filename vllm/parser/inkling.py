@@ -67,6 +67,7 @@ from vllm.renderers.inkling_encoding import (
     MESSAGE_SYSTEM,
     MESSAGE_TOOL,
     MESSAGE_USER,
+    SPECIAL_TOKEN_SPELLINGS,
     continuation_prefix,
 )
 from vllm.sampling_params import StructuredOutputsParams
@@ -323,6 +324,8 @@ class InklingParser(ParserEngine):
         self,
         tokenizer: TokenizerLike,
         tools: list[Tool] | None = None,
+        *,
+        prompt_is_untruncated: bool = False,
         **kwargs,
     ) -> None:
         kwargs.setdefault("parser_engine_config", inkling_config())
@@ -331,6 +334,12 @@ class InklingParser(ParserEngine):
         # Its prompts end between messages: the model opens its own turn.
         vocab = self.vocab
         self._is_inkling2 = CONTENT_XML in vocab and CONTENT_AUDIO_INPUT not in vocab
+        effort = (kwargs.get("chat_template_kwargs") or {}).get("reasoning_effort")
+        self._stream_bare_text = (
+            prompt_is_untruncated
+            and not self._is_inkling2
+            and effort in ("none", "minimal")
+        )
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -419,7 +428,18 @@ class InklingParser(ParserEngine):
                 self._streaming_initialized = True
                 return
             if token_id == model_id:
-                self._engine.reset(initial_state=ParserState.MESSAGE_HEADER)
+                state = ParserState.MESSAGE_HEADER
+                if self._stream_bare_text and prompt_token_ids[-1] == model_id:
+                    # All tool declarations share a leading XML block. A truncated
+                    # prompt can lose its marker while retaining the tool schema.
+                    xml_ids = {
+                        vocab[s]
+                        for s in SPECIAL_TOKEN_SPELLINGS[CONTENT_XML]
+                        if s in vocab
+                    }
+                    if xml_ids and xml_ids.isdisjoint(prompt_token_ids):
+                        state = ParserState.CONTENT
+                self._engine.reset(initial_state=state)
                 self._streaming_initialized = True
                 return
             if token_id in special_ids:
