@@ -175,6 +175,7 @@ class ShortConv(MambaBase, PluggableLayer):
                 attn_metadata.state_indices_tensor_p.flatten(),
                 attn_metadata.has_initial_states_p,
                 activation=None,
+                checkpoint=attn_metadata.checkpoint,
             ).transpose(0, 1)[:num_prefill_tokens]  # (num_prefill_tokens, dim)
             conv_output_list.append(C_p * out_p)
 
@@ -354,8 +355,8 @@ class ShortConv(MambaBase, PluggableLayer):
 
     def get_cache_checkpoint_alignment(self) -> int | None:
         # The window ending at a checkpoint is a copy of its last inputs, so
-        # any position works; the CPU path has no export.
-        return None if current_platform.is_cpu() else 1
+        # any position works.
+        return 1
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None

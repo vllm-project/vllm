@@ -3,11 +3,18 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn.functional as F
 
 from vllm._cpu_ops import causal_conv1d_update_cpu_vec
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.mamba.checkpoint import (
+        MambaPrefillCheckpointMetadata,
+    )
 
 
 def causal_conv1d_fn_cpu(
@@ -20,6 +27,7 @@ def causal_conv1d_fn_cpu(
     has_initial_state: torch.Tensor | None = None,
     activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
+    checkpoint: MambaPrefillCheckpointMetadata | None = None,
     **kwargs,
 ) -> torch.Tensor:
     """CPU implementation for causal_conv1d_fwd."""
@@ -80,6 +88,15 @@ def causal_conv1d_fn_cpu(
 
         out[:, bos:eos] = seq_out.squeeze(0)
         conv_states[slot, :, :state_len].copy_(conv_input[..., -state_len:].squeeze(0))
+        if checkpoint is not None:
+            offset = int(checkpoint.checkpoint_offsets[seq_idx])
+            dest = int(checkpoint.state_indices[seq_idx])
+            if offset > 0 and dest != NULL_BLOCK_ID:
+                # conv_input starts with the incoming state. At offset tokens
+                # its trailing convolution window therefore starts at offset.
+                conv_states[dest, :, :state_len].copy_(
+                    conv_input[0, :, offset : offset + state_len]
+                )
 
     return out.to(original_x_dtype)
 
