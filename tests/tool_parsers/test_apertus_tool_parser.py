@@ -14,6 +14,17 @@ from vllm.tool_parsers.apertus_tool_parser import (
     ApertusToolParser,
 )
 
+DELIMITER_ARGUMENTS = [
+    {"content": "ordinary text"},
+    {"content": f"before {TOOL_CALLS_PREFIX} after"},
+    {"content": f"before {TOOL_CALLS_SUFFIX} after"},
+    {
+        "content": f'escaped "quote" \\ {TOOL_CALLS_SUFFIX} and {TOOL_CALLS_PREFIX}',
+        "nested": {TOOL_CALLS_SUFFIX: [TOOL_CALLS_PREFIX, "trailing\\"]},
+    },
+]
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -47,6 +58,25 @@ def mock_request():
 
 
 class TestExtractToolCalls:
+    @pytest.mark.parametrize("arguments", DELIMITER_ARGUMENTS)
+    @pytest.mark.parametrize("ending", ["suffix", "no_suffix", "truncated"])
+    def test_delimiters_in_arguments(self, parser, mock_request, arguments, ending):
+        payload = json.dumps([{"write_file": arguments}], ensure_ascii=False)
+        if ending == "truncated":
+            payload = payload[:-2]
+        model_output = f"Before {TOOL_CALLS_PREFIX}{payload}"
+        if ending != "no_suffix":
+            model_output += TOOL_CALLS_SUFFIX
+        model_output += " After"
+
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called
+        assert result.content == "Before\nAfter"
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write_file"
+        assert json.loads(result.tool_calls[0].function.arguments) == arguments
+
     def test_no_tool_calls(self, parser, mock_request):
         model_output = "Hello, how can I help you today?"
         result = parser.extract_tool_calls(model_output, mock_request)
@@ -227,6 +257,36 @@ class TestStreamingExtraction:
             for delta, _ in results
             if delta and getattr(delta, "content", None)
         )
+
+    @pytest.mark.parametrize("arguments", DELIMITER_ARGUMENTS)
+    @pytest.mark.parametrize("ending", ["suffix", "no_suffix", "truncated"])
+    def test_delimiters_in_arguments(self, parser, mock_request, arguments, ending):
+        """Literal markers stay in arguments across every two-chunk boundary."""
+        calls = [{"write_file": arguments}, {"finish": {"ok": True}}]
+        payload = json.dumps(calls, ensure_ascii=False)
+        if ending == "truncated":
+            payload = payload[:-2]
+        model_output = f"Before {TOOL_CALLS_PREFIX}{payload}"
+        if ending != "no_suffix":
+            model_output += TOOL_CALLS_SUFFIX
+        model_output += " After"
+        chunkings = [list(model_output)] + [
+            [model_output[:split], model_output[split:]]
+            for split in range(len(model_output) + 1)
+        ]
+
+        for chunks in chunkings:
+            results = self._simulate_streaming(
+                ApertusToolParser(parser.model_tokenizer), mock_request, chunks
+            )
+            tool_calls = self._collect_tool_calls(results)
+
+            assert self._collect_content(results) == "Before  After", chunks
+            assert len(tool_calls) == 2, chunks
+            for index, call in enumerate(calls):
+                name, expected = next(iter(call.items()))
+                assert tool_calls[index]["name"] == name, chunks
+                assert json.loads(tool_calls[index]["arguments"]) == expected, chunks
 
     def test_basic_streaming_single_tool(self, parser, mock_request):
         chunks = [
