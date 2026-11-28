@@ -11,6 +11,7 @@ import pytest
 from tests.watermarking.golden_candidates import (
     DETECTOR_FACTORIES,
     GOLDEN_FLOAT_RTOL,
+    SYNTHID_TEXT_CONFIG_FIELDS,
     WATERMARK_CONFIG_FIELDS,
     WATERMARKING_CANDIDATES,
     compare_golden,
@@ -53,7 +54,9 @@ def test_golden_fixture_guards(goldens: dict[str, dict]):
 def test_resolved_records_every_watermark_config_field():
     # Each candidate records its key; key_file only says where a key is read from.
     assert {field.name for field in dataclasses.fields(WatermarkConfig)} == (
-        set(WATERMARK_CONFIG_FIELDS) | {"key", "key_file"}
+        set(WATERMARK_CONFIG_FIELDS)
+        | set(SYNTHID_TEXT_CONFIG_FIELDS)
+        | {"key", "key_file"}
     )
 
 

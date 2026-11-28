@@ -213,6 +213,33 @@ def test_speculative_config_warms_the_target_role_only(
     }
 
 
+def test_synthid_text_warms_its_kernel_for_both_logits_dtypes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    philox_calls = _capture_calls(monkeypatch)
+    calls: list[tuple[int, int, torch.dtype, bool]] = []
+
+    def fake_synthid_text_sample(logits, contexts, key, depth, **kwargs):
+        calls.append((key, depth, logits.dtype, kwargs["skip_mask"] is not None))
+        return torch.zeros(logits.shape[0], dtype=torch.int64)
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.sample.synthid_text.synthid_text_sample",
+        fake_synthid_text_sample,
+    )
+    watermark_sample_warmup(
+        _worker(WatermarkConfig(key=MASTER_KEY, algorithm="synthid_text", depth=7))
+    )
+
+    key = derive_watermark_key(MASTER_KEY, b"synthid_text")
+    assert philox_calls == []
+    assert set(calls) == {
+        (key, 7, torch.bfloat16, True),
+        (key, 7, torch.float32, True),
+    }
+    assert len(calls) == 2
+
+
 def test_dedup_none_also_warms_the_mask_free_specialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -93,7 +93,7 @@ def make_gpu_watermark_sampler(monkeypatch):
     return make
 
 
-@pytest.mark.parametrize("algorithm", ["gumbel", "dual_key_gumbel"])
+@pytest.mark.parametrize("algorithm", ["gumbel", "dual_key_gumbel", "synthid_text"])
 def test_watermarker_contract(algorithm: str):
     watermarker = create_watermarker(
         WatermarkConfig(algorithm=algorithm, key=42, context_width=4)

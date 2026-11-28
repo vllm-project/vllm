@@ -245,8 +245,20 @@ vllm serve MODEL \
 
 ### SynthID-Text
 
-[SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) is planned but
-not currently implemented.
+[SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) reweights the
+processed distribution with `depth` two-candidate tournament layers (default 30,
+at most 32) and then samples from it with the request's random sampler. The
+g-value of layer `l` is bit `l` of one Philox word for the context and candidate
+token, under a key derived from the configured key, so the g-values differ from
+those of the Hugging Face and DeepMind implementations. Detection counts the
+g-bits of each scored token and reports a binomial p-value with
+`SynthIDTextWatermarkDetector(key=42, depth=30)`. SynthID-Text does not support
+speculative decoding, even with `allow_target_only_watermarking`.
+
+```bash
+vllm serve MODEL \
+  --watermark-config '{"algorithm":"synthid_text","key":42,"depth":30}'
+```
 
 ## Pseudorandom functions
 

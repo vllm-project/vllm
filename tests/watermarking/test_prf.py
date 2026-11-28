@@ -16,7 +16,12 @@ def test_philox_compatibility_vector():
         (torch.tensor(expected_mantissas, dtype=torch.float64) + 1) / (2**24 + 1)
     ).to(torch.float32)
 
-    assert torch.equal(PhiloxPRF(42).uniform(contexts, token_ids), expected)
+    prf = PhiloxPRF(42)
+
+    assert torch.equal(prf.uniform(contexts, token_ids), expected)
+    assert torch.equal(
+        prf.words(contexts, token_ids) >> 8, torch.tensor(expected_mantissas)
+    )
 
 
 def test_prf_pairs_contexts_with_target_tokens():

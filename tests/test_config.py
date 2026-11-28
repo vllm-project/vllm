@@ -5370,6 +5370,21 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
         config._check_supports_watermarking()
 
 
+def test_synthid_text_rejects_target_only_speculative_decoding():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="synthid_text", key=42, allow_target_only_watermarking=True
+    )
+    config.speculative_config = fake_speculative_config(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+    )
+
+    with pytest.raises(ValueError, match="SynthID-Text.*speculative decoding"):
+        config._check_supports_watermarking()
+
+
 def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
     caplog_vllm, disable_log_dedup
 ):
@@ -5550,6 +5565,12 @@ def test_watermark_validation_errors_do_not_quote_the_key(tmp_path):
 def test_watermark_alpha_must_be_a_probability(alpha):
     with pytest.raises(ValidationError):
         WatermarkConfig(key=42, algorithm="dual_key_gumbel", alpha=alpha)
+
+
+@pytest.mark.parametrize("depth", [0, 33])
+def test_watermark_depth_is_bounded(depth):
+    with pytest.raises(ValidationError):
+        WatermarkConfig(key=42, algorithm="synthid_text", depth=depth)
 
 
 def test_unknown_watermark_prf_is_rejected():

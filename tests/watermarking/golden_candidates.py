@@ -22,6 +22,7 @@ from vllm.config.watermarking import (
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarkDetector,
     GumbelWatermarkDetector,
+    SynthIDTextWatermarkDetector,
     WatermarkDetection,
     WatermarkDetector,
     create_prf,
@@ -51,6 +52,8 @@ WATERMARK_CONFIG_FIELDS = (
     "allow_target_only_watermarking",
     "enforce",
 )
+# Recorded only for SynthID-Text candidates; the other algorithms ignore them.
+SYNTHID_TEXT_CONFIG_FIELDS = ("depth",)
 
 # round(((i + 1) * (5**0.5 - 1) / 2) % 1.0, 4) for i in range(64)
 ROUTING_UNIFORMS: tuple[float, ...] = (
@@ -101,6 +104,7 @@ class WatermarkingSchemeConfig:
     generation_deduplicate_contexts_max_history: int | None = 8192
     detection_deduplicate_contexts: bool = True
     p_value_threshold: float = 0.01
+    depth: int = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,9 +171,24 @@ def _create_dual_key_gumbel_detector(
     )
 
 
+def _create_synthid_text_detector(
+    key: int,
+    config: WatermarkingSchemeConfig,
+    prf: WatermarkPRFName,
+) -> WatermarkDetector:
+    return SynthIDTextWatermarkDetector(
+        key=key,
+        context_width=config.context_width,
+        p_value_threshold=config.p_value_threshold,
+        deduplicate_contexts=config.detection_deduplicate_contexts,
+        depth=config.depth,
+    )
+
+
 DETECTOR_FACTORIES = {
     "gumbel": _create_gumbel_detector,
     "dual_key_gumbel": _create_dual_key_gumbel_detector,
+    "synthid_text": _create_synthid_text_detector,
 }
 
 
@@ -233,10 +252,11 @@ class WatermarkingCandidate:
         assert isinstance(detector.prf, PhiloxPRF)
         key_b_prf = getattr(detector, "key_b_prf", None)
         dual_key = self.scheme == "dual_key_gumbel"
+        fields = WATERMARK_CONFIG_FIELDS
+        if self.scheme == "synthid_text":
+            fields += SYNTHID_TEXT_CONFIG_FIELDS
         return {
-            "watermark_config": {
-                field: getattr(config, field) for field in WATERMARK_CONFIG_FIELDS
-            },
+            "watermark_config": {field: getattr(config, field) for field in fields},
             "derived_keys": {
                 "key_a": str(derive_watermark_key(self.key, b"key_a"))
                 if dual_key
@@ -340,6 +360,7 @@ class WatermarkingCandidate:
                 self.scheme_config.generation_deduplicate_contexts_max_history
             ),
             prf=self.prf,
+            depth=self.scheme_config.depth,
         )
 
     def _detector(self) -> WatermarkDetector:
@@ -631,6 +652,7 @@ WATERMARKING_CANDIDATES = (
         generation_deduplicate_contexts="all",
         fixture=REPETITIVE_FIXTURE,
     ),
+    _candidate("synthid-text-philox-key42-cw4", "synthid_text", 42, prf="philox"),
 )
 
 DEDUPLICATION_TWINS = (
