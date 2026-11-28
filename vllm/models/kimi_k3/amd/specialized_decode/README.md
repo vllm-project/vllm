@@ -30,9 +30,9 @@ gated attention output to K2 for o_proj and the latent MoE. Eligible KDA layers
 retain K1/K2. Prefill and unsupported decode batches use the standard layer path.
 
 The kernels read vLLM's loaded weights, KDA states and MLA KV cache in place.
-Nothing is copied or re-quantized. The kernels tile up to 64 rows (`MAX_TOKENS`),
-but at 32 and 64 rows they lose to vLLM's decode, so a served step is capped at 16
-(`MAX_ROWS`).
+Nothing is copied or re-quantized, except with `specialized_decode_bf16_copies`
+(below). The kernels tile up to 64 rows (`MAX_TOKENS`), but at 32 and 64 rows
+they lose to vLLM's decode, so a served step is capped at 16 (`MAX_ROWS`).
 
 ## Enabling
 
@@ -44,7 +44,18 @@ VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4BMM=1 \
   --additional-config '{"decode_backend": "latency_specialized"}'
 ```
 
-There are no other options. `decode_backend=auto` (the default) runs vLLM's decode.
+`decode_backend=auto` (the default) runs vLLM's decode.
+
+The kernels read bf16 dense weights. With online FP8 linears (for example
+`--quantization-config '{"linear": "fp8_per_channel", ...}'`), the kernel
+layers' o_proj, latent down, shared experts, KDA in_proj and f_b_proj become FP8
+and the weight check refuses the specialized decode. Add
+`"specialized_decode_bf16_copies": true` to the additional config to keep a bf16
+copy of each such linear's loaded weight for the kernels, while prefill and
+every step vLLM serves use the FP8 linears. The copies cost memory (startup logs
+the size per rank; about 14.9 GiB per rank for Kimi-K3 at TP8 with online FP8
+per channel), are not supported with weight reloading, and the key requires
+`decode_backend=latency_specialized`.
 
 ## Supported deployments
 
