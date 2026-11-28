@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -223,7 +224,12 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.lookup.return_value = LookupResult.MISS
         self.manager.prepare_store.return_value.keys_to_retry = []
         self.manager.get_load_source.return_value = CacheHitSource.EXTERNAL_UNSPECIFIED
-        self.manager.get_stats.return_value = None
+        self.manager.on_schedule_end.return_value = False
+        # The base implementation hands each transfer to the
+        # complete_store / complete_load mocks.
+        self.manager.complete_transfers.side_effect = partial(
+            OffloadingManager.complete_transfers, self.manager
+        )
         self.manager.config_info.return_value = [{}]
         self.manager.on_new_request.return_value = RequestOffloadingContext()
 
