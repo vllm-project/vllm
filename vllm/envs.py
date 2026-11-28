@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
-    VLLM_DP_COORDINATOR_READY_TIMEOUT_S: int = 120
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
     VLLM_CHAT_TEMPLATE_FUEL: int = 500000
     VLLM_API_KEY: str | None = None
@@ -875,13 +874,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # during startup. Default is 600 seconds (10 minutes).
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
-    ),
-    # Seconds for the rank 0 frontend to wait for the DP coordinator to report
-    # its ZMQ socket addresses at startup. Default is 120 seconds. Remote DP
-    # engines using the multiprocessing backend have a separate 5-minute
-    # timeout for the frontend's reply to their startup handshake.
-    "VLLM_DP_COORDINATOR_READY_TIMEOUT_S": lambda: int(
-        os.environ.get("VLLM_DP_COORDINATOR_READY_TIMEOUT_S", "120")
     ),
     # Maximum wall-clock seconds allowed for a single chat template render.
     # Set to 0 to disable the timeout.
@@ -2581,7 +2573,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_HOST_IP",
         "VLLM_RAY_BUNDLE_INDICES",
         "VLLM_CHAT_TEMPLATE_FUEL",
-        "VLLM_DP_COORDINATOR_READY_TIMEOUT_S",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",

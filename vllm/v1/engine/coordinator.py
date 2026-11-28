@@ -9,7 +9,6 @@ import weakref
 import msgspec.msgpack
 import zmq
 
-from vllm import envs
 from vllm.config import LoggingConfig, ParallelConfig
 from vllm.logger import configure_logging, init_logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -56,7 +55,7 @@ class DPCoordinator:
 
     def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
         try:
-            timeout = envs.VLLM_DP_COORDINATOR_READY_TIMEOUT_S
+            timeout = self._ready_timeout_seconds
             ready = multiprocessing.connection.wait(
                 [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
             )
@@ -64,7 +63,8 @@ class DPCoordinator:
                 raise RuntimeError(
                     "DP Coordinator process failed to report ZMQ addresses "
                     f"within timeout={timeout} seconds during startup. "
-                    "Set VLLM_DP_COORDINATOR_READY_TIMEOUT_S to adjust this wait."
+                    "Set --data-parallel-coordinator-ready-timeout-seconds "
+                    "to adjust this wait."
                 )
             try:
                 return zmq_addr_pipe.recv()
@@ -84,6 +84,9 @@ class DPCoordinator:
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
 
+        self._ready_timeout_seconds = (
+            parallel_config.data_parallel_coordinator_ready_timeout_seconds
+        )
         host = parallel_config.data_parallel_master_ip
 
         # Assume coordinator is colocated with front-end procs when not in
@@ -116,11 +119,15 @@ class DPCoordinator:
         )
         self.proc.start()
         child_zmq_addr_pipe.close()
-        (
-            front_publish_address,
-            back_output_address,
-            back_publish_address,
-        ) = self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
+        try:
+            (
+                front_publish_address,
+                back_output_address,
+                back_publish_address,
+            ) = self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
+        except BaseException:
+            shutdown([self.proc])
+            raise
 
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address

@@ -271,6 +271,9 @@ class ParallelConfig:
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
     """Fixed port for data parallel messaging, shared by all nodes."""
+    data_parallel_coordinator_ready_timeout_seconds: int = Field(default=120, gt=0)
+    """Maximum time in seconds for the DP coordinator to report its ZMQ socket
+    addresses at startup."""
     dp_sync_interval: int = Field(default=16, ge=1)
     """Steps between DP finish-sync all-reduces; must match across DP ranks."""
     data_parallel_master_port: int = 29500
@@ -1145,6 +1148,7 @@ class ParallelConfig:
             "_data_parallel_master_port_list",
             "_coord_store_port",
             "data_parallel_rpc_port",
+            "data_parallel_coordinator_ready_timeout_seconds",
             "rank",
             "master_addr",
             "master_port",

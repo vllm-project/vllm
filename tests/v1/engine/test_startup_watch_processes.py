@@ -34,19 +34,18 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.mark.timeout(30)
-def test_dp_coordinator_wait_uses_configured_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    env_name = "VLLM_DP_COORDINATOR_READY_TIMEOUT_S"
-    monkeypatch.delenv(env_name, raising=False)
+def test_dp_coordinator_wait_uses_configured_timeout():
     coordinator = DPCoordinator(
-        ParallelConfig(data_parallel_size=2, data_parallel_size_local=2)
+        ParallelConfig(
+            data_parallel_size=2,
+            data_parallel_size_local=2,
+            data_parallel_coordinator_ready_timeout_seconds=10,
+        )
     )
     try:
-        monkeypatch.setenv(env_name, "1")
         reader, writer = connection.Pipe(duplex=False)
         # Keep the pipe open and empty so the wait can only end by timing out.
-        with reader, writer, pytest.raises(RuntimeError, match="timeout=1 seconds"):
+        with reader, writer, pytest.raises(RuntimeError, match="timeout=10 seconds"):
             coordinator._wait_for_zmq_addrs(reader)
     finally:
         coordinator.shutdown()

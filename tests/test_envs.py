@@ -56,18 +56,6 @@ def test_ray_bundle_indices_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_RAY_BUNDLE_INDICES" not in envs.compile_factors()
 
 
-def test_dp_coordinator_ready_timeout_default_and_override(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    env_name = "VLLM_DP_COORDINATOR_READY_TIMEOUT_S"
-    monkeypatch.delenv(env_name, raising=False)
-    assert envs.VLLM_DP_COORDINATOR_READY_TIMEOUT_S == 120
-
-    monkeypatch.setenv(env_name, "300")
-    assert envs.VLLM_DP_COORDINATOR_READY_TIMEOUT_S == 300
-    assert env_name not in envs.compile_factors()
-
-
 def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     # Only bounds chat template rendering in the Rust frontend.
     monkeypatch.setenv("VLLM_CHAT_TEMPLATE_FUEL", "2000000")
