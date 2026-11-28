@@ -198,11 +198,11 @@ class PCPManager:
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
             and getattr(model_config.hf_text_config, "model_type", None)
-            not in ("deepseek_v32", "glm_moe_dsa")
+            not in ("deepseek_v32", "glm_moe_dsa", "deepseek_v41")
         ):
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
-                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
+                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2, "
+                "GLM-5.2/5.3 and DeepSeek-V4.1. Set -cc.cudagraph_mode=NONE."
             )
         if (
             cudagraph_mode.has_full_cudagraphs()
@@ -417,21 +417,29 @@ class PCPManager:
         )
         return segments_by_rank, per_rank_num_tokens
 
-    def get_num_tokens_for_dispatch(
+    def get_dispatch_shape(
         self,
         num_scheduled_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-    ) -> int:
-        """Return the largest real rank-local batch before graph padding."""
-        return max(
-            sum(
+    ) -> tuple[int, int]:
+        """Return the largest rank-local `(num_reqs, num_tokens)` before padding.
+
+        Request counts only size decode graphs, so a batch with a prefill keeps
+        its global request count.
+        """
+        num_reqs = num_tokens = 0
+        for rank in range(self.pcp_world_size):
+            chunk_lens = [
                 chunk_len
                 for _, _, chunk_len in self._iter_rank_chunks(
                     rank, num_scheduled_tokens, is_prefilling
                 )
-            )
-            for rank in range(self.pcp_world_size)
-        )
+            ]
+            num_reqs = max(num_reqs, len(chunk_lens))
+            num_tokens = max(num_tokens, sum(chunk_lens))
+        if np.any(is_prefilling):
+            num_reqs = len(num_scheduled_tokens)
+        return num_reqs, num_tokens
 
     @staticmethod
     def _resolve_num_reqs_after_padding(

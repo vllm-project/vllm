@@ -180,26 +180,37 @@ def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("pcp_world_size", "num_scheduled_tokens", "is_prefilling", "expected"),
+    (
+        "pcp_world_size",
+        "shard_decode_requests",
+        "num_scheduled_tokens",
+        "is_prefilling",
+        "expected",
+    ),
     [
-        (2, [8], [True], 4),
-        (2, [7], [True], 4),
-        (2, [3], [False], 3),
-        (2, [3, 8], [False, True], 7),
-        (4, [2, 9], [False, True], 4),
+        (2, True, [8], [True], (1, 4)),
+        (2, True, [7], [True], (1, 4)),
+        (2, True, [3], [False], (1, 3)),
+        (2, True, [3, 8], [False, True], (2, 7)),
+        (4, True, [2, 9], [False, True], (2, 4)),
+        (4, True, [6] * 5, [False] * 5, (2, 12)),
+        (4, True, [6] * 8, [False] * 8, (2, 12)),
+        (4, False, [6] * 5, [False] * 5, (5, 30)),
     ],
 )
-def test_num_tokens_for_dispatch_uses_largest_pcp_rank(
-    pcp_world_size, num_scheduled_tokens, is_prefilling, expected
+def test_dispatch_shape_uses_largest_pcp_rank(
+    pcp_world_size, shard_decode_requests, num_scheduled_tokens, is_prefilling, expected
 ):
+    """Graphs are picked by the largest rank-local batch; request counts stay
+    global when a prefill is scheduled."""
     manager = PCPManager(
         pcp_world_size=pcp_world_size,
         pcp_rank=0,
         device=torch.device("cpu"),
-        shard_decode_requests=True,
+        shard_decode_requests=shard_decode_requests,
     )
 
-    actual = manager.get_num_tokens_for_dispatch(
+    actual = manager.get_dispatch_shape(
         np.asarray(num_scheduled_tokens, dtype=np.int32),
         np.asarray(is_prefilling, dtype=np.bool_),
     )
