@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Hashable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
@@ -265,7 +265,16 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             if fnmatch(prefix, wildcard_pattern):
                 return True
 
-        return False
+        # A fused layer is excluded when the wildcards exclude all of its shards.
+        base, _, proj_name = prefix.rpartition(".")
+        shards = self.packed_modules_mapping.get(proj_name, [])
+        return bool(shards) and all(
+            any(fnmatch(f"{base}.{shard}", pattern) for pattern in self.exclude_modules)
+            for shard in shards
+        )
+
+    def get_linear_format(self, prefix: str) -> Hashable:
+        return None if self.is_layer_excluded(prefix) else self.quant_method
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -2276,6 +2285,16 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             w4a16_nvfp4_config=w4a16_nvfp4_config,
             mxfp8_config=mxfp8_config,
         )
+
+    def get_linear_format(self, prefix: str) -> Hashable:
+        """The layer's `quantized_layers` entry; None for unquantized layers."""
+        if self.is_layer_excluded(prefix):
+            return None
+        for candidate in self._quantized_layer_prefix_candidates(prefix):
+            if candidate in self.quantized_layers:
+                info = self.quantized_layers[candidate]
+                return tuple(sorted((key, str(value)) for key, value in info.items()))
+        return None
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
         """Look up the upper-cased quant_algo for a vLLM-side layer prefix, or

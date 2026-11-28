@@ -54,7 +54,11 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+    MAMBA2_IN_PROJ_SLICES,
+    MambaMixer2,
+    mamba2_in_proj_stacked_mapping,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -406,6 +410,11 @@ class NemotronHMambaDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
+            low_rank={
+                name: rank
+                for name in (*MAMBA2_IN_PROJ_SLICES, "out")
+                if (rank := getattr(config, f"mamba_{name}_rank", None)) is not None
+            },
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -844,6 +853,21 @@ class NemotronHForCausalLM(
         self.model = NemotronHModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # Checkpoints may store in_proj as one tensor per slice; load them into
+        # each layer's in_proj groups. When TP does not divide n_groups, in_proj
+        # replicates groups across ranks and needs the fused tensor.
+        if config.n_groups % get_tensor_model_parallel_world_size() == 0:
+            stacked = {
+                key: value
+                for name, module in self.model.named_modules()
+                if isinstance(module, MambaMixer2)
+                for key, value in mamba2_in_proj_stacked_mapping(
+                    module.in_proj_groups, mixer_name=name
+                ).items()
+            }
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_stacked=stacked
+            )
 
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(

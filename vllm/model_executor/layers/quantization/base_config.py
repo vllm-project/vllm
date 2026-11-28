@@ -3,7 +3,7 @@
 
 import inspect
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Hashable, Iterator
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -227,6 +227,12 @@ class QuantizationConfig(ABC):
 
         """
         raise NotImplementedError
+
+    def get_linear_format(self, prefix: str) -> Hashable:
+        """A key for the weight format of the linear layer `prefix`; layers with
+        equal keys can share one merged linear. Configs that do not override this
+        give every layer the same format."""
+        return None
 
     @staticmethod
     def get_cache_scale_mapper() -> "WeightsMapper":
