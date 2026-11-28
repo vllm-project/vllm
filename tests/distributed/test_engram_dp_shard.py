@@ -132,6 +132,7 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
             [0, 1, 2, 3],
             [0, 1, 2, 3],
         ),
+        ("DeepseekV41ForCausalLM", {"mode": "per_token"}, 2, None, [0, 1]),
         ("Qwen4ExpForCausalLM", {}, 2, None, [0, 1]),
         # The offloaded Qwen4Exp PLE table is only shared over the group, so it
         # exists with dp_shared_memory unless the table is spread over DP.
@@ -993,6 +994,7 @@ def _check_dummy_hash_model_forward(
     model.engram_hash = state
     model.engram_swa_prefix = "swa"
     model.engram_dp_shared_memory = dp_shared_memory
+    model.engram_per_token = False
     model.layers = [Decoder(engram=engram)]
     model.start_layer = 0
     model.end_layer = 1

@@ -10,7 +10,7 @@ import pytest
 import torch
 from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
-from vllm.config import CacheConfig, ParallelConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
@@ -21,11 +21,13 @@ from vllm.model_executor.models.config import (
 from vllm.models.qwen4_exp.amd.model_state import (
     Qwen4ExpModelState as AmdQwen4ExpModelState,
 )
+from vllm.models.qwen4_exp.common.ple_mode import validate_ple_embedding_config
 from vllm.models.qwen4_exp.nvidia.model import (
     Qwen4ExpForCausalLM,
     Qwen4ExpForConditionalGeneration,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from ...utils import spawn_new_process_for_each_test
@@ -466,3 +468,67 @@ def test_qwen4_exp_model_state_pads_replayed_request_range(state_cls) -> None:
         model_state.ple_query_start_loc[:3], torch.tensor([0, 2, 5], dtype=torch.int32)
     )
     assert torch.all(model_state.ple_query_start_loc[3:] >= 5)
+
+
+def _ple_engine_config(tmp_path, mode: str) -> VllmConfig:
+    from vllm.engine.arg_utils import EngineArgs
+
+    Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config=_text_config().to_dict(),
+    ).save_pretrained(tmp_path)
+    return EngineArgs(
+        model=str(tmp_path),
+        language_model_only=True,
+        hf_overrides={"text_config": {"ple_embedding_mode": mode}},
+        skip_tokenizer_init=True,
+        max_model_len=128,
+    ).create_engine_config()
+
+
+def test_default_mode_is_ngram() -> None:
+    assert validate_ple_embedding_config(_text_config()) == "ngram"
+
+
+@pytest.mark.parametrize("field", ["ple_embed_dim", "vocab_size"])
+def test_per_token_rejects_invalid_table_dimensions(field):
+    config = _text_config(ple_embedding_mode="per_token")
+    setattr(config, field, 0)
+    with pytest.raises(ValueError, match=f"{field} must be positive"):
+        validate_ple_embedding_config(config)
+
+
+def test_per_token_requires_single_ple_layer() -> None:
+    with pytest.raises(ValueError, match="exactly one PLE layer"):
+        validate_ple_embedding_config(
+            _text_config(
+                ple_embedding_mode="per_token",
+                ple_layer_ids=[1, 3],
+                num_hidden_layers=4,
+                layer_types=["linear_attention", "full_attention"] * 2,
+            )
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="per-token PLE requires ROCm"
+)
+def test_per_token_override_applies_to_text_config(tmp_path) -> None:
+    config = _ple_engine_config(tmp_path, "per_token")
+    assert config.model_config is not None
+    assert config.model_config.hf_text_config.ple_embedding_mode == "per_token"
+
+
+@pytest.mark.parametrize(
+    ("mode", "error", "message"),
+    [
+        ("bogus", ValueError, "Invalid ple_embedding_mode"),
+        ("per_token", NotImplementedError, "only implemented for ROCm"),
+    ],
+)
+def test_model_config_rejects_unsupported_ple_mode(
+    tmp_path, monkeypatch, mode, error, message
+):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    with pytest.raises(error, match=message):
+        _ple_engine_config(tmp_path, mode)

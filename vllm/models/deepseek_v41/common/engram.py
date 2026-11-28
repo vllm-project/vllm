@@ -1720,10 +1720,7 @@ class Engram(nn.Module):
         self.clamp_value = 1e-6
         self.use_sequence_parallel = use_sequence_parallel
 
-        # Named ``embed_tokens`` so the checkpoint's ``engram.embed.weight``
-        # survives the mapper's ``embed.weight`` -> ``embed_tokens.weight``
-        # suffix rule.
-        self.embed_tokens = self._create_embedding(layout, layer_hash_index)
+        self._init_embedding(layout, layer_hash_index)
         n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
         self.wkv = self._create_wkv(
             n_hash_cols * layout.head_dim, quant_config, f"{prefix}.wkv"
@@ -1739,6 +1736,12 @@ class Engram(nn.Module):
 
         max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
         self._init_staging(max_tokens, layout.head_dim)
+
+    def _init_embedding(self, layout: EngramLayout, layer_hash_index: int) -> None:
+        # Named ``embed_tokens`` so the checkpoint's ``engram.embed.weight``
+        # survives the mapper's ``embed.weight`` -> ``embed_tokens.weight``
+        # suffix rule.
+        self.embed_tokens = self._create_embedding(layout, layer_hash_index)
 
     def _create_wkv(
         self, input_size: int, quant_config: QuantizationConfig | None, prefix: str

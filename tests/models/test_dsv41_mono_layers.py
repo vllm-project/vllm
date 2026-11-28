@@ -87,6 +87,7 @@ CASES = {
     "cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)],
     "gfx942": [(4, 8), (4, 42), (8, 8), (8, 42)],
 }
+PER_TOKEN_CASES = {"cdna4": [(2, 8)], "gfx942": [(4, 8)]}
 
 
 @torch.no_grad()
@@ -258,6 +259,7 @@ class MonoProbe:
 
     def mono_layers(self) -> dict:
         from vllm.models.deepseek_v41.amd import mono_decode
+        from vllm.models.deepseek_v41.amd.engram import PerTokenEngram
 
         def copies(m) -> bool:
             """Whether the layer holds the gfx942 copies of its weights, which
@@ -286,6 +288,11 @@ class MonoProbe:
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
+            "per_token": {
+                i: isinstance(layer.engram, PerTokenEngram)
+                for i, layer in self._decoder_layers().items()
+                if layer.engram is not None
+            },
         }
 
     def compare_merged_replays(self) -> None:
@@ -417,7 +424,14 @@ if os.environ.get(MERGE_AB):
 
 
 def _decode(
-    vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
+    vllm_runner,
+    monkeypatch,
+    tp: int,
+    mono: bool,
+    prompts,
+    path: str,
+    arch: str,
+    engram_mode: str,
 ):
     """`_decodes(tp, arch)` greedy decodes of `prompts` on one engine with the
     mono path on or off: (each decode's outputs, the workers' mono layers); each decoder
@@ -450,6 +464,7 @@ def _decode(
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         **indexer,
+        engram_config={"mode": engram_mode},
         enforce_eager=True,
         max_model_len=4096,
         max_num_seqs=len(prompts),
@@ -530,13 +545,25 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28), (8, 42)]
+    ("tp", "rows", "engram_mode"),
+    [
+        # The TP8 Buildkite step selects the original tp-rows node IDs.
+        *[
+            pytest.param(tp, rows, "ngram", id=f"{tp}-{rows}")
+            for tp, rows in [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28), (8, 42)]
+        ],
+        (2, 8, "per_token"),
+        (4, 8, "per_token"),
+    ],
 )
-def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
+def test_mono_decode_matches_the_model(
+    vllm_runner, monkeypatch, tmp_path, tp, rows, engram_mode
+):
     arch = _arch()
     if not arch:
         pytest.skip("the mono kernels target CDNA4 and gfx942")
-    if (tp, rows) not in CASES[arch]:
+    cases = PER_TOKEN_CASES if engram_mode == "per_token" else CASES
+    if (tp, rows) not in cases[arch]:
         pytest.skip(f"not a case of {arch}")
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
@@ -557,11 +584,20 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
 
     decodes = _decodes(tp, arch)
     on, probe_on = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch, engram_mode
     )
     off, probe_off = _decode(
-        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off", arch
+        vllm_runner,
+        monkeypatch,
+        tp,
+        False,
+        prompts,
+        f"{tmp_path}/off",
+        arch,
+        engram_mode,
     )
+    for rank in probe_on + probe_off:
+        assert rank["per_token"] == {2: engram_mode == "per_token"}, rank
 
     # both layer kinds took the mono path on every rank, at every decode step,
     # and on gfx942 from the weight copies made at load

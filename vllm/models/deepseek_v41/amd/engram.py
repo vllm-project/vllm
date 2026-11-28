@@ -14,7 +14,8 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.models.deepseek_v41.common.engram import Engram
+from vllm.models.deepseek_v41.common.engram import Engram, EngramLayout
+from vllm.models.deepseek_v41.common.engram_replacement import PerTokenTable
 from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import tl, triton
 
@@ -279,3 +280,23 @@ class RocmEngram(Engram):
             num_warps=8 if block_size >= 2048 else 4,
         )
         return output
+
+
+class PerTokenEngram(RocmEngram):
+    """Engram whose lookup uses the compressed ID of the current token."""
+
+    def _init_embedding(self, layout: EngramLayout, layer_hash_index: int) -> None:
+        self.per_token_table = PerTokenTable(
+            layout.compressed_vocab_size,
+            (layout.max_ngram_size - 1) * layout.n_heads,
+            layout.head_dim,
+            get_tensor_model_parallel_world_size(),
+            get_tensor_model_parallel_rank(),
+        )
+        # Expose the table without registering duplicate checkpoint keys.
+        object.__setattr__(self, "embed_tokens", self.per_token_table)
+
+    def prepare_embeddings(self, comp_ids: torch.Tensor) -> None:
+        rows = self.staged_rows[: comp_ids.shape[0]]
+        assert rows.shape[0] == comp_ids.shape[0], "engram staging buffer too small"
+        torch.index_select(self.per_token_table.weight, 0, comp_ids, out=rows)

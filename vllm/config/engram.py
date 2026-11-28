@@ -45,7 +45,8 @@ class EngramConfig:
 
     cpu_offload: bool = True
     """Store embedding weights in host memory. NVLink peer groups use local
-    Grace host memory when enabled and HBM when disabled."""
+    Grace host memory when enabled and HBM when disabled. In `per_token` mode
+    the table stays on the GPU."""
 
     disk_offload: bool = False
     """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
@@ -65,6 +66,10 @@ class EngramConfig:
     shared IPC namespace). Defaults to enabled when the model and other settings
     allow it; Flash uses private replicas. Falls back to per-replica tables when
     DP replicas are not co-located on one node or the host cannot hold them."""
+
+    mode: Literal["ngram", "per_token"] = "ngram"
+    """Use the hashed n-gram table or a per-token checkpoint table
+    (DeepSeek V4.1 on ROCm)."""
 
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
@@ -113,6 +118,17 @@ class EngramConfig:
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.mode != "ngram" and (
+            self.embedding_across_dp
+            or self.dp_shared_memory
+            or self.use_thp
+            or self.peer_group_size
+        ):
+            raise ValueError(
+                f"engram mode {self.mode!r} keeps its table on each rank's GPU: "
+                "embedding_across_dp, dp_shared_memory, use_thp and "
+                "peer_group_size must be off"
+            )
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -181,6 +197,18 @@ class EngramConfig:
                     "Qwen4Exp Engram pool is incompatible with disk_offload "
                     "and embedding_across_dp"
                 )
+        if self.mode == "ngram":
+            return
+        if model_config.architecture != "DeepseekV41ForCausalLM":
+            raise ValueError(
+                f"engram mode {self.mode!r} is only supported for DeepSeek V4.1"
+            )
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            raise NotImplementedError(
+                f"engram mode {self.mode!r} is only implemented for ROCm"
+            )
 
     def resolve_dp_shared_memory(
         self,
@@ -190,7 +218,8 @@ class EngramConfig:
         """Share host tables by default wherever the model supports them."""
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
-                self.cpu_offload
+                self.mode == "ngram"
+                and self.cpu_offload
                 and not self.use_thp
                 and not self.peer_group_size
                 and parallel_config.data_parallel_size > 1

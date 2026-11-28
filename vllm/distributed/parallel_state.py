@@ -2274,6 +2274,7 @@ def initialize_model_parallel(
             )
         )
         and not enable_elastic_ep
+        and engram_config.mode == "ngram"
     ):
         if (
             not engram_config.cpu_offload

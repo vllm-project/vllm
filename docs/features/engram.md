@@ -267,6 +267,41 @@ inside `unshare -Urm` without root.
 Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
 engine means restarting the group.
 
+## Per-token lookup on ROCm
+
+DeepSeek V4.1 and Qwen4Exp can load a smaller table indexed by the current
+token. The default is `ngram`. A checkpoint carrying both tables can run in
+either mode. The projection, gate, and residual use the same weights.
+
+**DeepSeek V4.1** selects the lookup with `--engram-config`:
+
+```bash
+vllm serve <model> --engram-config '{"mode": "per_token"}'
+```
+
+Each Engram layer loads `layers.<layer>.engram.per_token_table.weight`, a bf16
+tensor shaped `[engram_compressed_vocab_size, n_hash_cols, head_dim]`. The
+compressed token ID selects the row. For DeepSeek-V4.1-Flash, each table is
+about 1.2 GB versus about 100 GB for the n-gram table. Each TP rank loads the
+full tensor and keeps its own hash columns on GPU. Leave `embedding_across_dp`,
+`dp_shared_memory`, `use_thp`, and `peer_group_size` off.
+
+**Qwen4Exp** reads `ple_embedding_mode` from the text config. For a composite
+checkpoint, override it under `text_config`. For a standalone text checkpoint,
+set it at the top level.
+
+```bash
+vllm serve <model> --hf-overrides '{"text_config": {"ple_embedding_mode": "per_token"}}'
+```
+
+The single PLE layer loads `ple_embedding.per_token_table.weight`, shaped
+`[vocab_size, ple_embed_dim]` and replicated on each GPU. This is about 1.3 GB
+for Qwen3.8-Flash-Next, versus 102.4 GB for the n-gram table. Token IDs are
+clamped to the vocabulary range. Sequence parallelism is unsupported.
+
+Both models keep the per-token table on GPU regardless of `cpu_offload` and
+check for missing or invalid table weights during loading.
+
 ## Limitations
 
 - CUDA-alike platforms only.

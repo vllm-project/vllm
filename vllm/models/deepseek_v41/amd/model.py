@@ -70,7 +70,7 @@ from vllm.models.deepseek_v4.amd.model import (
 )
 from vllm.models.deepseek_v4.amd.model import takes_rocm_mxfp8_input
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
-from vllm.models.deepseek_v41.amd.engram import RocmEngram
+from vllm.models.deepseek_v41.amd.engram import PerTokenEngram, RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
     MHC_SEAM_MIN_TOKENS,
@@ -102,6 +102,7 @@ from ..common.engram import (
     can_share_engram_tables,
     gather_engram_hashes,
 )
+from ..common.engram_replacement import per_token_comp_ids, skip_engram_weight
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 
 if typing.TYPE_CHECKING:
@@ -245,7 +246,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         if engram_layout is not None:
             layer_id = extract_layer_index(prefix)
             if layer_id in engram_layout.layer_ids:
-                self.engram = RocmEngram(
+                engram_cls = (
+                    PerTokenEngram
+                    if vllm_config.engram_config is not None
+                    and vllm_config.engram_config.mode == "per_token"
+                    else RocmEngram
+                )
+                self.engram = engram_cls(
                     config,
                     vllm_config.quant_config,
                     engram_layout,
@@ -693,8 +700,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         self.engram_layout = EngramLayout.from_config(config)
         self.engram_dp_shared_memory = False
+        self.engram_per_token = False
         if self.engram_layout is not None:
             engram_config = vllm_config.engram_config
+            self.engram_per_token = (
+                engram_config is not None and engram_config.mode == "per_token"
+            )
             if engram_config is not None and engram_config.dp_shared_memory:
                 engram_config.dp_shared_memory = can_share_engram_tables(
                     self.engram_layout
@@ -874,7 +885,20 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             attn_metadata = get_forward_context().attn_metadata
             if isinstance(attn_metadata, list):
                 attn_metadata = attn_metadata[dbo_current_ubatch_id()]
-            if isinstance(attn_metadata, dict) and self.engram_hash.ensure_cache():
+            live = isinstance(attn_metadata, dict) and self.engram_hash.ensure_cache()
+            if self.engram_per_token:
+                engram_mask = (
+                    ~image_sentinel_mask(input_ids)
+                    if live
+                    else torch.zeros_like(input_ids, dtype=torch.bool)
+                )
+                comp_ids = per_token_comp_ids(
+                    self.engram_hash.token_map, input_ids, engram_mask
+                )
+                engram_hashes = comp_ids[:, None].expand(
+                    -1, self.engram_hash.multipliers.shape[0]
+                )
+            elif live:
                 assert self.engram_swa_prefix is not None
                 swa_metadata = typing.cast(
                     "DeepseekSparseSWAMetadata", attn_metadata[self.engram_swa_prefix]
@@ -1210,6 +1234,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if name.startswith(("vision.", "aligner.", "image_")):
                 # Vision weights are loaded by the outer multimodal wrapper.
                 logger.warning_once("Skipping non-text weight: %s", name)
+                continue
+            if skip_engram_weight(name, self.engram_per_token):
                 continue
             if pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = self._pad_shared_expert_weight(
