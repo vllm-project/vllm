@@ -196,4 +196,6 @@ def test_rust_build_cache_excludes_git_metadata() -> None:
         assert "source=.git,target=.git" not in cached_run
         assert "source=.git,target=.git" in exact_version_stage
         assert 'SETUPTOOLS_SCM_PRETEND_METADATA="{dirty=false}"' in exact_version_stage
-        assert "bash tools/build_rust.sh" in exact_version_stage
+        # Stamping keeps the cached binary; rebuilding it would relink per commit.
+        assert "tools/build_rust.py --stamp vllm/vllm-rs" in exact_version_stage
+        assert "build_rust.sh" not in exact_version_stage

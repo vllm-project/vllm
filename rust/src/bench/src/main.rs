@@ -13,7 +13,7 @@ use vllm_tracing::{LogFormatter, LogLevel};
 #[command(
     name = "vllm-bench",
     about = "Benchmark online serving throughput and offline multimodal preprocessing",
-    version = vllm_build_info::VERSION
+    version = vllm_build_info::version()
 )]
 struct Cli {
     #[command(flatten)]
