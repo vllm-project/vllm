@@ -37,6 +37,7 @@ steps:
   - tests/v1/sample/test_logprobs_e2e.py
   - tests/entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py
   - tests/entrypoints/openai/decisions/test_decisions_e2e.py
+  - tests/entrypoints/generate/structured_decisions/test_structured_decisions_e2e.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -65,8 +66,8 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
   - pytest -v -s entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py
-  # The Rust frontend does not implement /v1/systemone yet.
-  - pytest -v -s entrypoints/openai/decisions/test_decisions_e2e.py -k "not systemone"
+  - pytest -v -s entrypoints/openai/decisions/test_decisions_e2e.py
+  - pytest -v -s entrypoints/generate/structured_decisions/test_structured_decisions_e2e.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
@@ -103,6 +104,7 @@ steps:
       - tests/v1/sample/test_logprobs_e2e.py
       - tests/entrypoints/generate/generative_scoring/test_generative_scoring_e2e.py
       - tests/entrypoints/openai/decisions/test_decisions_e2e.py
+      - tests/entrypoints/generate/structured_decisions/test_structured_decisions_e2e.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"

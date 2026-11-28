@@ -26,6 +26,7 @@ prost-types.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true
 serde.workspace = true
+serde-json-fmt.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
 serde_with.workspace = true

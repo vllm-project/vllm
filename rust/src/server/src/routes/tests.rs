@@ -1147,8 +1147,6 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/messages"),
         ("POST", "/v1/messages/count_tokens"),
         ("POST", "/v1/chat/completions/batch"),
-        ("POST", "/v1/decisions"),
-        ("POST", "/v1/systemone"),
         ("POST", "/scale_elastic_ep"),
         ("POST", "/is_scaling_elastic_ep"),
     ] {
