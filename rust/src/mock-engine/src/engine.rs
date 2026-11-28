@@ -140,6 +140,7 @@ fn utility_response(
         "get_supported_tasks" => utility_envelope(vec!["generate"]),
         "is_sleeping" => utility_envelope(false),
         "is_inference_ready" => utility_envelope(true),
+        "check_health_generate" => utility_envelope("ok"),
         "reset_prefix_cache" => utility_envelope(true),
         "wake_up" => utility_envelope(true),
         "reset_mm_cache" | "reset_encoder_cache" | "profile" | "sleep" | "execute_dummy_batch" => {

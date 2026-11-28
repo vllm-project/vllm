@@ -39,6 +39,7 @@ pub use output::{
 };
 pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
+pub use vllm_engine_core_client::NotReady;
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 pub use weight_versions::{WeightVersionSpan, WeightVersions};
 
@@ -102,6 +103,10 @@ pub trait Llm: Any + Send + Sync {
     fn is_healthy(&self) -> bool {
         *self.subscribe_health().borrow()
     }
+
+    /// Check that this `Llm` can run the model now, for a generation
+    /// readiness probe, waiting at most `timeout` for an answer.
+    async fn check_health_generate(&self, timeout: Duration) -> std::result::Result<(), NotReady>;
 
     /// Submit one tokenized request and stream its outputs. Dropping the
     /// stream before the terminal output aborts the request.
@@ -447,6 +452,10 @@ impl Llm for EngineCoreLlm {
 
     fn subscribe_readiness(&self) -> watch::Receiver<bool> {
         self.client.subscribe_readiness()
+    }
+
+    async fn check_health_generate(&self, timeout: Duration) -> std::result::Result<(), NotReady> {
+        self.client.check_health_generate(timeout).await
     }
 
     async fn generate_n(

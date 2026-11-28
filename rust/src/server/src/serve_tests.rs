@@ -74,6 +74,13 @@ impl Llm for TestLlm {
         self.readiness.subscribe()
     }
 
+    async fn check_health_generate(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> Result<(), vllm_llm::NotReady> {
+        Ok(())
+    }
+
     async fn generate_n(
         &self,
         _request: GenerateRequest,

@@ -7718,6 +7718,211 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     engine_task.await.expect("mock engine task");
 }
 
+/// The status and JSON body of a `/health_generate` call; `None` for an empty
+/// body.
+async fn health_generate(
+    app: &axum::Router,
+    query: &str,
+) -> (StatusCode, Option<serde_json::Value>) {
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/health_generate{query}"))
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let body = (!body.is_empty()).then(|| serde_json::from_slice(&body).expect("json body"));
+    (status, body)
+}
+
+/// Receive one `check_health_generate` utility call and return its call ID.
+async fn recv_health_generate_call(dealer: &mut DealerSocket) -> u64 {
+    let utility = recv_engine_message(dealer).await;
+    let payload = decode_value(&utility[1]).expect("decode utility payload");
+    let array = payload.as_array().expect("utility payload array");
+    assert_eq!(array[2], Value::from("check_health_generate"));
+    assert_eq!(array[3], Value::Array(vec![]));
+    array[1].as_u64().expect("call id")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_generate_returns_ok_when_the_engine_can_run_the_model() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            for state in ["ok", "busy"] {
+                let call_id = recv_health_generate_call(dealer).await;
+                send_outputs(push, utility_outputs(call_id, utility_result_value(state))).await;
+            }
+        })
+    })
+    .await;
+
+    for _ in 0..2 {
+        assert_eq!(health_generate(&app, "").await, (StatusCode::OK, None));
+    }
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_generate_reports_a_sleeping_engine() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let call_id = recv_health_generate_call(dealer).await;
+            send_outputs(
+                push,
+                utility_outputs(call_id, utility_result_value("sleeping")),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    assert_eq!(
+        health_generate(&app, "").await,
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(json!({
+                "status": "not_ready",
+                "reason": "sleeping",
+                "message": "Engine is sleeping or paused (engine ranks: [0])",
+                "engine_ranks": [0],
+            }))
+        )
+    );
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_generate_reports_a_failed_probe() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let call_id = recv_health_generate_call(dealer).await;
+            let output = UtilityCallOutput {
+                output: UtilityOutput {
+                    call_id: call_id.into(),
+                    failure_message: Some("Forward probe failed on worker 0".to_owned()),
+                    result: None,
+                },
+                ..Default::default()
+            };
+            send_outputs(push, output.into()).await;
+        })
+    })
+    .await;
+
+    let (status, body) = health_generate(&app, "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let body = body.expect("json body");
+    assert_eq!(body["reason"], "probe_failed");
+    assert_eq!(body["message"], "Health check failed (engine ranks: [0])");
+    assert_eq!(body["engine_ranks"], json!([0]));
+    let error = body["error"].as_str().expect("error string");
+    assert!(
+        error.contains("Forward probe failed on worker 0"),
+        "{error}"
+    );
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_generate_reports_a_probe_timeout() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            // Never answered.
+            recv_health_generate_call(dealer).await;
+        })
+    })
+    .await;
+
+    assert_eq!(
+        health_generate(&app, "?timeout_s=0.05").await,
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(json!({
+                "status": "not_ready",
+                "reason": "probe_timeout",
+                "message": "Health check timed out after 0.05s (engine ranks: [0])",
+                "engine_ranks": [0],
+                "timeout_s": 0.05,
+            }))
+        )
+    );
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_generate_rejects_a_non_positive_timeout() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    for timeout in ["0", "-1", "nan"] {
+        let (status, body) = health_generate(&app, &format!("?timeout_s={timeout}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{timeout}");
+        assert_eq!(
+            body.expect("json body")["error"]["param"],
+            "query.timeout_s",
+            "{timeout}"
+        );
+    }
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test]
+async fn render_server_health_generate_is_ready_and_validates_its_query() {
+    let app = test_render_app();
+    assert_eq!(
+        health_generate(&app, "?timeout_s=1").await,
+        (StatusCode::OK, None)
+    );
+    let (status, body) = health_generate(&app, "?timeout_s=0").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body.expect("json body")["error"]["param"],
+        "query.timeout_s"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_generate_reports_a_dead_engine() {
+    let (app, state, engine_task) = test_health_app_with_engine_script(|push| {
+        boxed_test_future(async move {
+            push.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec()))
+                .await
+                .expect("send sentinel");
+        })
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.engine_core_client().is_healthy() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wait for unhealthy client");
+
+    assert_eq!(
+        health_generate(&app, "").await,
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(json!({"status": "not_ready", "reason": "engine_dead"}))
+        )
+    );
+    engine_task.await.expect("mock engine task");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn load_endpoint_resets_when_stream_response_is_dropped() {
@@ -12668,6 +12873,16 @@ impl Llm for UnavailableLlm {
         self.readiness.subscribe()
     }
 
+    async fn check_health_generate(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> Result<(), vllm_llm::NotReady> {
+        Err(vllm_llm::NotReady::ProbeFailed {
+            engine_ranks: vec![0],
+            error: "no engine can take the request".to_string(),
+        })
+    }
+
     async fn generate_n(
         &self,
         _request: GenerateRequest,
@@ -12739,6 +12954,13 @@ impl Llm for StreamErrorLlm {
 
     fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
         self.health.subscribe()
+    }
+
+    async fn check_health_generate(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> Result<(), vllm_llm::NotReady> {
+        Ok(())
     }
 
     async fn generate_n(
@@ -12914,6 +13136,12 @@ async fn llm_without_engine_core_serves_generation_routes_only() {
         .await
         .expect("call app");
     assert_eq!(response.status(), StatusCode::OK);
+
+    // Generation readiness is the `Llm`'s to answer.
+    let (status, body) = health_generate(&app, "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let body = body.expect("json body");
+    assert_eq!(body["reason"], "probe_failed");
 
     // Generation goes through the `Llm`, and its unavailability maps to 503.
     let (status, body) = post_json(

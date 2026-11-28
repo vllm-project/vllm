@@ -17,6 +17,7 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::{LoraInfoExporter, METRICS};
 use zeromq::RouterSendHalf;
 
+use crate::client::health::HealthProbes;
 use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
     OutputReceiver, OutputSender, RequestObserver, RequestRegistry, UtilityReceiver,
@@ -62,6 +63,11 @@ pub(crate) struct ClientInner {
     /// Whether the engines can accept and process new requests, maintained
     /// around the control calls this client sends.
     readiness: Arc<Readiness>,
+    // TODO: consider merging into `readiness`: both ask the engines whether
+    // they can serve (`is_inference_ready` versus a `check_health_generate`
+    // probe) and track the same control-call epochs.
+    /// Generation readiness probes, one in flight per engine at most.
+    health_probes: HealthProbes,
 }
 
 impl ClientInner {
@@ -104,6 +110,7 @@ impl ClientInner {
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
             readiness: Arc::new(Readiness::new()),
+            health_probes: HealthProbes::new(engines),
         }
     }
 
@@ -275,6 +282,15 @@ impl ClientInner {
         &self.readiness
     }
 
+    pub fn health_probes(&self) -> &HealthProbes {
+        &self.health_probes
+    }
+
+    /// The runtime this client's tasks run on.
+    pub fn runtime_handle(&self) -> &Handle {
+        &self.handle
+    }
+
     /// Call a typed utility method on every engine. See
     /// [`crate::EngineCoreClient::call_utility`].
     ///
@@ -290,16 +306,32 @@ impl ClientInner {
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
     {
+        self.call_utility_on(&self.engine_ids, method, args, recheck).await
+    }
+
+    /// [`Self::call_utility`] on the given engines only, returning one result
+    /// per engine in the given order.
+    pub async fn call_utility_on<T, A>(
+        self: &Arc<Self>,
+        engine_ids: &[EngineId],
+        method: &str,
+        args: A,
+        recheck: Option<RecheckGuard>,
+    ) -> Result<Vec<T>>
+    where
+        T: serde::de::DeserializeOwned,
+        A: serde::Serialize + std::fmt::Debug,
+    {
         trace!(
             method,
             client_index = self.client_index,
-            engine_count = self.engine_ids.len(),
+            engine_count = engine_ids.len(),
             "sending utility request"
         );
 
-        let mut call_ids = Vec::with_capacity(self.engine_ids.len());
-        let mut calls = Vec::with_capacity(self.engine_ids.len());
-        let prepared = self.engine_ids.iter().try_for_each(|engine_id| {
+        let mut call_ids = Vec::with_capacity(engine_ids.len());
+        let mut calls = Vec::with_capacity(engine_ids.len());
+        let prepared = engine_ids.iter().try_for_each(|engine_id| {
             let (call_id, rx) = self.allocate_and_register_utility_call()?;
             call_ids.push(call_id);
             let request = EngineCoreUtilityRequest::new(self.client_index, call_id, method, &args)?;

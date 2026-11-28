@@ -118,6 +118,33 @@ impl FromStr for CheckpointState {
     }
 }
 
+/// An engine's answer to the `check_health_generate` utility call, as
+/// Python's `EngineHealthState`, sent as its literal string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, DeserializeFromStr)]
+pub enum EngineHealthState {
+    /// The engine was idle and ran a forward probe.
+    Ok,
+    /// The engine had work, so its step loop proved it can run the model.
+    Busy,
+    /// The engine is sleeping or paused.
+    Sleeping,
+}
+
+impl FromStr for EngineHealthState {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "ok" => Ok(Self::Ok),
+            "busy" => Ok(Self::Busy),
+            "sleeping" => Ok(Self::Sleeping),
+            other => Err(format!(
+                "invalid engine health state `{other}`; expected one of: ok, busy, sleeping"
+            )),
+        }
+    }
+}
+
 /// Level of the `sleep` utility call, sent as Python's integer level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "u32", try_from = "u32")]

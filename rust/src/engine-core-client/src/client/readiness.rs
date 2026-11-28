@@ -117,6 +117,17 @@ impl Readiness {
         self.publish(&state);
     }
 
+    /// The epoch advanced whenever a control call ends: an engine answer to a
+    /// request sent at an older epoch may predate the call's effect.
+    pub fn epoch(&self) -> u64 {
+        self.state.lock().epoch
+    }
+
+    /// Whether a call that stops serving is in flight.
+    pub fn is_withdrawn(&self) -> bool {
+        self.state.lock().withdrawals > 0
+    }
+
     /// Record the engines' answer to an ask made at `epoch`, unless a control
     /// call ended since.
     fn answer(&self, epoch: u64, ready: bool) {

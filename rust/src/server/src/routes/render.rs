@@ -7,9 +7,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
-use axum::extract::State;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
@@ -20,6 +19,7 @@ use vllm_text::TextRequest;
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::error::{ApiError, chat_request_error, text_request_error};
 use crate::render::{RenderContext, RenderState};
+use crate::routes::health::HealthGenerateParams;
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, MmPayload, MultiModalFeatures,
     validate_request as validate_generate_request,
@@ -34,6 +34,7 @@ use crate::utils::{resolve_request_context, unix_timestamp};
 pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/health_generate", get(health_generate))
         .route("/ping", get(health).post(health))
         .route("/v1/models", get(list_models))
         .route(
@@ -50,6 +51,15 @@ pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
 
 async fn health() -> StatusCode {
     StatusCode::OK
+}
+
+/// A render server has no engine, so it is ready whenever it is up; the query
+/// is still validated as on the serve router.
+async fn health_generate(
+    params: Result<Query<HealthGenerateParams>, QueryRejection>,
+) -> Result<StatusCode, ApiError> {
+    params?.0.timeout()?;
+    Ok(StatusCode::OK)
 }
 
 /// Base cards carry `max_model_len` and `root` = model path; LoRA cards carry

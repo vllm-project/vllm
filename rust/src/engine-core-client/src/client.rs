@@ -28,12 +28,14 @@ use crate::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
+mod health;
 pub(crate) mod imp;
 mod output_channel;
 mod readiness;
 mod state;
 mod stream;
 
+pub use health::NotReady;
 pub use state::RequestObserver;
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
@@ -1023,6 +1025,16 @@ impl EngineCoreClient {
     /// Return the committed weight version agreed on by every connected engine.
     pub async fn get_weight_version(&self) -> Result<String> {
         self.call_utility_consensus("get_weight_version", ()).await
+    }
+
+    /// Check that every engine can run the model now, as Python's
+    /// `AsyncLLM.check_health_generate`, waiting at most `timeout` for their
+    /// answers: an idle engine runs a forward probe before it answers.
+    pub async fn check_health_generate(
+        &self,
+        timeout: Duration,
+    ) -> std::result::Result<(), NotReady> {
+        self.inner.health_probes().check(&self.inner, timeout).await
     }
 
     /// Return whether the engine is currently sleeping at any level.

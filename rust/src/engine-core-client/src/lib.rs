@@ -15,7 +15,7 @@ mod transport;
 
 pub use client::{
     AbortCause, CoordinatorMode, EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream,
-    EngineCoreStreamDelivery, EngineCoreStreamOutput, RequestObserver, TransportMode,
+    EngineCoreStreamDelivery, EngineCoreStreamOutput, NotReady, RequestObserver, TransportMode,
 };
 pub use error::{Error, Result};
 pub use transport::{ENGINE_CORE_DEAD_SENTINEL, EngineId};
