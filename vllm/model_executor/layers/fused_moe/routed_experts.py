@@ -1286,6 +1286,24 @@ class RoutedExperts(PluggableLayer):
                 fused_mapping = [
                     # (param_name, weight_name, expert_id, shard_id)
                     # expert_id doubles as the chunk index when splitting w13.
+                    # Input scales come first: their names extend the weight
+                    # names, and a fused tensor takes the first contiguous run
+                    # of matching entries.
+                    *(
+                        (
+                            f"{w13}input_scale",
+                            f"experts.{gate_up}_input_scale",
+                            chunk,
+                            shard_id,
+                        )
+                        for chunk, shard_id in enumerate(w13_shards)
+                    ),
+                    (
+                        f"{w2}input_scale",
+                        f"experts.{ckpt_down_proj_name}_input_scale",
+                        0,
+                        "w2",
+                    ),
                     *(
                         (f"{w13}weight", f"experts.{gate_up}", chunk, shard_id)
                         for chunk, shard_id in enumerate(w13_shards)
