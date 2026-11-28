@@ -463,6 +463,7 @@ th {
 | `Qwen3ForCausalLM` | Qwen3 | `Qwen/Qwen3-8B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3MoeForCausalLM` | Qwen3MoE | `Qwen/Qwen3-30B-A3B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
+| `Raon1MiniForCausalLM` | Raon-1-mini | `KRAFTON/Raon-1-mini-preview` | | |
 | `RicursiveForCausalLM` | Ripple | `ricursiveAI/Ripple-65B-Preview`, `ricursiveAI/Ripple-65B-Preview-NVFP4`, etc. | | ✅︎ |
 | `Rnj1ForCausalLM` | Rnj1 | `EssentialAI/rnj-1-instruct`, etc. | | |
 | `SolarForCausalLM` | Solar Pro | `upstage/solar-pro-preview-instruct`, etc. | ✅︎ | ✅︎ |

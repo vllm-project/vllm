@@ -97,9 +97,15 @@ class DFlashSpeculator(DraftModelSpeculator):
             and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and not self.context_kv_only
         ):
+            # Aux states can be wider than the target's hidden size (the draft
+            # then declares target_hidden_size); match what the draft's fc reads.
+            target_hidden_size = (
+                getattr(self.draft_model_config.hf_config, "target_hidden_size", None)
+                or vllm_config.model_config.get_hidden_size()
+            )
             self._aux_staging = torch.zeros(
                 self._num_graph_context_tokens(self.max_num_reqs),
-                len(aux_layers) * vllm_config.model_config.get_hidden_size(),
+                len(aux_layers) * target_hidden_size,
                 dtype=self.dtype,
                 device=device,
             )
