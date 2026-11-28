@@ -6,9 +6,10 @@ Architecture: Siglip2 vision tower + MLP projector + Phi3 language model.
 """
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import (
@@ -20,8 +21,10 @@ from transformers import (
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -43,16 +46,36 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .lfm2_siglip2 import Siglip2Model
 from .llava import LlavaMultiModalProjector
 from .utils import (
     AutoWeightsLoader,
+    StageMissingLayer,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .vision import (
+    get_fp8_padded_hidden_size,
+    get_vit_attn_backend,
+    is_vit_use_data_parallel,
+)
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.encoder_cudagraph_defs import (
+        EncoderCudaGraphCaptureInputs,
+        EncoderCudaGraphConfig,
+        EncoderCudaGraphReplayBuffers,
+        EncoderItemSpec,
+    )
 
 logger = init_logger(__name__)
 
@@ -199,13 +222,19 @@ class Phi4SiglipMultiModalProcessor(
 class Phi4SiglipImagePixelInputs(TensorSchema):
     """Dimensions:
     - bn: Batch size * number of images
-    - d: Max number of patches (padded across images in the batch)
+    - d: Max number of patches (padded per image or across images in the batch)
     - fd: Features per patch (patch_size * patch_size * channels)
     """
 
     type: Literal["pixel_values"] = "pixel_values"
-    pixel_values: Annotated[torch.Tensor, TensorShape("bn", "d", "fd")]
-    pixel_attention_mask: Annotated[torch.Tensor, TensorShape("bn", "d")]
+    pixel_values: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "d", "fd", dynamic_dims={"d"}),
+    ]
+    pixel_attention_mask: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "d", dynamic_dims={"d"}),
+    ]
     spatial_shapes: Annotated[torch.Tensor, TensorShape("bn", 2)]
 
 
@@ -219,7 +248,12 @@ class Phi4SiglipImagePixelInputs(TensorSchema):
     info=Phi4SiglipProcessingInfo,
     dummy_inputs=Phi4SiglipDummyInputsBuilder,
 )
-class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
+class Phi4ForCausalLMV(
+    nn.Module,
+    SupportsMultiModal,
+    SupportsEncoderCudaGraph,
+    SupportsPP,
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_tower.vision_tower.vision_model.head.": None,
@@ -275,6 +309,26 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
                 prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
+        head_dim = siglip2_config.hidden_size // siglip2_config.num_attention_heads
+        self._vision_tp_size = (
+            1 if is_vit_use_data_parallel() else get_tensor_model_parallel_world_size()
+        )
+        self._vision_fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            siglip2_config.num_attention_heads, head_dim
+        )
+        if (
+            not isinstance(self.vision_tower, StageMissingLayer)
+            and len(self.vision_tower.vision_model.encoder.layers) > 0
+        ):
+            self._vision_attn_backend = self.vision_tower.vision_model.encoder.layers[
+                0
+            ].self_attn.attn.attn_backend
+        else:
+            self._vision_attn_backend = get_vit_attn_backend(
+                head_size=head_dim,
+                dtype=torch.get_default_dtype(),
+            )
+
         # The Transformers modeling backend builds the text model from its config
         text_kwargs = config.to_dict()
         for key in ("model_type", "architectures", "auto_map", "vision_config"):
@@ -297,28 +351,62 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
             mm_token_ids=[_IMAGE_TOKEN_ID],
         )
 
-    def _packed_from_padded(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_attention_mask: torch.Tensor,
-        spatial_shapes: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Convert padded NaFlex tensors to packed format for Siglip2Model."""
-        valid_counts = pixel_attention_mask.sum(dim=1).to(torch.int32)
-        pixel_values_packed = pixel_values[pixel_attention_mask.bool()]
-        cu_seqlens = torch.zeros(
-            len(valid_counts) + 1,
-            dtype=torch.int32,
-            device=pixel_values.device,
-        )
-        cu_seqlens[1:] = valid_counts.cumsum(0)
-        max_seqlen = valid_counts.max()
+    @staticmethod
+    def _spatial_shapes_to_cpu(spatial_shapes: torch.Tensor) -> torch.Tensor:
         return (
-            pixel_values_packed,
-            spatial_shapes,
-            cu_seqlens,
-            max_seqlen,
+            spatial_shapes
+            if spatial_shapes.device.type == "cpu"
+            else spatial_shapes.cpu()
         )
+
+    @classmethod
+    def _spatial_shapes_and_lengths(
+        cls, spatial_shapes: torch.Tensor
+    ) -> tuple[torch.Tensor, list[int]]:
+        """Normalize CPU spatial_shapes and compute per-image patch counts."""
+        spatial_shapes_cpu = cls._spatial_shapes_to_cpu(spatial_shapes)
+        lengths_list = [int(h) * int(w) for h, w in spatial_shapes_cpu.tolist()]
+        return spatial_shapes_cpu, lengths_list
+
+    def _pack_pixel_values(
+        self,
+        pixel_values: torch.Tensor | list[torch.Tensor],
+        lengths_list: list[int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Pack NaFlex prefix patches without reading `pixel_attention_mask`."""
+        total_tokens = sum(lengths_list)
+        if total_tokens == 0:
+            patch_embedding = self.vision_tower.vision_model.embeddings.patch_embedding
+            return torch.empty(
+                (0, patch_embedding.input_size),
+                device=device,
+                dtype=patch_embedding.params_dtype,
+            )
+
+        if isinstance(pixel_values, torch.Tensor):
+            if pixel_values.device != device:
+                pixel_values = pixel_values.to(device=device, non_blocking=True)
+            if len(lengths_list) == 1:
+                return pixel_values[0, : lengths_list[0]]
+            if all(length == pixel_values.shape[1] for length in lengths_list):
+                return pixel_values.reshape(-1, pixel_values.shape[-1])
+            parts = [
+                pixel_values[i, :length]
+                for i, length in enumerate(lengths_list)
+                if length > 0
+            ]
+            return parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
+
+        parts = []
+        for pv, length in zip(pixel_values, lengths_list):
+            if length <= 0:
+                continue
+            chunk = pv[:length]
+            if chunk.device != device:
+                chunk = chunk.to(device=device, non_blocking=True)
+            parts.append(chunk)
+        return parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -336,35 +424,122 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
             spatial_shapes=spatial_shapes,
         )
 
-    def _process_image_input(
-        self, image_input: Phi4SiglipImagePixelInputs
-    ) -> MultiModalEmbeddings:
-        pixel_values = image_input["pixel_values"]
-        pixel_attention_mask = image_input["pixel_attention_mask"]
-        spatial_shapes = image_input["spatial_shapes"]
+    def _get_execution_device(
+        self,
+        pixel_values: torch.Tensor | list[torch.Tensor],
+    ) -> torch.device:
+        if isinstance(pixel_values, torch.Tensor):
+            pv_device: torch.device | None = pixel_values.device
+        elif pixel_values:
+            pv_device = pixel_values[0].device
+        else:
+            pv_device = None
+        if pv_device is not None and pv_device.type != "cpu":
+            return pv_device
+        for module in (self.vision_tower, self.multi_modal_projector):
+            for p in module.parameters():
+                if p.device.type != "cpu":
+                    return p.device
+        return pv_device if pv_device is not None else torch.device("cpu")
 
-        (
-            pixel_values_packed,
-            spatial_shapes_packed,
-            cu_seqlens,
-            max_seqlen,
-        ) = self._packed_from_padded(pixel_values, pixel_attention_mask, spatial_shapes)
+    def _prepare_vision_attn_metadata(
+        self,
+        seq_lens: Sequence[int],
+        *,
+        device: torch.device,
+        pad_to_num_seqs: int | None = None,
+    ) -> dict[str, torch.Tensor | None]:
+        """Prepare backend-specific attention metadata for packed sequences."""
+        cu_seqlens_np = np.cumsum([0, *seq_lens], dtype=np.int32)
+        if pad_to_num_seqs is not None and len(seq_lens) < pad_to_num_seqs:
+            cu_seqlens_np = np.concatenate(
+                [
+                    cu_seqlens_np,
+                    np.full(
+                        pad_to_num_seqs - len(seq_lens),
+                        cu_seqlens_np[-1],
+                        dtype=np.int32,
+                    ),
+                ]
+            )
 
+        attn_backend = self._vision_attn_backend
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            attn_backend, cu_seqlens_np, device
+        )
+        max_seqlen = torch.tensor(
+            MMEncoderAttention.compute_max_seqlen(attn_backend, cu_seqlens_np),
+            dtype=torch.int32,
+        )
+
+        if attn_backend == AttentionBackendEnum.TORCH_SDPA:
+            # `torch_sdpa_wrapper` calls `.tolist()` on `cu_seqlens`; keeping it
+            # on CPU avoids both H2D and D2H syncs on the eager SDPA path.
+            cu_seqlens = torch.from_numpy(cu_seqlens_np)
+        else:
+            cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                attn_backend,
+                cu_seqlens_np,
+                hidden_size=self.vision_tower.vision_model.config.hidden_size,
+                tp_size=self._vision_tp_size,
+                device=device,
+                fp8_padded_hidden_size=self._vision_fp8_padded_hidden_size,
+            )
+
+        return {
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max_seqlen,
+            "sequence_lengths": sequence_lengths,
+        }
+
+    def _encode_images(
+        self,
+        pixel_values: torch.Tensor | list[torch.Tensor],
+        spatial_shapes: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[int]]:
+        spatial_shapes_cpu, lengths_list = self._spatial_shapes_and_lengths(
+            spatial_shapes
+        )
+        device = self._get_execution_device(pixel_values)
+
+        pixel_values_packed = self._pack_pixel_values(
+            pixel_values, lengths_list, device
+        )
+        if pixel_values_packed.numel() == 0:
+            empty_out = torch.empty(
+                (0, int(self.config.hidden_size)),  # type: ignore[attr-defined]
+                device=device,
+                dtype=self.multi_modal_projector.linear_2.params_dtype,
+            )
+            return empty_out, lengths_list
+
+        attn_metadata = self._prepare_vision_attn_metadata(lengths_list, device=device)
+        cu_seqlens = attn_metadata["cu_seqlens"]
+        max_seqlen = attn_metadata["max_seqlen"]
+        assert cu_seqlens is not None and max_seqlen is not None
         vision_features = self.vision_tower(
             pixel_values_packed=pixel_values_packed,
-            spatial_shapes=spatial_shapes_packed,
+            spatial_shapes=spatial_shapes_cpu,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             select_layers=[-2],
+            sequence_lengths=attn_metadata["sequence_lengths"],
         )
 
         if vision_features.dim() == 3:
             vision_features = vision_features.squeeze(0)
 
         image_features = self.multi_modal_projector(vision_features)
+        return image_features, lengths_list
 
-        valid_counts = pixel_attention_mask.sum(dim=1).tolist()
-        return torch.split(image_features, [int(c) for c in valid_counts])
+    def _process_image_input(
+        self, image_input: Phi4SiglipImagePixelInputs
+    ) -> MultiModalEmbeddings:
+        image_features, lengths_list = self._encode_images(
+            image_input["pixel_values"],
+            image_input["spatial_shapes"],
+        )
+        return torch.split(image_features, lengths_list)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -372,6 +547,250 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
             return []
 
         return self._process_image_input(image_input)
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        out_hidden_size = int(self.config.hidden_size)  # type: ignore[attr-defined]
+        if isinstance(self.vision_tower, StageMissingLayer) or isinstance(
+            self.multi_modal_projector, StageMissingLayer
+        ):
+            return EncoderCudaGraphConfig(
+                modalities=[],
+                buffer_keys=[],
+                out_hidden_size=out_hidden_size,
+            )
+
+        vision_model = self.vision_tower.vision_model
+        attn_backend = self._vision_attn_backend
+        has_dynamic_fp8 = any(
+            bool(getattr(layer.self_attn.attn, "_fp8_dynamic_scale", False))
+            for layer in vision_model.encoder.layers
+        )
+        # Non-UVA CPU offloading leaves offloaded parameters on CPU outside
+        # forward and stages temporary H2D copies per call; check all parameters
+        # across both captured modules (including selective cpu_offload_params).
+        weights_on_accelerator = all(
+            p.device.type != "cpu"
+            for module in (self.vision_tower, self.multi_modal_projector)
+            for p in module.parameters()
+        )
+        # TORCH_SDPA splits sequences using host .tolist(); dynamic FP8 scales
+        # mutate host state and reduce amax across padded tail tokens.
+        graph_safe = (
+            weights_on_accelerator
+            and attn_backend != AttentionBackendEnum.TORCH_SDPA
+            and not has_dynamic_fp8
+        )
+        buffer_keys = [
+            "pixel_values_packed",
+            "pos_embeds",
+            "cu_seqlens",
+            "max_seqlen",
+        ]
+        if attn_backend == AttentionBackendEnum.FLASHINFER:
+            buffer_keys.append("sequence_lengths")
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            attn_backend, "cu_seqlens"
+        )
+        return EncoderCudaGraphConfig(
+            modalities=["image"] if graph_safe else [],
+            buffer_keys=buffer_keys,
+            padding_logics=padding_logics,
+            out_hidden_size=out_hidden_size,
+        )
+
+    def get_max_frames_per_video(self) -> int:
+        return 0
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        model_config = vllm_config.model_config
+        multimodal_config = model_config.multimodal_config
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            model_config.max_model_len,
+        )
+        mm_processor_kwargs = (
+            multimodal_config.mm_processor_kwargs
+            if multimodal_config is not None
+            else None
+        ) or {}
+        min_patches = mm_processor_kwargs.get(
+            "min_num_patches",
+            getattr(self.config, "min_num_patches", 256),
+        )
+        max_patches = mm_processor_kwargs.get(
+            "max_num_patches",
+            getattr(self.config, "max_num_patches", 3600),
+        )
+        assert isinstance(min_patches, (int, str))
+        min_patches_int = int(min_patches)
+        if isinstance(max_patches, (int, str)):
+            min_patches_int = min(min_patches_int, int(max_patches))
+        # Aspect-ratio grids with < min_num_patches tokens (e.g. 11x22=242)
+        # still round up into this first captured bucket via round_up_to.
+        min_budget = min(max(1, min_patches_int), max_budget)
+        return min_budget, max_budget
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list["EncoderItemSpec"]:
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        _, lengths_list = self._spatial_shapes_and_lengths(mm_kwargs["spatial_shapes"])
+        return [
+            EncoderItemSpec(input_size=num_patches, output_tokens=num_patches)
+            for num_patches in lengths_list
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        spatial_shapes_cpu = self._spatial_shapes_to_cpu(mm_kwargs["spatial_shapes"])
+
+        if not indices:
+            empty_pv: torch.Tensor | list[torch.Tensor] = (
+                [] if isinstance(pixel_values, list) else pixel_values[:0]
+            )
+            return {
+                "pixel_values": empty_pv,
+                "spatial_shapes": spatial_shapes_cpu[:0],
+            }
+
+        num_items = (
+            len(pixel_values)
+            if isinstance(pixel_values, list)
+            else pixel_values.shape[0]
+        )
+        if indices == list(range(num_items)):
+            return {
+                "pixel_values": pixel_values,
+                "spatial_shapes": spatial_shapes_cpu,
+            }
+
+        # Return per-image 2D views instead of stacking full padded rows;
+        # _pack_pixel_values slices each view's valid prefix in one cat.
+        return {
+            "pixel_values": [pixel_values[i] for i in indices],
+            "spatial_shapes": spatial_shapes_cpu[indices],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> "EncoderCudaGraphCaptureInputs":
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        del max_frames_per_batch, dtype, path, axis_keys
+        embeddings = self.vision_tower.vision_model.embeddings
+        patch_dim = embeddings.patch_embedding.input_size
+        patch_dtype = embeddings.patch_embedding.params_dtype
+        embed_dim = embeddings.embed_dim
+        pos_dtype = embeddings.position_embedding.weight.dtype
+
+        attn_metadata = self._prepare_vision_attn_metadata(
+            [token_budget],
+            device=device,
+            pad_to_num_seqs=max_batch_size,
+        )
+        values: dict[str, torch.Tensor] = {
+            "pixel_values_packed": torch.zeros(
+                (token_budget, patch_dim), device=device, dtype=patch_dtype
+            ),
+            "pos_embeds": torch.zeros(
+                (token_budget, embed_dim), device=device, dtype=pos_dtype
+            ),
+        }
+        for key, val in attn_metadata.items():
+            if val is not None:
+                values[key] = val
+        return EncoderCudaGraphCaptureInputs(values=values)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> "EncoderCudaGraphReplayBuffers":
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        del max_batch_size, max_frames_per_batch, path
+        spatial_shapes_cpu, lengths_list = self._spatial_shapes_and_lengths(
+            mm_kwargs["spatial_shapes"]
+        )
+        embeddings = self.vision_tower.vision_model.embeddings
+        device = self._get_execution_device(mm_kwargs["pixel_values"])
+
+        pixel_values_packed = self._pack_pixel_values(
+            mm_kwargs["pixel_values"], lengths_list, device
+        )
+        pos_embeds = embeddings.get_packed_pos_embeds(
+            spatial_shapes_cpu, lengths_list=lengths_list, device=device
+        )
+
+        attn_metadata = self._prepare_vision_attn_metadata(lengths_list, device=device)
+        # Keep the captured max_seqlen upper bound intact across replays.
+        attn_metadata.pop("max_seqlen", None)
+
+        values: dict[str, torch.Tensor | None] = {
+            "pixel_values_packed": pixel_values_packed,
+            "pos_embeds": pos_embeds,
+        }
+        for key, val in attn_metadata.items():
+            if val is not None:
+                values[key] = val
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        del path
+        vision_features = self.vision_tower(
+            pixel_values_packed=values["pixel_values_packed"],
+            spatial_shapes=None,
+            cu_seqlens=values["cu_seqlens"],
+            max_seqlen=values["max_seqlen"],
+            select_layers=[-2],
+            pos_embeds=values["pos_embeds"],
+            sequence_lengths=values.get("sequence_lengths"),
+        )
+        if vision_features.dim() == 3:
+            vision_features = vision_features.squeeze(0)
+        return self.multi_modal_projector(vision_features)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        del path
+        image_features, _ = self._encode_images(
+            mm_kwargs["pixel_values"],
+            mm_kwargs["spatial_shapes"],
+        )
+        return image_features
 
     def forward(
         self,

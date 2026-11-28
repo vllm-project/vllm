@@ -132,6 +132,24 @@ def _lfm3_vl_dummy_hf_overrides(hf_config):
     return hf_config
 
 
+def _phi4siglip_dummy_hf_overrides(hf_config):
+    """Shrink Phi4ForCausalLMV while keeping at least one vision encoder layer."""
+    # Phi4ForCausalLMV slices vision layers with layer_idx=-2 (leaving
+    # num_hidden_layers - 1 layers), so keep num_hidden_layers=2 in vision_config.
+    hf_config = dummy_hf_overrides(
+        hf_config,
+        model_arch="Phi4ForCausalLMV",
+    )
+    if hasattr(hf_config, "vision_config"):
+        hf_config.vision_config.update(
+            {
+                "num_layers": 2,
+                "num_hidden_layers": 2,
+            }
+        )
+    return hf_config
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "pixtral": VitCudagraphTestConfig(
         model="mistralai/Ministral-3-3B-Instruct-2512",
@@ -564,6 +582,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "hf_overrides": _lfm3_vl_dummy_hf_overrides,
             "enable_chunked_prefill": True,
             "gpu_memory_utilization": 0.80,
+        },
+        marks=[pytest.mark.core_model],
+    ),
+    "phi4siglip": VitCudagraphTestConfig(
+        model="microsoft/Phi-4-reasoning-vision-15B",
+        modalities=["image"],
+        image_prompt=(
+            "<|user|>\n<image>\nWhat is in this image?<|end|>\n<|assistant|>\n"
+        ),
+        max_model_len=8192,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [3600, 7200],
+            "encoder_cudagraph_max_vision_items_per_batch": 2,
+        },
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "revision": "refs/pr/8",
+            "load_format": "dummy",
+            "hf_overrides": _phi4siglip_dummy_hf_overrides,
         },
         marks=[pytest.mark.core_model],
     ),
@@ -1111,3 +1148,179 @@ def test_lfm3_vl_conv2d_gather_isolates_frames_and_tail_padding(dist_init):
         swapped_out = conv(padded_x, conv_indices=padded_idx)[:n_valid]
         torch.testing.assert_close(swapped_out, swapped_eager, rtol=1e-3, atol=1e-3)
         assert not torch.allclose(swapped_out, eager, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
+def test_phi4siglip_encoder_cudagraph(dist_init, tmp_path):
+    """Verify Phi4ForCausalLMV encoder graph replay, NaN isolation, and fallbacks."""
+    import json
+
+    import torch
+
+    from vllm.config import (
+        CompilationConfig,
+        ModelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed.parallel_state import graph_capture
+    from vllm.model_executor.models.phi4siglip import Phi4ForCausalLMV
+    from vllm.triton_utils import HAS_TRITON
+    from vllm.utils.flashinfer import has_flashinfer
+    from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+    cfg_dir = tmp_path / "phi4_tiny"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "phi3",
+                "architectures": ["Phi4ForCausalLMV"],
+                "vocab_size": 100352,
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "mm_hidden_size": 64,
+                "min_num_patches": 64,
+                "max_num_patches": 256,
+                "vision_config": {
+                    "model_type": "siglip2_vision_model",
+                    "hidden_size": 64,
+                    "intermediate_size": 128,
+                    "num_attention_heads": 4,
+                    "num_hidden_layers": 3,
+                    "patch_size": 16,
+                    "num_patches": 64,
+                },
+            }
+        )
+    )
+    device = torch.device(current_platform.device_type, 0)
+    dtype = torch.bfloat16
+
+    def build(attn_backend: str):
+        vllm_cfg = VllmConfig(
+            model_config=ModelConfig(
+                str(cfg_dir),
+                dtype="bfloat16",
+                max_model_len=1024,
+                skip_tokenizer_init=True,
+                mm_encoder_attn_backend=attn_backend,
+            ),
+            compilation_config=CompilationConfig(
+                cudagraph_mm_encoder=True,
+                encoder_cudagraph_token_budgets=[64, 160],
+                encoder_cudagraph_max_vision_items_per_batch=3,
+            ),
+        )
+        with set_current_vllm_config(vllm_cfg), set_default_torch_dtype(dtype):
+            m = Phi4ForCausalLMV(vllm_config=vllm_cfg).to(device).eval()
+        torch.manual_seed(0)
+        for name, param in m.named_parameters():
+            if "norm" in name and param.ndim == 1:
+                param.data.zero_() if "bias" in name else param.data.fill_(1.0)
+            else:
+                param.data.normal_(std=0.05)
+        return m, vllm_cfg
+
+    def make_img(hw: tuple[int, int], pad_len: int, seed: int):
+        valid = hw[0] * hw[1]
+        gen = torch.Generator(device=device).manual_seed(seed)
+        pv = torch.full((pad_len, 768), float("nan"), device=device, dtype=dtype)
+        pv[:valid] = torch.randn(
+            (valid, 768), generator=gen, device=device, dtype=dtype
+        )
+        mask = torch.zeros((pad_len,), device=device, dtype=torch.int32)
+        mask[:valid] = 1
+        return pv, mask, torch.tensor(hw, dtype=torch.int64)
+
+    with torch.inference_mode():
+        # Smallest first (48, 80 tokens) to exercise [1, 0] reorder & scatter-back.
+        pv0_64, mask0_64, shape0 = make_img((6, 8), 64, seed=11)
+        pv1_96, mask1_96, shape1 = make_img((8, 10), 96, seed=29)
+        pv0_96, mask0_96, _ = make_img((6, 8), 96, seed=11)
+        stacked_pv = torch.stack([pv0_96, pv1_96], dim=0)
+        stacked_mask = torch.stack([mask0_96, mask1_96], dim=0)
+        list_pv, list_mask = [pv0_64, pv1_96], [mask0_64, mask1_96]
+        spatial_2 = torch.stack([shape0, shape1], dim=0)
+
+        sdpa_m, _ = build("TORCH_SDPA")
+        assert sdpa_m.get_encoder_cudagraph_config().modalities == []
+        ref0 = sdpa_m.embed_multimodal(
+            pixel_values=pv0_64[:48].unsqueeze(0),
+            pixel_attention_mask=mask0_64[:48].unsqueeze(0),
+            spatial_shapes=shape0.unsqueeze(0),
+        )[0]
+        ref1 = sdpa_m.embed_multimodal(
+            pixel_values=pv1_96[:80].unsqueeze(0),
+            pixel_attention_mask=mask1_96[:80].unsqueeze(0),
+            spatial_shapes=shape1.unsqueeze(0),
+        )[0]
+        for actual, ref in zip(
+            sdpa_m.embed_multimodal(
+                pixel_values=list_pv,
+                pixel_attention_mask=list_mask,
+                spatial_shapes=spatial_2,
+            ),
+            (ref0, ref1),
+        ):
+            torch.testing.assert_close(actual, ref, rtol=0.016, atol=0.016)
+
+        supported = current_platform.get_supported_vit_attn_backends()
+        default_backend = current_platform.get_vit_attn_backend(
+            head_size=16, dtype=dtype
+        )
+        backends: list[str] = []
+        if default_backend != AttentionBackendEnum.TORCH_SDPA:
+            backends.append(default_backend.name)
+        elif HAS_TRITON and AttentionBackendEnum.TRITON_ATTN in supported:
+            backends.append(AttentionBackendEnum.TRITON_ATTN.name)
+        if (
+            current_platform.is_cuda()
+            and has_flashinfer()
+            and AttentionBackendEnum.FLASHINFER in supported
+            and AttentionBackendEnum.FLASHINFER.name not in backends
+        ):
+            backends.append(AttentionBackendEnum.FLASHINFER.name)
+
+        last_model = None
+        for backend in backends:
+            m, vllm_cfg = build(backend)
+            last_model = m
+            cg_cfg = m.get_encoder_cudagraph_config()
+            assert cg_cfg.modalities == ["image"]
+            if backend == "FLASHINFER":
+                assert "sequence_lengths" in cg_cfg.buffer_keys
+
+            mgr = EncoderCudaGraphManager(
+                vllm_config=vllm_cfg, device=device, dtype=dtype, model=m
+            )
+            with graph_capture(device=device):
+                mgr.capture(graph_pool=current_platform.graph_pool_handle())
+
+            for pv, mask in ((stacked_pv, stacked_mask), (list_pv, list_mask)):
+                eager_out = m.embed_multimodal(
+                    pixel_values=pv, pixel_attention_mask=mask, spatial_shapes=spatial_2
+                )
+                before = mgr.get_cumulative_stats()
+                cg_out = mgr.execute({"pixel_values": pv, "spatial_shapes": spatial_2})
+                after = mgr.get_cumulative_stats()
+                assert after["graph_hits"] - before["graph_hits"] == 2
+                assert after["graph_misses"] - before["graph_misses"] == 0
+                for out in (eager_out, cg_out):
+                    for actual, ref in zip(out, (ref0, ref1)):
+                        assert actual.device == device and torch.isfinite(actual).all()
+                        torch.testing.assert_close(actual, ref, rtol=0.016, atol=0.016)
+
+        if last_model is not None:
+            with gpu_sync_allowed():
+                last_model.multi_modal_projector.linear_1.to("cpu")
+            assert last_model.get_encoder_cudagraph_config().modalities == []

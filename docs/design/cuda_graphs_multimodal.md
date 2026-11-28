@@ -26,6 +26,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `Lfm3VlForConditionalGeneration` | `LFM3-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
 | `Mistral3ForConditionalGeneration` | `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
+| `Phi4ForCausalLMV` | `Phi-4-reasoning-vision` | ✅︎ | ❌︎ | ❌︎ |
 | `PixtralForConditionalGeneration` | `Pixtral`, Mistral-format `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
