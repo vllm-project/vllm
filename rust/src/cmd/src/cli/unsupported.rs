@@ -217,6 +217,14 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub io_processor_plugin: Option<Unsupported>,
 
+    /// Policy of the internal DP load balancer. "load" picks the engine with
+    /// the lowest load score. "prefix-affinity" sends requests that share a
+    /// prompt prefix to the engine that already caches it, while that engine's
+    /// load score is at most 1.25x the mean plus the API server count and its
+    /// KV cache usage is below 90%, falling back to "load" otherwise.
+    #[arg(long)]
+    pub data_parallel_lb_policy: Option<Unsupported>,
+
     /// Number of worker threads in the renderer thread pool. The pool is
     /// consumed by the async renderer path to parallelize tokenization, chat
     /// template rendering, and multimodal preprocessing across concurrent

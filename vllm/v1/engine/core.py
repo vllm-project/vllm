@@ -98,6 +98,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.dp_affinity import MAX_LEVELS, routing_keys
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -1428,6 +1429,12 @@ class EngineCoreProc(EngineCore):
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
             self.last_counts = (0, 0)
+            self.publish_prefix_keys = (
+                internal_dp_balancing
+                and vllm_config.parallel_config.data_parallel_lb_policy
+                == "prefix-affinity"
+            )
+            self.pending_prefix_keys: list[int] = []
 
             self.addresses = addresses
             self.process_input_queue_block = True
@@ -1867,14 +1874,41 @@ class EngineCoreProc(EngineCore):
         if not self.publish_dp_lb_stats:
             return
 
-        # Publish our request counts (if they've changed).
+        # Publish our request counts (if they've changed, or if there are new
+        # prefix keys to report).
         counts = self.scheduler.get_request_counts()
-        if counts != self.last_counts:
+        prefix_keys = self.pending_prefix_keys
+        if counts != self.last_counts or prefix_keys:
             self.last_counts = counts
+            self.pending_prefix_keys = []
             stats = SchedulerStats(
-                *counts, kv_cache_usage=self.scheduler.get_kv_cache_usage()
+                *counts,
+                kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                recent_prefix_keys=prefix_keys or None,
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
+
+    def add_request(self, request: Request, request_wave: int = 0):
+        super().add_request(request, request_wave)
+        tokens = request.prompt_token_ids
+        block_size = self.vllm_config.cache_config.block_size
+        if (
+            self.publish_prefix_keys
+            and not request.abort_immediately
+            and tokens
+            and len(tokens) >= block_size
+        ):
+            lora_request = request.lora_request
+            self.pending_prefix_keys.extend(
+                routing_keys(
+                    tokens,
+                    request.cache_salt,
+                    lora_request.lora_name if lora_request is not None else None,
+                    block_size,
+                    num_blocks=1,
+                    levels=MAX_LEVELS,
+                )
+            )
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -2806,16 +2840,20 @@ class DPEngineCoreProc(EngineCoreProc):
         if not self.publish_dp_lb_stats:
             return
 
-        # Publish our request counts (if they've changed), stamped with the
-        # lockstep-synchronized step counter and wave number.
+        # Publish our request counts (if they've changed, or if there are
+        # new prefix keys to report), stamped with the lockstep-synchronized
+        # step counter and wave number.
         counts = self.scheduler.get_request_counts()
-        if counts != self.last_counts:
+        prefix_keys = self.pending_prefix_keys
+        if counts != self.last_counts or prefix_keys:
             self.last_counts = counts
+            self.pending_prefix_keys = []
             stats = SchedulerStats(
                 *counts,
                 kv_cache_usage=self.scheduler.get_kv_cache_usage(),
                 step_counter=self.step_counter,
                 current_wave=self.current_wave,
+                recent_prefix_keys=prefix_keys or None,
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 

@@ -222,6 +222,7 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
     )
+    client.affinity_router = None
     return client
 
 
@@ -241,6 +242,223 @@ def test_dplb_weight_checksums_gather_every_engine():
         "dp1:tp0:w",
         "dp1:tp1:w",
     ]
+
+
+def _make_affinity_client(
+    num_engines: int = 2,
+    client_count: int = 1,
+    slack: float = 0.25,
+    kv_cap: float = 0.9,
+) -> DPLBAsyncMPClient:
+    from vllm.v1.engine.dp_affinity import PrefixAffinityRouter
+
+    client = _make_dplb_client(num_engines, client_count)
+    client.vllm_config.cache_config = SimpleNamespace(block_size=16)
+    client.affinity_router = PrefixAffinityRouter(
+        load_slack=slack, kv_cap=kv_cap, adaptive=False
+    )
+    return client
+
+
+def _conversation_request(conv: int, turn: int) -> EngineCoreRequest:
+    # Shared 4-block "system prompt", then a per-conversation block, then the
+    # turn's own tokens: turns of one conversation share a growing prefix.
+    tokens = [9] * 64 + [100 + conv] * 16 + [200 + turn] * 16 * turn
+    return make_request(SamplingParams(max_tokens=1), tokens)
+
+
+def test_dplb_affinity_adaptive_splits_shared_prefix():
+    """With a shared system prompt every conversation hashes to one engine at
+    the base key length; adaptive lengthening spreads conversations across
+    engines while keeping each conversation on one engine."""
+    from vllm.v1.engine.dp_affinity import PrefixAffinityRouter
+
+    fixed = _make_affinity_client(num_engines=4)
+    adaptive = _make_affinity_client(num_engines=4)
+    adaptive.affinity_router = PrefixAffinityRouter(load_slack=100.0, kv_cap=1.0)
+    assert fixed.affinity_router is not None
+    fixed.affinity_router.load_slack = 100.0
+
+    def route(client):
+        by_conv: dict[int, set] = {}
+        for turn in range(1, 5):
+            for conv in range(24):
+                client.engine_inflight.clear()
+                eng = client.get_core_engine_for_request(
+                    _conversation_request(conv, turn)
+                )
+                by_conv.setdefault(conv, set()).add(eng)
+        return by_conv
+
+    fixed_routes = route(fixed)
+    assert len({e for s in fixed_routes.values() for e in s}) == 1
+
+    adaptive_routes = route(adaptive)
+    engines_used = {e for s in adaptive_routes.values() for e in s}
+    assert len(engines_used) > 1
+    # Once the window is warm, later turns of a conversation stay together.
+    late = {
+        conv: adaptive.get_core_engine_for_request(_conversation_request(conv, 5))
+        for conv in range(24)
+    }
+    again = {
+        conv: adaptive.get_core_engine_for_request(_conversation_request(conv, 6))
+        for conv in range(24)
+    }
+    assert late == again
+
+
+def test_dplb_affinity_adaptive_keeps_base_key_when_spread():
+    """Distinct prefixes never exceed their fair share, so no lengthening."""
+    from vllm.v1.engine.dp_affinity import PrefixAffinityRouter
+
+    router = PrefixAffinityRouter(kv_cap=1.0)
+    reqs = [_prefix_request(p, 0) for p in range(40) for _ in range(2)]
+    for r in reqs:
+        router.candidates(r, 16, 2)
+    keys = router._keys(reqs[0], 16, 8)
+    assert router._select_level(keys, 2) == 0
+
+
+def test_dplb_affinity_observed_owner_overrides_hash():
+    """A coordinator-reported owner for the prompt's prefix key wins over the
+    hash-derived engine, so every API server follows where the prefix
+    actually landed (e.g. after a cap fallback on another client)."""
+    from vllm.v1.engine.dp_affinity import routing_keys
+
+    client = _make_affinity_client(num_engines=4)
+    req = _prefix_request(7, 0)
+    hashed = client.get_core_engine_for_request(req)
+    hashed_idx = client.core_engines.index(hashed)
+    owner_idx = (hashed_idx + 1) % 4
+
+    keys = routing_keys(req.prompt_token_ids, None, None, 16, 1, 2)
+    assert client.affinity_router is not None
+    client.affinity_router.observe_owners(owner_idx, keys)
+    client.engine_inflight.clear()
+    assert (
+        client.get_core_engine_for_request(_prefix_request(7, 1))
+        == client.core_engines[owner_idx]
+    )
+
+
+def test_dplb_affinity_kv_pressure_sheds():
+    """A preferred engine whose live KV usage is at the cap is skipped even
+    when its load score is fine; below the cap affinity holds."""
+    client = _make_affinity_client()
+    home = client.get_core_engine_for_request(_prefix_request(7, 0))
+    home_idx = client.core_engines.index(home)
+
+    client.lb_engines = [[0, 0, 0.0], [0, 0, 0.0]]
+    client.engine_inflight.clear()
+    client.lb_engines[home_idx] = [0, 0, 0.95]
+    assert client.get_core_engine_for_request(_prefix_request(7, 1)) != home
+
+    client.lb_engines = [[0, 0, 0.0], [0, 0, 0.0]]
+    client.engine_inflight.clear()
+    client.lb_engines[home_idx] = [0, 0, 0.6]
+    assert client.get_core_engine_for_request(_prefix_request(7, 2)) == home
+
+    # Every engine saturated: spilling gains nothing, so affinity is kept.
+    client.lb_engines = [[0, 0, 0.95], [0, 0, 0.95]]
+    client.engine_inflight.clear()
+    assert client.get_core_engine_for_request(_prefix_request(7, 3)) == home
+
+
+def _prefix_request(prefix: int, suffix: int) -> EngineCoreRequest:
+    # 32 shared prefix tokens (2 blocks of 16) followed by a distinct suffix.
+    tokens = [prefix] * 32 + [suffix] * 8
+    return make_request(SamplingParams(max_tokens=1), tokens)
+
+
+def test_dplb_affinity_same_prefix_same_engine():
+    client = _make_affinity_client()
+
+    # Below the bounded-load cap, consecutive same-prefix requests stay home
+    # even though the other engine is idle.
+    engines = {
+        client.get_core_engine_for_request(_prefix_request(7, s)) for s in range(3)
+    }
+
+    assert len(engines) == 1
+    assert client.engine_inflight[next(iter(engines))] == 3
+
+
+def test_dplb_affinity_survives_finished_burst_between_snapshots():
+    """Same-prefix requests that each finish before the next coordinator
+    snapshot stay on their engine: finished requests must not leave load
+    behind that trips the bounded-load check."""
+    client = _make_affinity_client(num_engines=2, client_count=4)
+    engines = set()
+    for s in range(8):
+        req = _prefix_request(7, s)
+        engines.add(client.get_core_engine_for_request(req))
+        asyncio.run(
+            DPLBAsyncMPClient.process_engine_outputs(
+                client, EngineCoreOutputs(finished_requests={req.request_id})
+            )
+        )
+    assert len(engines) == 1
+
+
+def test_dplb_affinity_switches_when_over_cap():
+    client = _make_affinity_client()
+    home = client.get_core_engine_for_request(_prefix_request(7, 0))
+    home_idx = client.core_engines.index(home)
+    other_idx = 1 - home_idx
+
+    # Home engine far above the bounded-load cap: affinity yields to load.
+    client.lb_engines = [[0, 0, 0.0], [0, 0, 0.0]]
+    client.lb_engines[home_idx] = [10, 10, 0.0]
+    chosen = client.get_core_engine_for_request(_prefix_request(7, 1))
+    assert chosen == client.core_engines[other_idx]
+
+
+def test_dplb_affinity_multi_client_consistent():
+    # Two API-server processes must agree without coordination.
+    a = _make_affinity_client(num_engines=4, client_count=2)
+    b = _make_affinity_client(num_engines=4, client_count=2)
+    b.eng_start_index = 2
+    for p in range(10):
+        assert a.get_core_engine_for_request(
+            _prefix_request(p, 0)
+        ) == b.get_core_engine_for_request(_prefix_request(p, 1))
+
+
+def test_dplb_affinity_observes_only_managed_engines():
+    """Coordinator prefix keys are indexed by global DP rank; a client that
+    manages ranks 2-3 maps them to its local engines and ignores the rest."""
+    client = _make_affinity_client(num_engines=2)
+    client.engine_ranks_managed = [2, 3]
+    client._observe_prefix_owners([None, 0, False])
+    client._observe_prefix_owners([None, 0, False, [[11], [], [22], [33]]])
+    assert client.affinity_router is not None
+    assert dict(client.affinity_router.prefix_owner) == {22: 0, 33: 1}
+
+
+def test_dplb_affinity_pinned_rank_precedence():
+    client = _make_affinity_client()
+    req = _prefix_request(7, 0)
+    req.data_parallel_rank = 1
+    assert client.get_core_engine_for_request(req) == client.core_engines[1]
+
+
+def test_dplb_affinity_sub_block_prompt_uses_load():
+    client = _make_affinity_client()
+    client.lb_engines = [[3, 3, 0.0], [0, 0, 0.0]]
+    short = make_request(SamplingParams(max_tokens=1), [5] * 8)
+    assert client.get_core_engine_for_request(short) == client.core_engines[1]
+
+
+def test_dplb_affinity_cache_salt_separates_prefixes():
+    from vllm.v1.engine.dp_affinity import PrefixAffinityRouter
+
+    router = PrefixAffinityRouter(adaptive=False)
+    plain = _prefix_request(7, 0)
+    salted = _prefix_request(7, 0)
+    salted.cache_salt = "tenant-b"
+    keys = {tuple(router.candidates(r, 16, 1 << 20)) for r in (plain, salted)}
+    assert len(keys) == 2
 
 
 def test_dplb_late_interaction_sticky_routing():

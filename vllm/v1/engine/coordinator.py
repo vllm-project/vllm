@@ -143,6 +143,8 @@ class EngineState:
     def __init__(self):
         # [waiting, running, kv_cache_usage]
         self.request_counts: list[int | float] = [0, 0, 0.0]
+        # Prefix-affinity routing keys admitted since the last publish.
+        self.new_prefix_keys: list[int] = []
 
 
 class DPCoordinatorProc:
@@ -284,7 +286,15 @@ class DPCoordinatorProc:
                         engine_req_counts_list = self._get_engine_counts()
                         stats_changed = False
 
-                    to_publish = (engine_req_counts_list, current_wave, engines_running)
+                    to_publish: tuple = (
+                        engine_req_counts_list,
+                        current_wave,
+                        engines_running,
+                    )
+                    # Keys only exist under prefix-affinity; otherwise keep the
+                    # 3-tuple that other front-ends (vllm-rs) decode.
+                    if (prefix_keys := self._take_prefix_keys()) is not None:
+                        to_publish += (prefix_keys,)
                     publish_front.send(msgspec.msgpack.encode(to_publish))
                     last_publish_time = int(time.time() * 1000)
                     continue
@@ -406,6 +416,10 @@ class DPCoordinatorProc:
                         stats[0] = scheduler_stats.num_waiting_reqs
                         stats[1] = scheduler_stats.num_running_reqs
                         stats[2] = scheduler_stats.kv_cache_usage
+                        if scheduler_stats.recent_prefix_keys:
+                            self.engines[eng_index].new_prefix_keys.extend(
+                                scheduler_stats.recent_prefix_keys
+                            )
                         stats_changed = True
 
                     # Wave coordination: handle wave completion and start notifications
@@ -456,6 +470,16 @@ class DPCoordinatorProc:
         """
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart((EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
+
+    def _take_prefix_keys(self) -> list[list[int]] | None:
+        """Per-engine prefix keys admitted since the last publish (None when
+        no engine reported any); resets the accumulators."""
+        if not any(e.new_prefix_keys for e in self.engines):
+            return None
+        keys = [e.new_prefix_keys for e in self.engines]
+        for e in self.engines:
+            e.new_prefix_keys = []
+        return keys
 
     def _get_engine_counts(self, do_copy=False) -> list[list[int | float]]:
         """Return list of [waiting, running] count lists for each engine."""
