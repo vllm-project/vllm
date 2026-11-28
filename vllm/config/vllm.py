@@ -121,6 +121,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiK3MTPModel",
         "KimiK31ForConditionalGeneration",
         "KimiLinearForCausalLM",
+        "MiniCPM5MoEForCausalLM",
+        "MiniCPM5MoeForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
         "MistralLarge4ForCausalLM",

@@ -77,6 +77,16 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
+    if (
+        model_arch
+        in (
+            "MiniCPM5MoEForCausalLM",
+            "MiniCPM5MoeForCausalLM",
+        )
+        and current_platform.is_rocm()
+    ):
+        pytest.skip("MiniCPM5 MoE does not yet support AMD/ROCm")
+
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None

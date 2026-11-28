@@ -13,14 +13,15 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -50,6 +51,10 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
     spec_decode_needs_target_embed,
+)
+from vllm.models.minicpm5_moe.nvidia.attention import (
+    apply_attention_gate,
+    apply_interleaved_rope,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -117,23 +122,13 @@ class MiniCPM5Attention(nn.Module):
         if self.gated:
             # HF reference: [token, head, 2 * head_dim], then split last axis.
             q, gate = q.reshape(-1, self.num_heads, 2 * self.head_dim).chunk(2, -1)
-            q = q.reshape(-1, self.q_size)
-            gate = gate.reshape(-1, self.q_size)
-        q, k = self.rotary_emb(positions, q, k)
+            q, k = apply_interleaved_rope(positions, q, k, self.rotary_emb)
+        else:
+            q, k = self.rotary_emb(positions, q, k)
         out = self.attn(q, k, v)
         if gate is not None:
-            out = out * gate.sigmoid()
+            out = apply_attention_gate(out, gate)
         return self.o_proj(out)[0]
-
-
-class MiniCPM5Gate(nn.Module):
-    def __init__(self, weight: nn.Parameter, correction_bias: nn.Parameter):
-        super().__init__()
-        self.weight = weight
-        self.e_score_correction_bias = correction_bias
-
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, None]:
-        return F.linear(hidden_states.float(), self.weight.float()), None
 
 
 class MiniCPM5DecoderLayer(nn.Module):
@@ -163,14 +158,16 @@ class MiniCPM5DecoderLayer(nn.Module):
                 quant_config=vllm_config.quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            if self.mlp.is_fused_shared_expert_enabled:
-                raise NotImplementedError(
-                    "MiniCPM5-15B-A2.5B does not support ROCm AITER shared "
-                    "expert fusion yet. Set "
-                    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to disable it."
-                )
-            gate = self.mlp.gate
-            self.mlp.gate = MiniCPM5Gate(gate.weight, gate.e_score_correction_bias)
+            correction_bias = self.mlp.gate.e_score_correction_bias
+            self.mlp.gate = GateLinear(
+                c.hidden_size,
+                c.n_routed_experts,
+                bias=False,
+                out_dtype=torch.float32,
+                params_dtype=torch.float32,
+                prefix=f"{prefix}.mlp.gate",
+            )
+            self.mlp.gate.e_score_correction_bias = correction_bias
             self.mlp.experts.gate = self.mlp.gate
         self.input_layernorm = RMSNorm(c.hidden_size, eps=c.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(c.hidden_size, eps=c.rms_norm_eps)
@@ -186,14 +183,6 @@ class MiniCPM5DecoderLayer(nn.Module):
         return self.mlp(hidden_states), residual
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": {0: "b"},
-        "positions": {0: "b"},
-        "intermediate_tensors": {0: "b"},
-        "inputs_embeds": {0: "b"},
-    },
-)
 class MiniCPM5Model(nn.Module, EagleModelMixin):
     supports_aux_hidden_states_over_pp = True
 
