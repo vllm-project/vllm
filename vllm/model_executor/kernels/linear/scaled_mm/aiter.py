@@ -200,8 +200,8 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_name, *_ = self.layer_param_names
-        w, *_ = self._get_layer_params(layer)
+        w_name, w_s_name, *_ = self.layer_param_names
+        w, w_s, *_ = self._get_layer_params(layer)
 
         replace_parameter(
             layer,
@@ -211,6 +211,14 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 requires_grad=False,
             ),
         )
+        if w_s.ndim == 1:
+            replace_parameter(
+                layer,
+                w_s_name,
+                torch.nn.Parameter(
+                    w_s.reshape(-1, 1).contiguous(), requires_grad=False
+                ),
+            )
 
     def apply_scaled_mm(
         self,
@@ -223,9 +231,10 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
+        output_shape[-1] = B.shape[0]
         return rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, out_dtype
-        )
+        ).view(*output_shape)
 
 
 class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -306,12 +315,11 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             torch.nn.Parameter(shuffled_w.t(), requires_grad=False),
         )
 
-        if w_s.ndim > 1:
-            replace_parameter(
-                layer,
-                w_s_name,
-                torch.nn.Parameter(w_s.t().contiguous(), requires_grad=False),
-            )
+        replace_parameter(
+            layer,
+            w_s_name,
+            torch.nn.Parameter(w_s.reshape(1, -1).contiguous(), requires_grad=False),
+        )
 
     def apply_scaled_mm(
         self,
@@ -372,14 +380,22 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_name, *_ = self.layer_param_names
-        w, *_ = self._get_layer_params(layer)
+        w_name, w_s_name, *_ = self.layer_param_names
+        w, w_s, *_ = self._get_layer_params(layer)
 
         replace_parameter(
             layer,
             w_name,
             torch.nn.Parameter(w.t(), requires_grad=False),
         )
+        if w_s.ndim == 1:
+            replace_parameter(
+                layer,
+                w_s_name,
+                torch.nn.Parameter(
+                    w_s.reshape(-1, 1).contiguous(), requires_grad=False
+                ),
+            )
 
     def apply_scaled_mm(
         self,
@@ -392,7 +408,10 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.w8a8_gemm(A, B, As, Bs, bias, out_dtype)
+        output_shape[-1] = B.shape[0]
+        return rocm_aiter_ops.w8a8_gemm(A, B, As, Bs, bias, out_dtype).view(
+            *output_shape
+        )
 
 
 class AiterTritonPerTensorFp8ScaledMMLinearKernel(ROCmFP8ScaledMMLinearKernel):
