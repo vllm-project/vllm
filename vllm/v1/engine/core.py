@@ -342,7 +342,8 @@ class EngineCore:
                 available_gpu_memory = self.model_executor.determine_available_memory()
                 self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
         else:
-            # Attention free models don't need memory for kv cache
+            # Still profile: torch.compile must first trace the full step budget.
+            self.model_executor.determine_available_memory()
             available_gpu_memory = [0] * len(layer_configs)
 
         assert len(layer_configs) == len(available_gpu_memory)
