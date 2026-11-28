@@ -864,12 +864,11 @@ class SamplingParams(
                     # optional space-prefixed form tokenizes to nothing.
                     continue
 
-                # If no space at the beginning
-                # or if prefix space produces a new word token
+                # Add the space-prefixed form unless it starts like the plain
+                # form, or is just a space token followed by the plain form.
                 if (not add_prefix_space) or (
-                    add_prefix_space
-                    and prompt_token_ids[0] != self._bad_words_token_ids[-1][0]
-                    and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
+                    prompt_token_ids[0] != self._bad_words_token_ids[-1][0]
+                    and prompt_token_ids[1:] != self._bad_words_token_ids[-1]
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
                     if len(self._bad_words_token_ids) > max_num_bad_words:

@@ -363,10 +363,9 @@ fn tokenize_bad_words(
         // Like Python, both encodings drop the word's leading whitespace.
         let bad_word = bad_word.trim_start();
 
-        // Without a leading space we always keep the encoding.
-        // With a leading space we only keep it when the prefix-space variant produces a
-        // distinct first token but the same sequence length — this mirrors the Python
-        // dedup condition that avoids redundant entries.
+        // Without a leading space we always keep the encoding. With a leading
+        // space we keep it unless it starts like the plain form, or is just a
+        // space token followed by the plain form, mirroring Python.
         let without_space = tokenizer.encode(bad_word, false)?;
         let with_space = tokenizer.encode(&format!(" {bad_word}"), false)?;
 
@@ -377,7 +376,7 @@ fn tokenize_bad_words(
         };
         let keep_with_space = !with_space.is_empty()
             && with_space[0] != first
-            && with_space.len() == without_space.len();
+            && with_space[1..] != without_space[..];
         for token_ids in std::iter::once(without_space).chain(keep_with_space.then_some(with_space))
         {
             all_token_ids.push(token_ids);
@@ -1661,7 +1660,10 @@ mod tests {
     fn lower_sampling_params_tokenizes_bad_words_like_python() {
         let tokenizer = TestTokenizer::new()
             .with_regular_token("blocked", 300)
-            .with_regular_token(" blocked", 301);
+            .with_regular_token(" blocked", 301)
+            .with_regular_token("found", 302)
+            .with_regular_token("ing", 303)
+            .with_regular_token(" founding", 304);
         let lower = |bad_words: Vec<String>| {
             lower_sampling_params(
                 SamplingParams {
@@ -1688,6 +1690,13 @@ mod tests {
         let cases = [
             // Leading whitespace is dropped before both encodings.
             (words(&[" blocked"]), Ok(Some(vec![vec![300], vec![301]]))),
+            // The spaced form is kept when its token count differs.
+            (
+                words(&["founding"]),
+                Ok(Some(vec![vec![302, 303], vec![304]])),
+            ),
+            // A space token followed by the plain form adds nothing.
+            (words(&["zz"]), Ok(Some(vec![vec![122, 122]]))),
             (
                 words(&["blocked", ""]),
                 Err("bad_words cannot contain an empty string."),
