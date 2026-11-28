@@ -54,6 +54,7 @@ pub struct SpecDecodeMetrics {
     pub num_accepted_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
     pub num_verified_tokens: Family<EngineLabels, U64Counter>,
     pub num_verified_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
+    pub num_draft_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
 }
 
 impl SpecDecodeMetrics {
@@ -100,6 +101,13 @@ impl SpecDecodeMetrics {
             num_verified_tokens_per_pos.clone(),
         );
 
+        let num_draft_tokens_per_pos = Family::default();
+        registry.register(
+            "vllm:spec_decode_num_draft_tokens_per_pos",
+            "Draft tokens per draft position.",
+            num_draft_tokens_per_pos.clone(),
+        );
+
         Self {
             num_drafts,
             num_draft_tokens,
@@ -107,6 +115,7 @@ impl SpecDecodeMetrics {
             num_accepted_tokens_per_pos,
             num_verified_tokens,
             num_verified_tokens_per_pos,
+            num_draft_tokens_per_pos,
         }
     }
 
@@ -119,6 +128,7 @@ impl SpecDecodeMetrics {
             num_accepted_tokens_per_pos: self.num_accepted_tokens_per_pos.clone(),
             num_verified_tokens: self.num_verified_tokens.get_or_create_owned(labels),
             num_verified_tokens_per_pos: self.num_verified_tokens_per_pos.clone(),
+            num_draft_tokens_per_pos: self.num_draft_tokens_per_pos.clone(),
         }
     }
 }
@@ -132,6 +142,7 @@ pub struct SpecDecodeHandles {
     num_accepted_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
     num_verified_tokens: U64Counter,
     num_verified_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
+    num_draft_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
 }
 
 impl SpecDecodeHandles {
@@ -163,6 +174,15 @@ impl SpecDecodeHandles {
                     position: position as u32,
                 })
                 .inc_by(verified_tokens);
+        }
+        for (position, draft_tokens) in stats.num_draft_tokens_per_pos.iter().copied().enumerate() {
+            self.num_draft_tokens_per_pos
+                .get_or_create(&EnginePositionLabels {
+                    model_name: labels.model_name.clone(),
+                    engine: labels.engine,
+                    position: position as u32,
+                })
+                .inc_by(draft_tokens);
         }
     }
 }

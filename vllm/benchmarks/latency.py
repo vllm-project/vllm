@@ -101,7 +101,9 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
         detokenize=not args.disable_detokenize,
     )
-    dummy_prompt_token_ids = np.random.randint(
+    # Seeded: the engine seeds only its own process, and unseeded prompts
+    # change between runs, and with them the spec decode acceptance.
+    dummy_prompt_token_ids = np.random.default_rng(args.seed).integers(
         10000, size=(args.batch_size, args.input_len)
     )
     dummy_prompts: list[TokensPrompt | TextPrompt] = [

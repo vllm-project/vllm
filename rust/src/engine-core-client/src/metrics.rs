@@ -136,7 +136,7 @@ impl SchedulerStatsRecorder {
         if let Some(spec_decoding_stats) = &stats.spec_decoding_stats {
             handles.spec_decode.record(spec_decoding_stats);
             handles.log_stats.observe_spec_decode(
-                spec_decoding_stats.num_drafts,
+                &spec_decoding_stats.num_draft_tokens_per_pos,
                 &spec_decoding_stats.num_accepted_tokens_per_pos,
             );
         }
