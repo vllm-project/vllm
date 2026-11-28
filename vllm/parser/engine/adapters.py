@@ -14,9 +14,16 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+from openai.types.responses import ToolChoiceFunction
+
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+)
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.structural_tag_markers import bind_marker_tokens
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 if TYPE_CHECKING:
     from vllm.entrypoints.generate.base.protocol import (
@@ -216,6 +223,28 @@ class ParserEngineToolAdapter(ToolParser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         return self._parser_engine.adjust_request(request)
+
+    def get_structural_tag(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        reasoning: bool = False,
+        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
+    ):
+        tag = super().get_structural_tag(
+            request, reasoning=reasoning, strict_level=strict_level
+        )
+        # Optional calls need the original grammar for free text.
+        if tag is None or (
+            request.tool_choice != "required"
+            and not isinstance(
+                request.tool_choice,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            )
+        ):
+            return tag
+        engine = self._parser_engine
+        return bind_marker_tokens(tag, engine.token_id_markers, engine.vocab)
 
     def extract_tool_calls(
         self,

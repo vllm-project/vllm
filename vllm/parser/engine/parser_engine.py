@@ -246,6 +246,16 @@ class ParserEngine(Parser):
     def vocab(self) -> dict[str, int]:
         return self.model_tokenizer.get_vocab()
 
+    @property
+    def token_id_markers(self) -> frozenset[str]:
+        """Markers the streaming engine matches by dedicated token ID."""
+        vocab = self.vocab
+        return frozenset(
+            text
+            for text in self.parser_engine_config.token_id_terminals.values()
+            if text in vocab
+        )
+
     # ── Engine lifecycle ──────────────────────────────────────────────
 
     @property
