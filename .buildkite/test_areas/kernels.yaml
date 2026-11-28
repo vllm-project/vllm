@@ -1334,6 +1334,9 @@ steps:
   - tests/kernels/quantization/test_rocm_mxfp4.py
   - tests/kernels/quantization/test_rocm_mxfp8_linear.py
   - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  - tests/kernels/quantization/test_rocm_fused_q_kv_rmsnorm_quant.py
+  - vllm/models/deepseek_v41/common/ops/query_quant.py
+  - vllm/models/common/ops/fused_qk_rmsnorm.py
   - tests/quantization/reference_mxfp4.py
   - tests/kernels/quant_utils.py
   - tests/kernels/utils.py
@@ -1341,6 +1344,7 @@ steps:
   - pytest -v -s kernels/quantization/test_rocm_mxfp4.py
   - pytest -v -s kernels/quantization/test_rocm_mxfp8_linear.py
   - pytest -v -s kernels/quantization/test_rocm_skinny_gemms.py -k wvsplitkrc
+  - pytest -v -s kernels/quantization/test_rocm_fused_q_kv_rmsnorm_quant.py
 
 - label: ":amd: (MI355 DPX) FP8 MoE Kernels"
   key: amd-fp8-moe-kernels-mi355
