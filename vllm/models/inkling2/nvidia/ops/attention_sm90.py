@@ -16,6 +16,7 @@ holds for every replay of a CUDA graph.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 # The query tile of tml_fa4 that shears the relative logits.
@@ -288,6 +289,17 @@ def rel_attention(
     if lse is None:
         lse = out
     block_m = _block_m(max_query_len, group)
+    # A 64-row tile uses less shared memory for Inkling 2 Mini's long prefills.
+    if (
+        mode == MODE_OUT_LSE
+        and not draft
+        and max_query_len >= 512
+        and num_heads == 24
+        and num_kv_heads == 8
+        and head_dim == 128
+        and current_platform.is_device_capability(90, device_id=q.get_device())
+    ):
+        block_m = 64
     tokens_per_tile = block_m // group
     num_reqs = cache_seqlens.shape[0]
     grid = (

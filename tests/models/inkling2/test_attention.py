@@ -25,6 +25,7 @@ REL_EXTENT = 1024
 SCENARIOS = {
     "prefill": [(1500, 1500), (37, 37), (300, 300)],
     "chunked_prefill": [(200, 1700), (64, 64), (513, 2100)],
+    "long_chunk": [(511, 2049), (512, 2432), (37, 37)],
     "decode": [(1, 1), (1, 900), (1, 3000), (1, 1025)],
 }
 
@@ -178,6 +179,8 @@ def test_portable_attention_dequantizes_kv_before_mma(
     [
         (24, 8, 16, None, "prefill"),
         (24, 8, 128, REL_EXTENT - 1, "chunked_prefill"),
+        (24, 8, 16, None, "long_chunk"),
+        (24, 8, 16, REL_EXTENT - 1, "long_chunk"),
         (12, 2, 16, None, "prefill"),
         (48, 8, 16, None, "prefill"),
         (12, 2, 128, REL_EXTENT - 1, "prefill"),
