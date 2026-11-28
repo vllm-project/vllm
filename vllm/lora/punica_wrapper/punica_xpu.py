@@ -128,6 +128,9 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
+    def _prepare_logits_indices(self, indices: torch.Tensor) -> None:
+        self.prompt_mapping_meta.prepare_tensors(indices)
+
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
@@ -374,7 +377,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             ".add_lora_linear() instead of being passed in."
         )
         buffer = torch.zeros((x.size(0), r), dtype=x.dtype, device=x.device)
-        sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+        if self._logits_row_indices is not None:
+            sampler_indices = self._logits_row_indices
+        else:
+            sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
         bgmv_shrink(x, lora_a_stacked, buffer, sampler_indices, scale)
         bgmv_expand(buffer, lora_b_stacked, y, sampler_indices, add_inputs=True)
         y = y.view_as(y_org)

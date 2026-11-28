@@ -7,6 +7,8 @@ https://arxiv.org/abs/2310.18547
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch
@@ -159,6 +161,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
+        # Prompt-logprob slices are not the sampler rows. While this is set,
+        # lm_head LoRA uses these ids and the subclass refreshes its metadata.
+        self._logits_row_indices: torch.Tensor | None = None
 
     def _update_base_metadata(
         self,
@@ -190,6 +195,32 @@ class PunicaWrapperBase(PunicaWrapperABC):
         )
 
         self.indices_len[:] = indices_len
+
+    def _prepare_logits_indices(self, indices: torch.Tensor) -> None:
+        """Point lm_head LoRA kernel metadata at exactly these rows."""
+
+    @contextmanager
+    def logits_indices_for_rows(self, row_indices: torch.Tensor) -> Iterator[None]:
+        """Apply lm_head LoRA to `row_indices`, one slot id per row.
+
+        A negative id is the base model. Restores the sampler-row metadata
+        when the context exits so a later sampled-token logits call still
+        sees the sampler mapping.
+
+        Args:
+            row_indices: LoRA slot ids for the hidden-state rows about to be
+                projected. Length is the row count of that projection.
+
+        """
+        previous = self._logits_row_indices
+        self._logits_row_indices = row_indices
+        self._prepare_logits_indices(row_indices)
+        try:
+            yield
+        finally:
+            self._logits_row_indices = previous
+            restore = previous if previous is not None else self.sampler_indices
+            self._prepare_logits_indices(restore)
 
     def _update_prefill_metadata(self, token_lora_tensor: torch.Tensor) -> None:
         (

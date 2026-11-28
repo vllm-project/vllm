@@ -178,7 +178,7 @@ def get_prompt_logprobs_token_ids(
 def compute_prompt_logprobs_with_chunking(
     prompt_token_ids: torch.Tensor,
     prompt_hidden_states: torch.Tensor,
-    logits_fn: Callable[[torch.Tensor], torch.Tensor],
+    logits_fn: Callable[[torch.Tensor, int], torch.Tensor],
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -192,7 +192,7 @@ def compute_prompt_logprobs_with_chunking(
     for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
         end_idx = start_idx + CHUNK_SIZE
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx], start_idx)
         requested_num = (
             prompt_logits.shape[-1]
             if num_prompt_logprobs == -1
@@ -256,7 +256,7 @@ class CPUPromptLogprobsWorker:
 
     def compute_prompt_token_id_logprobs(
         self,
-        logits_fn: Callable[[torch.Tensor], torch.Tensor],
+        logits_fn: Callable[[torch.Tensor, int], torch.Tensor],
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         prompt_lens: np.ndarray,
@@ -294,7 +294,7 @@ class CPUPromptLogprobsWorker:
             base = int(input_batch.query_start_loc_np[i]) - chunk_start
             for a in range(lo, hi, CHUNK_SIZE):
                 b = min(a + CHUNK_SIZE, hi)
-                logits = logits_fn(hidden_states[base + a : base + b])
+                logits = logits_fn(hidden_states[base + a : base + b], base + a)
                 ids = req.token_ids[a - start : b - start]
                 req.scores[a - start : b - start] = (
                     logits.gather(-1, ids)
@@ -309,7 +309,7 @@ class CPUPromptLogprobsWorker:
 
     def compute_prompt_logprobs(
         self,
-        logits_fn: Callable[[torch.Tensor], torch.Tensor],
+        logits_fn: Callable[[torch.Tensor, int], torch.Tensor],
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         all_token_ids: torch.Tensor,

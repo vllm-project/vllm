@@ -17,6 +17,7 @@ from vllm.config.compilation import CompilationMode
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers.logits_processor import prompt_row_logits_fn
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -1206,7 +1207,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
 
         assert self.prompt_logprobs_worker is not None
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
-            self.model.compute_logits,
+            prompt_row_logits_fn(self.model),
             hidden_states,
             input_batch,
             self.req_states.all_token_ids,
@@ -1215,7 +1216,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         )
         prompt_token_id_logprobs_dict = (
             self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
-                self.model.compute_logits,
+                prompt_row_logits_fn(self.model),
                 hidden_states,
                 input_batch,
                 self.req_states.prompt_len_np,

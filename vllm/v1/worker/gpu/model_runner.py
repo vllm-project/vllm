@@ -53,6 +53,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers.logits_processor import prompt_row_logits_fn
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -2342,7 +2343,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert self.prompt_logprobs_worker is not None
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
-            self.model.compute_logits,
+            prompt_row_logits_fn(self.model),
             hidden_states,
             input_batch,
             self.req_states.all_token_ids.gpu,
@@ -2351,7 +2352,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         prompt_token_id_logprobs_dict = (
             self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
-                self.model.compute_logits,
+                prompt_row_logits_fn(self.model),
                 hidden_states,
                 input_batch,
                 self.req_states.prompt_len.np,
