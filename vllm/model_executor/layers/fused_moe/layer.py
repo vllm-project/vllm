@@ -356,6 +356,7 @@ def FusedMoEFactory(
             hash_indices_table=hash_indices_table,
             bias_vl=bias_vl,
             image_sentinel_lo=image_sentinel_lo,
+            gate=gate,
         )
 
     if params_dtype is None:
