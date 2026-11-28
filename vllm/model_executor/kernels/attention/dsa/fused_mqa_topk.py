@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-launch fused FP8 MQA-logits + top-k prefill selection (SM100 family)"""
+"""Single-launch fused FP8 MQA-logits + top-k prefill selection: the native op
+(SM100 family) or, with VLLM_FUSED_MQA_TOPK_BACKEND=flashtopk, FlashTopK
+(flashtopk/) for the calls it takes."""
 
 import functools
 
@@ -8,6 +10,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.attention.dsa.flashtopk import (
+    flashtopk_available,
+    flashtopk_chunk,
+    flashtopk_mqa_topk_prefill,
+    flashtopk_takes,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -83,23 +91,27 @@ def use_fused_mqa_topk(
         and not candidate_selection
         and tuple(query_shape) == (FUSED_MQA_TOPK_HEADS, FUSED_MQA_TOPK_HEAD_DIM)
         and topk in FUSED_MQA_TOPK_TOPKS
-        and fused_mqa_topk_available()
+        and (fused_mqa_topk_available() or flashtopk_available())
     )
 
 
 def fused_mqa_topk_chunk(
     max_seqlen_k: int, keys: int, topk: int, rows: int, dense_rows: int
 ) -> bool:
-    """Whether a prefill chunk of a fused_mqa_topk-eligible layer takes the
-    fused_mqa_topk kernel: its longest row sees at least fused_mqa_topk_min_keys
-    keys (the dense path is as fast below), its gathered keys fit the kernel,
-    and its rows keep the SMs busy.
+    """Whether a prefill chunk of a fused_mqa_topk-eligible layer takes a fused
+    kernel: FlashTopK when `flashtopk_chunk` accepts it, else the native SM100
+    op when its longest row sees at least `fused_mqa_topk_min_keys` keys, its
+    gathered keys fit the kernel, and its rows keep the SMs busy.
 
-    Each SM scans every key of one 8-row block at a time, so the blocks run in
+    On the native op, each SM scans every key of one 8-row block at a time in
     waves of one per SM. A last wave that fills less than half the SMs costs a
     whole wave and makes the kernel slower than dense, unless dense needs more
-    than one logits call (rows > dense_rows, its rows per call).
+    than one logits call (`rows > dense_rows`, its rows per call).
     """
+    if flashtopk_chunk(max_seqlen_k, keys, rows):
+        return True
+    if not fused_mqa_topk_available():
+        return False
     sms = _sm_count(torch.accelerator.current_device_index())
     last_wave = (-(-rows // _BLOCK_ROWS) - 1) % sms + 1  # blocks, 1..sms
     return (
@@ -140,7 +152,10 @@ def fused_mqa_topk_key_scales(scales: torch.Tensor) -> torch.Tensor:
 
     scales: [keys, 4] uint8. SM100 caches store each power-of-two scale as four
     equal UE8M0 bytes; the fp32 value 2**(e - 127) has bit pattern `e << 23`.
+    Other caches (SM90) store the fp32 scale itself.
     """
+    if not current_platform.is_device_capability_family(100):
+        return scales.view(torch.float32).squeeze(-1)
     exponents = scales.view(torch.int32).squeeze(-1) & 0xFF
     return (exponents << 23).view(torch.float32)
 
@@ -153,20 +168,28 @@ def fused_mqa_topk_prefill(
     starts: torch.Tensor,
     ends: torch.Tensor,
     output: torch.Tensor,
+    *,
+    max_seqlen_k: int | None = None,
 ) -> None:
     """Fused replacement of `fp8_fp4_mqa_logits` + `top_k_per_row_prefill`.
 
-    q: [rows, 32, 128] fp8 e4m3; k: [keys, 128] fp8 e4m3 (keys <=
-    FUSED_MQA_TOPK_MAX_KEYS); scales: [keys] fp32; weights: [rows, 32] fp32;
-    starts/ends: [rows] int32, the visible key range `[start, end)` of each
-    row; output: [rows, k] int32 with k (the top-k) 512, 1024 or 2048. All
-    contiguous; q, k, scales, weights and output 16-byte aligned (the op checks
-    the contract).
+    q: `[rows, 32, 128]` fp8 e4m3; k: `[keys, 128]` fp8 e4m3 (`keys <=
+    FUSED_MQA_TOPK_MAX_KEYS`); scales: `[keys]` fp32; weights: `[rows, 32]`
+    fp32; starts/ends: `[rows]` int32, the visible key range `[start, end)` of
+    each row; output: `[rows, k]` int32 with k (the top-k) 512, 1024 or 2048.
+    All contiguous; q, k, scales, weights and output 16-byte aligned.
 
     Writes the same convention as `ops.top_k_per_row_prefill`: indices
     relative to the row's `start` (i.e. `key - start`), unordered, `-1`
     padded when fewer than k keys are visible.
     """
+    if flashtopk_takes(q.device, q.shape[0], k.shape[0], max_seqlen_k):
+        logger.info_once(
+            "Using the FlashTopK fused MQA+top-k prefill backend (top-k %d).",
+            output.shape[1],
+        )
+        flashtopk_mqa_topk_prefill(q, k, scales, weights, starts, ends, output)
+        return
     logger.info_once(
         "Using the single-launch fused MQA+top-k prefill kernel "
         "(FP8, 32 heads, top-k %d).",

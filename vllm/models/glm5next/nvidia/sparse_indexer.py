@@ -13,6 +13,10 @@ from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.kernels.attention.dsa.flashtopk import (
+    FLASHTOPK_WARMUP,
+    reserve_flashtopk,
+)
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
@@ -158,9 +162,10 @@ def sparse_attn_indexer_kpool(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
+    fused_topk = topk_tokens // max(index_kpool, 1)
     fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
-        topk=topk_tokens // max(index_kpool, 1),
+        topk=fused_topk,
         fp4_cache=use_fp4_cache,
         full_context=dcp_world_size == 1,
     )
@@ -180,6 +185,9 @@ def sparse_attn_indexer_kpool(
         # for (freed again, they overlap the dense logits below).
         if fused_mqa_topk:
             get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
+            reserve_flashtopk(
+                q_quant.device, q_quant.shape[0], total_seq_lens, fused_topk
+            )
 
         # Reserve profiler-visible memory for the worst-case decode logits,
         # whose shape is [B * next_n, max_pool_len]. This profiling branch
@@ -439,6 +447,7 @@ def sparse_attn_indexer_kpool(
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_dst,
+                    max_seqlen_k=chunk.max_seqlen_k,
                 )
                 logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
             else:
@@ -853,6 +862,9 @@ class SparseAttnIndexerKpool(CustomOp):
             if _cfg is not None
             else torch.float32
         )
+        if _cfg is not None and _cfg.kernel_config.enable_jit_warmup:
+            # Compiles the FlashTopK calls the profiling run reserves.
+            FLASHTOPK_WARMUP.register_warmup()
         _parallel = _cfg.parallel_config if _cfg is not None else None
         self._parallel_config = _parallel
         self.dcp_world_size = 1

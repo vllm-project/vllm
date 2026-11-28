@@ -33,6 +33,10 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.kernels.attention.dsa.flashtopk import (
+    FLASHTOPK_WARMUP,
+    reserve_flashtopk,
+)
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
@@ -705,6 +709,9 @@ def sparse_attn_indexer(
             # Allocate the largest fused_mqa_topk workspaces so they are
             # accounted for (freed again, they overlap the dense logits below).
             get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
+            reserve_flashtopk(
+                q_quant.device, q_quant.shape[0], total_seq_lens, topk_tokens
+            )
 
         # Decode rows per step: each decode is padded to 1 + speculative tokens.
         # The profiling run sets the vLLM config; other dummy runs may not.
@@ -975,6 +982,7 @@ def sparse_attn_indexer(
                     cu_seqlen_ks,
                     cu_seqlen_ke,
                     topk_indices,
+                    max_seqlen_k=chunk.max_seqlen_k,
                 )
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
             else:
@@ -1478,6 +1486,8 @@ class SparseAttnIndexer(CustomOp):
                 pad_value=0 if use_fp4_cache else -float("inf"),
             )
             _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
+            # Compiles the FlashTopK calls the profiling run reserves.
+            FLASHTOPK_WARMUP.register_warmup()
 
             if self.dcp_world_size > 1 and current_platform.is_cuda() and has_cutedsl():
                 from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (  # noqa: E501

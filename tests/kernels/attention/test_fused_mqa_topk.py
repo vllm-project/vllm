@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-launch fused MQA-logits + top-k prefill vs the dense indexer path."""
+"""Single-launch fused MQA-logits + top-k prefill vs the dense indexer path.
+
+Runs on the backend VLLM_FUSED_MQA_TOPK_BACKEND selects: native, or flashtopk
+(FlashTopK from FLASHTOPK_MIN_KEYS keys and the native op below on SM100,
+FlashTopK throughout on SM90). Tests of the native op's internals run on the
+native backend only.
+"""
 
 from types import SimpleNamespace
 
@@ -8,14 +14,27 @@ import pytest
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.kernels.attention.dsa.fused_mqa_topk as fused_module
 from vllm import _custom_ops as ops
+from vllm.model_executor.kernels.attention.dsa import flashtopk as flashtopk_module
+from vllm.model_executor.kernels.attention.dsa.flashtopk import (
+    FLASHTOPK_MIN_KEYS,
+    FLASHTOPK_WARMUP,
+    FlashTopkWarmup,
+    flashtopk_available,
+    flashtopk_chunk,
+    import_flashtopk,
+    reserve_flashtopk,
+)
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_available,
+    fused_mqa_topk_chunk,
     fused_mqa_topk_min_keys,
     fused_mqa_topk_prefill,
     get_fused_mqa_topk_workspaces,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     mqa_logits_mx_inputs,
@@ -28,8 +47,18 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 
 requires_fused_mqa_topk = pytest.mark.skipif(
-    not torch.cuda.is_available() or not fused_mqa_topk_available(),
-    reason="Requires the SM100 fused MQA+top-k extension",
+    not torch.cuda.is_available()
+    or not (fused_mqa_topk_available() or flashtopk_available()),
+    reason="Requires the fused MQA+top-k backend (native: SM100 extension; "
+    "flashtopk: FlashTopK on SM90/SM100)",
+)
+requires_native = pytest.mark.skipif(
+    envs.VLLM_FUSED_MQA_TOPK_BACKEND != "native",
+    reason="Tests the native fused_mqa_topk op's internals",
+)
+requires_flashtopk = pytest.mark.skipif(
+    envs.VLLM_FUSED_MQA_TOPK_BACKEND != "flashtopk",
+    reason="Tests the flashtopk backend's adapter",
 )
 
 TOPKS = (512, 1024, 2048)
@@ -110,8 +139,15 @@ def _check(rel, q, k, scales, weights, starts, ends, scores=True):
         chosen = logits.gather(1, idx[i:j].clamp(min=0)).masked_fill(
             ~valid[i:j], -torch.inf
         )
+        # SM90 FP8 WGMMA uses a 13-bit internal accumulator, so FP8 MQA logits
+        # differ from exact fp32 by up to ~0.5%.
+        rtol, atol = (
+            (1e-2, 1e-2)
+            if current_platform.is_device_capability_family(90)
+            else (2e-4, 1e-4)
+        )
         torch.testing.assert_close(
-            chosen.sort(descending=True).values, ref, rtol=2e-4, atol=1e-4
+            chosen.sort(descending=True).values, ref, rtol=rtol, atol=atol
         )
 
 
@@ -219,11 +255,11 @@ def test_multi_request_chunk_matches_dense(lens, topk):
 
 
 @requires_fused_mqa_topk
+@pytest.mark.parametrize("keys", [65536, FLASHTOPK_MIN_KEYS])
 @pytest.mark.parametrize("rows", [32768, 32770])
-def test_large_chunk_single_call(rows):
+def test_large_chunk_single_call(rows, keys):
     """Prefill chunks above 16384 rows (e.g. --max-num-batched-tokens 32768)
-    run in one launch."""
-    keys = 65536
+    run in one launch (FlashTopK: in slices that share the scratch)."""
     q, k, scales, weights = _inputs(rows, keys, seed=921)
     starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
     ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
@@ -275,6 +311,7 @@ def test_rescan_scores_only_its_block():
 
 
 @requires_fused_mqa_topk
+@requires_native
 def test_gate_with_common_score_offset():
     """Regression test: scores sharing a large common offset with a narrow top
     tail (top ranks within ~1 of each other at ~+68) must still get a tight gate.
@@ -306,8 +343,9 @@ def test_gate_with_common_score_offset():
 
 
 @requires_fused_mqa_topk
-def test_cuda_graph_replay():
-    rows, keys = 64, 65536
+@pytest.mark.parametrize("keys", [65536, FLASHTOPK_MIN_KEYS])
+def test_cuda_graph_replay(keys):
+    rows = 592
     q, k, scales, weights = _inputs(rows, keys)
     starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
     ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
@@ -328,6 +366,7 @@ def test_cuda_graph_replay():
 
 
 @requires_fused_mqa_topk
+@requires_native
 def test_op_rejects_bad_inputs():
     """The launcher does not re-check; the op enforces its contract."""
     q, k, scales, weights = _inputs(16, 4096)
@@ -339,6 +378,73 @@ def test_op_rejects_bad_inputs():
     wide = torch.empty(16, 2 * TOPK, device="cuda", dtype=torch.int32)
     with pytest.raises(RuntimeError, match="must be contiguous"):
         fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, wide[:, :TOPK])
+
+
+@requires_fused_mqa_topk
+@requires_flashtopk
+def test_flashtopk_gate_and_routing(monkeypatch):
+    """FlashTopK's gate requires >=128K keys and enough query rows for key
+    pruning to fill the SMs: 1-row / short-key chunks are rejected by
+    flashtopk_chunk (staying dense on SM90 and falling back to native on SM100),
+    and small-row direct calls skip 1-CTA pruning."""
+    device = torch.device("cuda", torch.accelerator.current_device_index())
+    planner = import_flashtopk().planner
+    assert planner.adaptive_threshold(device.index, 1, FLASHTOPK_MIN_KEYS) == 0.0
+    assert planner.adaptive_threshold(device.index, 592, FLASHTOPK_MIN_KEYS) > 0.0
+
+    assert not flashtopk_chunk(FLASHTOPK_MIN_KEYS - 1, FLASHTOPK_MIN_KEYS - 1, 592)
+    assert not flashtopk_chunk(FLASHTOPK_MIN_KEYS, FLASHTOPK_MIN_KEYS, 1)
+    assert flashtopk_chunk(FLASHTOPK_MIN_KEYS, FLASHTOPK_MIN_KEYS, 592)
+    native = fused_mqa_topk_available()
+    if not native:
+        assert not fused_mqa_topk_chunk(
+            FLASHTOPK_MIN_KEYS, FLASHTOPK_MIN_KEYS, 2048, 1, dense_rows=1024
+        )
+        assert fused_mqa_topk_chunk(
+            FLASHTOPK_MIN_KEYS, FLASHTOPK_MIN_KEYS, 2048, 592, dense_rows=1024
+        )
+
+    taken: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        fused_module,
+        "flashtopk_mqa_topk_prefill",
+        lambda q, k, *args: taken.append((q.shape[0], k.shape[0])),
+    )
+    rows, keys = 592, FLASHTOPK_MIN_KEYS
+    q, k, scales, weights = _inputs(rows, keys)
+    starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
+    out = torch.empty(rows, 512, device="cuda", dtype=torch.int32)
+    for r, n in ((rows, keys - 1), (1, keys), (rows, keys)):
+        ends = torch.full((r,), n, device="cuda", dtype=torch.int32)
+        fused_mqa_topk_prefill(
+            q[:r], k[:n], scales[:n], weights[:r], starts[:r], ends, out[:r]
+        )
+    expected = [(rows, keys)] if native else [(rows, keys - 1), (1, keys), (rows, keys)]
+    assert taken == expected
+
+
+@requires_fused_mqa_topk
+@requires_flashtopk
+def test_flashtopk_warmup_compiles_reserved_calls(monkeypatch):
+    """The profiling run reserves warmup keys only for deployments whose shape
+    passes flashtopk_chunk; warming compiles and runs cleanly."""
+    monkeypatch.setattr(flashtopk_module, "_RESERVED", {})
+    device = torch.device("cuda", torch.accelerator.current_device_index())
+    reserve_flashtopk(device, 1, 1 << 20, 512)
+    reserve_flashtopk(device, 592, FLASHTOPK_MIN_KEYS - 1, 512)
+    assert FLASHTOPK_WARMUP.get_warmup_keys() == []
+
+    reserve_flashtopk(device, 592, 1 << 20, 512)
+    key = FlashTopkWarmup.CompileKey(device.index, 512)
+    assert key in FLASHTOPK_WARMUP.get_warmup_keys()
+    FLASHTOPK_WARMUP.warmup()
+    rows, keys = 592, FLASHTOPK_MIN_KEYS
+    q, k, scales, weights = _inputs(rows, keys)
+    starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
+    ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
+    out = torch.empty(rows, 512, device="cuda", dtype=torch.int32)
+    fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
+    _check(out, q, k, scales, weights, starts, ends)
 
 
 KPOOL = 4
@@ -357,8 +463,13 @@ def _kpool_inputs(pool_lens=(20000, 70000), q_rows=96, tail=2, seed=919):
         ends += (base + (pos + 1) // KPOOL).tolist()
         base += n
     i32 = dict(device="cuda", dtype=torch.int32)
-    # Unit power-of-two scales as four UE8M0 bytes, like the SM100 K cache.
-    scales = torch.full((k.shape[0], 4), 127, device="cuda", dtype=torch.uint8)
+    if mqa_logits_use_mx_scales():
+        # Unit power-of-two scales as four UE8M0 bytes, like the SM100 K cache.
+        scales = torch.full((k.shape[0], 4), 127, device="cuda", dtype=torch.uint8)
+    else:
+        scales = torch.ones((k.shape[0], 1), device="cuda", dtype=torch.float32).view(
+            torch.uint8
+        )
     return (
         q,
         k,
@@ -417,7 +528,7 @@ def _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk, budget_mb=512):
     fused_fn = kpool_indexer.fused_mqa_topk_prefill
 
     def spy(*a, **kw):
-        calls.append(a[-1].shape)  # the output buffer: [rows, top-k pools]
+        calls.append(a[6].shape)  # the output buffer: [rows, top-k pools]
         fused_fn(*a, **kw)
 
     monkeypatch.setattr(kpool_indexer, "fused_mqa_topk_prefill", spy)
@@ -431,7 +542,7 @@ def _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk, budget_mb=512):
         k=None,
         weights=weights,
         quant_block_size=128,
-        scale_fmt="ue8m0",
+        scale_fmt="ue8m0" if mqa_logits_use_mx_scales() else "fp8_e4m3",
         topk_tokens=TOPK,
         head_dim=128,
         max_pool_len=keys,
@@ -452,11 +563,9 @@ def _row_sets(out):
 def test_kpool_indexer_fused_matches_dense(monkeypatch):
     """GLM-5.3-Flash kpool indexer: the fused_mqa_topk kernel ranks the top-512 pools of
     a packed multi-request chunk like the dense logits + top-k path."""
-    inputs = _kpool_inputs()
-    # 192 rows take the kernel only when dense needs more than one logits
-    # call, so shrink the budget below one call.
+    inputs = _kpool_inputs(pool_lens=(20000, 140000), q_rows=296)
     fused_mqa_topk_out, calls = _run_kpool_indexer(
-        monkeypatch, inputs, fused_mqa_topk=True, budget_mb=16
+        monkeypatch, inputs, fused_mqa_topk=True, budget_mb=64
     )
     assert calls == [torch.Size([inputs[0].shape[0], TOPK // KPOOL])]
     dense, calls = _run_kpool_indexer(monkeypatch, inputs, fused_mqa_topk=False)
@@ -497,10 +606,13 @@ def test_kpool_indexer_dense_fallback_splits_rows(monkeypatch):
     q, k, scales, weights, starts, ends, _ = inputs
     lens = ends - starts
     q_scale, w = mqa_logits_mx_inputs(q, None, weights, torch.float32)
+    k_scale = scales.view(
+        torch.int32 if mqa_logits_use_mx_scales() else torch.float32
+    ).squeeze(-1)
     logits = as_fp32_logits(
         fp8_fp4_mqa_logits(
             (q, q_scale),
-            (k, scales.view(torch.int32).squeeze(-1)),
+            (k, k_scale),
             w,
             starts,
             ends,
