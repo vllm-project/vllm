@@ -766,6 +766,9 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_not_processed: set[TransferId] = set()
         # D side: lease renewals to send this step, by remote P engine.
         self.lease_heartbeats: dict[EngineId, LeaseHeartbeat] = {}
+        # Tracks whether producer send notifications were already submitted to
+        # sender_loop during bind_connector_metadata().
+        self._send_reqs_submitted: bool = False
 
     def add_new_req(
         self,
@@ -958,6 +961,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         """Get block IDs whose remote KV load failed."""
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.connector_worker is not None:
+            assert isinstance(connector_metadata, MooncakeConnectorMetadata)
+            self.connector_worker.submit_send_reqs(connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -3215,6 +3224,27 @@ class MooncakeConnectorWorker:
         for remote_engine_id, heartbeat in lease_heartbeats.items():
             asyncio.create_task(self._send_lease_heartbeat(remote_engine_id, heartbeat))
 
+    def submit_send_reqs(self, metadata: MooncakeConnectorMetadata) -> None:
+        """Submit producer send notifications to sender_loop immediately.
+
+        Entries in ``reqs_to_send`` with non-empty ``block_ids`` come from
+        ``request_finished()`` of a prior completed step whose KV cache is
+        already finalized on GPU. Submitting them during
+        ``bind_connector_metadata()`` (before the next forward pass) instead
+        of waiting for deferred ``start_load_kv()`` in ``post_forward()`` lets
+        P->D RDMA transfers overlap with the next step's forward and avoids a
+        full prefill-step / PP-stage stall on handoff.
+        """
+        if metadata._send_reqs_submitted:
+            return
+        if not self.is_kv_consumer and (
+            metadata.reqs_to_send or metadata.reqs_not_processed
+        ):
+            metadata._send_reqs_submitted = True
+            asyncio.run_coroutine_threadsafe(
+                self.record_send_reqs(metadata), self.sender_loop
+            )
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
             asyncio.run_coroutine_threadsafe(
@@ -3227,12 +3257,7 @@ class MooncakeConnectorWorker:
                 self.receiver_loop,
             )
 
-        if not self.is_kv_consumer and (
-            metadata.reqs_to_send or metadata.reqs_not_processed
-        ):
-            asyncio.run_coroutine_threadsafe(
-                self.record_send_reqs(metadata), self.sender_loop
-            )
+        self.submit_send_reqs(metadata)
 
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache

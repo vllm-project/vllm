@@ -3789,3 +3789,93 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+def test_bind_connector_metadata_submits_send_reqs_before_start_load_kv():
+    """Producer send_meta.ready should be signaled during
+    bind_connector_metadata() (pre-forward) rather than waiting for deferred
+    start_load_kv() in post_forward(), and start_load_kv() must not submit
+    record_send_reqs() a second time."""
+    vllm_config = _make_worker_vllm_config("kv_producer")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch.object(mooncake_connector.current_platform, "set_device"),
+        patch.object(mooncake_connector, "get_current_attn_backends", return_value=[]),
+        patch.object(mooncake_connector.httpx, "AsyncClient", _BootstrapClientStub),
+    ):
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        )
+        worker = connector.connector_worker
+        assert worker is not None
+
+        try:
+            # Step N: allocation metadata creates an unset ready event.
+            alloc_meta = MooncakeConnectorMetadata()
+            alloc_meta.reqs_to_send = {"p-req-1": ("xfer-1", [])}
+            connector.bind_connector_metadata(alloc_meta)
+            deadline = time.monotonic() + 5.0
+            while "xfer-1" not in worker.reqs_need_send and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert "xfer-1" in worker.reqs_need_send
+            assert not worker.reqs_need_send["xfer-1"].ready.is_set()
+            connector.start_load_kv(MagicMock())
+            connector.clear_connector_metadata()
+
+            # Step N+1: finished metadata should signal ready during
+            # bind_connector_metadata(), BEFORE start_load_kv() is invoked.
+            finish_meta = MooncakeConnectorMetadata()
+            finish_meta.reqs_to_send = {"p-req-1": ("xfer-1", [[10, 11]])}
+            with patch.object(
+                worker, "record_send_reqs", wraps=worker.record_send_reqs
+            ) as spy_record:
+                connector.bind_connector_metadata(finish_meta)
+                deadline = time.monotonic() + 5.0
+                while (
+                    not worker.reqs_need_send["xfer-1"].ready.is_set()
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.005)
+                assert worker.reqs_need_send["xfer-1"].ready.is_set()
+                assert worker.reqs_need_send["xfer-1"].local_block_ids == [[10, 11]]
+                assert spy_record.call_count == 1
+
+                # Deferred start_load_kv() in post_forward() must not double-submit.
+                connector.start_load_kv(MagicMock())
+                assert spy_record.call_count == 1
+        finally:
+            worker.shutdown()
+
+
+def test_start_load_kv_still_submits_send_reqs_without_bind():
+    """Calling worker.start_load_kv() directly without bind_connector_metadata()
+    must still submit producer send notifications."""
+    vllm_config = _make_worker_vllm_config("kv_producer")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch.object(mooncake_connector.current_platform, "set_device"),
+        patch.object(mooncake_connector, "get_current_attn_backends", return_value=[]),
+        patch.object(mooncake_connector.httpx, "AsyncClient", _BootstrapClientStub),
+    ):
+        worker = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        assert worker is not None
+
+        try:
+            meta = MooncakeConnectorMetadata()
+            meta.reqs_to_send = {"p-req-direct": ("xfer-direct", [])}
+            worker.start_load_kv(meta)
+            deadline = time.monotonic() + 5.0
+            while (
+                "xfer-direct" not in worker.reqs_need_send
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.005)
+            assert "xfer-direct" in worker.reqs_need_send
+        finally:
+            worker.shutdown()
