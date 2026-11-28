@@ -20,9 +20,9 @@
 #include <cstdint>
 #include <algorithm>
 
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
+#include "../torch_utils.h"
+
+#include <torch/csrc/stable/tensor.h>
 
 #if defined(USE_ROCM)
   #include <hip/hip_runtime.h>
@@ -622,14 +622,16 @@ __global__ void __launch_bounds__(NT1)
 
 // Called by octave_prefill (octave_prefill_rdna3.cu) on gfx942; same
 // arguments, already validated there.
-void octave_prefill_cdna(torch::Tensor out, torch::Tensor q, torch::Tensor k,
-                         torch::Tensor v, torch::Tensor cache,
-                         torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-                         torch::Tensor seq_lens, int64_t max_query_len,
+void octave_prefill_cdna(torch::stable::Tensor out, torch::stable::Tensor q,
+                         torch::stable::Tensor k, torch::stable::Tensor v,
+                         torch::stable::Tensor cache,
+                         torch::stable::Tensor block_table,
+                         torch::stable::Tensor cu_seqlens_q,
+                         torch::stable::Tensor seq_lens, int64_t max_query_len,
                          double sm_scale, int64_t fmt, float* ws,
                          int num_splits) {
   using namespace octave_cdna;
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  auto stream = get_current_cuda_stream(q.get_device_index());
   const int num_seqs = seq_lens.size(0);
   const int hq = q.size(1), hkv = cache.size(1);
   const int hpk = hq / hkv;
@@ -639,12 +641,12 @@ void octave_prefill_cdna(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   const int rowtiles = (int)((max_query_len * hpk + QB1 - 1) / QB1);
 
   dim3 grid1(num_seqs, hkv, rowtiles * num_splits);
-  #define PREFIX(B, KC)                                                     \
-    prefix_attn<B, KC><<<grid1, NT1, 0, stream>>>(                          \
-        (const __half*)q.data_ptr(), cache.data_ptr<uint8_t>(),             \
-        block_table.data_ptr<int>(), cu_seqlens_q.data_ptr<int>(),          \
-        seq_lens.data_ptr<int>(), ws, (float)sm_scale, hq, hkv, block_size, \
-        max_blocks, num_splits, total_q, q.stride(0), q.stride(1),          \
+  #define PREFIX(B, KC)                                                        \
+    prefix_attn<B, KC><<<grid1, NT1, 0, stream>>>(                             \
+        (const __half*)q.const_data_ptr(), cache.const_data_ptr<uint8_t>(),    \
+        block_table.const_data_ptr<int>(), cu_seqlens_q.const_data_ptr<int>(), \
+        seq_lens.const_data_ptr<int>(), ws, (float)sm_scale, hq, hkv,          \
+        block_size, max_blocks, num_splits, total_q, q.stride(0), q.stride(1), \
         cache.stride(0), cache.stride(1), cache.stride(2))
   if (fmt == 4)
     PREFIX(4, false);
@@ -655,10 +657,10 @@ void octave_prefill_cdna(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   #undef PREFIX
   dim3 grid2(num_seqs, hkv, rowtiles);
   chunk_attn<<<grid2, NT1, 0, stream>>>(
-      (__half*)out.data_ptr(), ws, (const __half*)q.data_ptr(),
-      (const __half*)k.data_ptr(), (const __half*)v.data_ptr(),
-      cu_seqlens_q.data_ptr<int>(), seq_lens.data_ptr<int>(), hq, hkv,
-      max_blocks * block_size, (float)sm_scale, num_splits, total_q,
+      (__half*)out.mutable_data_ptr(), ws, (const __half*)q.const_data_ptr(),
+      (const __half*)k.const_data_ptr(), (const __half*)v.const_data_ptr(),
+      cu_seqlens_q.const_data_ptr<int>(), seq_lens.const_data_ptr<int>(), hq,
+      hkv, max_blocks * block_size, (float)sm_scale, num_splits, total_q,
       q.stride(0), q.stride(1), k.stride(0), k.stride(1), v.stride(0),
       v.stride(1), out.stride(0), out.stride(1));
 }

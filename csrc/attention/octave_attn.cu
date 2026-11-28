@@ -20,10 +20,15 @@
 // attention output is rotated back in the reduce kernel.
 
 #include <cstdint>
+#include <optional>
 #include <string>
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
+
+#include "../torch_utils.h"
+
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
 
 #if defined(USE_ROCM)
   #include <hip/hip_runtime.h>
@@ -837,6 +842,7 @@ __global__ void __launch_bounds__(256) window_attn_kernel(
 // Host launchers
 // ---------------------------------------------------------------------------
 using namespace octave;
+using torch::headeronly::ScalarType;
 
 // fmt: V fmt (3 or 4), plus kCompactFlag for compact K (3-bit V only).
 int octave_slot_bytes(int64_t fmt) {
@@ -848,41 +854,47 @@ int octave_slot_bytes(int64_t fmt) {
     case 3 + kCompactFlag:
       return Format<3, true>::SLOT;
   }
-  TORCH_CHECK(false, "octave: unknown format id ", fmt);
+  STD_TORCH_CHECK(false, "octave: unknown format id ", fmt);
   return 0;
 }
 
-static void check_cache(const torch::Tensor& cache, int64_t fmt) {
-  TORCH_CHECK(cache.dtype() == at::kByte && cache.dim() == 4,
-              "octave: cache must be uint8 [blocks, heads, block_size, slot]");
+static void check_cache(const torch::stable::Tensor& cache, int64_t fmt) {
+  STD_TORCH_CHECK(
+      cache.scalar_type() == ScalarType::Byte && cache.dim() == 4,
+      "octave: cache must be uint8 [blocks, heads, block_size, slot]");
   const int slot = octave_slot_bytes(fmt);
-  TORCH_CHECK(cache.size(3) == slot && cache.stride(3) == 1,
-              "octave: slot size mismatch, expected ", slot, " got ",
-              cache.size(3));
+  STD_TORCH_CHECK(cache.size(3) == slot && cache.stride(3) == 1,
+                  "octave: slot size mismatch, expected ", slot, " got ",
+                  cache.size(3));
 }
 
-void octave_cache_store(torch::Tensor key, torch::Tensor value,
-                        torch::Tensor cache, torch::Tensor slot_mapping,
-                        torch::Tensor k_signs, torch::Tensor v_signs,
-                        int64_t fmt) {
+void octave_cache_store(torch::stable::Tensor key, torch::stable::Tensor value,
+                        torch::stable::Tensor cache,
+                        torch::stable::Tensor slot_mapping,
+                        torch::stable::Tensor k_signs,
+                        torch::stable::Tensor v_signs, int64_t fmt) {
   const int n = slot_mapping.size(0);
   if (n == 0) return;
   check_cache(cache, fmt);
-  TORCH_CHECK(key.size(-1) == D && key.stride(-1) == 1 && value.stride(-1) == 1,
-              "octave: head_size must be 256 with contiguous last dim");
-  TORCH_CHECK(slot_mapping.dtype() == at::kLong);
+  STD_TORCH_CHECK(
+      key.size(-1) == D && key.stride(-1) == 1 && value.stride(-1) == 1,
+      "octave: head_size must be 256 with contiguous last dim");
+  STD_TORCH_CHECK(slot_mapping.scalar_type() == ScalarType::Long,
+                  "octave_cache_store: slot_mapping must be int64, got ",
+                  slot_mapping.scalar_type());
   const int hkv = cache.size(1);
-  const at::cuda::OptionalCUDAGuard guard(device_of(key));
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  const torch::stable::accelerator::DeviceGuard guard(key.get_device_index());
+  auto stream = get_current_cuda_stream(key.get_device_index());
   dim3 grid(n, hkv);
-  #define SQ_STORE(B, KC, T)                                             \
-    store_kernel<B, KC, T><<<grid, 32, 0, stream>>>(                     \
-        (const T*)key.data_ptr(), (const T*)value.data_ptr(),            \
-        (uint8_t*)cache.data_ptr(), slot_mapping.data_ptr<int64_t>(),    \
-        k_signs.data_ptr<int>(), v_signs.data_ptr<int>(), cache.size(2), \
-        key.stride(0), key.stride(1), value.stride(0), value.stride(1),  \
-        cache.stride(0), cache.stride(1), cache.stride(2))
-  const bool bf = key.dtype() == at::kBFloat16;
+  #define SQ_STORE(B, KC, T)                                                   \
+    store_kernel<B, KC, T><<<grid, 32, 0, stream>>>(                           \
+        (const T*)key.const_data_ptr(), (const T*)value.const_data_ptr(),      \
+        (uint8_t*)cache.mutable_data_ptr(),                                    \
+        slot_mapping.const_data_ptr<int64_t>(), k_signs.const_data_ptr<int>(), \
+        v_signs.const_data_ptr<int>(), cache.size(2), key.stride(0),           \
+        key.stride(1), value.stride(0), value.stride(1), cache.stride(0),      \
+        cache.stride(1), cache.stride(2))
+  const bool bf = key.scalar_type() == ScalarType::BFloat16;
   if (fmt == 4) {
     if (bf)
       SQ_STORE(4, false, __hip_bfloat16);
@@ -903,29 +915,32 @@ void octave_cache_store(torch::Tensor key, torch::Tensor value,
 }
 
 template <int VB, bool KC, int G, int QG, typename QT>
-static void launch_decode(torch::Tensor& query, torch::Tensor& cache,
-                          torch::Tensor& block_table, torch::Tensor& q_to_req,
-                          torch::Tensor& q_to_klen, torch::Tensor& mid_o,
-                          torch::Tensor& k_signs, float sm_scale_log2, int ns,
-                          hipStream_t stream) {
+static void launch_decode(torch::stable::Tensor& query,
+                          torch::stable::Tensor& cache,
+                          torch::stable::Tensor& block_table,
+                          torch::stable::Tensor& q_to_req,
+                          torch::stable::Tensor& q_to_klen,
+                          torch::stable::Tensor& mid_o,
+                          torch::stable::Tensor& k_signs, float sm_scale_log2,
+                          int ns, hipStream_t stream) {
   const int num_q = query.size(0);
   dim3 grid(num_q, cache.size(1), ns);
   decode_kernel<VB, KC, G, QG, QT><<<grid, 128, 0, stream>>>(
-      (const QT*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),
-      block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),
-      q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),
-      k_signs.data_ptr<int>(), sm_scale_log2, num_q, cache.size(2),
+      (const QT*)query.const_data_ptr(), (const uint8_t*)cache.const_data_ptr(),
+      block_table.const_data_ptr<int>(), q_to_req.const_data_ptr<int>(),
+      q_to_klen.const_data_ptr<int>(), mid_o.mutable_data_ptr<float>(),
+      k_signs.const_data_ptr<int>(), sm_scale_log2, num_q, cache.size(2),
       block_table.size(1), block_table.size(0), cache.size(0), ns,
       query.stride(0), query.stride(1), cache.stride(0), cache.stride(1),
       cache.stride(2), mid_o.stride(0), mid_o.stride(1), mid_o.stride(2));
 }
 
 template <int VB, bool KC, typename QT>
-static void dispatch_decode(int g, int qg, torch::Tensor& query,
-                            torch::Tensor& cache, torch::Tensor& block_table,
-                            torch::Tensor& q_to_req, torch::Tensor& q_to_klen,
-                            torch::Tensor& mid_o, torch::Tensor& k_signs,
-                            float sl2, int ns, hipStream_t stream) {
+static void dispatch_decode(
+    int g, int qg, torch::stable::Tensor& query, torch::stable::Tensor& cache,
+    torch::stable::Tensor& block_table, torch::stable::Tensor& q_to_req,
+    torch::stable::Tensor& q_to_klen, torch::stable::Tensor& mid_o,
+    torch::stable::Tensor& k_signs, float sl2, int ns, hipStream_t stream) {
   #define SQ_DEC(GG, QQ)                                                     \
     if (g == GG && qg == QQ) {                                               \
       launch_decode<VB, KC, GG, QQ, QT>(query, cache, block_table, q_to_req, \
@@ -944,65 +959,78 @@ static void dispatch_decode(int g, int qg, torch::Tensor& query,
   SQ_DEC(8, 1);
   SQ_DEC(8, 4);
   #undef SQ_DEC
-  TORCH_CHECK(false, "octave_decode: unsupported GQA group ", g);
+  STD_TORCH_CHECK(false, "octave_decode: unsupported GQA group ", g);
 }
 
-int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
-                       torch::Tensor block_table, torch::Tensor q_to_req,
-                       torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor k_signs, double sm_scale,
+int octave_decode_wmma(torch::stable::Tensor query, torch::stable::Tensor cache,
+                       torch::stable::Tensor block_table,
+                       torch::stable::Tensor q_to_req,
+                       torch::stable::Tensor q_to_klen,
+                       torch::stable::Tensor mid_o,
+                       torch::stable::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t fmt,
-                       const std::optional<torch::Tensor>& indices,
+                       const std::optional<torch::stable::Tensor>& indices,
                        const int* qpos, const int* wtags, int wmask,
                        const int* stags, int smask, int64_t query_group);
 
-bool octave_reduce_mfma(torch::Tensor out, torch::Tensor mid_o,
-                        torch::Tensor v_signs, int num_splits,
+bool octave_reduce_mfma(torch::stable::Tensor out, torch::stable::Tensor mid_o,
+                        torch::stable::Tensor v_signs, int num_splits,
                         cudaStream_t stream);
 
-static void launch_reduce(torch::Tensor out, torch::Tensor mid_o,
-                          torch::Tensor v_signs, int num_splits,
+static void launch_reduce(torch::stable::Tensor out,
+                          torch::stable::Tensor mid_o,
+                          torch::stable::Tensor v_signs, int num_splits,
                           cudaStream_t stream) {
   static const bool cdna3 =
-      std::string(at::cuda::getCurrentDeviceProperties()->gcnArchName)
-          .rfind("gfx942", 0) == 0;
+      std::string(get_device_prop()->gcnArchName).rfind("gfx942", 0) == 0;
   if (cdna3 && octave_reduce_mfma(out, mid_o, v_signs, num_splits, stream))
     return;
   dim3 grid(out.size(0), out.size(1));
-  if (out.dtype() == at::kBFloat16)
+  if (out.scalar_type() == ScalarType::BFloat16)
     reduce_kernel<__hip_bfloat16><<<grid, 256, 0, stream>>>(
-        mid_o.data_ptr<float>(), (__hip_bfloat16*)out.data_ptr(),
-        v_signs.data_ptr<int>(), num_splits, mid_o.stride(0), mid_o.stride(1),
-        mid_o.stride(2), out.stride(0), out.stride(1));
+        mid_o.const_data_ptr<float>(), (__hip_bfloat16*)out.mutable_data_ptr(),
+        v_signs.const_data_ptr<int>(), num_splits, mid_o.stride(0),
+        mid_o.stride(1), mid_o.stride(2), out.stride(0), out.stride(1));
   else
     reduce_kernel<half><<<grid, 256, 0, stream>>>(
-        mid_o.data_ptr<float>(), (half*)out.data_ptr(), v_signs.data_ptr<int>(),
-        num_splits, mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
-        out.stride(0), out.stride(1));
+        mid_o.const_data_ptr<float>(), (half*)out.mutable_data_ptr(),
+        v_signs.const_data_ptr<int>(), num_splits, mid_o.stride(0),
+        mid_o.stride(1), mid_o.stride(2), out.stride(0), out.stride(1));
 }
 
-void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
-                   torch::Tensor block_table, torch::Tensor q_to_req,
-                   torch::Tensor q_to_klen, torch::Tensor mid_o,
-                   torch::Tensor k_signs, torch::Tensor v_signs,
+void octave_decode(torch::stable::Tensor out, torch::stable::Tensor query,
+                   torch::stable::Tensor cache,
+                   torch::stable::Tensor block_table,
+                   torch::stable::Tensor q_to_req,
+                   torch::stable::Tensor q_to_klen, torch::stable::Tensor mid_o,
+                   torch::stable::Tensor k_signs, torch::stable::Tensor v_signs,
                    double sm_scale, int64_t num_kv_splits, int64_t fmt,
                    int64_t query_group, bool use_wmma) {
   const int num_q = query.size(0);
   if (num_q == 0) return;
   check_cache(cache, fmt);
-  TORCH_CHECK(query.size(2) == D && query.stride(2) == 1);
-  TORCH_CHECK(out.dtype() == query.dtype());
-  TORCH_CHECK(mid_o.size(2) >= num_kv_splits && mid_o.size(3) >= D + 2);
-  TORCH_CHECK(num_kv_splits <= 1024 && mid_o.stride(3) == 1);
+  STD_TORCH_CHECK(query.size(2) == D && query.stride(2) == 1,
+                  "octave_decode: head_size must be 256 with contiguous last "
+                  "dim");
+  STD_TORCH_CHECK(out.scalar_type() == query.scalar_type(),
+                  "octave_decode: out and query must have the same dtype, got ",
+                  out.scalar_type(), " and ", query.scalar_type());
+  STD_TORCH_CHECK(mid_o.size(2) >= num_kv_splits && mid_o.size(3) >= D + 2,
+                  "octave_decode: mid_o needs ", num_kv_splits, " splits of ",
+                  D + 2, " floats, got ", mid_o.size(2), " of ", mid_o.size(3));
+  STD_TORCH_CHECK(num_kv_splits <= 1024 && mid_o.stride(3) == 1,
+                  "octave_decode: at most 1024 splits and a contiguous last "
+                  "dim of mid_o");
   const int hq = query.size(1), hkv = cache.size(1);
-  TORCH_CHECK(hq % hkv == 0);
+  STD_TORCH_CHECK(hq % hkv == 0, "octave_decode: ", hq,
+                  " query heads are not a multiple of ", hkv, " KV heads");
   const int g = hq / hkv;
   const int qg = query_group > 1 ? 4 : 1;
   int ns = (int)num_kv_splits;
   const float sl2 = (float)sm_scale * 1.4426950408889634f;
-  const at::cuda::OptionalCUDAGuard guard(device_of(query));
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
-  const bool bf = query.dtype() == at::kBFloat16;
+  const torch::stable::accelerator::DeviceGuard guard(query.get_device_index());
+  auto stream = get_current_cuda_stream(query.get_device_index());
+  const bool bf = query.scalar_type() == ScalarType::BFloat16;
   // Fast tier when the device and shapes allow it, else the portable kernel.
   const int wmma_splits =
       use_wmma ? octave_decode_wmma(query, cache, block_table, q_to_req,
@@ -1035,65 +1063,86 @@ void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
 
 // Sparse decode: query row i attends to the logical positions indices[i, :]
 // of request q_to_req[i] (negative entries are skipped). WMMA tier only.
-void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
-                          torch::Tensor cache, torch::Tensor block_table,
-                          torch::Tensor q_to_req, torch::Tensor indices,
-                          torch::Tensor mid_o, torch::Tensor k_signs,
-                          torch::Tensor v_signs, double sm_scale,
-                          int64_t num_kv_splits, int64_t fmt,
-                          const std::optional<torch::Tensor>& positions,
-                          const std::optional<torch::Tensor>& wtab,
-                          const std::optional<torch::Tensor>& wtags,
-                          const std::optional<torch::Tensor>& stab,
-                          const std::optional<torch::Tensor>& stags) {
+void octave_decode_sparse(
+    torch::stable::Tensor out, torch::stable::Tensor query,
+    torch::stable::Tensor cache, torch::stable::Tensor block_table,
+    torch::stable::Tensor q_to_req, torch::stable::Tensor indices,
+    torch::stable::Tensor mid_o, torch::stable::Tensor k_signs,
+    torch::stable::Tensor v_signs, double sm_scale, int64_t num_kv_splits,
+    int64_t fmt, const std::optional<torch::stable::Tensor>& positions,
+    const std::optional<torch::stable::Tensor>& wtab,
+    const std::optional<torch::stable::Tensor>& wtags,
+    const std::optional<torch::stable::Tensor>& stab,
+    const std::optional<torch::stable::Tensor>& stags) {
   const int num_q = query.size(0);
   if (num_q == 0) return;
   check_cache(cache, fmt);
-  TORCH_CHECK(query.size(2) == D && query.stride(2) == 1);
-  TORCH_CHECK(out.dtype() == query.dtype());
-  TORCH_CHECK(indices.dim() == 2 && indices.size(0) >= num_q &&
-              indices.stride(1) == 1 && indices.dtype() == at::kInt);
-  TORCH_CHECK(mid_o.size(2) >= num_kv_splits && mid_o.size(3) >= D + 2);
-  TORCH_CHECK(num_kv_splits <= 1024 && mid_o.stride(3) == 1);
-  const at::cuda::OptionalCUDAGuard guard(device_of(query));
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  STD_TORCH_CHECK(query.size(2) == D && query.stride(2) == 1,
+                  "octave_decode_sparse: head_size must be 256 with "
+                  "contiguous last dim");
+  STD_TORCH_CHECK(out.scalar_type() == query.scalar_type(),
+                  "octave_decode_sparse: out and query must have the same "
+                  "dtype, got ",
+                  out.scalar_type(), " and ", query.scalar_type());
+  STD_TORCH_CHECK(indices.dim() == 2 && indices.size(0) >= num_q &&
+                      indices.stride(1) == 1 &&
+                      indices.scalar_type() == ScalarType::Int,
+                  "octave_decode_sparse: indices must be int32 [num_q, topk] "
+                  "with contiguous rows");
+  STD_TORCH_CHECK(mid_o.size(2) >= num_kv_splits && mid_o.size(3) >= D + 2,
+                  "octave_decode_sparse: mid_o needs ", num_kv_splits,
+                  " splits of ", D + 2, " floats, got ", mid_o.size(2), " of ",
+                  mid_o.size(3));
+  STD_TORCH_CHECK(num_kv_splits <= 1024 && mid_o.stride(3) == 1,
+                  "octave_decode_sparse: at most 1024 splits and a contiguous "
+                  "last dim of mid_o");
+  const torch::stable::accelerator::DeviceGuard guard(query.get_device_index());
+  auto stream = get_current_cuda_stream(query.get_device_index());
   // With the exact window, the packed-cache splits leave the last split of
   // mid_o to octave_window_attn.
   const bool win = positions.has_value();
-  TORCH_CHECK(!win || (wtab && wtags && stab && stags && num_kv_splits >= 2));
+  STD_TORCH_CHECK(
+      !win || (wtab && wtags && stab && stags && num_kv_splits >= 2),
+      "octave_decode_sparse: positions needs wtab, wtags, stab, stags and at "
+      "least 2 splits");
   const int wmask = win ? (int)wtags->size(0) - 1 : 0;
   const int smask = win ? (int)stags->size(0) - 1 : 0;
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       !win || (((wmask + 1) & wmask) == 0 && ((smask + 1) & smask) == 0),
       "octave_decode_sparse: shadow tables must be powers of two");
   const int ns = octave_decode_wmma(
       query, cache, block_table, q_to_req, q_to_req, mid_o, k_signs, sm_scale,
       win ? num_kv_splits - 1 : num_kv_splits, fmt, indices,
-      win ? positions->data_ptr<int>() : nullptr,
-      win ? wtags->data_ptr<int>() : nullptr, wmask,
-      win ? stags->data_ptr<int>() : nullptr, smask, 4);
-  TORCH_CHECK(ns > 0,
-              "octave_decode_sparse: needs the WMMA tier (gfx1100, head size "
-              "256, GQA group <= 8)");
+      win ? positions->const_data_ptr<int>() : nullptr,
+      win ? wtags->const_data_ptr<int>() : nullptr, wmask,
+      win ? stags->const_data_ptr<int>() : nullptr, smask, 4);
+  STD_TORCH_CHECK(ns > 0,
+                  "octave_decode_sparse: needs the WMMA tier (gfx1100, head "
+                  "size 256, GQA group <= 8)");
   if (!win) {
     launch_reduce(out, mid_o, v_signs, ns, stream);
     return;
   }
   const int hq = query.size(1), hkv = cache.size(1);
-  TORCH_CHECK(hq / hkv <= 8 && wtab->size(1) == hkv && wtab->size(2) == 2 * D);
+  STD_TORCH_CHECK(
+      hq / hkv <= 8 && wtab->size(1) == hkv && wtab->size(2) == 2 * D,
+      "octave_decode_sparse: the exact window needs a GQA group <= 8 and "
+      "wtab of [entries, ",
+      hkv, ", ", 2 * D, "]");
   dim3 grid(num_q, hkv);
-  #define SQ_WIN(T)                                                         \
-    window_attn_kernel<T><<<grid, 256, 0, stream>>>(                        \
-        (const T*)query.data_ptr(), positions->data_ptr<int>(),             \
-        q_to_req.data_ptr<int>(), block_table.data_ptr<int>(),              \
-        indices.data_ptr<int>(), (const T*)wtab->data_ptr(),                \
-        wtags->data_ptr<int>(), wmask, (const T*)stab->data_ptr(),          \
-        stags->data_ptr<int>(), smask, mid_o.data_ptr<float>(),             \
-        v_signs.data_ptr<int>(), (float)sm_scale, ns, (int)indices.size(1), \
-        indices.stride(0), cache.size(2), block_table.size(1),              \
-        block_table.size(0), cache.size(0), hq, hkv, query.stride(0),       \
-        query.stride(1), mid_o.stride(0), mid_o.stride(1), mid_o.stride(2))
-  if (query.dtype() == at::kBFloat16)
+  #define SQ_WIN(T)                                                            \
+    window_attn_kernel<T><<<grid, 256, 0, stream>>>(                           \
+        (const T*)query.const_data_ptr(), positions->const_data_ptr<int>(),    \
+        q_to_req.const_data_ptr<int>(), block_table.const_data_ptr<int>(),     \
+        indices.const_data_ptr<int>(), (const T*)wtab->const_data_ptr(),       \
+        wtags->const_data_ptr<int>(), wmask, (const T*)stab->const_data_ptr(), \
+        stags->const_data_ptr<int>(), smask, mid_o.mutable_data_ptr<float>(),  \
+        v_signs.const_data_ptr<int>(), (float)sm_scale, ns,                    \
+        (int)indices.size(1), indices.stride(0), cache.size(2),                \
+        block_table.size(1), block_table.size(0), cache.size(0), hq, hkv,      \
+        query.stride(0), query.stride(1), mid_o.stride(0), mid_o.stride(1),    \
+        mid_o.stride(2))
+  if (query.scalar_type() == ScalarType::BFloat16)
     SQ_WIN(__hip_bfloat16);
   else
     SQ_WIN(half);
@@ -1101,80 +1150,97 @@ void octave_decode_sparse(torch::Tensor out, torch::Tensor query,
   launch_reduce(out, mid_o, v_signs, ns + 1, stream);
 }
 
-void octave_window_store(torch::Tensor key, torch::Tensor value,
-                         torch::Tensor slot_mapping, torch::Tensor positions,
-                         torch::Tensor wtab, torch::Tensor wtags,
-                         torch::Tensor wlocks, torch::Tensor stab,
-                         torch::Tensor stags, torch::Tensor slocks) {
+void octave_window_store(
+    torch::stable::Tensor key, torch::stable::Tensor value,
+    torch::stable::Tensor slot_mapping, torch::stable::Tensor positions,
+    torch::stable::Tensor wtab, torch::stable::Tensor wtags,
+    torch::stable::Tensor wlocks, torch::stable::Tensor stab,
+    torch::stable::Tensor stags, torch::stable::Tensor slocks) {
   const int n = slot_mapping.size(0);
   if (n == 0) return;
-  TORCH_CHECK(slot_mapping.dtype() == at::kLong &&
-              positions.dtype() == at::kInt);
-  TORCH_CHECK(wtab.dtype() == key.dtype() && stab.dtype() == key.dtype());
+  STD_TORCH_CHECK(slot_mapping.scalar_type() == ScalarType::Long &&
+                      positions.scalar_type() == ScalarType::Int,
+                  "octave_window_store: slot_mapping must be int64 and "
+                  "positions int32, got ",
+                  slot_mapping.scalar_type(), " and ", positions.scalar_type());
+  STD_TORCH_CHECK(wtab.scalar_type() == key.scalar_type() &&
+                      stab.scalar_type() == key.scalar_type(),
+                  "octave_window_store: wtab and stab must have the dtype of "
+                  "key, ",
+                  key.scalar_type());
   const int hkv = wtab.size(1);
   const int wmask = (int)wtags.size(0) - 1, smask = (int)stags.size(0) - 1;
-  const at::cuda::OptionalCUDAGuard guard(device_of(key));
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
-  #define SQ_WSTORE(T)                                                      \
-    window_store_kernel<T><<<n, 32, 0, stream>>>(                           \
-        (const T*)key.data_ptr(), (const T*)value.data_ptr(),               \
-        slot_mapping.data_ptr<int64_t>(), positions.data_ptr<int>(),        \
-        (T*)wtab.data_ptr(), wtags.data_ptr<int>(), wlocks.data_ptr<int>(), \
-        wmask, (T*)stab.data_ptr(), stags.data_ptr<int>(),                  \
-        slocks.data_ptr<int>(), smask, hkv, key.stride(0), key.stride(1),   \
-        value.stride(0), value.stride(1))
-  if (key.dtype() == at::kBFloat16)
+  const torch::stable::accelerator::DeviceGuard guard(key.get_device_index());
+  auto stream = get_current_cuda_stream(key.get_device_index());
+  #define SQ_WSTORE(T)                                                        \
+    window_store_kernel<T><<<n, 32, 0, stream>>>(                             \
+        (const T*)key.const_data_ptr(), (const T*)value.const_data_ptr(),     \
+        slot_mapping.const_data_ptr<int64_t>(),                               \
+        positions.const_data_ptr<int>(), (T*)wtab.mutable_data_ptr(),         \
+        wtags.mutable_data_ptr<int>(), wlocks.mutable_data_ptr<int>(), wmask, \
+        (T*)stab.mutable_data_ptr(), stags.mutable_data_ptr<int>(),           \
+        slocks.mutable_data_ptr<int>(), smask, hkv, key.stride(0),            \
+        key.stride(1), value.stride(0), value.stride(1))
+  if (key.scalar_type() == ScalarType::BFloat16)
     SQ_WSTORE(__hip_bfloat16);
   else
     SQ_WSTORE(half);
   #undef SQ_WSTORE
 }
 
-void octave_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
-                   bool inverse) {
+void octave_rotate(torch::stable::Tensor x, torch::stable::Tensor signs,
+                   bool k_layout, bool inverse) {
   if (x.numel() == 0) return;
-  TORCH_CHECK(x.dim() == 3 && x.size(2) == D && x.stride(2) == 1,
-              "octave_rotate: x must be [T, H, 256] with contiguous last dim");
-  const at::cuda::OptionalCUDAGuard guard(device_of(x));
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  STD_TORCH_CHECK(
+      x.dim() == 3 && x.size(2) == D && x.stride(2) == 1,
+      "octave_rotate: x must be [T, H, 256] with contiguous last dim");
+  const torch::stable::accelerator::DeviceGuard guard(x.get_device_index());
+  auto stream = get_current_cuda_stream(x.get_device_index());
   dim3 grid(x.size(0), x.size(1));
-  if (x.dtype() == at::kBFloat16)
+  if (x.scalar_type() == ScalarType::BFloat16)
     rotate_kernel<__hip_bfloat16><<<grid, 32, 0, stream>>>(
-        (__hip_bfloat16*)x.data_ptr(), signs.data_ptr<int>(), k_layout, inverse,
-        x.stride(0), x.stride(1));
+        (__hip_bfloat16*)x.mutable_data_ptr(), signs.const_data_ptr<int>(),
+        k_layout, inverse, x.stride(0), x.stride(1));
   else
-    rotate_kernel<half>
-        <<<grid, 32, 0, stream>>>((half*)x.data_ptr(), signs.data_ptr<int>(),
-                                  k_layout, inverse, x.stride(0), x.stride(1));
+    rotate_kernel<half><<<grid, 32, 0, stream>>>(
+        (half*)x.mutable_data_ptr(), signs.const_data_ptr<int>(), k_layout,
+        inverse, x.stride(0), x.stride(1));
 }
 
 #else
-void octave_cache_store(torch::Tensor, torch::Tensor, torch::Tensor,
-                        torch::Tensor, torch::Tensor, torch::Tensor, int64_t) {
-  TORCH_CHECK(false, "octave requires ROCm");
+void octave_cache_store(torch::stable::Tensor, torch::stable::Tensor,
+                        torch::stable::Tensor, torch::stable::Tensor,
+                        torch::stable::Tensor, torch::stable::Tensor, int64_t) {
+  STD_TORCH_CHECK(false, "octave requires ROCm");
 }
-void octave_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                   torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                   torch::Tensor, double, int64_t, int64_t, int64_t, bool) {
-  TORCH_CHECK(false, "octave requires ROCm");
+void octave_decode(torch::stable::Tensor, torch::stable::Tensor,
+                   torch::stable::Tensor, torch::stable::Tensor,
+                   torch::stable::Tensor, torch::stable::Tensor,
+                   torch::stable::Tensor, torch::stable::Tensor,
+                   torch::stable::Tensor, double, int64_t, int64_t, int64_t,
+                   bool) {
+  STD_TORCH_CHECK(false, "octave requires ROCm");
 }
-void octave_decode_sparse(torch::Tensor, torch::Tensor, torch::Tensor,
-                          torch::Tensor, torch::Tensor, torch::Tensor,
-                          torch::Tensor, torch::Tensor, torch::Tensor, double,
-                          int64_t, int64_t, const std::optional<torch::Tensor>&,
-                          const std::optional<torch::Tensor>&,
-                          const std::optional<torch::Tensor>&,
-                          const std::optional<torch::Tensor>&,
-                          const std::optional<torch::Tensor>&) {
-  TORCH_CHECK(false, "octave requires ROCm");
+void octave_decode_sparse(torch::stable::Tensor, torch::stable::Tensor,
+                          torch::stable::Tensor, torch::stable::Tensor,
+                          torch::stable::Tensor, torch::stable::Tensor,
+                          torch::stable::Tensor, torch::stable::Tensor,
+                          torch::stable::Tensor, double, int64_t, int64_t,
+                          const std::optional<torch::stable::Tensor>&,
+                          const std::optional<torch::stable::Tensor>&,
+                          const std::optional<torch::stable::Tensor>&,
+                          const std::optional<torch::stable::Tensor>&,
+                          const std::optional<torch::stable::Tensor>&) {
+  STD_TORCH_CHECK(false, "octave requires ROCm");
 }
-void octave_window_store(torch::Tensor, torch::Tensor, torch::Tensor,
-                         torch::Tensor, torch::Tensor, torch::Tensor,
-                         torch::Tensor, torch::Tensor, torch::Tensor,
-                         torch::Tensor) {
-  TORCH_CHECK(false, "octave requires ROCm");
+void octave_window_store(torch::stable::Tensor, torch::stable::Tensor,
+                         torch::stable::Tensor, torch::stable::Tensor,
+                         torch::stable::Tensor, torch::stable::Tensor,
+                         torch::stable::Tensor, torch::stable::Tensor,
+                         torch::stable::Tensor, torch::stable::Tensor) {
+  STD_TORCH_CHECK(false, "octave requires ROCm");
 }
-void octave_rotate(torch::Tensor, torch::Tensor, bool, bool) {
-  TORCH_CHECK(false, "octave requires ROCm");
+void octave_rotate(torch::stable::Tensor, torch::stable::Tensor, bool, bool) {
+  STD_TORCH_CHECK(false, "octave requires ROCm");
 }
 #endif
