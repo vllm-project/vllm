@@ -521,7 +521,6 @@ def test_external_connector_kv_cache_access(connector, access, multi):
 
 
 _NIXL_ACCESS = KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
-_LEGACY_IPC = KVCacheAccess.LEGACY_IPC
 
 # vLLM's LMCacheMPConnector imports the optional lmcache package, which is
 # only installed on some platforms (e.g. not on XPU).
@@ -538,7 +537,7 @@ requires_lmcache = pytest.mark.skipif(
         (["OffloadingConnector", "NixlConnector"], _NIXL_ACCESS),
         pytest.param(
             ["NixlConnector", "LMCacheMPConnector"],
-            _NIXL_ACCESS | _LEGACY_IPC,
+            _NIXL_ACCESS | KVCacheAccess.EXPORTS_FD,
             marks=requires_lmcache,
         ),
     ],
@@ -682,12 +681,17 @@ def test_extensible_kv_cache_with_nixl_needs_an_imex_channel_by_default(
 @pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
 def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
-    """LMCacheMPConnector shares the KV cache through legacy CUDA IPC, which
-    cannot export driver-mapped memory on any platform."""
+    """With `lmcache.mp.use_vmm_api` off, LMCacheMPConnector shares the KV
+    cache through legacy CUDA IPC, which cannot export driver-mapped memory on
+    any platform."""
     import vllm.platforms
     from vllm.config.vllm import VllmConfig
 
-    lmcache = {"kv_connector": "LMCacheMPConnector", "kv_role": "kv_both"}
+    lmcache = {
+        "kv_connector": "LMCacheMPConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"lmcache.mp.use_vmm_api": False},
+    }
     transfer = (
         KVTransferConfig(
             kv_connector="MultiConnector",

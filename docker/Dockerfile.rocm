@@ -139,8 +139,8 @@ RUN cd /opt/nixl && \
 # Fetch and verify pinned LMCache source.
 FROM dev AS lmcache_source
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
-ARG LMCACHE_REF="1181bea5c65a6f477e3680acd14ffac988b13dc3"
-ARG LMCACHE_VERSION="0.5.7.post1"
+ARG LMCACHE_REF="651617efcd556edf27387b646997869a2805fad2"
+ARG LMCACHE_VERSION="0.5.8"
 
 # Remove NVIDIA-only dependencies and align NumPy and OpenTelemetry with the runtime.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
@@ -169,7 +169,7 @@ COPY --from=lmcache_source \
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system -r /tmp/lmcache-build-requirements.txt
 
-ARG LMCACHE_VERSION="0.5.7.post1"
+ARG LMCACHE_VERSION="0.5.8"
 ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
 
 COPY --from=lmcache_source /app/lmcache /app/lmcache

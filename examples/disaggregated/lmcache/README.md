@@ -17,17 +17,36 @@ LMCache integrates with vLLM v1 in two ways:
   distributed KV storage and for sharing KV cache across instances. See the
   [LMCache docs](https://docs.lmcache.ai) for the full MP setup.
 
+### MP mode options
+
+The connector built into vLLM is synced from `lmcache` 0.5.8 (see
+`requirements/kv_connectors.txt`) and is used when the installed `lmcache`
+package does not provide a connector for this vLLM version. It reads these
+keys from `kv_connector_extra_config`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `lmcache.mp.host`, `lmcache.mp.port` | `tcp://localhost`, `5555` | The single LMCache server to connect to. |
+| `lmcache.mp.server_urls` | unset | A list or comma-separated string of server URLs, one per node; takes precedence over `host`/`port`. Not supported with data parallelism or pipeline parallelism. |
+| `lmcache.mp.mq_timeout` | `300` | Timeout in seconds for requests to the server. |
+| `lmcache.mp.heartbeat_interval` | `10` | Seconds between server heartbeat pings. |
+| `lmcache.mp.eager_prefetch` | `false` | Submit the LMCache lookup as soon as a request enters the waiting queue. |
+| `lmcache.mp.save_decode_cache` | `false` | Also store chunks that contain generated tokens; by default only complete prompt chunks are stored. |
+| `lmcache.mp.lazy_offload` | `false` | Buffer stores and offload them by LMCache's policy; requires prefix caching. |
+
+Models with cross-attention KV cache groups are rejected at startup.
+
 ### MP mode with the extensible KV cache
 
 vLLM's extensible KV cache (`--enable-extensible-kv-cache`) allocates the KV
 cache through the CUDA VMM API, which legacy CUDA IPC cannot share.
-`LMCacheMPConnector` declares legacy CUDA IPC by default, which keeps the
-extensible KV cache off. With `"lmcache.mp.use_vmm_api": true` in its
-`kv_connector_extra_config`, also as a `MultiConnector` child, it declares
-POSIX file descriptor export instead: vLLM allocates the KV cache exportable,
-and the LMCache server imports each layer through a file descriptor. vLLM
-refuses to start if the extensible KV cache is then off, e.g. with
-`kv_cache_memory_bytes`.
+Since lmcache 0.5.8, `LMCacheMPConnector` declares POSIX file descriptor
+export by default, also as a `MultiConnector` child: vLLM allocates the KV
+cache exportable, and the LMCache server imports each layer through a file
+descriptor. vLLM refuses to start if the extensible KV cache is then off, e.g.
+with `kv_cache_memory_bytes`. With `"lmcache.mp.use_vmm_api": false` in its
+`kv_connector_extra_config`, it declares legacy CUDA IPC instead, which keeps
+the extensible KV cache off.
 
 Next to `NixlConnector` in a `MultiConnector`, on a host with an IMEX channel
 (e.g., GB200/GB300) the KV cache gets a FABRIC handle only, and the LMCache server imports it
