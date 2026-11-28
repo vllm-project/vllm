@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import httpx
 import numpy as np
 import pytest
 import torch
+import transformers
+from packaging.version import Version
+from PIL import Image
 from transformers import Qwen3VLVideoProcessor
 
+from tests.utils import RemoteLaunchRenderServer
 from vllm.config import ModelConfig
 from vllm.model_executor.models.transformers.multimodal import MultiModalProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.utils import encode_image_url, encode_video_url
 
 VIDEO_MODEL_SETTINGS = {
     "Qwen/Qwen3-VL-2B-Instruct": {
@@ -292,3 +298,105 @@ def test_dummy_video_has_the_most_tokens(model_id):
         video_sizes=[[num_frames, 10_000, 10_000]]
     )["num_video_tokens"]
     assert max_tokens >= huge_frame_tokens
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.25.0.dev0"),
+    reason="The check needs Transformers 5.25 (huggingface/transformers#50706)",
+)
+@pytest.mark.parametrize(
+    ("model", "modality", "shape", "num_items", "max_model_len", "args", "kwargs"),
+    [
+        # 2929 tokens per image
+        (
+            "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            "image",
+            (480, 640, 3),
+            2,
+            4096,
+            [],
+            {},
+        ),
+        # 1569 tokens per video
+        (
+            "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            "video",
+            (8, 240, 320, 3),
+            3,
+            4096,
+            [],
+            {},
+        ),
+        # Qwen3-VL keeps 4 frames of these 30 fps clips, 392 tokens per video, where
+        # all 32 frames would count 3136
+        (
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "video",
+            (32, 448, 448, 3),
+            2,
+            700,
+            ["--media-io-kwargs", '{"video": {"do_sample_frames": true, "fps": 30}}'],
+            {},
+        ),
+        # 256 tokens per image with this `size` from the request or the server, where
+        # the default counts 4096
+        (
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            "image",
+            (1792, 1792, 3),
+            3,
+            600,
+            ["--trust-request-mm-kwargs"],
+            {"size": {"shortest_edge": 3136, "longest_edge": 200704}},
+        ),
+        (
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            "image",
+            (1792, 1792, 3),
+            3,
+            600,
+            [
+                "--mm-processor-kwargs",
+                '{"size": {"shortest_edge": 3136, "longest_edge": 200704}}',
+            ],
+            {},
+        ),
+    ],
+)
+def test_render_rejects_media_over_max_model_len(
+    model, modality, shape, num_items, max_model_len, args, kwargs
+):
+    """A prompt whose images or videos alone exceed `max_model_len` is rejected by
+    their count before preprocessing, while one item fewer is processed."""
+    media = np.zeros(shape, dtype=np.uint8)
+    if modality == "image":
+        url = encode_image_url(Image.fromarray(media))
+    else:
+        url = encode_video_url(media)
+    item = {"type": f"{modality}_url", f"{modality}_url": {"url": url}}
+    with RemoteLaunchRenderServer(
+        model,
+        [
+            "--host",
+            "127.0.0.1",
+            "--model-impl",
+            "transformers",
+            "--max-model-len",
+            str(max_model_len),
+            *args,
+        ],
+    ) as server:
+        endpoint = server.url_for("v1/chat/completions/render")
+        for count, status in ((num_items, 400), (num_items - 1, 200)):
+            response = httpx.post(
+                endpoint,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": [item] * count}],
+                    "mm_processor_kwargs": kwargs,
+                },
+                timeout=120,
+            )
+            assert response.status_code == status, response.text[:512]
+            if status == 400:
+                assert "images and videos alone need" in response.text

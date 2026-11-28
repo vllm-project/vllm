@@ -146,6 +146,14 @@ lookup.
   clip is processed and account for the concatenated output while the
   individual tensors are live. EmbeddingGemma2 counts the frames the processor
   will keep when processor-side sampling is enabled.
+- The Transformers modeling backend (`--model-impl transformers`) does not
+  apply `VLLM_MAX_MEDIA_PREPROCESSING_BYTES`. With Transformers 5.25 or later,
+  it counts the tokens of each image and video with the Hugging Face processor
+  and the processor kwargs before preprocessing, and rejects a prompt whose
+  images and videos alone exceed `--max-model-len`. This bounds the processor's
+  output by `--max-model-len` (Qwen3-VL produces 24 KiB of pixel values per
+  token, 6 GiB at its default length of 262144), but not its intermediate
+  buffers, such as an image resized before it is cropped.
 
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
