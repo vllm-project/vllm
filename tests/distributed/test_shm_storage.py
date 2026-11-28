@@ -404,6 +404,57 @@ class TestShmObjectStorageReferenceCounting(unittest.TestCase):
         self.writer.release_touches()
         self.assertTrue(self._is_evictable("image"))
 
+    def test_aborted_unread_item_blocks_reclaim_until_released(self):
+        """An item whose request was aborted before any worker read it
+        blocks FIFO reclaim until its obligation is released (#69352)."""
+        aborted = self._reference("aborted")
+        stored = [aborted]
+        try:
+            for i in range(10000):
+                stored.append(self._reference(f"item_{i}"))
+        except MemoryError:
+            pass
+        self.assertGreater(len(stored), 1)
+
+        # Every other item is read by all readers.
+        for reference in stored[1:]:
+            for reader in self.readers:
+                reader.get(*reference)
+
+        # Reclaim is blocked at the unread item.
+        with self.assertRaises(MemoryError):
+            self._reference("after")
+
+        # Releasing the aborted request's obligation unblocks reclaim.
+        self.assertTrue(self.writer.release_obligation("aborted"))
+        self._reference("after")
+        self.assertFalse(self.writer.is_cached("aborted"))
+
+    def test_release_obligation_refused_once_item_is_read(self):
+        """Once a read has completed, the obligation can no longer be
+        attributed to one hand-out, so release refuses. The item was
+        already consumed, so it stays evictable as usual."""
+        reference = self._reference("image")
+        for reader in self.readers:
+            reader.get(*reference)
+
+        self.assertFalse(self.writer.release_obligation("image"))
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_release_obligation_shared_item_needs_each_handout_released(self):
+        """A second hand-out of the same item keeps it unevictable until
+        its obligation is released too."""
+        self._reference("image")
+        self._reference("image")
+
+        self.assertTrue(self.writer.release_obligation("image"))
+        self.assertFalse(self._is_evictable("image"))
+        self.assertTrue(self.writer.release_obligation("image"))
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_release_obligation_unknown_key_is_noop(self):
+        self.assertFalse(self.writer.release_obligation("missing"))
+
 
 # Reader process function
 def reader_process(process_id, storage_handle, items_to_read):

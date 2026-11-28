@@ -373,6 +373,15 @@ class BaseMultiModalProcessorCache(
         """Release the items that were touched but not updated afterwards."""
         return None
 
+    def release_sender_obligations(self, mm_hashes: Sequence[str]) -> None:
+        """Release read obligations for items handed to aborted requests.
+
+        No-op by default; the shared-memory sender cache overrides this to
+        drop the outstanding read obligation of items that will never be
+        read, so FIFO reclaim can advance past them.
+        """
+        return None
+
     @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         """Get (and reset) the multi-modal cache stats.

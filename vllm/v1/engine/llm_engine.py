@@ -227,8 +227,16 @@ class LLMEngine:
 
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
-        request_ids = self.output_processor.abort_requests(request_ids, internal)
+        request_ids, aborted_mm_hashes = self.output_processor.abort_requests(
+            request_ids, internal
+        )
         self.engine_core.abort_requests(request_ids)
+
+        if aborted_mm_hashes:
+            # Release the SHM read obligation of items handed to the aborted
+            # requests but never read, so FIFO reclaim can advance past
+            # them (#69352).
+            self.renderer.release_mm_cache_obligations(aborted_mm_hashes)
 
     def add_request(
         self,

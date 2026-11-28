@@ -206,6 +206,7 @@ class RequestState:
         temperature: float | None = None,
         stream_input: bool = False,
         remote_prefill_cached_tokens: int | None = None,
+        mm_hashes: list[str] | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -233,6 +234,10 @@ class RequestState:
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
         self.remote_prefill_cached_tokens = remote_prefill_cached_tokens
+        # Multimodal cache hashes handed to this request (one per handed-out
+        # item, in feature order). Used on abort to release the SHM read
+        # obligation of items the request never consumed.
+        self.mm_hashes = mm_hashes or []
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
@@ -369,6 +374,11 @@ class RequestState:
             stream_interval=stream_interval,
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
+            mm_hashes=[
+                feature.mm_hash
+                for feature in request.mm_features or []
+                if feature.mm_hash is not None
+            ],
         )
         if state.stats is not None and sampling_params is not None:
             state.stats.is_watermarked = bool(sampling_params.watermarking)
@@ -632,7 +642,9 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+    def abort_requests(
+        self, request_ids: Iterable[str], internal: bool
+    ) -> tuple[list[str], list[str]]:
         """Abort a list of requests.
 
         The request_ids may be either external request IDs (those passed to
@@ -646,7 +658,28 @@ class OutputProcessor:
         In the case of parallel sampling, a request ID may be used to identify
         a parent request, in which case the associated child requests are aborted
         also.
+
+        Returns:
+            The internal request IDs that were aborted, and the multimodal
+            cache hashes handed to those requests. Hashes are deduplicated per
+            external request ID: parallel-sampling children share one set of
+            handed-out items, so they contribute their hashes only once.
+
         """
+        aborted_mm_hashes: list[str] = []
+        seen_external_ids: set[str] = set()
+        request_ids_to_abort = self._abort_requests(
+            request_ids, internal, seen_external_ids, aborted_mm_hashes
+        )
+        return request_ids_to_abort, aborted_mm_hashes
+
+    def _abort_requests(
+        self,
+        request_ids: Iterable[str],
+        internal: bool,
+        seen_external_ids: set[str],
+        aborted_mm_hashes: list[str],
+    ) -> list[str]:
         internal_req_ids = []
         for request_id in request_ids:
             if internal:
@@ -668,6 +701,9 @@ class OutputProcessor:
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
+                if req_state.external_req_id not in seen_external_ids:
+                    seen_external_ids.add(req_state.external_req_id)
+                    aborted_mm_hashes.extend(req_state.mm_hashes)
                 self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
                 # Produce final abort output.
@@ -690,7 +726,9 @@ class OutputProcessor:
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
                     child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs, internal=True)
+                    child_reqs = self._abort_requests(
+                        child_reqs, True, seen_external_ids, aborted_mm_hashes
+                    )
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
         self._update_admission_stats()

@@ -672,6 +672,40 @@ class SingleWriterShmObjectStorage:
         """Check if the object with the given key is cached."""
         return key in self.key_index
 
+    def release_obligation(self, key: str) -> bool:
+        """Drop one outstanding read obligation for `key`.
+
+        Called when a request that was handed this item is aborted before
+        any worker read it: the expected read will never happen, so the
+        item would otherwise block FIFO reclaim forever (see #69352).
+
+        Only releases when no reader has consumed the item yet (reader
+        count is still 0). Once a read has completed, the obligation can
+        no longer be attributed to a single hand-out: the item may have
+        been handed out again, and releasing then could free it while
+        another request still has to read it.
+
+        Returns:
+            True if an obligation was released.
+
+        """
+        if key not in self.key_index:
+            return False
+        address, monotonic_id = self.key_index[key]
+        try:
+            with self.ring_buffer.access_buf(address) as (data_view, buf_metadata):
+                self._validate_monotonic_id(address, monotonic_id, buf_metadata)
+                reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
+        except ValueError:
+            return False
+        if reader_count != 0:
+            return False
+        writer_count = self.writer_flag.get(monotonic_id, 0)
+        if writer_count <= 0:
+            return False
+        self.writer_flag[monotonic_id] = writer_count - 1
+        return True
+
     def get_cached(self, key: str) -> tuple[int, int]:
         """Get the cached object by key if it exists."""
         address, monotonic_id = self.key_index[key]

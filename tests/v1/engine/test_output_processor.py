@@ -23,6 +23,7 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.outputs import (
     CompletionOutput,
     PoolingRequestOutput,
@@ -1907,6 +1908,69 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
         else:
             assert request.external_req_id is not None
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+def test_abort_requests_returns_mm_hashes(dummy_test_vectors):
+    """Abort reports the mm hashes handed to the request, deduplicated per
+    external request ID so parallel-sampling children contribute once."""
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    prompt_tokens = dummy_test_vectors.prompt_tokens[0]
+
+    def make_mm_request(
+        request_id: str,
+        external_req_id: str,
+        mm_hashes: list[str],
+        sampling_params: SamplingParams | None = None,
+    ) -> EngineCoreRequest:
+        return EngineCoreRequest(
+            request_id=request_id,
+            external_req_id=external_req_id,
+            prompt_token_ids=prompt_tokens,
+            mm_features=[
+                MultiModalFeatureSpec(
+                    data=None,
+                    modality="image",
+                    identifier=mm_hash,
+                    mm_position=PlaceholderRange(offset=0, length=1),
+                    mm_hash=mm_hash,
+                )
+                for mm_hash in mm_hashes
+            ],
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=sampling_params or SamplingParams(),
+            pooling_params=None,
+        )
+
+    # One request with two distinct items, one repeated twice in the prompt.
+    request = make_mm_request("request-0", "external-0", ["hash-a", "hash-b", "hash-a"])
+    queue = RequestOutputCollector(
+        request.sampling_params.output_kind, request.request_id
+    )
+    output_processor.add_request(request, None, queue=queue)
+    aborted_ids, aborted_hashes = output_processor.abort_requests(
+        ["external-0"], internal=False
+    )
+    assert aborted_ids == ["request-0"]
+    assert aborted_hashes == ["hash-a", "hash-b", "hash-a"]
+
+    # Parallel sampling: two children share one external ID and one set of
+    # handed-out items, so the hashes are reported only once.
+    parent_request = make_mm_request(
+        "parent", "external-parent", ["hash-c"], SamplingParams(n=2)
+    )
+    parent_req = ParentRequest(parent_request)
+    for idx in range(2):
+        child_id, child_params = parent_req.get_child_info(idx)
+        child = make_mm_request(child_id, "external-parent", ["hash-c"], child_params)
+        output_processor.add_request(child, None, parent_req, idx)
+    aborted_ids, aborted_hashes = output_processor.abort_requests(
+        ["parent"], internal=True
+    )
+    assert sorted(aborted_ids) == sorted(parent_req.child_requests)
+    assert aborted_hashes == ["hash-c"]
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])

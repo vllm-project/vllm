@@ -197,6 +197,9 @@ class BaseRenderer(ABC, Generic[_T]):
         self._clear_mm_cache_async = make_async(
             self.clear_mm_cache, executor=self._mm_executor
         )
+        self._release_mm_cache_obligations_async = make_async(
+            self.release_mm_cache_obligations, executor=self._mm_executor
+        )
         self._process_multimodal_async = make_async(
             self._process_multimodal, executor=self._mm_executor
         )
@@ -312,6 +315,17 @@ class BaseRenderer(ABC, Generic[_T]):
 
         if self._mm_cache_stats is not None:
             self._mm_cache_stats.reset = True
+
+    def release_mm_cache_obligations(self, mm_hashes: Sequence[str]) -> None:
+        """Release read obligations for items handed to aborted requests.
+
+        Must run on the multimodal executor (see
+        release_mm_cache_obligations_async) so it stays serialized with
+        process_inputs on the mm_processor_cache.
+        """
+        mm_processor_cache = self._mm_processor_cache
+        if mm_processor_cache is not None:
+            mm_processor_cache.release_sender_obligations(mm_hashes)
 
     def _warmup_mm_processor(
         self,
@@ -443,6 +457,14 @@ class BaseRenderer(ABC, Generic[_T]):
         """Serialize clear_mm_cache through the multimodal executor to avoid
         races with concurrent process_inputs on the mm_processor_cache."""
         await self._clear_mm_cache_async()
+
+    async def release_mm_cache_obligations_async(
+        self, mm_hashes: Sequence[str]
+    ) -> None:
+        """Serialize release_mm_cache_obligations through the multimodal
+        executor to avoid races with concurrent process_inputs on the
+        mm_processor_cache."""
+        await self._release_mm_cache_obligations_async(mm_hashes)
 
     def queue_mm_cache_invalidations(self, mm_hashes: Sequence[str]) -> None:
         """Coalesce stale sender entries without interrupting processing."""

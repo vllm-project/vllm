@@ -984,8 +984,17 @@ class AsyncLLM(EngineClient):
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
+        all_request_ids, aborted_mm_hashes = self.output_processor.abort_requests(
+            request_ids, internal
+        )
         await self.engine_core.abort_requests_async(all_request_ids)
+
+        if aborted_mm_hashes:
+            # Release the SHM read obligation of items handed to the aborted
+            # requests but never read, so FIFO reclaim can advance past
+            # them (#69352). Serialized through the multimodal executor
+            # with process_inputs.
+            await self.renderer.release_mm_cache_obligations_async(aborted_mm_hashes)
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
