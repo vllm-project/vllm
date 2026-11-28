@@ -6,7 +6,11 @@ import torch
 from torch import nn
 from transformers import ModernBertConfig
 from transformers.activations import ACT2FN
-
+import os
+import json
+from pathlib import Path
+import importlib
+from vllm.config.utils import config
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -30,7 +34,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from .interfaces import SupportsCrossEncoding, SupportsLoRA
 from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
@@ -316,7 +320,7 @@ class ModernBertModel(nn.Module, SupportsLoRA):
 
 
 class ModernBertPooler(SequencePooler):
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, model_config: ModelConfig, module_configs):
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
 
@@ -325,6 +329,10 @@ class ModernBertPooler(SequencePooler):
         # vllm_pooling_type = pooler_config.seq_pooling_type
         # Currently we don't have a way to see if the user set the pooling type
         # explicitly or not, so we always use the HF pooling type for now.
+        
+        pooling_config = module_configs.get("1_Pooling")
+        if not pooling_config:
+            hf_pooling_type = pooling_config.pooling_mode
 
         super().__init__(
             pooling=get_seq_pooling_method(hf_pooling_type),
@@ -333,17 +341,38 @@ class ModernBertPooler(SequencePooler):
         )
 
         head_dtype = model_config.head_dtype
+        dense_in_features = config.hidden_size
+        dense_out_features = config.hidden_size
+        dense_bias = config.classifier_bias
+        dense_config = module_configs.get("2_Dense")
+        activation_function = nn.GELU()
+        if dense_config is not None:
+            dense_in_features = dense_config.in_features
+            dense_out_features = dense_config.out_features
+            dense_bias = dense_config.bias
+            module_path, object_name = dense_config.activation_function.rsplit(".", 1)
+            module = importlib.import_module(module_path)
+            activation_function = getattr(module, object_name)()
+
         self.dense = nn.Linear(
-            config.hidden_size,
-            config.hidden_size,
-            config.classifier_bias,
+            dense_in_features,
+            dense_out_features,
+            dense_bias,
             dtype=head_dtype,
         )
-        self.act = nn.GELU()
+        self.act = activation_function
+
+        normalized_shape = config.hidden_size
+        layer_norm_eps = config.norm_eps
+        layer_norm_bias = config.norm_bias
+        layer_norm_config = module_configs.get("3_LayerNorm")
+        if layer_norm_config is not None:
+            normalized_shape = layer_norm_config.dimension
+            layer_norm_bias = layer_norm_config.norm_bias
         self.norm = nn.LayerNorm(
-            config.hidden_size,
-            eps=config.norm_eps,
-            bias=config.norm_bias,
+            normalized_shape,
+            eps=layer_norm_eps,
+            bias=layer_norm_bias,
             dtype=head_dtype,
         )
 
@@ -353,43 +382,127 @@ class ModernBertPooler(SequencePooler):
             projector=lambda x: self.norm(self.act(self.dense(x))),
         )
 
+@config
+class PoolingConfig:
+    path: str
+    embedding_dimension: int
+    pooling_mode: str
+    include_prompt: bool
+    prefix: str
+
+@config
+class LayerNormConfig:
+    path: str
+    dimension: int
+    norm_bias: bool
+    prefix: str
+
+@config
+class DenseConfig:
+    path: str
+    in_features: int
+    out_features: int 
+    bias: bool
+    activation_function: str
+    module_input_name: str
+    module_output_name: str
+    prefix: str
 
 @default_pooling_type(seq_pooling_type="CLS")
 class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
     is_pooling_model = True
+    config_class_for_modules = {
+        "PoolingConfig": PoolingConfig,
+        "LayerNormConfig": LayerNormConfig,
+        "DenseConfig": DenseConfig
+    }
+
+    def load_other_modules_config(self, config):
+        self.hf_to_vllm_mapper = None
+        self.module_configs = {}
+        modules_path = config.name_or_path+"/modules.json"
+        modules_file_path = Path(modules_path)
+        if modules_file_path.is_file():
+            with open(modules_file_path, "r", encoding="utf-8") as f:
+                modules_json_array = json.load(f)
+        else:
+            return
+        
+        for folder_json in modules_json_array:
+            folder_name = folder_json.get("path")
+            if not folder_name:
+                continue
+            module_config = config.name_or_path+f"/{folder_name}/config.json"
+            module_config_path = Path(module_config)
+            if not module_config_path.is_file():
+                continue
+            with open(module_config_path, "r", encoding="utf-8") as f:
+                module_config_json = json.load(f)
+                module_config_json["path"] = config.name_or_path+f"/{folder_name}"
+            module_config_class_name = folder_name.split("_")[-1] + "Config"
+            self.module_configs[folder_name] = self.config_class_for_modules[module_config_class_name](**module_config_json)
+        
+        weight_mapper_file_path = Path(config.name_or_path+"/weight_mapper.json")
+        if weight_mapper_file_path.is_file():
+            with open(weight_mapper_file_path, "r", encoding="utf-8") as f:
+                weight_mapper_json = json.load(f)
+            self.hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix=weight_mapper_json)
+
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-
         self.config = config
+        self.load_other_modules_config(config)
+
         self.model = ModernBertModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "modernbert")
         )
+        classifier_in_features = config.hidden_size
+        classifier_out_features = config.num_labels
+        classifier_bias = vllm_config.model_config.hf_config.classifier_bias
+        classifier_config = self.module_configs.get("4_Dense")
+        if classifier_config is not None:
+            classifier_in_features = classifier_config.in_features
+            classifier_out_features = classifier_config.out_features
+            classifier_bias = classifier_config.bias
+
         self.classifier = nn.Linear(
-            config.hidden_size,
-            config.num_labels,
+            classifier_in_features,
+            classifier_out_features,
+            classifier_bias,
             dtype=vllm_config.model_config.head_dtype,
         )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooling = ModernBertPooler(vllm_config.model_config)
+        self.pooling = ModernBertPooler(vllm_config.model_config, self.module_configs)
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,
             pooling=self.pooling,
             classifier=self.classifier,
         )
+        
+        self.secondary_weights = []
+        for _, module_config in self.module_configs.items(): 
+            if not module_config.prefix:
+                continue      
+            self.secondary_weights.append(DefaultModelLoader.Source(
+                                            module_config.path, 
+                                            vllm_config.model_config.revision, 
+                                            prefix=module_config.prefix)
+                                        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         self_weights = []
-
+        if self.hf_to_vllm_mapper is not None:
+            weights = self.hf_to_vllm_mapper.apply(weights)
         def weight_filter():
             for name, weight in weights:
                 if name.startswith("model."):
@@ -402,7 +515,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in self_weights:
-            if name.startswith("classifier"):
+            if name.startswith("classifier") or name.startswith("pooling"):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
