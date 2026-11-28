@@ -246,7 +246,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
 )
 @pytest.mark.parametrize(
     "seq_lens,seq_threshold_3D",
-    [([(129, 463)], 0), ([(1, 2011)], 0), ([(1, 2011)], 8)],
+    [([(129, 463)], 0), ([(1, 2011)], 0), ([(1, 2011)], 8), ([(8, 2011)], 8)],
 )
 def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
     test_triton_unified_attn_diffkv_vs_reference(
