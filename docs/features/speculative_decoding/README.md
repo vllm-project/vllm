@@ -73,6 +73,28 @@ Draft sampling defaults to `greedy`; set `draft_sample_method` to
 Set `enable_adaptive_verification` to `true` in the speculative config to
 enable [adaptive verification](adaptive_verification.md).
 
+## DSpark Top-k Drafting
+
+For Qwen3 DSpark drafts, `dspark_draft_topk` restricts the Markov projection to
+the top-k backbone candidates. It is disabled by default and can change draft
+acceptance. For example:
+
+```bash
+vllm serve Qwen/Qwen3-8B \
+    --hf-overrides '{"head_dtype": "float32"}' \
+    --speculative-config '{
+        "method": "dspark",
+        "model": "deepseek-ai/dspark_qwen3_8b_block7",
+        "num_speculative_tokens": 3,
+        "draft_sample_method": "probabilistic",
+        "dspark_draft_topk": 128
+    }'
+```
+
+`head_dtype: float32` computes output-head logits in FP32 while the model and
+Markov weights can remain BF16. Top-k Markov corrections use the candidate
+logits' dtype, so these options can be combined.
+
 ## Custom Speculators (Experimental)
 
 You can plug in your own speculator by registering it as a speculative method
