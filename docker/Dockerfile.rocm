@@ -656,6 +656,8 @@ COPY --link vllm /vllm-workspace/src/vllm
 WORKDIR /vllm-workspace
 # Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
 ENV VLLM_GPU_SYNC_CHECK=error
+# AITER defaults on for CDNA3+; CI keeps it off unless a test opts in.
+ENV VLLM_ROCM_USE_AITER=0
 # run-amd-test.sh's pytest plugin, in site-packages: commands that set PYTHONPATH still load it.
 RUN cp .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py \
     "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/"

@@ -715,6 +715,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         from vllm.model_executor.layers.mamba.gdn.base import (
             GatedDeltaNetAttention,
         )
+        from vllm.platforms.rocm import on_gfx942
 
         gdn_layers = get_layers_from_vllm_config(
             config,
@@ -795,9 +796,12 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
                 # Fuse aiter fused_add_rms_norm + (aiter / vllm built-in)
                 # dynamic per-token fp8 quant
-                AiterFusedAddRMSNormDynamicQuantPattern(
-                    epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
-                ).register(self.patterns)
+                # TODO(akaratza): drop the gfx942 gate once AITER_BRANCH includes
+                # ROCm/aiter#6300 (the residual is stored truncated on gfx942).
+                if not on_gfx942():
+                    AiterFusedAddRMSNormDynamicQuantPattern(
+                        epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
+                    ).register(self.patterns)
 
             # Fuse decomposed RMSNormGated + group fp8 quant.
             # The replacement op (fused_rms_gated_fp8_group_quant) requires

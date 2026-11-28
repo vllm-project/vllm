@@ -313,6 +313,7 @@ def test_attention_quant_pattern(
     model_name: str,
     model_class: type[AttentionQuantPatternModel],
     backend: AttentionBackendEnum,
+    use_aiter: bool,
     dist_init,
     disable_vllm_compile_cache,
 ):
@@ -470,7 +471,7 @@ def test_attention_quant_pattern(
     # Check quantization ops in the graph before and after fusion
     if "-quant_fp8" in custom_ops_list:
         quant_op = torch.ops.aten.reciprocal
-    elif getattr(model_class, "aiter_quant", False):
+    elif use_aiter:
         quant_op = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
     else:
         quant_op = QUANT_OPS[quant_key]
@@ -575,6 +576,7 @@ def test_rocm_aiter_static_quant_attention(
                 model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
                 model_class=TestAttentionAiterFp8StaticQuantPatternModel,
                 backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+                use_aiter=True,
                 dist_init=dist_init,
                 disable_vllm_compile_cache=disable_vllm_compile_cache,
             )

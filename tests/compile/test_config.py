@@ -1576,7 +1576,7 @@ def test_blackwell_cudagraph_default(monkeypatch, is_blackwell, expected_max_siz
     )
 
 
-def test_cached_compilation_config(default_vllm_config):
+def test_cached_compilation_config(use_aiter, default_vllm_config):
     import torch
     from torch._inductor.utils import run_and_get_code
 
@@ -1615,7 +1615,10 @@ def test_cached_compilation_config(default_vllm_config):
         _, code = run_and_get_code(query_quant, query, _q_scale)
 
     code = " ".join(code)
-    assert "torch.ops._C.static_scaled_fp8_quant.default(" in code
+    if use_aiter:
+        assert "torch.ops.vllm.rocm_aiter_per_tensor_quant.default(" in code
+    else:
+        assert "torch.ops._C.static_scaled_fp8_quant.default(" in code
 
 
 def test_compile_sizes_post_init():

@@ -208,6 +208,8 @@ fi
 # Scrub orchestration vars before handing control to test commands.
 # (VLLM_CI_* that are test knobs are intentionally left — see tests/ci_envs.py)
 unset VLLM_TEST_COMMANDS VLLM_CI_EXPECTED_GPU_COUNT VLLM_CI_DIAGNOSTICS_DIR
+# AITER defaults on for CDNA3+; CI keeps it off unless a test opts in.
+export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-0}"
 
 echo "Test commands: $commands"
 echo "--- Test log"
