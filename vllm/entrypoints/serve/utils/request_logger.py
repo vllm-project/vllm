@@ -18,16 +18,21 @@ logger = init_logger(__name__)
 
 
 class RequestLogger:
-    def __init__(self, *, max_log_len: int | None) -> None:
+    def __init__(self, *, max_log_len: int | None, ids_only: bool = False) -> None:
         self.max_log_len = max_log_len
+        self.ids_only = ids_only
 
         if not logger.isEnabledFor(logging.INFO):
-            logger.warning_once(
-                "`--enable-log-requests` is set but "
-                "the minimum log level is higher than INFO. "
-                "No request information will be logged."
+            flag = (
+                "--enable-log-request-ids-only" if ids_only else "--enable-log-requests"
             )
-        elif not logger.isEnabledFor(logging.DEBUG):
+            logger.warning_once(
+                "`%s` is set but "
+                "the minimum log level is higher than INFO. "
+                "No request information will be logged.",
+                flag,
+            )
+        elif not ids_only and not logger.isEnabledFor(logging.DEBUG):
             logger.info_once(
                 "`--enable-log-requests` is set but "
                 "the minimum log level is higher than DEBUG. "
@@ -44,6 +49,10 @@ class RequestLogger:
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
+        if self.ids_only:
+            logger.info("Received request %s.", request_id)
+            return
+
         if logger.isEnabledFor(logging.DEBUG):
             max_log_len = self.max_log_len
             if max_log_len is not None:
@@ -71,6 +80,9 @@ class RequestLogger:
         )
 
     def log_request_body(self, request: AnyRequest | AnyPoolingRequest) -> None:
+        if self.ids_only:
+            return
+
         try:
             level = logging.getLevelNamesMapping()[envs.VLLM_REQUEST_BODY_LOG_LEVEL]
         except KeyError:
