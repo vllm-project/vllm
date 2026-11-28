@@ -434,8 +434,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         if num_speculative_tokens <= 1:
             if num_speculative_tokens == 0:
                 self.draft_tokens[:num_reqs].fill_(-1)
-                return self.draft_tokens[:num_reqs]
-            return self.draft_tokens[:num_reqs, :1]
+            return self.draft_tokens[:num_reqs]
 
         self._run_multi_step_decode(
             input_batch,
