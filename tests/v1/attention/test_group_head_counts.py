@@ -425,7 +425,7 @@ def test_flashinfer_cudagraph_support_ignores_model_heads(monkeypatch, spec_kv_h
     pytest.importorskip("flashinfer")
     import vllm.v1.attention.backends.flashinfer as backend
 
-    monkeypatch.setattr(backend, "_use_fa2_native_decode", lambda: False)
+    monkeypatch.setattr(backend, "_use_fa2_native_decode", lambda *_: False)
     monkeypatch.setattr(backend, "force_use_trtllm_attention", lambda: None)
     monkeypatch.setattr(backend, "supports_trtllm_attention", lambda **_: True)
     monkeypatch.setattr(
