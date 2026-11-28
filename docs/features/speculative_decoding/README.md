@@ -185,6 +185,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `parallel_drafting` | `boolean` | `null` | Deprecated and has no effect. `dflash` and `dspark` always draft in parallel, and no other method supports it. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
+| `draft_temperature_scale` | `float >= 0` | `None` | Scale each request's target temperature for model-based draft proposals: `T_draft = scale * T_target`. Positive scales require `draft_sample_method="probabilistic"`; zero selects greedy drafting. Unset preserves existing behavior. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
 | `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |
 | `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. With `synthetic`, runs FLy's entropy computation without deferring rejections (see [FLy](fly.md#measuring-fly-cost-with-synthetic-acceptance)). |
@@ -252,6 +253,40 @@ vllm serve <target-model> \
 ```
 
 ### Notes
+
+To scale probabilistic draft temperatures relative to each request's target
+sampling temperature, set `draft_temperature_scale` in the speculative config:
+
+```bash
+vllm serve YOUR_MODEL --speculative-config '{
+  "method": "mtp",
+  "num_speculative_tokens": 3,
+  "draft_sample_method": "probabilistic",
+  "draft_temperature_scale": 0.5
+}'
+```
+
+This uses `T_draft = 0.5 * T_target`: target temperatures of `0.75` and `1.0`
+produce draft temperatures of `0.375` and `0.5`, respectively. Requests with
+different target temperatures can share a batch, and a greedy target (`T=0`)
+always gets greedy drafts.
+
+The target continues to use each request's sampling parameters. With lossless
+verification, changing the draft temperature affects acceptance and performance
+while preserving the target output distribution. Verification uses the same
+draft temperature as proposal sampling.
+
+An unset scale preserves existing behavior: greedy drafting uses argmax, and
+probabilistic drafting inherits the target temperature. A scale of `1` also
+inherits the target temperature; `0` selects greedy drafting without allocating
+a draft-logits cache. Positive scales require probabilistic drafting. Scaling is
+supported by model-based speculators except XPress. Lookup methods such as n-gram
+and suffix decoding do not support this option.
+
+Benchmark both acceptance and throughput: retaining draft logits for
+probabilistic drafting uses extra memory, and higher acceptance may not offset
+its verification cost. The example scale illustrates configuration and is not
+a tuned recommendation for every model.
 
 - `--speculative-config` expects a JSON object on the CLI. In YAML config
   files, use a nested mapping instead of an escaped JSON string.

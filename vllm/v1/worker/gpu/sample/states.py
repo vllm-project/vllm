@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
@@ -9,17 +11,34 @@ from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 
+if TYPE_CHECKING:
+    from vllm.config import SpeculativeConfig
+
 NO_LOGPROBS = -1
 _NP_INT64_MIN = np.iinfo(np.int64).min
 _NP_INT64_MAX = np.iinfo(np.int64).max
 
 
 class SamplingStates:
-    def __init__(self, max_num_reqs: int, vocab_size: int):
+    def __init__(
+        self,
+        max_num_reqs: int,
+        vocab_size: int,
+        speculative_config: "SpeculativeConfig | None" = None,
+    ):
         self.max_num_reqs = max_num_reqs
         self.vocab_size = vocab_size
 
         self.temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.draft_temperature_scale = 1.0
+        if (
+            speculative_config is not None
+            and speculative_config.draft_temperature_scale is not None
+        ):
+            self.draft_temperature_scale = speculative_config.draft_temperature_scale
+        self.draft_temperature = self.temperature
+        if self.draft_temperature_scale != 1.0:
+            self.draft_temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.top_k = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.top_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.min_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
@@ -45,6 +64,10 @@ class SamplingStates:
         min_p = sampling_params.min_p
 
         self.temperature.np[req_idx] = temperature
+        if self.draft_temperature is not self.temperature:
+            self.draft_temperature.np[req_idx] = (
+                temperature * self.draft_temperature_scale
+            )
         self.top_p.np[req_idx] = top_p
         if top_k <= 0 or top_k > self.vocab_size:
             top_k = self.vocab_size
@@ -73,6 +96,8 @@ class SamplingStates:
 
     def apply_staged_writes(self) -> None:
         self.temperature.copy_to_uva()
+        if self.draft_temperature is not self.temperature:
+            self.draft_temperature.copy_to_uva()
         self.top_p.copy_to_uva()
         self.top_k.copy_to_uva()
         self.min_p.copy_to_uva()

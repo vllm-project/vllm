@@ -952,9 +952,10 @@ def _prepare_dflash_inputs_kernel(
             tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len),
         )
         # Copy sampling state.
+        draft_temp = tl.load(temperature_ptr + req_state_idx)
         tl.store(
             out_temperature_ptr + req_state_idx,
-            tl.load(temperature_ptr + req_state_idx),
+            draft_temp,
         )
         tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
 

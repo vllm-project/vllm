@@ -14,12 +14,14 @@ pytest.importorskip("triton")
 if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip("CUDA or XPU required for sampler flag tests", allow_module_level=True)
 
+from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcessor,
 )
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.states import SamplingStates
 from vllm.v1.worker.gpu.states import RequestState
 
 DEVICE = torch.device(current_platform.device_type)
@@ -42,12 +44,70 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
         device=DEVICE,
     )
     return Sampler(
-        vllm_config=SimpleNamespace(reasoning_config=MockReasoningConfig()),
+        vllm_config=SimpleNamespace(
+            reasoning_config=MockReasoningConfig(), speculative_config=None
+        ),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
         custom_logits_processors=custom_logits_processors,
+    )
+
+
+@pytest.mark.parametrize("scale", [None, 0.0, 0.5, 1.0, 1.5])
+def test_draft_temperature_scale_preserves_target_and_reused_slots(tmp_path, scale):
+    """Scaling changes only draft temperatures, including when a slot is reused."""
+    from transformers import LlamaConfig
+
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    ).save_pretrained(tmp_path)
+    target = ModelConfig(
+        model=str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="float32",
+        max_model_len=128,
+    )
+    spec = SpeculativeConfig(
+        method="draft_model",
+        model=str(tmp_path),
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+        draft_sample_method="probabilistic",
+        draft_temperature_scale=scale,
+    )
+    states = SamplingStates(2, VOCAB_SIZE, spec)
+    effective_scale = 1.0 if scale is None else scale
+    assert (states.draft_temperature is states.temperature) == (effective_scale == 1.0)
+    for index, temperature in enumerate((0.0, 1.5)):
+        states.add_request(index, SamplingParams(temperature=temperature, seed=42))
+    states.apply_staged_writes()
+    torch.testing.assert_close(
+        states.temperature.gpu, torch.tensor([0.0, 1.5], device=DEVICE), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        states.draft_temperature.gpu,
+        torch.tensor([0.0, 1.5], device=DEVICE) * effective_scale,
+        rtol=0,
+        atol=0,
+    )
+    states.add_request(0, SamplingParams(temperature=0.5, seed=42))
+    states.apply_staged_writes()
+    torch.testing.assert_close(
+        states.temperature.gpu, torch.tensor([0.5, 1.5], device=DEVICE), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        states.draft_temperature.gpu,
+        torch.tensor([0.5, 1.5], device=DEVICE) * effective_scale,
+        rtol=0,
+        atol=0,
     )
 
 

@@ -125,6 +125,7 @@ DraftSampleMethod = Literal["greedy", "probabilistic"]
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
+    "draft_temperature_scale",
     "dspark_draft_topk",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
@@ -691,6 +692,16 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    draft_temperature_scale: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False
+    )
+    """Scale each request's target temperature for draft proposals:
+    `T_draft = draft_temperature_scale * T_target`. Unset preserves existing
+    behavior: greedy drafts use argmax and probabilistic drafts inherit the
+    target temperature. Positive scales require draft_sample_method='probabilistic';
+    zero selects greedy drafting without caching draft logits. Only valid for
+    model-based speculators. Target sampling parameters are unchanged."""
+
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
@@ -755,6 +766,7 @@ class SpeculativeConfig:
             "synthetic_acceptance_length",
             "enable_adaptive_verification",
             "draft_sample_method",
+            "draft_temperature_scale",
             "dspark_draft_topk",
             "xpress_topc",
             "fly_window_size",
@@ -1470,6 +1482,17 @@ class SpeculativeConfig:
         return None
 
     def __post_init__(self):
+        if self.draft_temperature_scale == 0.0:
+            self.draft_sample_method = "greedy"
+        elif (
+            self.draft_temperature_scale is not None
+            and self.draft_sample_method != "probabilistic"
+        ):
+            raise ValueError(
+                "A positive draft_temperature_scale requires "
+                "draft_sample_method='probabilistic'."
+            )
+
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight

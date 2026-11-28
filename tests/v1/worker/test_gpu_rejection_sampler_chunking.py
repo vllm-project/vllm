@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
@@ -418,17 +418,15 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     )
     draft_sampled[:, 1:] = torch.tensor([0, 1, 2], device=device)
     draft_sampled = draft_sampled.flatten()
+    sampling_states = SamplingStates(num_reqs, vocab_size)
+    for row in range(num_reqs):
+        sampling_states.add_request(row, SamplingParams(temperature=1.0, seed=row))
+    sampling_states.apply_staged_writes()
     sampler = SimpleNamespace(
         logprobs_mode="processed_logprobs",
         return_sampling_mask=False,
         logprob_token_ids_state=None,
-        sampling_states=SimpleNamespace(
-            top_k=SimpleNamespace(np=np.full(num_reqs, vocab_size)),
-            temperature=SimpleNamespace(gpu=torch.ones(num_reqs, device=device)),
-            seeds=SimpleNamespace(
-                gpu=torch.arange(num_reqs, dtype=torch.int64, device=device)
-            ),
-        ),
+        sampling_states=sampling_states,
         use_fp64_gumbel=False,
         apply_sampling_params=lambda logits, *_: logits,
         trace_replay_state=None,

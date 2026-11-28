@@ -296,6 +296,7 @@ class RejectionSampler:
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
+            draft_temperature=self.sampler.sampling_states.draft_temperature.gpu,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
             fly_window_size=self.fly_window_size,

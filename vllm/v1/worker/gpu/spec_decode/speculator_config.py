@@ -190,6 +190,8 @@ class SpeculatorConfig:
 class DraftModelSpeculatorConfig(SpeculatorConfig):
     """A speculator whose draft model is loaded from the `model` checkpoint."""
 
+    supported_options = frozenset({"draft_temperature_scale"})
+
     # The draft model takes the target's positions, so its
     # max_position_embeddings is raised to the target's max_model_len where its
     # RoPE type allows.
