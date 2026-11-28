@@ -47,7 +47,9 @@ class TestSetting:
                 "--max-model-len",
                 "2048",
                 "--gpu-memory-utilization",
-                "0.98",
+                # XPU reserves part of the device at startup, so 0.98 exceeds
+                # the free memory.
+                "0.95" if current_platform.is_xpu() else "0.98",
             ],
             pp_size=1,
             tp_size=1,
