@@ -12,13 +12,16 @@ multicast is disabled for it. Checked here:
 - `multicast_rendezvous`: the multicast address on multicast platforms, and 0 on
   every rank when one rank's binding is skipped (the ranks agree on the path);
 - the specialized decode's peer-store mailboxes (DCP partials, top-k exchange,
-  MoE tail reduce-scatter) bind no multicast object and still map every peer.
+  MoE tail reduce-scatter) bind no multicast object and still map every peer;
+- the specialized decode refuses TP ranks that span nodes without one NVLink fabric
+  (CPU only: the topology is faked).
 
 Runs on 2 GPUs (`mp.spawn`), or on every rank of a `torchrun` / `srun` launch
 (e.g. TP8 across two GB300 NVL72 trays) when `RANK` and `WORLD_SIZE` are set.
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -161,3 +164,49 @@ def test_symm_multicast_budget():
     from vllm.utils.network_utils import get_open_port
 
     mp.spawn(worker, args=(world, get_open_port()), nprocs=world)
+
+
+@pytest.mark.parametrize(
+    ("tp", "topology", "refused"),
+    [
+        (1, None, False),
+        (16, "INTRA_NODE", False),
+        (16, "CROSS_NODE_NVLINK", False),
+        (16, "UNSUPPORTED", True),
+    ],
+)
+def test_specialized_decode_requires_shared_fabric(monkeypatch, tp, topology, refused):
+    """TP ranks on different nodes without a shared NVLink fabric would block in the
+    first mailbox rendezvous until the store timeout (600 s): refuse them up front."""
+    import vllm.distributed
+    from vllm.distributed.device_communicators import nvlink_fabric
+    from vllm.models.kimi_k3.nvidia.specialized_decode import runtime
+
+    queried = []
+
+    def classify(group):
+        queried.append(group)
+        return nvlink_fabric.SymmetricMemoryTopology[topology]
+
+    tp_group = SimpleNamespace(cpu_group=object())
+    monkeypatch.setattr(vllm.distributed, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(nvlink_fabric, "get_symmetric_memory_topology", classify)
+    monkeypatch.setattr(runtime, "unsupported", lambda _config: None)
+    config = SimpleNamespace(
+        additional_config={"decode_backend": "latency_specialized"},
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp, decode_context_parallel_size=1
+        ),
+        speculative_config=None,
+        model_config=SimpleNamespace(
+            max_model_len=4096, hf_text_config=SimpleNamespace(dsa_config=None)
+        ),
+        cache_config=SimpleNamespace(cache_dtype="fp8"),
+        compilation_config=SimpleNamespace(cudagraph_capture_sizes=[1, 2]),
+    )
+    if refused:
+        with pytest.raises(ValueError, match="without a shared NVLink fabric"):
+            runtime.specialized_decode_config(config)
+    else:
+        assert runtime.specialized_decode_config(config) is not None
+    assert queried == ([] if tp == 1 else [tp_group.cpu_group])
