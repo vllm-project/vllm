@@ -571,7 +571,11 @@ class _AutotuneGroup:
         # Ranks run sequentially: snapshot every rank's file before any saves.
         self.record(("all_gather",))
         if isinstance(obj, bool):
-            out[:] = [rank not in self.run.rejected_load_ranks for rank in self.ranks]
+            env = json.dumps(self.run.env)
+            out[:] = [
+                rank not in self.run.rejected_load_ranks and fingerprint[0] == env
+                for rank, fingerprint in zip(self.ranks, self.run.gathered[self.ranks])
+            ]
             assert out[self.rank_in_group] == obj
             return
         out[:] = self.run.gathered.setdefault(
@@ -594,10 +598,14 @@ class _AutotuneTuner:
         self._dirty = False
 
     def load_configs(self, path):
-        if self.run.rank in self.run.rejected_load_ranks:
+        configs = json.loads(Path(path).read_text())
+        if (
+            self.run.rank in self.run.rejected_load_ranks
+            or configs.pop("_metadata", None) != self.run.env
+        ):
             return False
-        self.loaded = json.loads(Path(path).read_text())
-        self.cache.update(self.loaded)
+        self.loaded = configs
+        self.cache.update(configs)
         return True
 
     def clear_cache(self):
@@ -605,8 +613,12 @@ class _AutotuneTuner:
         self._dirty = False
 
     def save_configs(self, path):
-        self.run.saves.append((self.run.rank, Path(path), dict(self.cache)))
-        Path(path).write_text(json.dumps(self.cache))
+        # FlashInfer leaves a file saved under another environment untouched.
+        path = Path(path)
+        if path.exists() and json.loads(path.read_text())["_metadata"] != self.run.env:
+            return
+        self.run.saves.append((self.run.rank, path, dict(self.cache)))
+        path.write_text(json.dumps({"_metadata": self.run.env, **self.cache}))
 
     def profile(self, operation):
         if operation in self.cache:
@@ -632,6 +644,7 @@ class _AutotuneRun:
             defaultdict(lambda: defaultdict(list))
         )
         self.gathered = {}
+        self.env = "env-a"
         self.rejected_load_ranks: set[int] = set()
         self.tuners = {}
         self.saves = []
@@ -786,6 +799,26 @@ def test_rejected_cache_retunes_every_rank_in_its_tuning_group(autotune_run, pp,
     rerun.assert_collectives_match()
     assert set(rerun.profile_groups) == set(range(tp))
     assert {rank for rank, _, _ in rerun.saves} == set(range(tp))
+
+
+@pytest.mark.parametrize("pp, tp", [(1, 1), (1, 4), (2, 4)])
+def test_cache_from_other_library_versions_is_replaced(autotune_run, pp, tp):
+    """Otherwise every later start rejects the old file and retunes."""
+    autotune_run(pp=pp, tp=tp).execute()
+    upgraded = autotune_run(pp=pp, tp=tp)
+    upgraded.env = "env-b"
+    upgraded.execute()
+    upgraded.assert_collectives_match()
+    assert set(upgraded.profile_groups) == set(range(pp * tp))
+    saved = {rank: cache for rank, _, cache in upgraded.saves}
+    assert set(saved) == set(range(pp * tp))
+    warm = autotune_run(pp=pp, tp=tp)
+    warm.env = "env-b"
+    warm.execute()
+    warm.assert_collectives_match()
+    assert not warm.profile_groups
+    for rank, tuner in warm.tuners.items():
+        assert tuner.loaded == saved[rank]
 
 
 def test_autotune_cache_key_normalizes_kv_init_fields():

@@ -708,4 +708,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             autotune_v2_reload()
             world.barrier()
     elif tuner._dirty:
+        if not cache_hit:
+            # FlashInfer never overwrites a file saved under other library versions.
+            cache_path.unlink(missing_ok=True)
         tuner.save_configs(str(cache_path))
