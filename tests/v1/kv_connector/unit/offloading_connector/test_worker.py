@@ -719,6 +719,49 @@ def test_register_split_padded_pages_raises():
         worker.register_kv_caches(kv_caches)
 
 
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_register_kv_caches_covers_whole_page(layout):
+    """Row b of the registered tensors holds every byte of block b of every
+    layer and nothing else, whichever dim order the layout uses."""
+    from vllm.v1.kv_cache_interface import compute_layout_strides
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    spec = AttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    layers = ["layer0", "layer1"]
+    layer_stride, block_stride, *_ = compute_layout_strides(
+        spec, NUM_BLOCKS, len(layers), layout
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=len(layers) * spec.page_size_bytes * NUM_BLOCKS,
+                layers=layers,
+                layer_stride=layer_stride,
+                block_stride=block_stride,
+            )
+        ],
+        kv_cache_groups=[make_kv_cache_group(layers, spec)],
+    )
+    kv_caches = allocate_kv_cache(
+        kv_cache_config, torch.device(f"{DEVICE_TYPE}:0"), layout, [BLOCK_SIZE]
+    )
+    worker, offloading_spec = _make_worker(kv_cache_config)
+    worker.register_kv_caches(kv_caches)
+
+    canonical = offloading_spec.get_worker.call_args[0][0]
+    for canonical_tensor in canonical.tensors:
+        canonical_tensor.tensor[3] = 1
+    for cache in kv_caches.values():
+        assert (cache[3] != 0).all()
+        assert not cache[:3].any() and not cache[4:].any()
+
+
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
 def test_register_kv_caches_uniform_type(backend):
     """Test register_kv_caches with a group whose layer layouts differ.
