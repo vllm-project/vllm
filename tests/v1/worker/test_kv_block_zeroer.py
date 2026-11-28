@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -12,6 +11,7 @@ from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
+    MambaSpec,
 )
 from vllm.v1.worker import utils as worker_utils
 from vllm.v1.worker.utils import (
@@ -36,8 +36,8 @@ def test_attention_blocks_are_zeroed():
         device,
         attn_groups_iter=[AttentionGroup(None, [layer_name], spec, 0)],
         kernel_block_sizes=[2],
-        static_forward_context={
-            layer_name: SimpleNamespace(kv_cache=storage),
+        cache_pages={
+            layer_name: storage,
         },
         num_blocks=4,
     )
@@ -83,9 +83,9 @@ def test_layers_in_one_group_may_use_different_kernel_pages_per_block():
             )
         ],
         kernel_block_sizes=[1],
-        static_forward_context={
-            "wide": SimpleNamespace(kv_cache=wide),
-            "narrow": SimpleNamespace(kv_cache=narrow),
+        cache_pages={
+            "wide": wide,
+            "narrow": narrow,
         },
         num_blocks=num_blocks,
     )
@@ -227,6 +227,24 @@ def test_packed_segment_zeros_only_its_last_block_page():
     assert torch.equal(backing, expected)
 
 
+def test_unaligned_mamba_state_page_zeroing():
+    spec = MambaSpec(block_size=16, shapes=((5,),), dtypes=(torch.uint8,))
+    device = torch.device(DEVICE)
+    pages = torch.ones((3, 1, 1, 5), dtype=torch.uint8, device=device)
+    zeroer = KVBlockZeroer(
+        device, [AttentionGroup(None, ["state"], spec, 0)], [16], {"state": pages}, 3
+    )
+    assert zeroer._meta is not None
+    _, strides, spans, *_ = zeroer._meta
+    assert zeroer._byte_stores
+    assert strides.tolist() == spans.tolist() == [5]
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        zeroer.zero_block_ids([1])
+        assert torch.equal(
+            pages.flatten(), pages.new_tensor([1] * 5 + [0] * 5 + [1] * 5)
+        )
+
+
 def test_large_dsv4_launch_geometry(monkeypatch):
     """Keep the failing DSV4 shape efficient and within launch limits."""
     device = torch.device("cpu")
@@ -250,10 +268,7 @@ def test_large_dsv4_launch_geometry(monkeypatch):
             for group_id, name in enumerate(layer_names)
         ],
         kernel_block_sizes=[1] * n_segs,
-        static_forward_context={
-            name: SimpleNamespace(kv_cache=storage)
-            for name, storage in storages.items()
-        },
+        cache_pages=storages,
         num_blocks=1,
     )
 
@@ -381,12 +396,12 @@ def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
             kv_cache_group_id=0,
         )
     ]
-    ctx = {f"layer.{i}": SimpleNamespace(kv_cache=views[i]) for i in range(num_layers)}
+    ctx = {f"layer.{i}": views[i] for i in range(num_layers)}
     zeroer = KVBlockZeroer(
         device,
         attn_groups_iter=iter(groups),
         kernel_block_sizes=[spec.block_size],
-        static_forward_context=ctx,
+        cache_pages=ctx,
         num_blocks=num_blocks,
     )
     zeroer.zero_block_ids([2])

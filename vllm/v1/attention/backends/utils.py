@@ -22,11 +22,17 @@ from vllm.config.cache import _layout_from_name
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
+    np_to_pinned_tensor,
+    nvfp4_split_data_scale,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
     KVCacheLayout,
+    KVCacheRuntimeShapes,
     KVCacheSpec,
     MambaSpec,
     get_kv_quant_mode,
@@ -214,6 +220,64 @@ _FLASHINFER_LAYOUT_NAMES = {
     "BLNHC": "NHD",
     "BHLNC": "HND",
 }
+
+
+_KVPair = tuple[torch.Tensor, torch.Tensor]
+
+
+def flashinfer_nvfp4_kv_views(
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...], num_kv_heads: int
+) -> tuple[_KVPair, _KVPair, str]:
+    """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
+    if isinstance(kv_cache, tuple):
+        page, k_data, k_scale, v_data, v_scale = kv_cache
+        layout = "HND" if page.stride(1) >= page.stride(2) else "NHD"
+        return (
+            (k_data, v_data),
+            (k_scale, v_scale),
+            layout,
+        )
+    num_blocks, num_slots, block_size, full_dim = kv_cache.shape
+    hnd = kv_cache.stride()[1:] == (block_size * full_dim, full_dim, 1)
+    if not hnd and kv_cache.stride()[1:] != (full_dim, num_slots * full_dim, 1):
+        raise ValueError(f"NVFP4 KV pages must be dense, got {kv_cache.stride()}")
+    dims = (num_kv_heads, block_size) if hnd else (block_size, num_kv_heads)
+    side_size = num_kv_heads * block_size * full_dim
+    (k_data, k_scale), (v_data, v_scale) = (
+        nvfp4_split_data_scale(
+            kv_cache.as_strided(
+                (num_blocks, *dims, full_dim),
+                (kv_cache.stride(0), dims[1] * full_dim, full_dim, 1),
+                kv_cache.storage_offset() + side * side_size,
+            )
+        )
+        for side in range(2)
+    )
+    return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
+
+
+def flashinfer_nvfp4_component_shapes(
+    spec: AttentionSpec,
+    num_blocks: int,
+    layout: KVCacheLayout,
+    kernel_block_size: int | None = None,
+) -> KVCacheRuntimeShapes:
+    """FlashInfer packs K data, K scales, V data, V scales within each page."""
+    bs = kernel_block_size or spec.block_size
+    num_blocks *= spec.block_size // bs
+    rows = spec.get_num_kernel_states(bs)
+    num_heads = spec.num_kv_heads
+    full_dim = spec.state_content_size_bytes
+    dims = (
+        (num_heads, rows)
+        if get_flashinfer_layout_string(layout) == "HND"
+        else (rows, num_heads)
+    )
+    data_width = full_dim * 8 // 9
+    data = (num_blocks, *dims, data_width)
+    scales = (num_blocks, *dims, full_dim - data_width)
+    pair = ((data, torch.uint8), (scales, torch.float8_e4m3fn))
+    return (*pair, *pair)
 
 
 def get_flashinfer_layout_string(layout: KVCacheLayout) -> str:

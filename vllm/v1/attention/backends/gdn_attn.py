@@ -35,7 +35,12 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheLayout,
+    KVCacheRuntimeShapes,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
@@ -91,6 +96,20 @@ class GDNFlashInferCheckpointPlan:
 
 
 class GDNAttentionBackend(AttentionBackend):
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: KVCacheSpec,
+        num_blocks: int,
+        layout: KVCacheLayout,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        assert isinstance(spec, MambaSpec)
+        return tuple(
+            ((num_blocks, *shape), dtype)
+            for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True)
+        )
+
     @staticmethod
     def get_name() -> str:
         return "GDN_ATTN"

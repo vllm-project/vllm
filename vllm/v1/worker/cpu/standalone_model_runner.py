@@ -424,6 +424,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 attn_groups=(group for groups in self.attn_groups for group in groups),
             )
+        self.kv_caches_by_layer = kv_caches_dict
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
@@ -438,7 +439,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             attn_groups_iter=(group for groups in self.attn_groups for group in groups),
             kernel_block_sizes=self.kernel_block_sizes,
-            static_forward_context=self.compilation_config.static_forward_context,
+            cache_pages=self.kv_caches_by_layer,
             num_blocks=self.kv_cache_config.num_blocks,
         )
 
@@ -1321,6 +1322,8 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         self.kv_block_zeroer = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
+        if hasattr(self, "kv_caches_by_layer"):
+            self.kv_caches_by_layer.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):

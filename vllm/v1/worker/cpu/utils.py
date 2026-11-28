@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import KVBlockZeroer
 
 if TYPE_CHECKING:
@@ -36,7 +35,7 @@ class CPUKVBlockZeroer(KVBlockZeroer):
         device: torch.device,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
-        static_forward_context: dict[str, Any],
+        cache_pages: dict[str, torch.Tensor],
         num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
@@ -47,7 +46,7 @@ class CPUKVBlockZeroer(KVBlockZeroer):
             runner_only_attn_layers = set()
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, AttentionSpec):
+            if not spec.has_layer_views:
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
@@ -56,13 +55,7 @@ class CPUKVBlockZeroer(KVBlockZeroer):
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv_cache = static_forward_context[layer_name].kv_cache
-                if not isinstance(kv_cache, torch.Tensor):
-                    continue
-                if group.kernel_block_stride:
-                    kv_cache = group.map_kv_cache_to_manager_blocks(
-                        kv_cache, num_blocks
-                    )
+                kv_cache = cache_pages[layer_name]
                 if kv_cache.device.type != self.device.type:
                     continue
                 assert kv_cache.shape[0] % num_blocks == 0, (

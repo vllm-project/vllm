@@ -28,7 +28,14 @@ if TYPE_CHECKING:
         KVQuantMode,
     )
 
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, get_kv_quant_mode
+from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    KVCacheRuntimeShapes,
+    compute_layer_kv_cache_shape_bytes,
+    get_kv_quant_mode,
+)
 
 
 class AttentionType(StrEnum):
@@ -69,6 +76,23 @@ class AttentionBackend(ABC):
 
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: "KVCacheSpec",
+        num_blocks: int,
+        layout: KVCacheLayout,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Return (element shape, dtype) pairs in physical page order.
+
+        The default describes the packed layer tensor in the resolved layout.
+        Overrides describe contiguous components within each page.
+        """
+        shape = compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size)
+        dtype = getattr(spec, "dtype", torch.int8)
+        return (((*shape[:-1], shape[-1] // get_dtype_size(dtype)), dtype),)
 
     @staticmethod
     def get_supported_kernel_block_sizes(

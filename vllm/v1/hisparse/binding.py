@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayerConfig,
     KVCacheLayout,
+    KVCacheRuntimeViews,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -177,6 +178,8 @@ def allocate_hisparse_kv_caches(
     kernel_block_sizes: list[int],
     host_pool: HiSparseHostPool,
     allocate: Callable[[int], torch.Tensor] | None = None,
+    *,
+    runtime: KVCacheRuntimeViews | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the host pool separately from the shared device backing."""
     device_config = copy(kv_cache_config)
@@ -186,7 +189,12 @@ def allocate_hisparse_kv_caches(
         if not tensor.host_resident
     ]
     kv_caches = allocate_kv_cache(
-        device_config, device, layout, kernel_block_sizes, allocate=allocate
+        device_config,
+        device,
+        layout,
+        kernel_block_sizes,
+        allocate=allocate,
+        runtime=runtime,
     )
     host_tensors = [
         tensor for tensor in kv_cache_config.kv_cache_tensors if tensor.host_resident
@@ -204,6 +212,7 @@ def allocate_hisparse_kv_caches(
             layout,
             tensor,
             kernel_block_size=kernel_block_sizes[host_group_id],
+            runtime=runtime,
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
@@ -217,6 +226,8 @@ def init_hisparse_kv_cache(
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
     allocate: Callable[[int], torch.Tensor] | None = None,
+    *,
+    runtime: KVCacheRuntimeViews | None = None,
 ) -> dict[str, Any]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
     backend = get_hisparse_backend()
@@ -230,6 +241,7 @@ def init_hisparse_kv_cache(
             kernel_block_sizes,
             host_pool,
             allocate=allocate,
+            runtime=runtime,
         )
         backend.prepare_kv_cache_views(kv_cache_config, kv_caches, forward_context)
         cache_handles = bind_hisparse_kv_caches(
