@@ -307,28 +307,26 @@ impl AppState {
             .await
     }
 
-    /// Validate and prepare LoRA adapter specs for `/start_weight_update`.
+    /// Validate and prepare one LoRA adapter spec for `/start_weight_update`.
     pub(crate) async fn prepare_lora_weight_update(
         &self,
-        specs: &[LoraWeightUpdateSpec],
+        spec: &LoraWeightUpdateSpec,
     ) -> Result<PreparedLoraWeightUpdate, LoadLoraError> {
         self.ensure_lora_enabled()?;
-        self.lora_manager.prepare_weight_update(&self.served_model_names, specs).await
+        self.lora_manager.prepare_weight_update(&self.served_model_names, spec).await
     }
 
-    pub(crate) async fn set_pending_lora_weight_update(&self, pending: Option<Vec<LoadedLora>>) {
+    pub(crate) async fn set_pending_lora_weight_update(&self, pending: Option<LoadedLora>) {
         self.lora_manager.set_pending_weight_update(pending).await;
     }
 
-    pub(crate) async fn take_pending_lora_weight_update(&self) -> Option<Vec<LoadedLora>> {
+    pub(crate) async fn take_pending_lora_weight_update(&self) -> Option<LoadedLora> {
         self.lora_manager.take_pending_weight_update().await
     }
 
-    /// Commit LoRA adapters from a completed `/finish_weight_update` session.
-    ///
-    /// Returns `true` if any adapter reused the exact same `lora_path`.
-    pub(crate) async fn commit_lora_weight_update(&self, adapters: Vec<LoadedLora>) -> bool {
-        self.lora_manager.commit_weight_update(adapters).await
+    /// Commit a LoRA adapter from a completed `/finish_weight_update` session.
+    pub(crate) async fn commit_lora_weight_update(&self, adapter: LoadedLora) {
+        self.lora_manager.commit_weight_update(adapter).await;
     }
 
     fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {

@@ -978,12 +978,12 @@ impl EngineCoreClient {
     }
 
     /// Start a LoRA weight update session (leaves base model weights untouched).
-    pub async fn start_lora_weight_update(&self, lora_adapters: Vec<JsonValue>) -> Result<()> {
+    pub async fn start_lora_weight_update(&self, lora_adapter: JsonValue) -> Result<()> {
         self.collective_rpc(
             "start_weight_update",
             None,
             Vec::<JsonValue>::new(),
-            BTreeMap::from([("lora_adapters".to_string(), JsonValue::Array(lora_adapters))]),
+            BTreeMap::from([("lora_adapter".to_string(), lora_adapter)]),
         )
         .await?;
         Ok(())
