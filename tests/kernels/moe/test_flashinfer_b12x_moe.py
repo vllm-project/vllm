@@ -31,7 +31,12 @@ from flashinfer.fp4_quantization import fp4_quantize
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from tests.kernels.utils import torch_moe
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -41,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
     FlashInferB12xExperts,
 )
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     reorder_w1w3_to_w3w1,
 )
@@ -348,6 +354,87 @@ def test_flashinfer_b12x_moe_relu2(
             atol=2e-1,
             rtol=2e-1,
         )
+
+
+def _rebuild_moe_quant_configs(worker) -> int:
+    """Build every MoE layer's quant config again, as the DeepGEMM warmup does
+    when DeepGEMM is usable."""
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    layers = [
+        m for m in worker.model_runner.model.modules() if isinstance(m, RoutedExperts)
+    ]
+    for layer in layers:
+        layer.quant_method.get_fused_moe_quant_config(layer)
+    return len(layers)
+
+
+@pytest.mark.parametrize("checkpoint", ["modelopt", "compressed-tensors"])
+def test_flashinfer_b12x_fc2_input_scale_stays_one(
+    checkpoint: str, default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """The FC2 input scale is 1.0, a quant config rebuild after loading changes
+    no tensor the kernel reads, and a reload keeps the scale's tensor (#67914)."""
+    from tests.quantization.test_keep_param_objects import (
+        CT_NVFP4,
+        NVFP4,
+        _cold_start,
+        _ct,
+        _kernel_tensors,
+        _load,
+        _moe,
+        _same_bytes,
+    )
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        finish_direct_reload,
+    )
+
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config.moe_backend = "flashinfer_b12x"
+    quant_config = {
+        "modelopt": lambda: ModelOptNvFp4Config(**NVFP4, exclude_modules=[]),
+        "compressed-tensors": lambda: _ct(*CT_NVFP4),
+    }[checkpoint]
+    layer, method, names = _cold_start(
+        lambda: _moe(quant_config()), default_vllm_config, seed=0
+    )
+    experts = method.moe_kernel.fused_experts
+    assert isinstance(experts, FlashInferB12xExperts)
+
+    read = {n: t.clone() for n, t in _kernel_tensors(layer, method).items()}
+    method.get_fused_moe_quant_config(layer)  # as the DeepGEMM warmup does
+    rebuilt = _kernel_tensors(layer, method)
+    assert [n for n in read if not _same_bytes(rebuilt[n], read[n])] == []
+
+    (fc2_input_scale,) = (getattr(experts, n) for n in experts.kept_constants)
+    assert torch.equal(fc2_input_scale, torch.ones_like(fc2_input_scale))
+
+    begin_direct_reload(layer)
+    _load(layer, names)
+    finish_direct_reload(layer, default_vllm_config.model_config, torch.device("cuda"))
+    reloaded = method.moe_kernel.fused_experts
+    assert reloaded is not experts
+    assert [getattr(reloaded, n) for n in reloaded.kept_constants] == [fc2_input_scale]
+    assert torch.equal(fc2_input_scale, torch.ones_like(fc2_input_scale))
+
+
+def test_flashinfer_b12x_serves_static_nvfp4_checkpoint(
+    vllm_runner, monkeypatch
+) -> None:
+    """A static-quant NVFP4 checkpoint on b12x still completes a prompt after
+    its quant configs are built again. That rebuild overwrote the FC2 input
+    scale, and every completion was one repeated token (#67914)."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        "nvidia/Qwen3-30B-A3B-NVFP4",
+        max_model_len=1024,
+        kernel_config={"enable_jit_warmup": False, "moe_backend": "flashinfer_b12x"},
+    ) as llm:
+        assert all(llm.collective_rpc(_rebuild_moe_quant_configs))
+        outputs = llm.generate_greedy(["The capital of France is"], max_tokens=8)
+    assert "Paris" in outputs[0][1]
 
 
 if __name__ == "__main__":
