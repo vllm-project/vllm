@@ -127,6 +127,10 @@ variants:
     supported_hardware: [h100, h200, b200, b300, gb200, gb300, vr200, mi300x, mi325x, mi355x]
     description: "Quantization-aware-trained MXFP4 weights with MXFP8 activations; footprint is estimated until the checkpoint is published."
     hardware_overrides:
+      # Single-node 8x B200 needs CPU weight offload; this is the total HBM
+      # capacity of that node, not a claim that the unoffloaded model fits.
+      b200:
+        vram_minimum_gb: 1440
       # The MI355X path needs vllm-project/vllm#53940 (SiTUv2 a4w4 MoE routing)
       # and #55966. Track the rolling ROCm 10.0 nightly.
       mi355x:
@@ -338,6 +342,128 @@ strategy_overrides:
 # the baseline command for one GPU + strategy, on by default there (Baseline
 # in the builder drops it). Their runbooks render on the preset's card.
 presets:
+  b200_cpu_offload_uva:
+    label: "Single-node UVA CPU offload"
+    description: "8x B200 TP8, selective 52 GiB/rank UVA MoE weight offload; no draft model."
+    hardware: b200
+    strategy: single_node_tp
+    variants: [default]
+    workload: "8K input / 1K output; concurrency 1, 2, and 4"
+    env:
+      VLLM_ALLREDUCE_USE_FLASHINFER: "1"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_RUST_FRONTEND: "1"
+    select:
+      features: { spec_decoding: false }
+    args:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--load-format"
+      - "safetensors"
+      - "--safetensors-load-strategy"
+      - "lazy"
+      - "--offload-backend"
+      - "uva"
+      - "--cpu-offload-gb"
+      - "52"
+      - "--cpu-offload-params"
+      - "w13_weight"
+      - "w2_weight"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--max-model-len"
+      - "32768"
+      - "--max-num-seqs"
+      - "5"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-backend"
+      - "TOKENSPEED_MLA"
+      - "--attention-config"
+      - '{"use_prefill_query_quantization":true,"mla_prefill_backend":"TOKENSPEED_MLA"}'
+      - "--enable-prefix-caching"
+      - "--prefix-match-unit"
+      - "128"
+      - "--disable-flashinfer-autotune"
+    runbook: |
+      Tested on a single node with 8 NVIDIA B200 GPUs using the native MXFP4
+      checkpoint and vLLM 0.33.0. This is a CPU *weight* offload recipe,
+      not KV-cache offloading. The 52 GiB budget applies to each TP rank.
+      Allocate sufficient host DRAM beyond the nominal per-rank budget.
+      The input/output workload was 8192/1024 tokens at concurrency 1/2/4.
+      Compared with a 68 GiB/rank UVA setting, this 52 GiB/rank setting
+      delivered approximately 1.36x output throughput at concurrency 4.
+      The benchmark used CUDA graphs; do not add --enforce-eager.
+      If enabling --numa-bind, check per-NUMA-node memory headroom first;
+      strict NUMA policy caused OOM with a different, larger prefetch setup.
+      Docker should provide --ipc=host and adequate memlock/IPC capabilities.
+      The prefetch backend is not recommended for this hardware setup:
+      8/4/1 exhausted host RAM and 8/3/1 decoded substantially slower.
+
+  b200_cpu_offload_uva_dspark:
+    label: "Single-node UVA + DSpark"
+    description: "Same 52 GiB/rank UVA offload with DSpark; about 2.15-2.27x output throughput versus plain UVA in the tested workload."
+    hardware: b200
+    strategy: single_node_tp
+    variants: [default]
+    workload: "8K input / 1K output; concurrency 1, 2, and 4"
+    env:
+      VLLM_ALLREDUCE_USE_FLASHINFER: "1"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_RUST_FRONTEND: "1"
+    select:
+      features: { spec_decoding: true }
+    # Inherit the model's existing Kimi-K3 DSpark feature. Match the B200
+    # configuration qualified in the earlier recipes PR (#1013).
+    json_args:
+      "--speculative-config": { rejection_sample_method: "standard" }
+    args:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--load-format"
+      - "safetensors"
+      - "--safetensors-load-strategy"
+      - "lazy"
+      - "--offload-backend"
+      - "uva"
+      - "--cpu-offload-gb"
+      - "52"
+      - "--cpu-offload-params"
+      - "w13_weight"
+      - "w2_weight"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--max-model-len"
+      - "32768"
+      - "--max-num-seqs"
+      - "5"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-backend"
+      - "TOKENSPEED_MLA"
+      - "--attention-config"
+      - '{"use_prefill_query_quantization":true,"mla_prefill_backend":"TOKENSPEED_MLA"}'
+      - "--enable-prefix-caching"
+      - "--prefix-match-unit"
+      - "128"
+      - "--disable-flashinfer-autotune"
+    runbook: |
+      Same single-node 8x B200 TP8 UVA configuration as the baseline preset,
+      with the existing RedHatAI/Kimi-K3-speculator.dspark feature enabled.
+      Ensure the draft checkpoint is available in the container's HF cache.
+      With the 8192/1024-token workload, output throughput improved by
+      approximately 2.23x (concurrency 1), 2.27x (concurrency 2), and
+      2.15x (concurrency 4) versus the 52 GiB/rank plain-UVA baseline.
+      These are workload-specific ratios, not expected universal speedups.
+      Preserve CUDA graphs and the same target offload/attention settings
+      when comparing DSpark against non-speculative decoding.
+
   gb200_agentx_agg:
     label: "AgentX aggregated"
     hardware: gb200
