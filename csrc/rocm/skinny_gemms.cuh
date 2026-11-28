@@ -310,7 +310,11 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
   __syncthreads();
 
   if (qwarpid < NUM_A_ROWS_PER_BLOCK) {
-    acc[qwarpid] = qthreadid < num_warps ? red_smem[qwarpid][qthreadid] : 0.f;
+    // With 32-wide waves there can be more warp partials than these 16 lanes.
+    acc[qwarpid] = 0.f;
+    for (int w = qthreadid; w < num_warps; w += 16) {
+      acc[qwarpid] += red_smem[qwarpid][w];
+    }
 #pragma unroll
     for (int mask = 16 / 2; mask >= 1; mask /= 2) {
       acc[qwarpid] += __shfl_xor(acc[qwarpid], mask);
