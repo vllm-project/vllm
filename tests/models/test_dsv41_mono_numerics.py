@@ -13,9 +13,12 @@ is checked on the kernels' own FFN input, where routing cannot differ.
 
 On gfx942 at TP4 and TP8, `test_mono_decode_942_replays` runs the composed runner on
 the copies of the weights that the model makes at load, at steps of 6, 8 and 42
-rows, and replays the steps in one CUDA graph. The real model's numerics on
-gfx942 are checked by `test_dsv41_mono_layers.py`."""
+rows, and replays the steps in one CUDA graph. `test_largestep_hook_matches_moe`
+runs one MoE layer's large-step block (`largestep.moe.LargeStepHook.forward`)
+against `DeepseekV4MoE.forward` at 48, 144 and 256 rows. The real model's
+numerics on gfx942 are checked by `test_dsv41_mono_layers.py`."""
 
+import os
 import shutil
 import subprocess
 
@@ -890,3 +893,210 @@ def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch, tp: int):
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _mono_replay_942)
+
+
+# ------------------------------------------------- gfx942 large-step MoE block
+
+
+# The hook test's tolerances, relative L2 against the float64 reference, about
+# 1.5x the errors measured on MI300X TP4 (24 Nov 2026: stock 3.9e-3, block
+# 4.4e-2, every M alike). The block quantizes x and the intermediate h to MXFP8
+# (e4m3, 3 mantissa bits, one power-of-two scale per 32 values), as the mono
+# decode layer does, while stock keeps them in bf16, so the block is further
+# from float64 by design. A wrong expert, weight or scale gives about 1.
+LS_STOCK_RTOL = 3e-2  # bf16 activations and h, f32 accumulation
+LS_BLOCK_RTOL = 6.5e-2  # x and h to MXFP8, h and each pick to bf16
+LS_TIE_MARGIN = 1e-4  # float64 score gap below which a row is a routing tie
+# Image-token routing: every fourth token is an image sentinel id, which picks
+# experts with the second bias (`gate.bias_vl`).
+LS_IMAGE_EVERY = 4
+
+# The case reaches the Ray workers as an environment variable: "rows,image".
+LS_CASE = "DSV41_LARGESTEP_HOOK_CASE"
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _largestep_hook(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        init_workspace_manager(device)
+        rows, image = os.environ[LS_CASE].split(",")
+        _check_largestep_hook(rank, tp_size, device, int(rows), image == "1")
+
+
+def _check_largestep_hook(rank: int, tp: int, device, rows: int, image: bool) -> None:
+    """One MoE layer with random weights, built the way the model builds it at
+    load (the gfx942 copies of the routed experts, `mono942`, then the hook).
+    Three implementations of the same layer on the same input:
+
+    - ref: `tests/kernels/models/amd/dsv41_largestep_reference.py`, torch only,
+      float64, no activation quantization, the exact weight values;
+    - stock: `DeepseekV4MoE.forward`, vLLM's a16w4 MoE (the layer has no hook);
+    - block: this PR's `LargeStepHook.forward`.
+
+    Routing: the block runs the layer's router (`select_experts`) and the
+    reference routes in float64, so the test checks that both pick the same
+    experts. Stock routes inside AITER's fused kernel and does not expose its
+    ids; it gets the same logits and bias, and its output error says whether it
+    routed alike. Rows whose 6th and 7th biased scores are closer than
+    LS_TIE_MARGIN are ties that any implementation may break either way, and are
+    left out of the id check.
+
+    With `image`, the layer has the image routing bias (`bias_vl`) and every
+    LS_IMAGE_EVERY-th token is an image sentinel id, which routes with it in
+    the block (vLLM's router). Stock's AITER routing has no bias_vl and is
+    compared with the text-bias routing instead.
+
+    Pass: stock's error against ref is below LS_STOCK_RTOL and the block's
+    below LS_BLOCK_RTOL. The block quantizes x and the intermediate to MXFP8 (as the
+    mono decode layer does), stock keeps them in bf16, so the block is further
+    from the float64 reference than stock by design; both errors are printed."""
+    from tests.kernels.models.amd import dsv41_largestep_reference as R
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed import tensor_model_parallel_all_reduce
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.models.deepseek_v41.amd import mono_decode
+    from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepHook
+    from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    vc = EngineArgs(
+        model=MODEL,
+        tensor_parallel_size=tp,
+        moe_backend="aiter",
+        load_format="dummy",
+        max_model_len=65536,
+        language_model_only=True,
+    ).create_engine_config()
+    with set_current_vllm_config(vc), set_default_torch_dtype(torch.bfloat16), device:
+        moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
+    # The load hook that gives the routed experts their gfx942 copies.
+    mono_decode._capture_plain_experts(moe.experts.routed_experts)
+    inter = mono_decode._routed_inter_942()
+    _random_moe(
+        moe,
+        torch.Generator(device=device).manual_seed(2001 + rank),
+        torch.Generator(device=device).manual_seed(2000),
+        inter=inter,
+    )
+    # The reference's weights, read before vLLM converts them at load.
+    e, sh = moe.experts.routed_experts, moe.shared_experts
+    u8 = torch.uint8
+    plain = [t.data.view(u8).clone() for t in (
+        e.w13_weight, e.w13_weight_scale, e.w2_weight, e.w2_weight_scale)]  # fmt: skip
+    gate_w = moe.gate.weight.data.double().clone()
+    bias = moe.gate.e_score_correction_bias.data.double().clone()
+    s_gu = R.dequant_fp8_blocks(
+        sh.gate_up_proj.weight.data, sh.gate_up_proj.weight_scale.data.view(u8)
+    )
+    s_dn = R.dequant_fp8_blocks(
+        sh.down_proj.weight.data, sh.down_proj.weight_scale.data.view(u8)
+    )
+    scale = float(moe.routed_scaling_factor)
+    lo = 0
+    if image:
+        # As the model does when the checkpoint has vision layers.
+        from vllm.models.deepseek_v41.common.mm_preprocess import (
+            IMAGE_SENTINEL_BASE_ID,
+        )
+
+        lo = IMAGE_SENTINEL_BASE_ID
+        g_vl = torch.Generator(device=device).manual_seed(2002)
+        vl = torch.rand(moe.n_routed_experts, generator=g_vl, device=device)
+        moe.gate.bias_vl = torch.nn.Parameter(vl.float(), requires_grad=False)
+        moe.image_sentinel_lo = lo
+        moe.experts.router.bias_vl = moe.gate.bias_vl
+        moe.experts.router.image_sentinel_lo = lo
+    process_weights_after_loading(moe, vc.model_config, device)
+    # The decoder layer is only read by `takes`, which this test does not call
+    # (it calls `forward` directly), so a bare module whose weak reference
+    # dies at once is enough.
+    hook = LargeStepHook(torch.nn.Module(), moe, tp, device)
+
+    g = torch.Generator(device=device).manual_seed(3000 + rows)
+    x = (torch.randn(rows, HIDDEN, generator=g, device=device) * 0.5).to(torch.bfloat16)
+    ids = torch.randint(0, 1000, (rows,), generator=g, device=device)
+    is_image = torch.zeros(rows, dtype=torch.bool, device=device)
+    if image:
+        is_image[::LS_IMAGE_EVERY] = True
+        ids[is_image] = lo + torch.randint(
+            0, 5, (int(is_image.sum()),), generator=g, device=device
+        )
+    with set_forward_context(None, vc):
+        logits, _ = moe.gate(x)
+        _, got_ids = moe.experts.router.select_experts(x, logits, input_ids=ids)
+        block = hook.forward(moe, x.clone(), ids).double()
+        stock = moe(x.clone(), ids).double()
+
+    row_bias = bias.expand(rows, -1).clone()
+    if image:
+        row_bias[is_image] = moe.gate.bias_vl.data.double()
+    ref_ids, ref_w, margin = R.route_fp64(x, gate_w, row_bias, scale)
+    order = got_ids.long().argsort(-1)
+    sure = margin > LS_TIE_MARGIN
+    same = (got_ids.long().gather(1, order) == ref_ids).all(-1)
+    assert bool(same[sure].all()), (
+        f"router and float64 reference pick different experts in "
+        f"{int((~same & sure).sum())} rows that are not ties"
+    )
+    part = R.routed_fp64(x, *plain, ref_ids, ref_w, inter) + R.shared_fp64(
+        x, s_gu, s_dn
+    )
+    # The all-reduce runs in float32: summing 4 or 8 parts adds about 1e-7.
+    ref = tensor_model_parallel_all_reduce(part.float()).double()
+    assert torch.isfinite(block).all() and torch.isfinite(stock).all()
+    err_block, err_stock = _rel(block, ref), _rel(stock, ref)
+    if image:
+        # Stock's monolithic a16w4 MoE routes inside AITER with the text bias
+        # only (`aiter_triton_kernel_w4a16_moe_forward` takes no bias_vl), so
+        # image rows go to other experts there: measured 0.54 against this
+        # reference, 3.9e-3 against the text-bias one. Stock is checked
+        # against the text-bias routing, the block against bias_vl's.
+        t_ids, t_w, _ = R.route_fp64(x, gate_w, bias.expand(rows, -1), scale)
+        part_t = R.routed_fp64(x, *plain, t_ids, t_w, inter)
+        part_t = part_t + R.shared_fp64(x, s_gu, s_dn)
+        ref_t = tensor_model_parallel_all_reduce(part_t.float()).double()
+        err_stock = _rel(stock, ref_t)
+    print(
+        f"TP{tp} rank {rank}, {rows} rows, image {image}: block {err_block:.3e}, "
+        f"stock {err_stock:.3e} (relative L2 against float64), "
+        f"ties {int((~sure).sum())}"
+    )
+    assert err_stock < LS_STOCK_RTOL, f"stock {err_stock:.3e}"
+    assert err_block < LS_BLOCK_RTOL, f"block {err_block:.3e}"
+
+
+@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
+@pytest.mark.parametrize(
+    "tp", [pytest.param(4, id="TP4-inter576"), pytest.param(8, id="TP8-inter288")]
+)
+@pytest.mark.parametrize(
+    ("rows", "image"),
+    [
+        pytest.param(48, False, id="M48"),
+        pytest.param(144, False, id="M144"),
+        pytest.param(256, False, id="M256"),
+        pytest.param(96, True, id="M96-image-tokens"),
+    ],
+)
+def test_largestep_hook_matches_moe(
+    monkeypatch: pytest.MonkeyPatch, tp: int, rows: int, image: bool
+):
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
+    import flydsl  # noqa: F401  # on gfx942 a missing FlyDSL fails, not skips
+
+    monkeypatch.setenv(LS_CASE, f"{rows},{int(image)}")
+    multi_process_parallel(monkeypatch, tp, 1, _largestep_hook)

@@ -86,6 +86,7 @@ steps:
   - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
+  - tests/kernels/models/amd/dsv41_largestep_reference.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
@@ -116,6 +117,8 @@ steps:
   - tests/models/common/specialized_decode/harness.py
   - tests/models/common/specialized_decode/inputs.py
   - tests/models/common/specialized_decode/reference.py
+  - tests/kernels/models/amd/test_dsv41_largestep_moe.py
+  - tests/kernels/models/amd/dsv41_largestep_reference.py
   - tests/models/common/specialized_decode/bounds.py
   commands:
   - >-
@@ -128,6 +131,7 @@ steps:
     tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
     tests/kernels/models/amd/test_dsv41_mono_gfx942.py
     tests/models/deepseek_v41/amd/mono/test_primitives.py
+    tests/kernels/models/amd/test_dsv41_largestep_moe.py
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd

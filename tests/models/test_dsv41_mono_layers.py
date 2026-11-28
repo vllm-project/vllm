@@ -82,10 +82,11 @@ def _arch() -> str:
 
 # The (tensor parallel size, decode rows) cases of each GPU. The gfx942 kernels
 # build for TP4 and TP8. 8 rows are two GEMV passes of 6 rows there, the second
-# one padded, and 42 rows are the most that they take.
+# one padded, and 42 rows are the most that they take. Steps of 48 and 96 rows
+# run the large-step MoE block (`largestep`) under --monokernel.
 CASES = {
     "cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)],
-    "gfx942": [(4, 8), (4, 42), (8, 8), (8, 42)],
+    "gfx942": [(4, 8), (4, 42), (4, 48), (4, 96), (8, 8), (8, 42), (8, 48), (8, 96)],
 }
 
 
@@ -140,6 +141,44 @@ def _host_reads(hook):
     return wrapper
 
 
+# Calls that took the large-step block, per decoder layer, in this worker:
+# all of them, and those made while a CUDA graph was being captured. Under
+# enforce_eager every decode step is a call. Under CUDA graphs the calls happen
+# at capture, and a replay runs the captured launches without a call.
+_LARGE_CALLS: dict[int, int] = {}
+_LARGE_CAPTURED: dict[int, int] = {}
+
+
+def _count_large() -> None:
+    """Wrap each large-step hook's forward as the model builds it at load, so
+    the counts cover graph capture, which runs before any probe call. The
+    model keeps no test state."""
+    from vllm.models.deepseek_v41.amd import mono_decode
+
+    build = mono_decode.MonoDecodeLayer.build_runner
+    if getattr(build, "_counted", False):
+        return
+
+    def build_and_count(self, device, layer=None):
+        build(self, device, layer)
+        ls = getattr(getattr(layer, "ffn", None), "largestep", None)
+        if ls is None:
+            return
+        i = layer.attn.layer_id
+        _LARGE_CALLS[i] = _LARGE_CAPTURED[i] = 0
+        fwd = ls.forward
+
+        def counted(*a, **kw):
+            _LARGE_CALLS[i] += 1
+            _LARGE_CAPTURED[i] += int(torch.cuda.is_current_stream_capturing())
+            return fwd(*a, **kw)
+
+        ls.forward = counted
+
+    build_and_count._counted = True  # type: ignore[attr-defined]
+    mono_decode.MonoDecodeLayer.build_runner = build_and_count  # type: ignore[method-assign]
+
+
 @register_model_loader(LOAD_FORMAT)
 class RandomWeightLoader(DummyModelLoader):
     """Dummy loading with weights in the checkpoint's ranges, before post-load
@@ -149,6 +188,7 @@ class RandomWeightLoader(DummyModelLoader):
     def load_weights(self, model, model_config) -> None:
         from vllm.distributed import get_tensor_model_parallel_world_size
 
+        _count_large()
         super().load_weights(model, model_config)
         for name, t in model.state_dict().items():
             _fill(name, t)
@@ -286,6 +326,10 @@ class MonoProbe:
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
+            "large_steps": {i: _LARGE_CALLS.get(i) for i in self._decoder_layers()},
+            "large_captured": {
+                i: _LARGE_CAPTURED.get(i) for i in self._decoder_layers()
+            },
         }
 
     def compare_merged_replays(self) -> None:
@@ -417,12 +461,23 @@ if os.environ.get(MERGE_AB):
 
 
 def _decode(
-    vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
+    vllm_runner,
+    monkeypatch,
+    tp: int,
+    mono: bool,
+    prompts,
+    path: str,
+    arch: str,
+    graph_sizes: list[int] | None = None,
 ):
     """`_decodes(tp, arch)` greedy decodes of `prompts` on one engine with the
-    mono path on or off: (each decode's outputs, the workers' mono layers); each decoder
-    layer's outputs for the decode tokens of decode-only steps, and vLLM's
-    routing margins, saved under `path.d<decode>`."""
+    mono path on or off: (each decode's outputs, the workers' mono layers); each
+    decoder layer's outputs for the decode tokens of decode-only steps, and
+    vLLM's routing margins, saved under `path.d<decode>`. With `graph_sizes`,
+    the run captures FULL_DECODE_ONLY CUDA graphs of those sizes instead of
+    running eagerly, and keeps only the outputs and the block's call counts (a
+    probe cannot read the GPU inside a replay). Outputs carry the chosen
+    token's log-probability."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -450,7 +505,16 @@ def _decode(
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         **indexer,
-        enforce_eager=True,
+        **(
+            dict(enforce_eager=True)
+            if graph_sizes is None
+            else dict(
+                compilation_config={
+                    "cudagraph_mode": "FULL_DECODE_ONLY",
+                    "cudagraph_capture_sizes": graph_sizes,
+                }
+            )
+        ),
         max_model_len=4096,
         max_num_seqs=len(prompts),
         # All prompts prefill in one step, so that no decode token shares a
@@ -459,15 +523,21 @@ def _decode(
         enable_prefix_caching=False,
         gpu_memory_utilization=0.5,
     ) as runner:
-        runner.llm.collective_rpc("capture_steps", args=([len(p) for p in prompts],))
-        params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1)
+        eager = graph_sizes is None
+        if eager:
+            runner.llm.collective_rpc(
+                "capture_steps", args=([len(p) for p in prompts],)
+            )
+        params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1, logprobs=0)
         decodes = []
         for d in range(_decodes(tp, arch)):
-            runner.llm.collective_rpc("reset_capture")
+            if eager:
+                runner.llm.collective_rpc("reset_capture")
             outs = runner.llm.generate(
                 [TokensPrompt(prompt_token_ids=p) for p in prompts], params
             )
-            runner.llm.collective_rpc("save_capture", args=(f"{path}.d{d}",))
+            if eager:
+                runner.llm.collective_rpc("save_capture", args=(f"{path}.d{d}",))
             decodes.append([o.outputs[0] for o in outs])
         probe = runner.llm.collective_rpc("mono_layers")
     return decodes, probe
@@ -530,8 +600,12 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28), (8, 42)]
-)
+    ("tp", "rows"),
+    [
+        (2, 8), (4, 8), (4, 42), (4, 48), (4, 96),
+        (8, 8), (8, 28), (8, 42), (8, 48), (8, 96),
+    ],
+)  # fmt: skip
 def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
     arch = _arch()
     if not arch:
@@ -564,16 +638,29 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     )
 
     # both layer kinds took the mono path on every rank, at every decode step,
-    # and on gfx942 from the weight copies made at load
+    # and on gfx942 from the weight copies made at load. A gfx942 step of more
+    # than 42 rows takes vLLM's attention and the large-step MoE block instead,
+    # in every layer at every decode step.
     launches = len(WHOLE + FFN)  # one launch (pair) a layer a step
     copies = arch == "gfx942"
+    from vllm.models.deepseek_v41.amd.largestep.moe import MIN_ROWS
+
+    large = arch == "gfx942" and rows >= MIN_ROWS
     for rank in probe_on:
         assert rank["layers"] == {
             i: ["whole" if i in WHOLE else "ffn", True, copies] for i in WHOLE + FFN
         }, rank
-        assert rank["epoch"] >= launches * STEPS * decodes, rank
-        assert rank["epoch"] % launches == 0, rank
+        if large:
+            # enforce_eager and equal max_tokens: one block call a decode step,
+            # STEPS of them a decode. The scheduler may split a step when
+            # requests arrive late, so this bounds the count from both sides.
+            n_min, n_max = STEPS * decodes, 2 * STEPS * decodes
+            assert all(n_min <= n <= n_max for n in rank["large_steps"].values()), rank
+        else:
+            assert rank["epoch"] >= launches * STEPS * decodes, rank
+            assert rank["epoch"] % launches == 0, rank
     assert all(set(r["layers"].values()) == {None} for r in probe_off)
+    assert all(set(r["large_steps"].values()) == {None} for r in probe_off)
 
     def matching(mono_outs, ref_outs) -> set[tuple[int, int]]:
         """One mono decode against one vLLM decode: each decode token whose
@@ -652,5 +739,83 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
             f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, {per_pair}"
         )
 
-    if (tp, rows) == (8, 8):
+    # The K2 + K1 merge is CDNA4 only (`DSV41MonoLayer.merges`).
+    if (tp, rows) == (8, 8) and arch == "cdna4":
         _merged_matches_two_launches(vllm_runner, monkeypatch)
+
+
+# The largest difference of the chosen token's log-probability between the
+# padded CUDA graph run and the eager run, up to where a request's two runs
+# part. Measured on MI300X: 6.4e-2 and 9.4e-2 at TP4, 1.6e-1 at TP8, with 3 to
+# 11 of 45 to 50 requests parting at a near-tie.
+LOGPROB_TOL = 0.3
+
+
+@pytest.mark.parametrize(
+    ("tp", "rows", "graph"),
+    [
+        pytest.param(4, 45, 48, id="TP4-45req-padded-to-48"),
+        pytest.param(4, 50, 56, id="TP4-50req-padded-to-56"),
+        pytest.param(8, 45, 48, id="TP8-45req-padded-to-48"),
+    ],
+)
+def test_largestep_in_padded_cuda_graphs(
+    vllm_runner, monkeypatch, tmp_path, tp, rows, graph
+):
+    """The large-step block as production runs it: FULL_DECODE_ONLY CUDA
+    graphs, a decode step of `rows` requests padded to the captured size
+    `graph`, the padding rows routed to expert -1 (VLLM_MOE_SKIP_PADDING).
+
+    The block must be captured into the graph in every layer (its calls happen
+    while the stream captures), and the decode must agree with the same run
+    under enforce_eager, where every step is an unpadded call of the block,
+    within the spread that near-ties of the random-weight model allow."""
+    if _arch() != "gfx942":
+        pytest.skip("the large-step block is gfx942 only")
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
+    import flydsl  # noqa: F401  # on gfx942 a missing FlyDSL fails, not skips
+
+    g = torch.Generator().manual_seed(1)
+    prompts = [
+        torch.randint(1000, 60000, (n,), generator=g).tolist()
+        for n in torch.randint(300, 2000, (rows,), generator=g).tolist()
+    ]
+    # gfx942 runs one decode an engine (`_decodes`), so [0] is the decode.
+    (eager,), _ = _decode(
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/eager", "gfx942"
+    )
+    (graphs,), probe = _decode(
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/g", "gfx942", [graph]
+    )
+    for rank in probe:
+        captured = [n for n in rank["large_captured"].values() if n is not None]
+        assert len(captured) == len(WHOLE + FFN), rank
+        assert all(n >= 1 for n in captured), rank
+    # Eager and graph runs differ in more than the padding (other attention and
+    # GEMM launches, other batch shapes), so their log-probabilities differ a
+    # little. The random-weight model's next-token distribution is nearly flat
+    # (the chosen token's log-probability is about -7.3, so many tokens are
+    # within a few hundredths of it, and lm_head shards that are alike on every
+    # rank give exact ties), so the two runs often part at a near-tie. So the
+    # check runs per token up to where a request's two runs part: the chosen
+    # tokens' log-probabilities agree within LOGPROB_TOL, also at the token
+    # where they part, and at most half the requests part. The exact claim,
+    # padding rows leave the real rows bit for bit unchanged, is in
+    # test_block_padding_rows_change_nothing. This test shows that the block
+    # is captured in every layer and that its replays decode like eager calls.
+    worst, parted = 0.0, 0
+    for a, b in zip(eager, graphs, strict=True):
+        for t, (ta, tb) in enumerate(zip(a.token_ids, b.token_ids, strict=True)):
+            worst = max(
+                worst, abs(a.logprobs[t][ta].logprob - b.logprobs[t][tb].logprob)
+            )
+            if ta != tb:
+                parted += 1
+                break
+    print(
+        f"{tp=} {rows=}: largest log-probability difference {worst:.3e}, "
+        f"{parted} of {rows} requests parted at a tie"
+    )
+    assert worst < LOGPROB_TOL, worst
+    assert parted <= rows // 2, parted

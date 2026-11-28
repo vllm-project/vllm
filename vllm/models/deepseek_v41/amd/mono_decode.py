@@ -545,10 +545,23 @@ class MonoDecodeLayer:
         logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
         return MonoDecodeLayer()
 
-    def build_runner(self, device: torch.device) -> None:
+    def build_runner(
+        self, device: torch.device, layer: "DeepseekV4DecoderLayer | None" = None
+    ) -> None:
         """Build the layer's runner after loading rather than at its first
-        decode step, which must not allocate, exchange handles or sync."""
+        decode step, which must not allocate, exchange handles or sync.
+
+        On gfx942 it also gives `layer` (the decoder layer) the large-step MoE
+        block for the decode steps above this layer's row limit
+        (`largestep.moe.LargeStepHook`), which reads the gfx942 weight copies
+        made here."""
         _mono_runner(device, self if self.draft else None)
+        if layer is not None:
+            from vllm.models.deepseek_v41.amd.largestep import gate
+
+            hook = gate.build(layer)
+            if hook is not None:
+                layer.ffn.largestep = hook
 
     def weights(self, layer: "DeepseekV4DecoderLayer"):
         if self._weights is not None:
@@ -676,10 +689,26 @@ class MonoDecodeLayer:
         return None
 
     @staticmethod
-    def _decode_step(layer: "DeepseekV4DecoderLayer", rows: int):
+    def decode_step(
+        layer: "DeepseekV4DecoderLayer", rows: int, max_rows: int
+    ) -> str | None:
+        """Why a step of `rows` rows takes the original path, or None for a
+        decode-only step of at most `max_rows` rows: the same check the mono
+        decode layer makes, for other blocks that take decode-only steps (the
+        gfx942 large-step MoE)."""
+        return MonoDecodeLayer._decode_step(layer, rows, max_rows)[0]
+
+    @staticmethod
+    def _decode_step(
+        layer: "DeepseekV4DecoderLayer", rows: int, max_rows: int | None = None
+    ):
         """(why this step takes the original path -- None for a decode-only step
-        the kernels take -- the layer's SWA metadata, its compressed cache's)."""
-        if not 1 <= rows <= _max_rows():
+        the kernels take -- the layer's SWA metadata, its compressed cache's).
+        `max_rows` defaults to the mono decode layer's limit. The gfx942
+        large-step MoE (`largestep.moe`) passes its own limit, so it takes the
+        same decode-only steps above the mono limit."""
+        limit = _max_rows() if max_rows is None else max_rows
+        if not 1 <= rows <= limit:
             return f"{rows} rows", None, None
         if not is_forward_context_available():
             return "no forward context", None, None

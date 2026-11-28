@@ -174,6 +174,18 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         self.n_physical_experts = self.n_routed_experts
         self.n_local_physical_experts = self.n_local_experts
         self.n_redundant_experts = 0
+        # Under --monokernel on gfx942, decode steps too large for the mono
+        # decode layer run this block on the large-step kernels
+        # (`largestep.moe`, built after the weights load).
+        self.largestep = None
+
+    def forward(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        ls = self.largestep
+        if ls is not None and ls.takes(hidden_states):
+            return ls.forward(self, hidden_states, input_ids)
+        return super().forward(hidden_states, input_ids)
 
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
@@ -368,7 +380,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         if self.mono is not None:
-            self.mono.build_runner(self.attn_norm.weight.device)
+            self.mono.build_runner(self.attn_norm.weight.device, self)
         if not self.use_mega_mhc or not self.hc_attn_fn.is_cuda:
             return
         # Reloads and in-place updates end here too; refilled in place, so
