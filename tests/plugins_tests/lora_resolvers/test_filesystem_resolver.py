@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 import shutil
 
@@ -63,3 +64,19 @@ async def test_nonlora_adapter(adapter_cache, pa_files):
 
     pa_request = await fs_resolver.resolve_lora(MODEL_NAME, PA_NAME)
     assert pa_request is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_adapter_config(adapter_cache):
+    """An adapter_config.json without the keys the resolver reads should be
+    skipped, not raise out of resolve_lora."""
+    lora_name = "malformed_adapter"
+    model_files = adapter_cache / lora_name
+    os.makedirs(model_files)
+    with open(os.path.join(model_files, "adapter_config.json"), "w") as f:
+        json.dump({"unrelated_key": "value"}, f)
+
+    fs_resolver = FilesystemResolver(adapter_cache)
+    assert fs_resolver is not None
+
+    assert await fs_resolver.resolve_lora(MODEL_NAME, lora_name) is None
