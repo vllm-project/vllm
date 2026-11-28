@@ -393,6 +393,12 @@ def _attn_packed(
     V_ALIGN: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    rswa_prefix_lens_ptr=None,
+    R_SWA_WINDOW: tl.constexpr = 0,
+    USE_R_SWA: tl.constexpr = False,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
+    MM_PREFIX_CLAMP_SW: tl.constexpr = False,
 ):
     # Strides as visible multiples of the alignment found by kv_tile_alignment,
     # and V addressed from K, let the K/V tile loads compile to vector loads.
@@ -505,6 +511,13 @@ def _attn_packed(
         SLIDING_WINDOW,
         USE_MM_PREFIX,
         IS_3D,
+        CHUNK_LOOKBACK=CHUNK_LOOKBACK,
+        CHUNK_SIZE=CHUNK_SIZE,
+        USE_R_SWA=USE_R_SWA,
+        MM_PREFIX_CLAMP_SW=MM_PREFIX_CLAMP_SW,
+        MAX_MM_RANGES=MAX_MM_RANGES,
+        mm_prefix_range_ptr=mm_prefix_range_ptr,
+        seq_idx=seq_idx,
     )
 
     # Tile loop.  Per-tile: load packed KV + scales, dequantize into
@@ -582,6 +595,12 @@ def _attn_packed(
             SLIDING_WINDOW,
             USE_MM_PREFIX,
             MAX_MM_RANGES,
+            rswa_prefix_lens_ptr=rswa_prefix_lens_ptr,
+            R_SWA_WINDOW=R_SWA_WINDOW,
+            USE_R_SWA=USE_R_SWA,
+            CHUNK_LOOKBACK=CHUNK_LOOKBACK,
+            CHUNK_SIZE=CHUNK_SIZE,
+            MM_PREFIX_CLAMP_SW=MM_PREFIX_CLAMP_SW,
         )
 
         # Score: split-dot across the 2 INT4 streams; fused
@@ -614,7 +633,7 @@ def _attn_packed(
         acc_s0 = acc_s0 * alpha[:, None]
         acc_s1 = acc_s1 * alpha[:, None]
 
-        if SLIDING_WINDOW:
+        if SLIDING_WINDOW and not USE_R_SWA and not USE_MM_PREFIX:
             qpos_lo = q_block_local_idx * BLOCK_Q
             sw_mask = (context_len + qpos_lo - seq_offset) < SLIDING_WINDOW
             V_s0 = tl.where(sw_mask[:, None], V_s0, 0.0)
@@ -712,6 +731,10 @@ def _launch_packed_attn(
     softmax_segm_max,
     softmax_segm_expsum,
     packing_factor: int,
+    rswa_prefix_lens=None,
+    rswa_window: int | None = None,
+    chunk_lookback: int = -1,
+    mm_prefix_clamp_sliding_window: bool = False,
 ):
     """Launch `_attn_packed` for one of the sub-byte modes.
 
@@ -746,6 +769,14 @@ def _launch_packed_attn(
     BLOCK_Q = BLOCK_M // num_queries_per_kv
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+    # Same chunked / R-SWA resolution as unified_attention's core path.
+    chunk_size = -1
+    if sliding_window_val > 0 and chunk_lookback > -1:
+        chunk_size = sliding_window_val // (chunk_lookback + 1)
+        assert chunk_size > 0, "sliding_window must be > chunk_lookback+1"
+    elif sliding_window_val <= 0:
+        chunk_lookback = -1
+    use_rswa = rswa_window is not None and rswa_prefix_lens is not None
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=True
     )
@@ -847,6 +878,12 @@ def _launch_packed_attn(
         v_cache_delta=v_cache_delta,
         K_ALIGN=k_align,
         V_ALIGN=v_align,
+        rswa_prefix_lens_ptr=rswa_prefix_lens if use_rswa else seqused_k,
+        R_SWA_WINDOW=rswa_window or 0,
+        USE_R_SWA=use_rswa,
+        CHUNK_LOOKBACK=chunk_lookback,
+        CHUNK_SIZE=chunk_size,
+        MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
     )
 
     if use_3d:
@@ -930,6 +967,10 @@ def unified_attention_int4(
     softmax_segm_output: torch.Tensor | None = None,
     softmax_segm_max: torch.Tensor | None = None,
     softmax_segm_expsum: torch.Tensor | None = None,
+    rswa_prefix_lens: torch.Tensor | None = None,
+    rswa_window: int | None = None,
+    chunk_lookback: int = -1,
+    mm_prefix_clamp_sliding_window: bool = False,
 ) -> None:
     """Paged attention over the INT4 packed cache, writing into *out*.
 
@@ -968,6 +1009,10 @@ def unified_attention_int4(
         softmax_segm_output=softmax_segm_output,
         softmax_segm_max=softmax_segm_max,
         softmax_segm_expsum=softmax_segm_expsum,
+        rswa_prefix_lens=rswa_prefix_lens,
+        rswa_window=rswa_window,
+        chunk_lookback=chunk_lookback,
+        mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
         packing_factor=_INT4_PACKING_FACTOR,
     )
 

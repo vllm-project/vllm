@@ -1083,6 +1083,10 @@ def unified_attention(
             softmax_segm_output=softmax_segm_output,
             softmax_segm_max=softmax_segm_max,
             softmax_segm_expsum=softmax_segm_expsum,
+            rswa_prefix_lens=rswa_prefix_lens,
+            rswa_window=rswa_window,
+            chunk_lookback=chunk_lookback,
+            mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
         )
         return
 
