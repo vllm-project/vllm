@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -141,7 +142,7 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         activation: MoEActivation,
         expert_map: torch.Tensor | None,
     ) -> None:
-        """Reuse the provider while its source weight bindings remain unchanged."""
+        """Bind XpuFusedMoe without prepacking; reuse while weight bindings match."""
         if self._weights_match(w1, w2):
             return
         weight_bindings = (w1, w2)
@@ -157,8 +158,6 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         ):
             w1 = w1.view(torch.float4_e2m1fn_x2)
             w2 = w2.view(torch.float4_e2m1fn_x2)
-        # XpuFusedMoe relayouts the loaded [E, N, K] weights and scales
-        # in place for this device's grouped GEMM.
         self.fused_moe_impl = XpuFusedMoe(
             w13=w1,
             w13_scales=self.w1_scale,
@@ -175,6 +174,20 @@ class XPUExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             gemm1_clamp_limit=self.gemm1_clamp_limit,
         )
         self._weight_bindings = weight_bindings
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Bind XpuFusedMoe and prepack weights in place for this device's GEMM."""
+        self._layer = cast("RoutedExperts", layer)
+        self.initialize_weights(
+            self._layer.w13_weight,
+            self._layer.w2_weight,
+            self.moe_config.experts_per_token,
+            self._layer.activation,
+            self._layer.expert_map,
+        )
+        assert self.fused_moe_impl is not None
+        if not is_weights_pre_processed():
+            self.fused_moe_impl.prepack_weights()
 
     def apply(
         self,
@@ -349,19 +362,6 @@ class XPUExpertsFp8(XPUExperts):
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Prepare layout before reload restores the captured parameter storage."""
-        self._layer = cast("RoutedExperts", layer)
-        self.initialize_weights(
-            self._layer.w13_weight,
-            self._layer.w2_weight,
-            self.moe_config.experts_per_token,
-            self._layer.activation,
-            self._layer.expert_map,
-        )
-        # Reload can restore different Parameters; post-load or first use
-        # rebinds only when those final objects differ from this preparation.
 
 
 class XPUExpertsMxFp8(XPUExpertsFp8):
