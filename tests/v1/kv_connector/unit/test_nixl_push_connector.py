@@ -353,6 +353,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         w._send_failures = set()
         w._sending_transfers_lock = threading.Lock()
+        w._push_completion_notifs = {}
         w._push_finished_blocks = {}
         w._pending_d_registrations = {}
         w._reg_send_inbox = queue.Queue()
@@ -1012,6 +1013,53 @@ class TestPushWriterNotifs:
         w._reqs_to_process.add(request_id)
         return request_id
 
+    def test_push_completion_notif_is_sent_only_after_write_is_done(self):
+        """D must not be told the KV arrived until this worker sees the WRITE done.
+
+        NIXL delivers a notification attached to the WRITE when the UCX
+        endpoint flush completes. With SGL puts that flush can finish while
+        fragments are still queued, so D would decode a partial cache.
+        """
+        w = self._pollable_worker()
+        w.world_size = 2
+        w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
+        w._compute_desc_ids = MagicMock(return_value=[0])
+        w.dst_num_blocks = {w.engine_id: 8}
+        w.region_num_blocks = [8]
+        w._remote_stages[w.engine_id] = remote_stage(
+            region_pairs_by_index(1), region_num_blocks=[8]
+        )
+        w._remote_agents[w.engine_id] = {(0, 0): "decode-agent"}
+        w.nixl_wrapper.make_prepped_xfer.return_value = 101
+        w.nixl_wrapper.check_xfer_state.return_value = "PROC"
+
+        handle = w._xfer_blocks(
+            read_spec=ReadSpec(0, [[1]], [[1]]),
+            dst_engine_id=w.engine_id,
+            request_id="p-req",
+            remote_request_id="decode-request",
+            local_xfer_side_handle=1,
+            remote_xfer_side_handle=2,
+        )
+        assert handle == 101
+        _, kwargs = w.nixl_wrapper.make_prepped_xfer.call_args
+        assert "notif_msg" not in kwargs
+
+        request_id = "p-req"
+        w._sending_transfers[request_id] = [handle]
+        w._inflight_pushes[request_id] = w.engine_id
+        w._reqs_to_send[request_id] = time.perf_counter() + 60
+        w._reqs_to_process.add(request_id)
+
+        assert w.get_transfer_results().finished_sending == set()
+        w.nixl_wrapper.send_notif.assert_not_called()
+
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+        assert w.get_transfer_results().finished_sending == {request_id}
+        w.nixl_wrapper.send_notif.assert_called_once_with(
+            "decode-agent", notif_msg=b"decode-request:2"
+        )
+
     def test_failed_push_send_is_not_reported_done_sending(self):
         """A failed P-side WRITE must not surface as finished sending.
 
@@ -1097,6 +1145,7 @@ class TestPushWriterNotifs:
         w._remote_stages[w.engine_id] = remote_stage(
             region_pairs_by_index(1), region_num_blocks=[8]
         )
+        w._remote_agents[w.engine_id] = {(0, 0): "decode-agent"}
         w.nixl_wrapper.make_prepped_xfer.return_value = 101
         w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
         if release_fails:
@@ -1836,6 +1885,7 @@ class TestPushPrefixCaching:
             )
         }
         w.src_xfer_handles_by_block_size = {16: 2000}
+        w._remote_agents[engine_id] = {(0, 0): "decode-agent"}
 
         # Stub only the NIXL WRITE; kernel expansion, prefix-cache trim, desc
         # computation and count assertions all run for real.

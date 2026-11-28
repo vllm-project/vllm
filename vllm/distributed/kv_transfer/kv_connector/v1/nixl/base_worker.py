@@ -3754,6 +3754,7 @@ class NixlBaseConnectorWorker:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                     if xfer_state == "DONE":
+                        self._on_xfer_done(req_id, handle)
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
                         self.xfer_stats.record_transfer(res)
                         self.nixl_wrapper.release_xfer_handle(handle)
@@ -3786,6 +3787,10 @@ class NixlBaseConnectorWorker:
             else:
                 transfers[req_id] = in_progress
         return done_req_ids, failed_req_ids
+
+    def _on_xfer_done(self, req_id: str, handle: int) -> None:
+        """Called once a handle's state is DONE, before it is released."""
+        del req_id, handle
 
     def _try_release_xfer_handle(self, req_id: str, handle: int) -> bool:
         """Release a handle, returning False if the caller must retain it."""
