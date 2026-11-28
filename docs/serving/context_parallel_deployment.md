@@ -16,6 +16,13 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+For Model Runner V2 without speculative decoding, startup memory profiling uses
+a conservative per-rank PCP token budget. The budget includes per-request chunk
+rounding and short prefills replicated under DCP; it is not simply
+`max_num_batched_tokens / prefill_context_parallel_size`. The scheduler's global
+token limit, CUDA graph capture sizes, and MoE communication buffer capacities
+are unchanged. Speculative decoding retains the global profiling budget.
+
 ### DeepSeek-V4.1-Flash on ROCm
 
 ROCm supports eager prefill context parallelism for the text-only

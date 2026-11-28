@@ -433,6 +433,21 @@ class PCPManager:
             for rank in range(self.pcp_world_size)
         )
 
+    def get_profile_num_tokens(self, max_num_tokens: int, max_num_reqs: int) -> int:
+        """Bound rank-local rows for non-speculative memory profiling."""
+        pcp_size = self.pcp_world_size
+        # Two ceil-rounded chunks add at most (2 * PCP - 1) / PCP rows
+        # per request beyond its evenly divided token count.
+        overhead = 2 * pcp_size - 1
+        if self.dcp_world_size > 1:
+            # The longest prefill replicated by replicated_requests has
+            # (2 * PCP - 1)**2 tokens. Decode contributes only one token.
+            overhead = max(overhead, (pcp_size - 1) * (2 * pcp_size - 1) ** 2)
+        return min(
+            max_num_tokens,
+            (max_num_tokens + max_num_reqs * overhead) // pcp_size,
+        )
+
     @staticmethod
     def _resolve_num_reqs_after_padding(
         input_batch: InputBatch,

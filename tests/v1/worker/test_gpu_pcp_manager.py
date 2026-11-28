@@ -29,6 +29,44 @@ def _copy_to_cpu(value, device=None, dtype=None, out=None):
     return tensor
 
 
+@pytest.mark.parametrize("pcp_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("with_dcp", [False, True])
+@pytest.mark.parametrize("shard_decode_requests", [False, True])
+def test_profile_budget_covers_rank_local_batches(
+    pcp_size, with_dcp, shard_decode_requests
+):
+    """Cover chunk rounding, replicated short prefills and mixed decode rows."""
+    manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=shard_decode_requests,
+        dcp_world_size=pcp_size if with_dcp else 1,
+    )
+    for query_len in range(1, 4 * pcp_size**2 + 2):
+        for num_decodes in (0, 3, 7):
+            query_lens = np.array(
+                [1] * num_decodes + [query_len] * (7 - num_decodes), dtype=np.int32
+            )
+            prefilling = np.arange(7) >= num_decodes
+            total_tokens = int(query_lens.sum())
+            budget = manager.get_profile_num_tokens(total_tokens, len(query_lens))
+            assert manager.get_num_tokens_for_dispatch(query_lens, prefilling) <= budget
+            assert budget <= total_tokens
+
+
+@pytest.mark.parametrize("dcp_size,expected", [(1, 8640), (4, 17600)])
+def test_profile_budget_reduces_global_prefill_rows(dcp_size, expected):
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=dcp_size == 1,
+        dcp_world_size=dcp_size,
+    )
+    assert manager.get_profile_num_tokens(32768, 256) == expected
+
+
 def _make_config(cudagraph_mode: CUDAGraphMode):
     return SimpleNamespace(
         parallel_config=SimpleNamespace(

@@ -27,6 +27,41 @@ logger = init_logger("test_context_parallel")
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
+
+def _profile_forward_rows(worker):
+    runner = worker.model_runner
+    rows = []
+
+    def record_rows(module, args, kwargs):
+        rows.append(kwargs["input_ids"].shape[0])
+
+    handle = runner.model.register_forward_pre_hook(record_rows, with_kwargs=True)
+    try:
+        runner.profile_run()
+    finally:
+        handle.remove()
+    return max(rows), runner.max_num_tokens
+
+
+@create_new_process_for_each_test()
+def test_pcp_memory_profile_uses_local_rows(vllm_runner, monkeypatch, enable_pickle):
+    """Profile real weights without treating the global budget as local rows."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        "deepseek-ai/DeepSeek-V2-Lite-Chat",
+        dtype="bfloat16",
+        prefill_context_parallel_size=2,
+        distributed_executor_backend="mp",
+        enforce_eager=True,
+        max_model_len=2048,
+        max_num_batched_tokens=1024,
+        max_num_seqs=4,
+    ) as model:
+        for local_rows, global_limit in model.llm.collective_rpc(_profile_forward_rows):
+            assert global_limit == 1024
+            assert 512 <= local_rows < global_limit
+
+
 CP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
