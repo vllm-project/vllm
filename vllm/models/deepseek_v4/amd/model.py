@@ -87,7 +87,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import (
-    is_weights_pre_processed,
     refill_derived,
     replace_parameter,
 )
@@ -96,7 +95,10 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
     finalize_mega_moe_weights,
 )
 from vllm.models.deepseek_v4.amd.mono_decode import MonoDecodeLayer
-from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+from vllm.models.deepseek_v4.amd.rocm import (
+    DeepseekV4ROCMAiterMLAAttention,
+    weight_already_preshuffled,
+)
 from vllm.models.deepseek_v4.amd.silu_and_mul_mxfp8 import silu_and_mul_mxfp8
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.compressor import dsv4_swa_replay_enabled
@@ -215,11 +217,8 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        # Skip when the linear kernel already B-preshuffled this weight.
-        if not (
-            getattr(self.gate_up_proj, "aiter_bpreshuffled", False)
-            or is_weights_pre_processed()
-        ):
+        # Skip if the weight is already shuffled.
+        if not weight_already_preshuffled(self.gate_up_proj):
             replace_parameter(
                 self.gate_up_proj,
                 "weight",
@@ -652,12 +651,14 @@ class DeepseekV4MoE(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         fuse_heterogeneous_shared_expert: bool = False,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
 
         self.tp_size = get_tensor_model_parallel_world_size()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
+        if quant_config is None:
+            quant_config = vllm_config.quant_config
         self.prefix = prefix
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
@@ -753,11 +754,15 @@ class DeepseekV4MoE(nn.Module):
             )
         )
         shared_quant_config = quant_config
-        if fuse_mega_moe_shared_expert:
-            # MegaMoE requantizes the checkpoint weights itself.
+        if fuse_heterogeneous_shared_expert or fuse_mega_moe_shared_expert:
+            # The fused MoE copies the shared expert's weights after loading,
+            # so its linears keep the checkpoint layout.
             assert quant_config is not None
             shared_quant_config = copy.copy(quant_config)
-            shared_quant_config.online_quantization_config = None
+            shared_quant_config.keep_weight_layout = True
+            if fuse_mega_moe_shared_expert:
+                # MegaMoE requantizes the checkpoint weights itself.
+                shared_quant_config.online_quantization_config = None
 
         if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
@@ -934,16 +939,24 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         self.rms_norm_eps = config.rms_norm_eps
+        quant_config = vllm_config.quant_config
+        if vllm_config.kernel_config.monokernel and quant_config is not None:
+            # Mono decode reads wq_b and the shared down_proj in the
+            # checkpoint layout.
+            quant_config = copy.copy(quant_config)
+            quant_config.keep_weight_layout = True
         self.attn = DeepseekV4ROCMAiterMLAAttention(
             vllm_config,
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
+            quant_config=quant_config,
         )
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
             fuse_heterogeneous_shared_expert=fuse_heterogeneous_shared_expert,
+            quant_config=quant_config,
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)

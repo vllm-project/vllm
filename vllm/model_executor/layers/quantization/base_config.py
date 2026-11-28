@@ -133,6 +133,9 @@ class QuantizationConfig(ABC):
     not in the model, and should be ignored if unexpected during loading. These are used
     after remapping, so should be in vLLM format (e.g. .q_scale, not .q.scale)."""
     online_quantization_config: "OnlineQuantizationConfig | None" = None
+    keep_weight_layout: bool = False
+    """Set on a copy of the config for linears whose weights other code reads
+    directly, so their kernel keeps the checkpoint layout."""
 
     def __init__(self):
         super().__init__()

@@ -274,6 +274,10 @@ class MonoDecodeLayer:
         # the kernels read vLLM's preshuffled wqkv / wo_b / shared gate_up
         assert a._wqa_wkv_scale is not None and a._wo_b_scale is not None
         assert sh is not None and sh._gateup_scale is not None
+        # and wq_b / shared down_proj in the checkpoint layout (the decoder
+        # layer builds its linears with keep_weight_layout under --monokernel)
+        assert not getattr(a.wq_b, "aiter_bpreshuffled", False)
+        assert not getattr(sh.down_proj, "aiter_bpreshuffled", False)
         d = Dims(get_tensor_model_parallel_world_size())
         attn = AttnWeights(
             layer_id=extract_layer_index(a.prefix),

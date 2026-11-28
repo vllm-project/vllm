@@ -134,6 +134,8 @@ def _fp8_param(linear) -> tuple[torch.Tensor, torch.Tensor]:
         s = getattr(linear, "weight_scale", None)
     if w.dtype != FP8 or s is None or s.dtype != torch.float32:
         raise MonoUnsupported(f"{type(linear).__name__}: expected block-FP8 weights")
+    if getattr(linear, "aiter_bpreshuffled", False):
+        raise MonoUnsupported(f"{type(linear).__name__}: weight is preshuffled")
     n, k = w.shape[-2:]
     if tuple(s.shape) != ((n + 127) // 128, (k + 127) // 128):
         # transposed storage (a kernel that keeps W^T) is not read here

@@ -142,6 +142,139 @@ def test_rocm_moe_routing_and_shared_experts_match_reference(
     torch.testing.assert_close(actual.float(), expected, rtol=0.02, atol=5e-5)
 
 
+def _preshuffled_fp8_linear(
+    holder: str = "quant_method", weight_shape: tuple[int, int] = (256, 128)
+) -> nn.Module:
+    pytest.importorskip("aiter")
+    from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+        AiterPreshuffledFp8BlockScaledMMKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        FP8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
+        kFp8Static128BlockSym,
+    )
+
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8Static128BlockSym,
+        activation_quant_key=kFp8Dynamic128Sym,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=weight_shape,
+    )
+    layer = nn.Module()
+    layer.weight = nn.Parameter(
+        torch.randn(*weight_shape, device="cuda").to(current_platform.fp8_dtype()),
+        requires_grad=False,
+    )
+    layer.register_parameter(
+        "weight_scale" if holder == "scheme" else "weight_scale_inv",
+        nn.Parameter(
+            torch.ones(*(dim // 128 for dim in weight_shape), device="cuda"),
+            requires_grad=False,
+        ),
+    )
+    setattr(
+        layer,
+        holder,
+        SimpleNamespace(fp8_linear=AiterPreshuffledFp8BlockScaledMMKernel(config)),
+    )
+    return layer
+
+
+def test_rocm_wo_a_keeps_weight_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The attention reads wo_a's weight directly, so wo_a is built with a
+    copy of the quant config that keeps the checkpoint layout."""
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
+
+    seen = {}
+
+    def fake_init(self, input_size, output_size, **kwargs):
+        nn.Module.__init__(self)
+        self.tp_size = 1
+        seen["quant_config"] = kwargs["quant_config"]
+
+    monkeypatch.setattr(ColumnParallelLinear, "__init__", fake_init)
+    quant_config = SimpleNamespace(keep_weight_layout=False)
+    DeepseekV4GroupedWoA(256, 1024, n_groups=2, quant_config=quant_config)
+
+    assert seen["quant_config"] is not quant_config
+    assert seen["quant_config"].keep_weight_layout
+    assert not quant_config.keep_weight_layout
+
+
+@pytest.mark.parametrize("holder", ["quant_method", "scheme"])
+def test_rocm_gateup_shuffles_once_and_down_proj_keeps_preshuffled_backend(
+    holder: str, monkeypatch: pytest.MonkeyPatch, default_vllm_config
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v4.amd import model as rocm_model
+
+    gate_up, down = _preshuffled_fp8_linear(holder), _preshuffled_fp8_linear(holder)
+    original_gate_up = gate_up.weight.detach().clone()
+    original_down = down.weight.detach().clone()
+    monkeypatch.setattr(
+        rocm_model, "MergedColumnParallelLinear", lambda *a, **k: gate_up
+    )
+    monkeypatch.setattr(rocm_model, "RowParallelLinear", lambda *a, **k: down)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    model = rocm_model.DeepseekV4MLP(128, 128, "silu")
+    for linear in (gate_up, down):
+        getattr(linear, holder).fp8_linear.process_weights_after_loading(linear)
+    model.prepare_gateup_preshuffle()
+
+    for linear, original in ((gate_up, original_gate_up), (down, original_down)):
+        expected = rocm_aiter_ops.shuffle_weight(original, layout=(16, 16))
+        torch.testing.assert_close(
+            linear.weight.view(torch.uint8), expected.view(torch.uint8)
+        )
+
+
+def test_rocm_fused_qkv_quant_matches_preshuffled_gemm_scale_layout(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v4.amd.rocm import (
+        DeepseekV4ROCMAiterMLAAttention,
+        apply_pre_quantized_block_scaled_mm,
+    )
+
+    if not rocm_aiter_ops.is_blockscale_bpreshuffle_tuned(1024, 256):
+        pytest.skip("Requires a tuned AITER preshuffled FP8 GEMM")
+    linear = _preshuffled_fp8_linear(weight_shape=(1024, 256))
+    original = linear.weight.detach().clone()
+    linear.quant_method.fp8_linear.process_weights_after_loading(linear)
+    attention = DeepseekV4ROCMAiterMLAAttention.__new__(DeepseekV4ROCMAiterMLAAttention)
+    nn.Module.__init__(attention)
+    attention.wq_b = linear
+    attention.indexer = None
+    attention.q_lora_rank, attention.head_dim = 256, 128
+    attention.eps = 1e-5
+    attention.q_norm = SimpleNamespace(
+        weight=torch.ones(256, dtype=torch.bfloat16, device="cuda")
+    )
+    attention.kv_norm = SimpleNamespace(
+        weight=torch.ones(128, dtype=torch.bfloat16, device="cuda")
+    )
+    monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: True)
+    # Multiple rows and groups with different ranges expose byte-order errors.
+    inputs = torch.randn(16, 384, dtype=torch.bfloat16, device="cuda")
+    inputs[:, :128] *= 4
+    quantized, scales, _ = attention._split_qkv_and_norm(inputs)
+    assert scales is not None
+    output = apply_pre_quantized_block_scaled_mm(linear, quantized, scales)
+    q = inputs[:, :256].float()
+    normalized = q * torch.rsqrt(q.square().mean(dim=-1, keepdim=True) + attention.eps)
+    reference_scales = normalized.view(16, 2, 128).abs().amax(dim=-1)
+    reference_scales /= torch.finfo(current_platform.fp8_dtype()).max
+    dequantized = quantized.float() * reference_scales.repeat_interleave(128, dim=1)
+    expected = dequantized @ original.float().T
+    torch.testing.assert_close(output.float(), expected, atol=0.125, rtol=0.01)
+
+
 def test_rocm_packed_kv_cache_auto_uses_ds_mla_layout() -> None:
     from vllm.config import CacheConfig
     from vllm.models.deepseek_v4.attention import _resolve_dsv4_kv_cache_dtype
@@ -313,6 +446,84 @@ def test_rocm_fse_rejects_data_parallel_deployment(
         assert resolve_layer_fused_shared_expert(
             None, "model.layers.0.ffn", disable_under_ep=True
         )
+
+
+@pytest.mark.parametrize("fusion", ["none", "heterogeneous", "mega_moe"])
+def test_rocm_fused_shared_expert_linears_keep_weight_layout(
+    fusion: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fused MoE copies the shared expert's weights as stored (#57132).
+    from vllm.models.deepseek_v4.amd import model as rocm_model
+
+    class FakeGate(nn.Module):
+        def __init__(self, **kwargs) -> None:
+            super().__init__()
+
+    class FakeMLP(nn.Module):
+        def __init__(self, *, quant_config, **kwargs) -> None:
+            super().__init__()
+            self.quant_config = quant_config
+
+    class FakeMegaMoEExperts(nn.Module):
+        def __init__(self, *args, fuse_shared_expert: bool, **kwargs) -> None:
+            super().__init__()
+            self.fuse_shared_expert = fuse_shared_expert
+
+    monkeypatch.setattr(rocm_model, "GateLinear", FakeGate)
+    monkeypatch.setattr(rocm_model, "DeepseekV4MLP", FakeMLP)
+    monkeypatch.setattr(rocm_model, "FusedMoEFactory", lambda **kwargs: nn.Identity())
+    monkeypatch.setattr(rocm_model, "DeepseekV4AiterMegaMoEExperts", FakeMegaMoEExperts)
+    monkeypatch.setattr(rocm_model, "_validate_aiter_mega_moe_config", lambda c: None)
+    monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_rank", lambda: 0)
+    # Only MegaMoE asks to fuse the shared expert; the AITER fused path stays off.
+    monkeypatch.setattr(
+        rocm_model,
+        "resolve_layer_fused_shared_expert",
+        lambda *a, moe_backend=None, **k: moe_backend == "aiter_mega_moe",
+    )
+
+    config = SimpleNamespace(
+        hidden_size=16,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=8,
+        hidden_act="silu",
+        swiglu_limit=None,
+        norm_topk_prob=True,
+        scoring_func="sqrtsoftplus",
+        num_hash_layers=0,
+        vocab_size=32,
+        topk_method="noaux_tc",
+        vision_n_layers=0,
+        n_shared_experts=1,
+    )
+    mega_moe = fusion == "mega_moe"
+    quant_config = SimpleNamespace(
+        online_quantization_config=None, keep_weight_layout=False
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=config),
+        quant_config=quant_config,
+        parallel_config=ParallelConfig(),
+        kernel_config=KernelConfig(moe_backend="aiter_mega_moe")
+        if mega_moe
+        else KernelConfig(),
+    )
+    moe = rocm_model.DeepseekV4MoE(
+        vllm_config,
+        prefix="model.layers.0.ffn",
+        fuse_heterogeneous_shared_expert=fusion == "heterogeneous",
+    )
+
+    if mega_moe:
+        assert moe.experts.fuse_shared_expert
+    # The shared expert's linears get a copy of the config, so selection
+    # gives them the plain kernel; the routed experts keep the original.
+    shared_config = moe.shared_experts.quant_config
+    assert shared_config.keep_weight_layout == (fusion != "none")
+    assert (shared_config is quant_config) == (fusion == "none")
+    assert not quant_config.keep_weight_layout
 
 
 def test_rocm_mtp_forwards_input_ids_for_vision_routing(

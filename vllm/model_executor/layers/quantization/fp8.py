@@ -360,6 +360,7 @@ class Fp8LinearMethod(LinearMethodBase):
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
+            keep_weight_layout=self.quant_config.keep_weight_layout,
         )
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)

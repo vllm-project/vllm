@@ -6,6 +6,7 @@ The text model is hosted by `PixtralForConditionalGeneration` for the
 multimodal checkpoint.
 """
 
+import copy
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, cast
 
@@ -109,6 +110,7 @@ class MistralLarge4DecoderLayer(nn.Module):
                 config,
                 prefix=f"{prefix}.mlp",
                 reduce_results=not self.defer_allreduce,
+                quant_config=quant_config,
             )
         else:
             self.mlp = MistralMLP(
@@ -195,6 +197,12 @@ class MistralLarge4Model(nn.Module, EagleModelMixin):
             torch.zeros(max_num_tokens, 1, config.qk_rope_head_dim),
         )
 
+        quant_config = vllm_config.quant_config
+        if self.specialized_decode_config is not None and quant_config is not None:
+            # The specialized decode reads the FP8 linears' weights in the
+            # checkpoint layout.
+            quant_config = copy.copy(quant_config)
+            quant_config.keep_weight_layout = True
         self.layers = nn.ModuleList(
             MistralLarge4DecoderLayer(
                 vllm_config,
@@ -204,7 +212,7 @@ class MistralLarge4Model(nn.Module, EagleModelMixin):
                 topk_indices_buffer=topk_indices_buffer,
                 index_group_builder=index_group_builder,
                 zero_kv_inputs=zero_kv_inputs,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
             )
             for spec in self.layer_specs
         )

@@ -618,3 +618,144 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return gemm_a8w8_blockscale_op(
             A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
         )
+
+
+class AiterPreshuffledFp8BlockScaledMMKernel(AiterFp8BlockScaledMMKernel):
+    """AITER CK FP8 block-scaled GEMM on a (16, 16) pre-shuffled weight.
+
+    A layer whose weight other code reads directly is built with
+    `keep_weight_layout`, so selection gives it the parent kernel.
+
+    TODO: fold the parent's gfx1250 Triton preshuffle (`use_bpreshuffle`) into
+    this class.
+    """
+
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        # can_implement rules out both parent Triton paths, so the parent
+        # resolves to its CK `gemm_a8w8_blockscale`.
+        super().__init__(config)
+        # gemm_a8w8_blockscale_bpreshuffle reads the activation scale
+        # column-major.
+        act_scale_descriptor = config.activation_quant_key.scale
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
+            column_major_scales=True,
+        )
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
+            compute_capability
+        )
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        # Measured on gfx950 only.
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            return False, "only enabled on gfx950."
+
+        if config.keep_weight_layout:
+            return False, "the layer's weight is read in the checkpoint layout."
+
+        # bpreshuffle GEMM requires aiter fp8 linear to be enabled and an fp8
+        # 2D weight. shuffle_weight(layout=(16, 16)) tiles N by 16, and the
+        # block scales need K % 128 == 0.
+        if not rocm_aiter_ops.is_linear_fp8_enabled():
+            return (
+                False,
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1` "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`."
+                ),
+            )
+
+        n, k = config.weight_shape
+        if not (n % 16 == 0 and k % 128 == 0):
+            return (
+                False,
+                (
+                    f"requires N divisible by 16 and K divisible by 128, "
+                    f"received N={n} and K={k}."
+                ),
+            )
+
+        # A shape needs at least one tuned bpreshuffle row; an M without its
+        # own row runs CK's default bpreshuffle instance.
+        if not rocm_aiter_ops.is_blockscale_bpreshuffle_tuned(n, k):
+            return (
+                False,
+                (
+                    f"requires a tuned aiter blockscale bpreshuffle config for "
+                    f"N={n} and K={k}."
+                ),
+            )
+
+        # The plain blockscale GEMM keeps the checkpoint layout, so it wins
+        # whenever its own table covers the shape.
+        if rocm_aiter_ops.prefers_plain_blockscale(n, k):
+            return (
+                False,
+                f"the plain aiter blockscale GEMM is tuned for N={n} and K={k}.",
+            )
+        # So does the plain Triton GEMM the parent runs for a shape it has
+        # tuned.
+        if rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
+            return (
+                False,
+                f"the plain Triton blockscale GEMM is tuned for N={n} and K={k}.",
+            )
+
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Block strategy and the e8m0 scale upcast.
+        super().process_weights_after_loading(layer)
+
+        params = FP8BlockParams.from_layer(layer)
+        weight = params.weight
+        # runtime safety net
+        assert (
+            weight.dim() == 2
+            and weight.dtype == current_platform.fp8_dtype()
+            and weight.shape[0] % 16 == 0
+            and weight.shape[1] % 128 == 0
+        ), (
+            "AiterPreshuffledFp8BlockScaledMMKernel requires a 2D fp8 weight "
+            "with N divisible by 16 and K divisible by 128."
+        )
+
+        shuffled_weight = rocm_aiter_ops.shuffle_weight(
+            weight.contiguous(), layout=(16, 16)
+        )
+        replace_parameter(
+            layer,
+            params.WEIGHT,
+            torch.nn.Parameter(shuffled_weight.data, requires_grad=False),
+        )
+        # Model code that shuffles weights by hand checks this tag.
+        layer.aiter_bpreshuffled = True
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        """`As` must be column-major, as `quant_fp8` writes it. A row-major
+        one will not raise, it just returns wrong numbers for M > 1.
+        """
+        return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            A, B, As, Bs, output_dtype=self.config.out_dtype
+        )

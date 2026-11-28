@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Grouped `wo_a` output projection for DeepSeek-V4."""
 
+import copy
+
 import torch
 
 from vllm.distributed.utils import divide
@@ -22,6 +24,11 @@ class DeepseekV4GroupedWoA(ColumnParallelLinear):
     def __init__(
         self, input_size: int, output_size: int, *, n_groups: int, **kwargs
     ) -> None:
+        if kwargs.get("quant_config") is not None:
+            # The attention reads the weight as a stack of per-group
+            # matrices, so it keeps the checkpoint layout.
+            kwargs["quant_config"] = copy.copy(kwargs["quant_config"])
+            kwargs["quant_config"].keep_weight_layout = True
         super().__init__(input_size, output_size, **kwargs)
         self.n_local_groups = divide(n_groups, self.tp_size)
 

@@ -40,6 +40,8 @@ class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     weight_shape: tuple[int, int]
     input_dtype: torch.dtype
     out_dtype: torch.dtype
+    # Other code reads the weight directly, so the kernel must not relayout it.
+    keep_weight_layout: bool = False
 
 
 _FP8ParamsT = tuple[

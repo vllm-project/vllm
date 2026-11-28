@@ -259,6 +259,7 @@ def _decoder_layer(layer_id=5, **attn):
             compress_ratio=md.CSA,
             indexer=object(),
             kv_cache_dtype="fp8_ds_mla",
+            wq_b=SimpleNamespace(),
         )
         | attn
     )
@@ -267,7 +268,7 @@ def _decoder_layer(layer_id=5, **attn):
         experts=SimpleNamespace(
             routed_experts=SimpleNamespace(quant_method=quant_method)
         ),
-        shared_experts=object(),
+        shared_experts=SimpleNamespace(down_proj=SimpleNamespace()),
         use_mega_moe=False,
         fuse_heterogeneous_shared_expert=False,
         is_fused_shared_expert_enabled=False,
@@ -363,6 +364,54 @@ def test_opt_in_outside_the_kernels_raises(monkeypatch, case, match):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
+@pytest.mark.parametrize("monokernel", [True, False])
+def test_plain_read_linears_keep_the_checkpoint_layout(monkeypatch, monokernel):
+    """The kernels read wq_b and the shared down_proj as stored, so under
+    --monokernel the decoder layer builds its linears with keep_weight_layout
+    and selection gives them the plain FP8 kernel."""
+    from torch import nn
+
+    from vllm.models.deepseek_v4.amd import model as rocm_model
+
+    seen = {}
+
+    def fake(name):
+        def build(*args, quant_config=None, **kwargs):
+            seen[name] = quant_config
+            return nn.Identity()
+
+        return build
+
+    monkeypatch.setitem(
+        sys.modules, "vllm.model_executor.layers.mhc", ModuleType("mhc")
+    )
+    monkeypatch.setattr(rocm_model, "DeepseekV4ROCMAiterMLAAttention", fake("attn"))
+    monkeypatch.setattr(rocm_model, "DeepseekV4MoE", fake("ffn"))
+    for op in ("RMSNorm", "MHCPreOp", "MHCPostOp", "MHCFusedPostPreOp"):
+        monkeypatch.setattr(rocm_model, op, lambda *a, **k: nn.Identity())
+    monkeypatch.setattr(rocm_model.MonoDecodeLayer, "create", lambda *a: None)
+    quant_config = SimpleNamespace(keep_weight_layout=False)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                hidden_size=256,
+                rms_norm_eps=1e-6,
+                hc_mult=4,
+                hc_sinkhorn_iters=20,
+                hc_eps=1e-6,
+            )
+        ),
+        quant_config=quant_config,
+        kernel_config=SimpleNamespace(monokernel=monokernel),
+    )
+
+    rocm_model.DeepseekV4DecoderLayer(vllm_config, "model.layers.5")
+
+    assert seen["attn"] is seen["ffn"]
+    assert seen["attn"].keep_weight_layout is monokernel
+    assert not quant_config.keep_weight_layout
+
+
 def test_hca_key_table_is_vllms_c128a_width(monkeypatch):
     """The runner's HCA key table is as wide as the c128a table vLLM's metadata
     builder allocates: every compressed row of the longest context, in 128-row
@@ -413,6 +462,20 @@ def _loaded_layer():
     hc = {f"hc_{s}_{p}": t for s in ("attn", "ffn") for p in ("fn", "scale", "base")}
     norms = dict(attn_norm=lin(), ffn_norm=lin())
     return SimpleNamespace(attn=attn, ffn=ffn, **hc, **norms)
+
+
+@pytest.mark.parametrize("holder, linear", [("attn", "wq_b"), ("ffn", "down_proj")])
+def test_weights_refuse_a_preshuffled_plain_read(monkeypatch, holder, linear):
+    """wq_b and the shared down_proj are read as stored: a preshuffled one
+    would be garbage, so it is an error."""
+    _deployment(monkeypatch)
+    runner = sys.modules["vllm.models.deepseek_v4.amd.mono.runner"]
+    runner.AttnWeights = runner.MonoLayerWeights = SimpleNamespace  # type: ignore[attr-defined]
+    layer = _loaded_layer()
+    owner = layer.attn if holder == "attn" else layer.ffn.shared_experts
+    getattr(owner, linear).aiter_bpreshuffled = True
+    with pytest.raises(AssertionError):
+        md.MonoDecodeLayer(HCA_WIDTH).weights(layer)
 
 
 def test_weight_update_refills_the_derived_scales_in_place(monkeypatch):
