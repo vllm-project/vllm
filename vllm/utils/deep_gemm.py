@@ -162,6 +162,40 @@ def _nvcc_version(nvcc: str) -> tuple[int, int] | None:
     return (int(match[1]), int(match[2])) if match else None
 
 
+def _deep_gemm_host_compiler() -> str | None:
+    """Return the host compiler nvcc picks for DeepGEMM's JIT, or None.
+
+    nvcc honours ``NVCC_CCBIN`` first and otherwise falls back to the C
+    compiler on ``PATH``.
+    """
+    ccbin = os.environ.get("NVCC_CCBIN")
+    if ccbin:
+        return shutil.which(ccbin) or (ccbin if os.path.exists(ccbin) else None)
+    return shutil.which(os.environ.get("CC") or "gcc")
+
+
+def _host_compiler_supports_cxx20(cc: str) -> bool:
+    """Whether ``cc`` accepts ``-std=c++20``.
+
+    nvcc silently drops that flag when the host compiler predates it, and CUDA
+    13's CCCL then rejects the lowered dialect, so DeepGEMM's JIT fails on the
+    first kernel it has to compile. gcc gained C++20 in gcc 10, clang in clang
+    11.
+    """
+    try:
+        out = subprocess.run(
+            [cc, "--version"], capture_output=True, text=True, timeout=60
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True  # Unreadable: do not disable DeepGEMM on a probe failure.
+    first = out.strip().splitlines()[0] if out.strip() else ""
+    match = re.search(r"(\d+)\.(\d+)", first)
+    if match is None:
+        return True
+    floor = (11, 0) if "clang" in out.lower() else (10, 0)
+    return (int(match[1]), int(match[2])) >= floor
+
+
 @functools.cache
 def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
@@ -187,6 +221,20 @@ def is_deep_gemm_supported() -> bool:
             "to enable them.",
             *version,
             nvcc,
+        )
+        return False
+    # nvcc silently drops -std=c++20 when the host compiler predates it, and
+    # CUDA 13's CCCL then rejects the lowered dialect, which aborts the engine
+    # on the first block-FP8 layer. Decline DeepGEMM here so that selection
+    # falls back to a kernel that works.
+    host_cc = _deep_gemm_host_compiler()
+    if host_cc is not None and not _host_compiler_supports_cxx20(host_cc):
+        logger.warning_once(
+            "DeepGEMM kernels are disabled: DeepGEMM's JIT compiles with "
+            "-std=c++20, but the host compiler at %s does not accept it "
+            "(gcc >= 10 or clang >= 11 is required). Point NVCC_CCBIN at a "
+            "newer host compiler to enable them.",
+            host_cc,
         )
         return False
     return True
