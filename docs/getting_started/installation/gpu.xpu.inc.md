@@ -10,6 +10,19 @@ vLLM initially supports basic model inference and serving on Intel GPU platform.
 - Dependency: [vllm-xpu-kernels](https://github.com/vllm-project/vllm-xpu-kernels): a package provide all necessary vllm custom kernel when running vLLM on Intel GPU platform,
 - Python: 3.14
 
+!!! note "XPU kernels runtime notes"
+    Install `vllm_xpu_kernels` from `requirements/xpu.txt` (release wheel by
+    default). Rebuild or reinstall that package when you change kernel configs.
+
+    Runtime notes (enforced by the kernels package):
+
+    - **Native MXFP8 / block-FP8 MoE (Xe2):** fused MoE uses the native
+      grouped-GEMM path by default. Escape hatches:
+      `VLLM_XPU_FUSED_MOE_NATIVE_MXFP8=0`,
+      `VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8=0`, or
+      `VLLM_XPU_FUSED_MOE_USE_REF=1` (force the Python reference expert
+      loop for A/B).
+
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
 
