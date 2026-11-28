@@ -23,7 +23,12 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    refill_derived,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.models.common.ops.sequence_parallel import is_sequence_parallel_active
 from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_bf16 import (
     prepare_megamoe_bf16_inputs,
@@ -188,12 +193,6 @@ class MuseSparkMegaMoEExperts(nn.Module):
                 dtype=torch.bfloat16,
             )
 
-        self._transformed_l1: (
-            torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None
-        ) = None
-        self._transformed_l2: (
-            torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None
-        ) = None
         self._norm_gamma: torch.Tensor | None = None
 
         compilation_config = vllm_config.compilation_config
@@ -230,49 +229,52 @@ class MuseSparkMegaMoEExperts(nn.Module):
             yield name
 
     def finalize_weights(self) -> None:
-        """Repack checkpoint tensors into the layout the kernel reads."""
-        if self._transformed_l1 is not None:
-            return
-        deep_gemm = _get_deep_gemm()
+        """Repack checkpoint tensors in place into the layout the kernel reads.
 
-        if self.weight_layout == "trtllm":
-            if self.is_nvfp4:
+        Reruns after every weight reload (so it is not idempotent); parameters
+        keep their storage and derived tensors are refilled in place.
+        """
+        deep_gemm = _get_deep_gemm()  # fail early on an unsupported build
+        if not is_weights_pre_processed():  # else already in kernel layout
+            if self.weight_layout == "trtllm" and self.is_nvfp4:
                 self._prepare_trtllm_weights()
-            else:
+            elif self.weight_layout == "trtllm":
                 self._prepare_trtllm_bf16_weights()
-        elif self.is_nvfp4:
-
-            def sf_to_kernel_layout(sf: torch.Tensor) -> torch.Tensor:
-                # Four E4M3 block scales per int32, then MN-major for the TMA loads.
-                packed = sf.data.view(torch.uint8).contiguous().view(torch.int32)
-                return packed.transpose(-1, -2).contiguous().transpose(-1, -2)
-
-            self._transformed_l1, self._transformed_l2 = (
-                deep_gemm.transform_weights_for_mega_moe(
-                    (
-                        self.w13_weight.data.view(torch.int8),
-                        sf_to_kernel_layout(self.w13_weight_scale),
-                    ),
-                    (
-                        self.w2_weight.data.view(torch.int8),
-                        sf_to_kernel_layout(self.w2_weight_scale),
-                    ),
-                )
-            )
-            self._drop_retransformed_weights()
-        else:
-            self._transformed_l1, self._transformed_l2 = (
-                deep_gemm.transform_weights_for_mega_moe(
+            elif self.is_nvfp4:
+                self._prepare_native_nvfp4_weights()
+            else:
+                # L2 comes back as the parameter itself.
+                l1, _ = deep_gemm.transform_weights_for_mega_moe(
                     self.w13_weight.data, self.w2_weight.data
                 )
-            )
-            self.w13_weight = None
+                replace_parameter(self, "w13_weight", l1)
         # The kernel applies gamma verbatim; fold in the zero-centered gain.
         norm = self.post_expert_norm
         gamma = norm.weight.data.float()
         if norm.zero_centered_gamma:
             gamma = gamma + norm.gain_center
-        self._norm_gamma = gamma.contiguous()
+        refill_derived(self, "_norm_gamma", gamma.contiguous())
+
+    def _prepare_native_nvfp4_weights(self) -> None:
+        def sf_to_kernel_layout(sf: torch.Tensor) -> torch.Tensor:
+            # Four E4M3 block scales per int32, then MN-major for the TMA loads.
+            packed = sf.data.view(torch.uint8).contiguous().view(torch.int32)
+            return packed.transpose(-1, -2).contiguous().transpose(-1, -2)
+
+        # The L2 weight comes back as the parameter itself.
+        (w13, sf13), (_, sf2) = _get_deep_gemm().transform_weights_for_mega_moe(
+            (
+                self.w13_weight.data.view(torch.int8),
+                sf_to_kernel_layout(self.w13_weight_scale),
+            ),
+            (
+                self.w2_weight.data.view(torch.int8),
+                sf_to_kernel_layout(self.w2_weight_scale),
+            ),
+        )
+        replace_parameter(self, "w13_weight", w13.view(torch.uint8))
+        replace_parameter(self, "w13_weight_scale", sf13)
+        replace_parameter(self, "w2_weight_scale", sf2)
 
     def _prepare_trtllm_weights(self) -> None:
         from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
@@ -293,20 +295,10 @@ class MuseSparkMegaMoEExperts(nn.Module):
             self.num_local_experts,
             True,
         )
-        self.w13_weight.data = w13
-        self.w13_weight_scale.data = sf13
-        self.w2_weight.data = w2
-        self.w2_weight_scale.data = sf2
-        e, h, i = self.num_local_experts, self.hidden_size, self.intermediate_size
-        # Views describe logical shapes; DeepGEMM reads the physical TRT layout.
-        self._transformed_l1 = (
-            w13.view(torch.int8),
-            sf13.view(torch.int32).view(e, 2 * i, h // 64),
-        )
-        self._transformed_l2 = (
-            w2.view(torch.int8),
-            sf2.view(torch.int32).view(e, h, i // 64),
-        )
+        replace_parameter(self, "w13_weight", w13)
+        replace_parameter(self, "w13_weight_scale", sf13)
+        replace_parameter(self, "w2_weight", w2)
+        replace_parameter(self, "w2_weight_scale", sf2)
 
     def _prepare_trtllm_bf16_weights(self) -> None:
         from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -317,27 +309,23 @@ class MuseSparkMegaMoEExperts(nn.Module):
         w13, w2 = convert_moe_weights_to_flashinfer_trtllm_block_layout(
             {}, self.w13_weight.data, self.w2_weight.data
         )
-        self.w13_weight.data = w13
-        self.w2_weight.data = w2
-        self._transformed_l1, self._transformed_l2 = w13, w2
+        replace_parameter(self, "w13_weight", w13)
+        replace_parameter(self, "w2_weight", w2)
 
-    def _drop_retransformed_weights(self) -> None:
-        """Release the checkpoint tensors the kernel no longer reads."""
-        assert isinstance(self._transformed_l2, tuple)
-        kept = self._transformed_l2[0].untyped_storage().data_ptr()
-        if kept != self.w2_weight.untyped_storage().data_ptr():
-            raise AssertionError(
-                f"{self.prefix}: MegaMoE no longer returns the L2 weight "
-                "aliased to w2_weight, so the drop list here is stale."
-            )
-        for name in ("w13_weight", "w13_weight_scale", "w2_weight_scale"):
-            param = getattr(self, name)
-            if param.untyped_storage().data_ptr() == kept:
-                raise AssertionError(
-                    f"{self.prefix}: {name} is aliased by the transformed "
-                    "weights and must not be dropped."
-                )
-            setattr(self, name, None)
+    def _kernel_weights(self):
+        """The repacked parameters as the L1 and L2 operands DeepGEMM reads."""
+        if not self.is_nvfp4:
+            return self.w13_weight.data, self.w2_weight.data
+        sf13, sf2 = self.w13_weight_scale.data, self.w2_weight_scale.data
+        if self.weight_layout == "trtllm":
+            # Views describe logical shapes; DeepGEMM reads the physical TRT layout.
+            e, h, i = self.num_local_experts, self.hidden_size, self.intermediate_size
+            sf13 = sf13.view(torch.int32).view(e, 2 * i, h // 64)
+            sf2 = sf2.view(torch.int32).view(e, h, i // 64)
+        return (
+            (self.w13_weight.data.view(torch.int8), sf13),
+            (self.w2_weight.data.view(torch.int8), sf2),
+        )
 
     def get_symm_buffer(self):
         """Return this dtype's view of the EP group's shared allocation.
@@ -400,7 +388,7 @@ class MuseSparkMegaMoEExperts(nn.Module):
                 f"Muse Spark MegaMoE got {num_tokens} tokens, but the "
                 f"symmetric buffer was sized for {self.max_num_tokens}."
             )
-        assert self._transformed_l1 is not None, "finalize_weights() not called"
+        assert self._norm_gamma is not None, "finalize_weights() not called"
         return self.get_symm_buffer(), self.get_padding_mask(num_tokens)
 
     def forward(
@@ -442,11 +430,12 @@ class MuseSparkMegaMoEExperts(nn.Module):
         deep_gemm = _get_deep_gemm()
 
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+        l1, l2 = self._kernel_weights()
         if not self.is_nvfp4:
             deep_gemm.bf16_mega_moe(
                 y,
-                self._transformed_l1,
-                self._transformed_l2,
+                l1,
+                l2,
                 buffer,
                 post_expert_norm_gamma=self._norm_gamma,
                 post_expert_norm_eps=self.post_expert_norm.variance_epsilon,
@@ -455,8 +444,8 @@ class MuseSparkMegaMoEExperts(nn.Module):
             return y
         deep_gemm.fp4_fp4_mega_moe(
             y=y,
-            l1_weights=self._transformed_l1,
-            l2_weights=self._transformed_l2,
+            l1_weights=l1,
+            l2_weights=l2,
             sym_buffer=buffer,
             l1_alphas=self.w13_weight_scale_2.data,
             l2_alphas=self.w2_weight_scale_2.data,
