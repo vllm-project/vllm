@@ -45,6 +45,12 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
 
+With `--all2all-backend nixl_ep`, vLLM can size dispatch at runtime when every
+rank in a fixed-membership EP group supports NIXL's fixed low-latency layout.
+MoE layers sharing this buffer must use the same padded hidden size and number
+of local experts. If any rank lacks fixed-layout support, or if elastic EP is
+enabled, vLLM uses the configured static dispatch capacity.
+
 ### Mooncake EP
 
 Install a Mooncake package built with EP support, including the elastic legacy

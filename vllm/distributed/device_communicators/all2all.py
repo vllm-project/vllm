@@ -434,6 +434,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 class _NixlEPBufferState:
     buffer: Any
     max_num_ep_ranks: int
+    num_experts_per_rank: int
+    fixed_layout: tuple[int, int] | None
     connected_ep_size: int
     active_ep_size: int
 
@@ -480,6 +482,29 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             else self.world_size
         )
         max_num_global_experts = max_num_ep_ranks * num_experts_per_rank
+        fixed_layout = None
+        layout_kwargs = {}
+        # Elastic scale-up reuses the original buffers. Keep the legacy layout
+        # so newly admitted ranks can join without changing that reservation.
+        if not parallel_config.enable_elastic_ep:
+            shape = (
+                max_num_tokens_per_dp_rank,
+                token_hidden_size,
+                num_experts_per_rank,
+            )
+            capabilities = self.tcp_store_group.all_gather_obj(
+                (hasattr(Buffer, "has_fixed_low_latency_layout"), shape)
+            )
+            if any(peer_shape != shape for _, peer_shape in capabilities):
+                raise ValueError(
+                    "NIXL EP ranks must agree on the buffer shape "
+                    "(max tokens per rank, hidden size, experts per rank). "
+                    f"Got {[peer_shape for _, peer_shape in capabilities]}."
+                )
+            if all(supported for supported, _ in capabilities):
+                fixed_layout = (max_num_tokens_per_dp_rank, token_hidden_size)
+                layout_kwargs["low_latency_layout"] = fixed_layout
+
         num_rdma_bytes = Buffer.get_rdma_size_hint(
             num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
             hidden=token_hidden_size,
@@ -497,12 +522,15 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             num_ranks=max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
             num_rdma_bytes=num_rdma_bytes,
+            **layout_kwargs,
         )
         ranks_to_connect = list(range(self.world_size))
         buffer.connect_ranks(ranks_to_connect)
         NixlEPAll2AllManager._buffer = _NixlEPBufferState(
             buffer=buffer,
             max_num_ep_ranks=max_num_ep_ranks,
+            num_experts_per_rank=num_experts_per_rank,
+            fixed_layout=fixed_layout,
             connected_ep_size=self.world_size,
             active_ep_size=self.world_size,
         )
@@ -589,19 +617,35 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             torch.accelerator.synchronize()
 
     def get_handle(self, kwargs):
+        max_tokens = kwargs["max_num_tokens_per_dp_rank"]
+        hidden_size = kwargs["token_hidden_size"]
+        num_experts = kwargs["num_local_experts"]
         with NixlEPAll2AllManager._lock:
             state = NixlEPAll2AllManager._buffer
             if state is None:
-                max_num_tokens_per_dp_rank = kwargs["max_num_tokens_per_dp_rank"]
                 self._init_buffer(
-                    max_num_tokens_per_dp_rank=max_num_tokens_per_dp_rank,
-                    token_hidden_size=kwargs["token_hidden_size"],
-                    num_experts_per_rank=kwargs["num_local_experts"],
+                    max_num_tokens_per_dp_rank=max_tokens,
+                    token_hidden_size=hidden_size,
+                    num_experts_per_rank=num_experts,
                 )
-
-            assert NixlEPAll2AllManager._buffer is not None
-            handle = NixlEPAll2AllManager._buffer.buffer
-            return handle
+                state = NixlEPAll2AllManager._buffer
+                assert state is not None
+            elif state.fixed_layout is not None:
+                reserved_tokens, reserved_hidden = state.fixed_layout
+                if (
+                    hidden_size != reserved_hidden
+                    or max_tokens > reserved_tokens
+                    or num_experts != state.num_experts_per_rank
+                ):
+                    raise ValueError(
+                        "Cannot reuse the fixed-layout NIXL EP buffer for this MoE "
+                        f"layer. It requests hidden size {hidden_size}, "
+                        f"{max_tokens} tokens per rank and {num_experts} experts "
+                        f"per rank. The buffer reserves hidden size {reserved_hidden}, "
+                        f"up to {reserved_tokens} tokens per rank and "
+                        f"{state.num_experts_per_rank} experts per rank."
+                    )
+            return state.buffer
 
     def dispatch(
         self,

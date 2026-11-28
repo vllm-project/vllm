@@ -339,6 +339,8 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     described above for the Modular case.
     """
 
+    supports_runtime_dispatch_capacity: bool = False
+
     @abstractmethod
     def prepare(
         self,
@@ -1319,13 +1321,6 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        fused_out_alias = self.prepare_finalize.allocate_fused_expert_output(
-            fused_out_shape,
-            workspace_dtype,
-            device,
-            self.fused_experts.finalize_weight_and_reduce_impl(),
-        )
-
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
@@ -1335,6 +1330,16 @@ class FusedMoEKernelModularImpl:
         # storage for workspace13.
         # Idle collective ranks still need the workspace manager initialized.
         max_shape_size = max(1, prod(workspace13_shape), prod(fused_out_shape))
+        if self.prepare_finalize.supports_runtime_dispatch_capacity:
+            assert M_full <= fused_out_shape[1]
+            fused_out_shape = (fused_out_shape[0], M_full, fused_out_shape[2])
+
+        fused_out_alias = self.prepare_finalize.allocate_fused_expert_output(
+            fused_out_shape,
+            workspace_dtype,
+            device,
+            self.fused_experts.finalize_weight_and_reduce_impl(),
+        )
 
         if current_platform.is_cpu():
             # Every CPU FusedMoEExpertsModular kernel reports zero-sized
