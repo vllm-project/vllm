@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warm up Qwen Triton kernels from the loaded model's compile keys."""
 
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,22 +12,9 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
-
-_QWEN_MODEL_TYPES = frozenset(
-    {
-        "qwen3_next",
-        "qwen3_5",
-        "qwen3_5_text",
-        "qwen3_5_moe",
-        "qwen3_5_moe_text",
-        "qwen4_exp",
-        "qwen4_exp_text",
-    }
-)
 
 # Covers L=1 constexpr, non-divisible runtime L, and divisible runtime L.
 _FLA_POST_CONV_WARMUP_LENGTHS = (1, 2, 16)
@@ -61,31 +49,17 @@ def _is_non_empty_tensor(value: object) -> bool:
     return isinstance(value, torch.Tensor) and value.numel() > 0
 
 
-def _is_qwen_gdn_layer(module: object) -> bool:
-    return all(
-        hasattr(module, attr)
-        for attr in (
-            "num_k_heads",
-            "num_v_heads",
-            "head_k_dim",
-            "head_v_dim",
-            "conv_kernel_size",
-            "tp_size",
-            "kv_cache",
-            "norm",
-            "A_log",
-            "dt_bias",
-        )
-    )
-
-
 def _iter_qwen_gdn_layers(static_forward_context: object):
-    if not isinstance(static_forward_context, dict):
+    # The layer's module is imported iff the model uses it; do not import it here.
+    module = sys.modules.get(
+        "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn"
+    )
+    if module is None or not isinstance(static_forward_context, dict):
         return
 
-    for module in static_forward_context.values():
-        if _is_qwen_gdn_layer(module):
-            yield module
+    for layer in static_forward_context.values():
+        if isinstance(layer, module.QwenGatedDeltaNetAttention):
+            yield layer
 
 
 def _split_qwen_gdn_cache(kv_cache: object) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -393,25 +367,17 @@ def _synchronize_device(device: torch.device) -> None:
 
 
 @torch.inference_mode()
-def qwen_triton_warmup(
-    runner: "GPUModelRunner",
-    model_config: "ModelConfig",
-) -> None:
-    """Warm Qwen GDN Triton kernels reported by the JIT monitor."""
-    model_type = getattr(model_config.hf_text_config, "model_type", "") or getattr(
-        model_config.hf_config, "model_type", ""
-    )
-    if model_type not in _QWEN_MODEL_TYPES:
-        return
-
-    device = runner.device
-    logger.info("Warming up Qwen GDN Triton kernels for model_type=%s.", model_type)
-
+def qwen_gdn_triton_warmup(runner: "GPUModelRunner") -> None:
+    """Warm the Triton kernels of the model's Qwen GDN layers, if any."""
     gdn_config = _qwen_gdn_warmup_config(
         runner.compilation_config.static_forward_context
     )
     if gdn_config is None:
         return
+
+    logger.info("Warming up Qwen GDN Triton kernels.")
+    device = runner.device
+    model_config = runner.model_config
 
     max_num_tokens = max(1, int(runner.max_num_tokens))
     _warm_gated_rms_norm_kernel(device, gdn_config, max_num_tokens, model_config.dtype)

@@ -14,35 +14,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _worker(context):
-    return SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            model_config=SimpleNamespace(
-                hf_text_config=SimpleNamespace(model_type="step5")
-            ),
-            compilation_config=SimpleNamespace(static_forward_context=context),
-        )
-    )
-
-
-def test_step5_warmup_dispatches_rocm_csa_topk():
-    from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
+def test_step5_csa_warmup_uses_first_indexed_layer_topk():
     from vllm.models.step5.amd import warmup
-    from vllm.models.step5.amd.model import Step5Attention
 
-    def layer(indexer):
-        mock = MagicMock(indexer=indexer)
-        mock.__class__ = Step5Attention
-        return mock
-
-    sparse = layer(SimpleNamespace(topk=512))
-    dense = layer(None)
-    worker = _worker({"swa": dense, "other": object(), "csa": sparse})
+    sparse = MagicMock(indexer=SimpleNamespace(topk=512))
+    dense = MagicMock(indexer=None)
+    worker = object()
 
     with patch.object(warmup, "run_step5_scored_prefill_warmup") as run:
-        step5_dsa_warmup(worker)
+        warmup.step5_csa_warmup([dense, sparse], worker)
     run.assert_called_once_with(worker, 512)
 
     with patch.object(warmup, "run_step5_scored_prefill_warmup") as run:
-        step5_dsa_warmup(_worker({"swa": dense}))
+        warmup.step5_csa_warmup([dense], worker)
     run.assert_not_called()

@@ -128,6 +128,7 @@ from ..common.mm_preprocess import (
 from .specialized_decode.runtime import specialized_decode_config
 
 if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
     from vllm.v1.worker.gpu.model_states.interface import ModelState
 
     from .specialized_decode.runtime.decode import SpecializedDecode
@@ -1545,6 +1546,11 @@ class KimiLinearForCausalLM(
         # PIECEWISE steps).
         self.needs_norm_in_logits = False
 
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from .warmup import KimiK3KernelWarmup
+
+        return KimiK3KernelWarmup
+
     def get_model_state_cls(self) -> "type[ModelState]":
         from .model_state import KimiK3ModelState
 
@@ -2060,6 +2066,11 @@ class KimiK3ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from .warmup import KimiK3KernelWarmup
+
+        return KimiK3KernelWarmup
 
     def get_model_state_cls(self) -> "type[ModelState]":
         return self.language_model.get_model_state_cls()

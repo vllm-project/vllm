@@ -77,7 +77,10 @@ class FlashInferWarmupCache(WarmupCache):
             or is_draft_model_cacheable(vllm_config.speculative_config)
         ):
             return
-        from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
+        from vllm.model_executor.warmup.kernel_warmup import (
+            flashinfer_autotune,
+            get_kernel_warmup,
+        )
 
         try:
             current_platform.update_block_size_for_backend(vllm_config)
@@ -93,7 +96,13 @@ class FlashInferWarmupCache(WarmupCache):
             if not self._adopt_from_stores(runner):
                 transport.adopt(self, runner)
             # The runner requires skip_attn when no KV cache exists
-            flashinfer_autotune(runner, skip_attn=True)
+            flashinfer_autotune(
+                runner,
+                skip_attn=True,
+                autotune_flashinfer_kernels=(
+                    get_kernel_warmup(runner).autotune_flashinfer_kernels
+                ),
+            )
             logger.info(
                 "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
                 "configs are in the on-disk autotune cache",

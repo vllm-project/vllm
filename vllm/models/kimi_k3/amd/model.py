@@ -3,7 +3,7 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 from collections.abc import Iterable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -49,6 +49,9 @@ from ..common.mm_preprocess import (
 )
 from .encoder_cudagraph import KimiK3EncoderCudaGraphMixin
 from .linear import KimiLinearForCausalLM
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -227,6 +230,11 @@ class KimiK3ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from .warmup import KimiK3KernelWarmup
+
+        return KimiK3KernelWarmup
 
     def get_model_state_cls(self) -> type:
         return self.language_model.get_model_state_cls()

@@ -3,6 +3,7 @@
 """Step5 on ROCm: compressed sparse attention (CSA) and an FP32 residual."""
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -63,6 +64,9 @@ from ..common.ops.indexer_norm_rope import indexer_norm_rope
 from .checks import validate_parallel_geometry, verify_kv_transfer_compatibility
 from .csa_attention import step5_csa_attention
 from .csa_cache import Step5CSASummaryCacheLayer
+
+if TYPE_CHECKING:
+    from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 
 
 class Step5SparseIndexer(nn.Module):
@@ -712,6 +716,11 @@ class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         },
         orig_to_new_prefix={"vision_model.": None, "vit_large_projector.": None},
     )
+
+    def get_kernel_warmup_cls(self) -> "type[KernelWarmup]":
+        from .warmup import Step5KernelWarmup
+
+        return Step5KernelWarmup
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

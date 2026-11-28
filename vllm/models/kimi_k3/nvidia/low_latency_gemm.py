@@ -20,8 +20,9 @@ re-measured there and may deserve their own table once retuned.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn.functional as F
@@ -40,6 +41,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+
+if TYPE_CHECKING:
+    from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 
 Backend = Literal["cute", "dsv3_fused_a"]
 # A resolved per-token-count call: the backend plus its CuTe config (None for
@@ -849,18 +853,14 @@ def run_kda_projection_overlap(
     return projected_qkvg, g1, beta
 
 
-def autotune_kda_qkvg(model: nn.Module) -> None:
+def autotune_kda_qkvg(layers: Iterable[KimiK3DeltaAttention]) -> None:
     """Autotune the supported QKVG GEMM before CUDA graph capture."""
-    from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
-
     backend = _kda_qkvg_flashinfer_backend()
     children: list[KimiK3DeltaAttention] = []
     weights_by_shape: dict[
         tuple[int, int, int, torch.dtype, torch.device], torch.Tensor
     ] = {}
-    for child in model.modules():
-        if not isinstance(child, KimiK3DeltaAttention):
-            continue
+    for child in layers:
         if child._projection_overlap_max_tokens <= 0:
             continue
         children.append(child)

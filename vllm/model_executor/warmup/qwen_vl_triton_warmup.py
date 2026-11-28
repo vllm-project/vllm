@@ -1,21 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm Qwen3-VL ViT kernels and M-RoPE for SupportsMRoPE models."""
+"""Warm the Qwen3-VL vision tower's Triton kernels."""
 
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.kernel_warmup import KernelWarmup
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-# Covers Triton's ==1 / %16==0 / other integer buckets.
-_MROPE_TOKEN_COUNTS = (1, 2, 16)
 
 
 def _warm_vision(model: torch.nn.Module, device: torch.device) -> None:
@@ -60,57 +58,13 @@ def _warm_vision(model: torch.nn.Module, device: torch.device) -> None:
         )
 
 
-def _warm_mrope(runner: "GPUModelRunner", model: torch.nn.Module) -> None:
-    from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
-    from vllm.model_executor.models.interfaces import supports_mrope
+class Qwen3VLKernelWarmup(KernelWarmup):
+    """Kernel warmup for models with a Qwen3-VL vision tower."""
 
-    is_mrope_model = supports_mrope(model)
-    if not is_mrope_model:
-        return
-
-    rope = next(
-        (module for module in model.modules() if isinstance(module, MRotaryEmbedding)),
-        None,
-    )
-    if rope is None or all(
-        getattr(module, "use_fused_qk_norm_rope_gate", False)
-        for module in model.modules()
-        if any(child is rope for child in module.children())
-    ):
-        return
-
-    model_config = runner.model_config
-    parallel_config = runner.parallel_config
-    num_query_heads = int(model_config.get_num_attention_heads(parallel_config))
-    num_kv_heads = int(model_config.get_num_kv_heads(parallel_config))
-    for num_tokens in _MROPE_TOKEN_COUNTS:
-        positions = torch.arange(
-            num_tokens, dtype=torch.long, device=runner.device
-        ).expand(3, -1)
-        query = torch.empty(
-            (num_tokens, num_query_heads * rope.head_size),
-            dtype=runner.dtype,
-            device=runner.device,
-        )
-        key_tensor = torch.empty(
-            (num_tokens, num_kv_heads * rope.head_size),
-            dtype=runner.dtype,
-            device=runner.device,
-        )
-        rope(positions, query, key_tensor)
-
-    logger.info("Warmed M-RoPE Triton kernels.")
-
-
-def _synchronize_device(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.accelerator.synchronize(device)
-
-
-@torch.inference_mode()
-def qwen_vl_triton_warmup(runner: "GPUModelRunner") -> None:
-    """Warm Qwen3-VL ViT kernels and M-RoPE for `SupportsMRoPE` models."""
-    model = runner.get_model()
-    _warm_vision(model, runner.device)
-    _warm_mrope(runner, model)
-    _synchronize_device(runner.device)
+    def warmup_jit_kernels(self, worker: "Worker") -> None:
+        super().warmup_jit_kernels(worker)
+        device = self.runner.device
+        with torch.inference_mode():
+            _warm_vision(self.model, device)
+        if device.type == "cuda":
+            torch.accelerator.synchronize(device)
