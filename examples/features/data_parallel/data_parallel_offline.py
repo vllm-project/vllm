@@ -29,12 +29,13 @@ Multi-node:
 """
 
 import os
+import shutil
 from time import sleep
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_dp_rendezvous_dir, get_open_port
 
 
 def create_parser():
@@ -209,5 +210,10 @@ if __name__ == "__main__":
             exit_code = 1
         elif proc.exitcode:
             exit_code = proc.exitcode
+
+    if dp_num_nodes == 1:
+        # This process chose the token the ranks rendezvous under, so it owns
+        # the directory they created. All ranks are gone by now.
+        shutil.rmtree(get_dp_rendezvous_dir(dp_master_port_val), ignore_errors=True)
 
     exit(exit_code)

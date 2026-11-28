@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import shutil
 import socket
 import threading
 
@@ -8,10 +10,13 @@ import zmq
 
 from vllm.utils import network_utils
 from vllm.utils.network_utils import (
+    get_dp_file_store_init_method,
+    get_dp_rendezvous_dir,
     get_file_store_init_method,
     get_open_port,
     get_open_ports_list,
     get_tcp_uri,
+    is_loopback_address,
     join_host_port,
     make_zmq_listener,
     make_zmq_path,
@@ -26,6 +31,48 @@ def test_get_file_store_init_method_is_unique():
 
     assert len(init_methods) == 2
     assert all(method.startswith("file://") for method in init_methods)
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [
+        ("127.0.0.1", True),
+        ("127.1.2.3", True),
+        ("::1", True),
+        ("localhost", True),
+        ("10.0.0.1", False),
+        ("example.com", False),
+        ("", False),
+    ],
+)
+def test_is_loopback_address(host, expected):
+    assert is_loopback_address(host) is expected
+
+
+def test_dp_file_store_init_method_is_stable_per_token():
+    """Every rank derives the path on its own, so equal tokens must agree and
+    different tokens must not collide."""
+    try:
+        first = get_dp_file_store_init_method(42123, 42123)
+
+        assert first == get_dp_file_store_init_method(42123, 42123)
+        assert first.startswith(f"file://{get_dp_rendezvous_dir(42123)}/")
+        # A later group of the same run shares the directory, not the file.
+        assert get_dp_file_store_init_method(42123, 42124) != first
+        # A concurrent run shares neither.
+        assert get_dp_rendezvous_dir(42124) != get_dp_rendezvous_dir(42123)
+    finally:
+        shutil.rmtree(get_dp_rendezvous_dir(42123), ignore_errors=True)
+
+
+def test_dp_file_store_init_method_creates_its_directory():
+    """The torch FileStore creates the file but not the directory above it."""
+    token = get_open_port()
+    try:
+        method = get_dp_file_store_init_method(token, token)
+        assert os.path.isdir(os.path.dirname(method.removeprefix("file://")))
+    finally:
+        shutil.rmtree(get_dp_rendezvous_dir(token), ignore_errors=True)
 
 
 def _call_with_timeout(func, timeout: float = 10.0):
