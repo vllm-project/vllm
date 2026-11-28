@@ -3,11 +3,13 @@
 """Utilities for downloading and initializing model weights."""
 
 import asyncio
+import collections
 import concurrent.futures
 import fnmatch
 import glob
 import hashlib
 import inspect
+import itertools
 import json
 import os
 import random
@@ -1213,23 +1215,30 @@ def multi_thread_safetensors_weights_iterator(
     if shuffle_safetensors_files:
         hf_weights_files = _shuffle_files(hf_weights_files)
 
+    # Yield shards in file order, not completion order: every rank must see the
+    # same weight order, because online quantization can run a TP collective
+    # (e.g. the per-tensor amax all-reduce) while each layer is processed.
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Note to use generator here so we do not store all the loaded files in memory
-        # at the same time, which can cause OOM for large models.
-        futures = (executor.submit(_load_file, st_file) for st_file in hf_weights_files)
-        futures_iter = tqdm(
-            concurrent.futures.as_completed(futures),
+        files = iter(hf_weights_files)
+        # Keep at most max_workers shards in flight to bound host memory.
+        pending = collections.deque(
+            executor.submit(_load_file, st_file)
+            for st_file in itertools.islice(files, max_workers)
+        )
+        with tqdm(
             total=len(hf_weights_files),
             desc="Multi-thread loading shards",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
-        )
-
-        for future in futures_iter:
-            state_dict = future.result()
-            del future
-            for key in list(state_dict):
-                yield key, state_dict.pop(key)
+        ) as pbar:
+            while pending:
+                state_dict = pending.popleft().result()
+                next_file = next(files, None)
+                if next_file is not None:
+                    pending.append(executor.submit(_load_file, next_file))
+                pbar.update(1)
+                for key in list(state_dict):
+                    yield key, state_dict.pop(key)
 
 
 def runai_safetensors_weights_iterator(
