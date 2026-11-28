@@ -1085,6 +1085,17 @@ class FusedMoEParallelConfig:
         return self.sp_size > 1
 
     @property
+    def use_tp_sequence_parallel_dispatch(self) -> bool:
+        """TP-sharded experts fed sequence-parallel tokens, gathered over TP
+        by the prepare/finalize."""
+        return (
+            self.is_sequence_parallel
+            and not self.use_ep
+            and self.dp_size == 1
+            and self.pcp_size == 1
+        )
+
+    @property
     def use_all2all_kernels(self):
         return self.use_ep and (
             self.dp_size > 1 or self.pcp_size > 1 or self.is_sequence_parallel

@@ -504,7 +504,18 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # so we should not defer input quantization.
         # Otherwise, AITER fused MoE kernels handle input quantization
         # internally via a single fused kernel.
+        # The TP sequence-parallel dispatch quantizes MXFP4 before its
+        # all-gather for the same reason.
+        if self._mxfp4_tp_sequence_parallel_dispatch:
+            return False
         return not self.moe_config.use_mori_epv1_kernels
+
+    @property
+    def _mxfp4_tp_sequence_parallel_dispatch(self) -> bool:
+        return (
+            self.quant_config.use_mxfp4_w4a4
+            and self.moe_config.moe_parallel_config.use_tp_sequence_parallel_dispatch
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -567,10 +578,14 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # Workspaces are managed internally by AITER.
         workspace1 = (0,)
         workspace2 = (0,)
-        # MoRI dispatches MXFP4 activations packed two per byte, so K is
-        # half the hidden size there.
+        # MoRI and the TP sequence-parallel dispatch send MXFP4 activations
+        # packed two per byte, so K is half the hidden size there. The TP
+        # dispatch sends bf16 for small batches, so check K itself.
         packed_fp4_input = (
             self.moe_config.use_mori_epv1_kernels and self.quant_config.use_mxfp4_w4a4
+        ) or (
+            self._mxfp4_tp_sequence_parallel_dispatch
+            and self.moe_config.hidden_dim == K * 2
         )
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)

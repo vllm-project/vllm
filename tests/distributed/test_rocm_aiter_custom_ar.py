@@ -402,3 +402,65 @@ def test_rocm_aiter_custom_ag_rs(
         test_target,
         data_parallel_size=data_parallel_size,
     )
+
+
+class _FakeQuickReduce:
+    disabled = False
+
+    def __init__(self, eligible: bool):
+        self.eligible = eligible
+
+    def should_quick_allreduce(self, inp: torch.Tensor) -> bool:
+        return self.eligible
+
+    def quick_all_reduce(self, inp: torch.Tensor) -> torch.Tensor:
+        return inp * 2
+
+
+class _FakeAiterReduceScatter:
+    disabled = False
+
+    def should_custom_rs(self, inp: torch.Tensor, dim: int) -> bool:
+        return True
+
+    def custom_reduce_scatter(self, inp, out, dim=0):
+        # Like AITER: fill `out` in place and return None.
+        out.copy_(inp.view(2, -1, *inp.shape[1:]).sum(0))
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("qr_eligible", [True, False])
+def test_sp_reduce_scatter_rocm_backends(rank: int, qr_eligible: bool):
+    """Without vLLM's own custom AR, the SP reduce-scatter takes QuickReduce
+    (all-reduce, keep the local rows) when eligible, else AITER's kernel."""
+    from vllm.distributed.device_communicators.cuda_communicator import (
+        CudaCommunicator,
+    )
+
+    comm = object.__new__(CudaCommunicator)
+    comm.world_size = 2
+    comm.rank_in_group = rank
+    comm.ca_comm = None
+    comm.qr_comm = _FakeQuickReduce(qr_eligible)
+    comm.aiter_ar_comm = _FakeAiterReduceScatter()
+    x = torch.arange(24, dtype=torch.float32).view(6, 4)
+
+    out = comm.custom_reduce_scatter(x)
+
+    local = slice(rank * 3, (rank + 1) * 3)
+    expected = (x * 2)[local] if qr_eligible else x[:3] + x[3:]
+    torch.testing.assert_close(out, expected)
+
+
+def test_sp_reduce_scatter_rocm_uneven_rows_fall_back():
+    from vllm.distributed.device_communicators.cuda_communicator import (
+        CudaCommunicator,
+    )
+
+    comm = object.__new__(CudaCommunicator)
+    comm.world_size = 2
+    comm.rank_in_group = 0
+    comm.ca_comm = None
+    comm.qr_comm = _FakeQuickReduce(True)
+    comm.aiter_ar_comm = _FakeAiterReduceScatter()
+    assert comm.custom_reduce_scatter(torch.zeros(5, 4)) is None
