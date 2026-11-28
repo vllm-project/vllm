@@ -264,6 +264,12 @@ class DeepseekV2Eagle3Model(nn.Module):
             ".q_a_proj": (".fused_qkv_a_proj", 0),
             ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
         },
+        # The quant config's cache-scale mapper renames KV-cache scales to
+        # .self_attn.attn.*; the MLA layer keeps them in mla_attn.mla_attn.
+        orig_to_new_suffix={
+            ".self_attn.attn.k_scale": ".self_attn.mla_attn.mla_attn.k_scale",
+            ".self_attn.attn.v_scale": ".self_attn.mla_attn.mla_attn.v_scale",
+        },
     )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
