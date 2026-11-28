@@ -304,6 +304,19 @@ def _owned(model: torch.nn.Module, t: torch.Tensor) -> bool:
     return ckpt is not None and ckpt[0] is model._ckpt_owner
 
 
+def _undo_renames(model: torch.nn.Module) -> None:
+    """Undo move_parameter/retire_parameter, as cold start registered them."""
+    for prefix, module in model.named_modules():
+        for name, p in list(module._parameters.items()):
+            if p is None or (hasattr(p, "_ckpt") and not _owned(model, p)):
+                continue
+            p.__dict__.pop("retired", None)
+            p.__dict__.pop("runtime_name", None)
+            full = f"{prefix}.{name}" if prefix else name
+            if hasattr(p, "_ckpt") and full not in model._ckpt_param_names:
+                del module._parameters[name]
+
+
 def _checkpoint_views(
     model: torch.nn.Module,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
@@ -366,6 +379,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
             # Reset padding: loaders skip it or fill it, and a load plan skips
             # loader fills. Erases the checkpoint region too.
             t.data.zero_()
+    _undo_renames(model)
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )

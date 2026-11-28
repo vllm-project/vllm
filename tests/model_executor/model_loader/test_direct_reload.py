@@ -13,7 +13,9 @@ post-load processing has the hazards found on real models:
 (f) post-load processing grows a weight (padding): a reload writes it into
     the existing storage to keep its address;
 (g) online quantization: the kernel dtype cannot hold the checkpoint tensor,
-    which its loader quantizes as it arrives.
+    which its loader quantizes as it arrives;
+(h) post-load processing registers a checkpoint tensor under its runtime name
+    and retires a tensor it created, then looks both up by name (Humming).
 
 Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
@@ -42,7 +44,13 @@ from vllm.model_executor.model_loader.reload.direct import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import replace_parameter, retire_parameter
+from vllm.model_executor.utils import (
+    kernel_parameters,
+    move_parameter,
+    replace_parameter,
+    retire_parameter,
+    set_kernel_parameter,
+)
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
@@ -143,6 +151,17 @@ def _pad(layer):  # (f): kernel layout larger than the checkpoint's
     replace_parameter(layer, "weight", torch.nn.functional.pad(layer.weight, (0, 4)))
 
 
+def _rename_scale(layer):  # (h): Humming-like renames, by name
+    params = kernel_parameters(layer)
+    inv = params["weight_scale_inv"]  # its checkpoint name
+    replace_parameter(layer, "amax", layer.weight.float().abs().amax().reshape(1))
+    amax = kernel_parameters(layer)["amax"]  # created here, live while processing
+    replace_parameter(layer, "weight", (layer.weight * inv / amax).to(torch.bfloat16))
+    move_parameter(layer, "weight_scale_inv", "weight_scale")
+    set_kernel_parameter(layer, "weight_scale", 1.0 / inv)
+    retire_parameter(layer, "amax")
+
+
 def _quantize_int8(weight):  # (g): bf16 checkpoint tensor, int8 kernel tensor
     scale = weight.float().abs().amax() / 127
     return (weight / scale).round().to(torch.int8), scale
@@ -157,6 +176,8 @@ _SHAPES = {
     "engram.weight": ((3, 5), torch.bfloat16),
     "pad.weight": ((4, 4), torch.bfloat16),
     "online.weight": ((4, 6), torch.bfloat16),
+    "rename.weight": ((4, 4), torch.bfloat16),
+    "rename.weight_scale_inv": ((1,), torch.float32),
 }
 _PWAL = {
     "attn.kv_b": None,
@@ -166,6 +187,7 @@ _PWAL = {
     "engram": _pack,
     "pad": _pad,
     "online": _transpose,
+    "rename": _rename_scale,
 }
 
 
@@ -311,6 +333,7 @@ class TestReloadEqualsColdStart:
             ["engram.weight"],
             ["pad.weight"],
             ["online.weight", "online.weight_scale"],
+            ["rename.weight", "rename.weight_scale_inv"],
         ],
         ids=[
             "a-parent-derived",
@@ -320,6 +343,7 @@ class TestReloadEqualsColdStart:
             "e-not-idempotent",
             "f-grows",
             "g-online-quant",
+            "h-renamed",
         ],
     )
     def test_new_checkpoint_hazard(self, names):
