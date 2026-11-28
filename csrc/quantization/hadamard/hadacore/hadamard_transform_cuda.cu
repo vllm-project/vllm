@@ -792,17 +792,22 @@ torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x, bool inplace)
         "Only power of two Hadamard sizes up to 2^15 are supported, got ", had_size);
 
     const auto res_shape = x.sizes();
+    auto numel = x.numel();
+    if (numel == 0) {
+        return inplace ? x : torch::stable::empty_like(x);
+    }
+
+    torch::stable::Tensor orig_x = x;
     x = torch::stable::reshape(x, {-1, had_size});
 
-    auto numel = x.numel();
     if (numel % 256 != 0) {
         x = torch::stable::pad(x, {0, 0, 0, (256 - numel % 256) / had_size});
     }
 
-    if (x.stride(-1) != 1) {
+    if (!x.is_contiguous()) {
         x = torch::stable::contiguous(x);
     }
-    torch::stable::Tensor out = inplace ? x : torch::stable::empty_like(x);
+    torch::stable::Tensor out = (inplace && x.data_ptr() == orig_x.data_ptr()) ? x : torch::stable::empty_like(x);
 
     torch::stable::accelerator::DeviceGuard device_guard(x.get_device_index());
     auto stream = get_current_cuda_stream();
@@ -816,9 +821,9 @@ torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x, bool inplace)
         out = torch::stable::narrow(out, 0, 0, numel / had_size);
     }
 
-    if (inplace && out.data_ptr() != x.data_ptr()) {
-        torch::stable::copy_(x, torch::stable::view(out, res_shape));
-        return x;
+    if (inplace && out.data_ptr() != orig_x.data_ptr()) {
+        torch::stable::copy_(orig_x, torch::stable::view(out, res_shape));
+        return orig_x;
     }
     return torch::stable::reshape(out, res_shape);
 }

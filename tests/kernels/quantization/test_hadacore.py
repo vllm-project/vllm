@@ -51,3 +51,24 @@ def test_hadacore_odd_row_counts(
     y = ops.hadacore_transform(x.clone(), inplace=True)
     y_true = (x.to(hadamard.dtype) @ hadamard.T).to(y.dtype)
     torch.testing.assert_close(y, y_true, atol=0.05, rtol=0.02)
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+def test_hadacore_empty_batch(inplace, dtype=torch.bfloat16, device="cuda"):
+    """Verify hadacore_transform handles empty batch without error (#70383)."""
+    x = torch.empty((0, 64), dtype=dtype, device=device)
+    out = ops.hadacore_transform(x, inplace=inplace)
+    assert out.shape == (0, 64)
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+def test_hadacore_strided_slice(inplace, dtype=torch.bfloat16, device="cuda"):
+    """Verify hadacore_transform on strided slice does not corrupt memory (#70383)."""
+    base = torch.full((4, 96), 99.0, device=device, dtype=dtype)
+    x = base[:, :64]
+    x.copy_(torch.randn(4, 64, device=device, dtype=dtype))
+
+    ref = ops.hadacore_transform(x.contiguous().clone(), inplace=False)
+    out = ops.hadacore_transform(x, inplace=inplace)
+    assert (base[:, 64:] == 99.0).all(), "out-of-slice memory was overwritten"
+    torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
