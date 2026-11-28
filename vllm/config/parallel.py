@@ -453,7 +453,10 @@ class ParallelConfig:
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
     calls. It may also define `init_worker_extension(self)`, called after
-    device and distributed initialization but before model loading, and
+    device and distributed initialization but before model loading,
+    `before_load_model(self, *, load_dummy_weights)`, called immediately
+    before `Worker.load_model`, `after_load_model(self, *,
+    load_dummy_weights)`, called after a successful model load, and
     `destroy_worker_extension(self)`, called (best-effort) before the worker
     shuts down."""
     master_addr: str = "127.0.0.1"

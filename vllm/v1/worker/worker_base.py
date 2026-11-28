@@ -415,6 +415,21 @@ class WorkerWrapperBase:
             if callable(hook):
                 hook(self.worker)
 
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        before_hook = getattr(self._worker_extension_cls, "before_load_model", None)
+        if callable(before_hook):
+            before_hook(self.worker, load_dummy_weights=load_dummy_weights)
+
+        if load_dummy_weights:
+            self.worker.load_model(load_dummy_weights=True)
+        else:
+            # Hardware plugins may expose only the default, no-argument load.
+            self.worker.load_model()
+
+        after_hook = getattr(self._worker_extension_cls, "after_load_model", None)
+        if callable(after_hook):
+            after_hook(self.worker, load_dummy_weights=load_dummy_weights)
+
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)
 
