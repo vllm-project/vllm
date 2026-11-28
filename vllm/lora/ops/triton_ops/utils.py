@@ -359,3 +359,33 @@ def _normalize_lora_config_keys(
             nk = key
         out[nk] = val
     return out
+
+
+def resolve_lora_ranks(
+    lora_ranks: torch.Tensor | None,
+    lora_ids: torch.Tensor,
+    num_slices: int,
+    num_lora_slots: int,
+    has_submax_ranks_cpu: torch.Tensor | None = None,
+) -> tuple[bool, torch.Tensor, int]:
+    """Validate optional per-adapter rank tensor and gate uniform full-rank ops."""
+    if has_submax_ranks_cpu is not None:
+        assert has_submax_ranks_cpu.numel() == 1
+        if not has_submax_ranks_cpu.item():
+            return False, lora_ids, 0
+    if lora_ranks is None:
+        return False, lora_ids, 0
+
+    assert lora_ranks.dtype == torch.int32
+    assert lora_ranks.is_contiguous()
+    if lora_ranks.ndim == 1:
+        assert lora_ranks.size(0) == num_lora_slots
+        lora_ranks_d0_stride = 0
+    elif lora_ranks.ndim == 2:
+        assert lora_ranks.size(0) == num_slices and lora_ranks.size(1) == num_lora_slots
+        lora_ranks_d0_stride = lora_ranks.stride(0)
+    else:
+        raise ValueError(
+            f"Expected 1D or 2D lora_ranks tensor, got {lora_ranks.ndim}D."
+        )
+    return True, lora_ranks, lora_ranks_d0_stride

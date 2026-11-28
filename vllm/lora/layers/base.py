@@ -97,6 +97,62 @@ class BaseLayerWithLoRA(nn.Module):
     ):
         self.punica_wrapper: PunicaWrapperBase = punica_wrapper
 
+    def _init_lora_rank_buffers(
+        self,
+        n_slices: int,
+        max_loras: int,
+        device: torch.device,
+        *,
+        track_a: bool = True,
+    ) -> None:
+        """Allocate per-slice rank tensors and CPU sub-max tracking flags."""
+        if track_a:
+            self.lora_a_ranks = torch.zeros(
+                (n_slices, max_loras), dtype=torch.int32, device=device
+            )
+            self._a_submax_slots = [False] * max_loras
+            self._has_submax_a_ranks_cpu = torch.zeros(
+                1, dtype=torch.bool, device="cpu"
+            )
+        self.lora_b_ranks = torch.zeros(
+            (n_slices, max_loras), dtype=torch.int32, device=device
+        )
+        self._b_submax_slots = [False] * max_loras
+        self._has_submax_b_ranks_cpu = torch.zeros(1, dtype=torch.bool, device="cpu")
+
+    def _clear_lora_rank_slot(self, index: int) -> None:
+        """Reset stored ranks and sub-max tracking state for one adapter slot."""
+        if hasattr(self, "lora_a_ranks"):
+            self.lora_a_ranks[:, index] = 0
+            self._a_submax_slots[index] = False
+            self._has_submax_a_ranks_cpu[0] = any(self._a_submax_slots)
+        if hasattr(self, "lora_b_ranks"):
+            self.lora_b_ranks[:, index] = 0
+            self._b_submax_slots[index] = False
+            self._has_submax_b_ranks_cpu[0] = any(self._b_submax_slots)
+
+    def clear_lora_ranks(self, index: int) -> None:
+        """Clear rank tracking for a deactivated slot without zeroing weights."""
+        if hasattr(self, "_b_submax_slots"):
+            self._clear_lora_rank_slot(index)
+
+    @staticmethod
+    def _set_slot_rank(
+        ranks_gpu: torch.Tensor,
+        submax_slots: list[bool],
+        has_submax_cpu: torch.Tensor,
+        slot_index: int,
+        slice_index: int,
+        rank: int | None,
+        full_rank: int,
+    ) -> None:
+        """Record a slice rank and mark the slot sub-max if unadapted or < full."""
+        if rank is not None:
+            ranks_gpu[slice_index, slot_index] = rank
+        if rank is None or rank < full_rank:
+            submax_slots[slot_index] = True
+            has_submax_cpu[0] = True
+
     @classmethod
     def can_replace_layer(
         cls,

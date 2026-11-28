@@ -111,7 +111,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `lora_ranks` (int32 tensor of effective
+                per-adapter/per-slice ranks) and `lora_has_submax_cpu`
+                (1-element CPU bool tensor gating rank masking when False);
+                other keys are ignored.
 
         """
         x = x.view(-1, x.shape[-1])
@@ -124,6 +127,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ),
             scale,
             split_k_reduction=self.lora_config.split_k_reduction,
+            lora_ranks=kwargs.get("lora_ranks"),
+            has_submax_ranks_cpu=kwargs.get("lora_has_submax_cpu"),
         )
 
     def add_expand(
@@ -153,7 +158,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_inputs (bool): If True, add LoRA output to y; if False, write
                 LoRA-only output to y (used for dual-stream when base and LoRA
                 run on different CUDA streams). Defaults to True.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `lora_ranks` (int32 tensor of effective
+                per-adapter/per-slice ranks) and `lora_has_submax_cpu`
+                (1-element CPU bool tensor gating rank masking when False);
+                other keys are ignored.
 
         """
         y_org = y
@@ -172,6 +180,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ),
             offset_start=offset_start,
             add_inputs=add_inputs,
+            lora_ranks=kwargs.get("lora_ranks"),
+            has_submax_ranks_cpu=kwargs.get("lora_has_submax_cpu"),
         )
 
         y = y.view_as(y_org)
@@ -194,7 +204,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `lora_b_ranks` (int32 tensor of
+                effective per-adapter ranks) and `lora_b_has_submax_cpu`
+                (1-element CPU bool tensor); other keys are ignored.
 
         """
         lora_expand(
@@ -206,6 +218,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ),
             offset_start=0,
             add_inputs=add_inputs,
+            lora_ranks=kwargs.get("lora_b_ranks"),
+            has_submax_ranks_cpu=kwargs.get("lora_b_has_submax_cpu"),
         )
 
     def add_lora_linear(
@@ -239,8 +253,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
-            **kwargs: Accepts `add_inputs` (bool, defaults to True); any other
-                keys are ignored.
+            **kwargs: Accepts `add_inputs` (bool, defaults to True) and
+                optional `lora_a_ranks` / `lora_b_ranks` (int32 tensors of
+                effective per-adapter/per-slice ranks) and
+                `lora_a_has_submax_cpu` / `lora_b_has_submax_cpu` (1-element
+                CPU bool tensors); other keys are ignored.
 
         """
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
@@ -257,11 +274,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
         )
         add_inputs = kwargs.pop("add_inputs", True)
+        lora_a_ranks = kwargs.pop("lora_a_ranks", None)
+        lora_b_ranks = kwargs.pop("lora_b_ranks", None)
+        lora_a_has_submax_cpu = kwargs.pop("lora_a_has_submax_cpu", None)
+        lora_b_has_submax_cpu = kwargs.pop("lora_b_has_submax_cpu", None)
         self.add_shrink(
             buffer,  # type: ignore
             x,
             lora_a_stacked,
             scale,
+            lora_ranks=lora_a_ranks,
+            lora_has_submax_cpu=lora_a_has_submax_cpu,
             **kwargs,
         )
         self.add_expand(
@@ -270,6 +293,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_b_stacked,
             output_slices,
             add_inputs=add_inputs,
+            lora_ranks=lora_b_ranks,
+            lora_has_submax_cpu=lora_b_has_submax_cpu,
             **kwargs,
         )
 
@@ -297,7 +322,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]): Default to None.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `lora_a_ranks` / `lora_b_ranks` (int32
+                tensors of effective per-adapter ranks) and
+                `lora_a_has_submax_cpu` / `lora_b_has_submax_cpu` (1-element
+                CPU bool tensors); other keys are ignored.
 
         """
         y_org = y
@@ -323,6 +351,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ),
             scale,
             split_k_reduction=self.lora_config.split_k_reduction,
+            lora_ranks=kwargs.get("lora_a_ranks"),
+            has_submax_ranks_cpu=kwargs.get("lora_a_has_submax_cpu"),
         )
 
         lora_expand(
@@ -333,6 +363,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 buffer.size(0), self.lora_config.specialize_active_lora
             ),
             add_inputs=True,
+            lora_ranks=kwargs.get("lora_b_ranks"),
+            has_submax_ranks_cpu=kwargs.get("lora_b_has_submax_cpu"),
         )
         y = y.view_as(y_org)
 

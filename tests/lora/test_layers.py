@@ -2524,3 +2524,137 @@ def test_dsv4_rope_quant_is_off_with_lora():
     vllm_config.lora_config = LoRAConfig(max_lora_rank=8)
     reason = rope_quant_unsupported_reason(torch.nn.Module(), vllm_config)
     assert reason is not None and "LoRA" in reason
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA LoRA projection")
+def test_layer_submax_rank_tracking_and_torch_compile(default_vllm_config, dist_init):
+    """Per-layer sub-max tracking keeps uniform full-rank unmasked (even with
+    unused slots) and switches dynamically with torch.compile without retrace."""
+    torch.manual_seed(0)
+    max_loras, max_rank, hidden_size, out_size, num_tokens = 4, 64, 128, 128, 16
+    config = LoRAConfig(
+        max_loras=max_loras, max_lora_rank=max_rank, lora_dtype=torch.bfloat16
+    )
+
+    with torch.device("cuda"), torch.inference_mode():
+        base_merged = MergedColumnParallelLinear(
+            hidden_size,
+            [out_size, out_size],
+            bias=False,
+            disable_tp=True,
+            params_dtype=torch.bfloat16,
+        )
+        base_merged.weight.normal_(0, 0.02)
+        layer = from_layer(base_merged, max_loras, config, ["gate_proj", "up_proj"])
+        assert isinstance(layer, MergedColumnParallelLinearWithLoRA)
+        punica = get_punica_wrapper(
+            num_tokens, num_tokens, base_merged.weight.device, lora_config=config
+        )
+        layer.set_mapping(punica)
+
+        assert not layer._has_submax_a_ranks_cpu.item()
+        assert not layer._has_submax_b_ranks_cpu.item()
+
+        # 1) Single full-rank adapter (3 unused slots) -> stays False.
+        a_full = [
+            torch.randn(max_rank, hidden_size, dtype=torch.bfloat16) * 0.05
+            for _ in range(2)
+        ]
+        b_full = [
+            torch.randn(out_size, max_rank, dtype=torch.bfloat16) * 0.05
+            for _ in range(2)
+        ]
+        layer.set_lora(0, a_full, b_full)
+        assert not layer._has_submax_a_ranks_cpu.item()
+        assert not layer._has_submax_b_ranks_cpu.item()
+
+        # 2) Compile once while uniform full-rank, then verify dynamic sub-max
+        #    transitions skip NaN-poisoned tails without recompiling.
+        compiled_apply = torch.compile(layer.apply, fullgraph=True)
+        punica.update_metadata(
+            LoRAMapping((1,) * num_tokens, (1,)),
+            [1, None, None, None],
+            max_loras + 1,
+            128,
+        )
+        x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
+        base_out = layer.base_layer.quant_method.apply(layer.base_layer, x, None)
+        ref_full = base_out + torch.cat(
+            [
+                (x @ a_full[0].T) @ b_full[0].T,
+                (x @ a_full[1].T) @ b_full[1].T,
+            ],
+            dim=-1,
+        )
+        out_full = compiled_apply(x)
+        torch.testing.assert_close(out_full, ref_full, rtol=3e-2, atol=2e-2)
+
+        # Load sub-max + None-slice adapter into slot 1 -> flips to True.
+        a_sub = torch.randn(8, hidden_size, dtype=torch.bfloat16) * 0.05
+        b_sub = torch.randn(out_size, 8, dtype=torch.bfloat16) * 0.05
+        layer.set_lora(1, [a_sub, None], [b_sub, None])
+        assert layer._has_submax_a_ranks_cpu.item()
+        assert layer._has_submax_b_ranks_cpu.item()
+        # Poison padded rank tail of slot 1 directly in GPU buffer.
+        layer.lora_a_stacked[0][1, 0, 8:, :].fill_(float("nan"))
+        layer.lora_b_stacked[0][1, 0, :, 8:].fill_(float("nan"))
+        layer.lora_a_stacked[1][1].fill_(float("nan"))
+        layer.lora_b_stacked[1][1].fill_(float("nan"))
+
+        punica.update_metadata(
+            LoRAMapping((1,) * (num_tokens // 2) + (2,) * (num_tokens // 2), (1, 2)),
+            [1, 2, None, None],
+            max_loras + 1,
+            128,
+        )
+        out_mixed = compiled_apply(x)
+        assert not torch.isnan(out_mixed).any()
+        half = num_tokens // 2
+        ref_mixed_tail = base_out[half:] + torch.cat(
+            [
+                (x[half:] @ a_sub.T) @ b_sub.T,
+                torch.zeros((half, out_size), dtype=torch.bfloat16),
+            ],
+            dim=-1,
+        )
+        torch.testing.assert_close(
+            out_mixed[:half], ref_full[:half], rtol=3e-2, atol=2e-2
+        )
+        torch.testing.assert_close(
+            out_mixed[half:], ref_mixed_tail, rtol=3e-2, atol=2e-2
+        )
+
+        # Overwrite slot 1 back to full rank -> flips cleanly back to False.
+        layer.set_lora(1, a_full, b_full)
+        assert not layer._has_submax_a_ranks_cpu.item()
+        assert not layer._has_submax_b_ranks_cpu.item()
+        out_restored = compiled_apply(x)
+        torch.testing.assert_close(out_restored, ref_full, rtol=3e-2, atol=2e-2)
+
+        # Deactivating a sub-max slot via clear_lora_ranks also clears tracking.
+        layer.set_lora(1, [a_sub, a_sub], [b_sub, b_sub])
+        assert layer._has_submax_a_ranks_cpu.item()
+        assert layer._has_submax_b_ranks_cpu.item()
+        layer.clear_lora_ranks(1)
+        assert not layer._has_submax_a_ranks_cpu.item()
+        assert not layer._has_submax_b_ranks_cpu.item()
+
+        # Also check VocabParallelEmbeddingWithLoRA tracks B rank cleanly.
+        emb_base = VocabParallelEmbedding(64, hidden_size, params_dtype=torch.bfloat16)
+        emb_base.weight.normal_(0, 0.02)
+        emb_lora = from_layer(emb_base, max_loras, config, [])
+        assert isinstance(emb_lora, VocabParallelEmbeddingWithLoRA)
+        emb_lora.set_lora(
+            0,
+            torch.randn(max_rank, 64, dtype=torch.bfloat16),
+            torch.randn(hidden_size, max_rank, dtype=torch.bfloat16),
+        )
+        assert not emb_lora._has_submax_b_ranks_cpu.item()
+        emb_lora.set_lora(
+            1,
+            torch.randn(8, 64, dtype=torch.bfloat16),
+            torch.randn(hidden_size, 8, dtype=torch.bfloat16),
+        )
+        assert emb_lora._has_submax_b_ranks_cpu.item()
+        emb_lora.reset_lora(1)
+        assert not emb_lora._has_submax_b_ranks_cpu.item()

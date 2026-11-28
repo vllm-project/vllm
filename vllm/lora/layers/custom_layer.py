@@ -69,6 +69,7 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
         self.lora_a_stacked[0][index] = 0
         for lora_b in self.lora_b_stacked:
             lora_b[index] = 0
+        self._clear_lora_rank_slot(index)
 
     def set_lora(
         self,
@@ -89,6 +90,24 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
         for group, rows in enumerate(lora_b.split(group_size)):
             group_b = self.lora_b_stacked[group][index, 0]
             group_b[: rows.shape[0], : rows.shape[1]].copy_(rows, non_blocking=True)
+        self._set_slot_rank(
+            self.lora_a_ranks,
+            self._a_submax_slots,
+            self._has_submax_a_ranks_cpu,
+            index,
+            0,
+            lora_a.shape[0],
+            self.lora_a_stacked[0].shape[2],
+        )
+        self._set_slot_rank(
+            self.lora_b_ranks,
+            self._b_submax_slots,
+            self._has_submax_b_ranks_cpu,
+            index,
+            0,
+            lora_b.shape[1],
+            self.lora_b_stacked[0].shape[3],
+        )
 
     def grouped_forward(
         self,
@@ -136,6 +155,10 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
                 (self.lora_b_stacked[group],),
                 1.0,
                 (o_lora_rank,),
+                lora_a_ranks=self.lora_a_ranks,
+                lora_b_ranks=self.lora_b_ranks,
+                lora_a_has_submax_cpu=self._has_submax_a_ranks_cpu,
+                lora_b_has_submax_cpu=self._has_submax_b_ranks_cpu,
             )
             z[:, group] = group_output
         return z

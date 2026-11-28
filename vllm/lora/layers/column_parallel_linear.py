@@ -54,7 +54,12 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     buffers.zero_()
 
     shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
-        buffers, x, layer.lora_a_stacked, 1.0
+        buffers,
+        x,
+        layer.lora_a_stacked,
+        1.0,
+        lora_ranks=layer.lora_a_ranks,
+        lora_has_submax_cpu=layer._has_submax_a_ranks_cpu,
     )
 
     if not current_platform.can_update_inplace():
@@ -69,6 +74,8 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         layer.output_slices,
         offset_start=0,
         add_input=True,
+        lora_ranks=layer.lora_b_ranks,
+        lora_has_submax_cpu=layer._has_submax_b_ranks_cpu,
     )
 
     if not current_platform.can_update_inplace():
@@ -246,6 +253,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             )
             for output_size in self.output_slices
         )
+        self._init_lora_rank_buffers(self.n_slices, max_loras, self.device)
 
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
@@ -350,15 +358,37 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
+        a_full_rank = self.lora_a_stacked[0].shape[2]
+        b_full_rank = self.lora_b_stacked[0].shape[3]
         for i in range(self.n_slices):
-            if (lora_a_i := lora_a[i]) is not None:
+            lora_a_i = lora_a[i]
+            if lora_a_i is not None:
                 self.lora_a_stacked[i][
                     index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
                 ].copy_(lora_a_i, non_blocking=True)
-            if (lora_b_i := lora_b[i]) is not None:
+            self._set_slot_rank(
+                self.lora_a_ranks,
+                self._a_submax_slots,
+                self._has_submax_a_ranks_cpu,
+                index,
+                i,
+                lora_a_i.shape[0] if lora_a_i is not None else None,
+                a_full_rank,
+            )
+            lora_b_i = lora_b[i]
+            if lora_b_i is not None:
                 self.lora_b_stacked[i][
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
+            self._set_slot_rank(
+                self.lora_b_ranks,
+                self._b_submax_slots,
+                self._has_submax_b_ranks_cpu,
+                index,
+                i,
+                lora_b_i.shape[1] if lora_b_i is not None else None,
+                b_full_rank,
+            )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)

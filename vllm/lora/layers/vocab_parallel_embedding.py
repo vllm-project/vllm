@@ -51,10 +51,14 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],
             self.lora_a_stacked.shape[2],
         )
+        self._init_lora_rank_buffers(
+            1, max_loras, self.base_layer.weight.device, track_a=False
+        )
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
+        self._clear_lora_rank_slot(index)
 
     def set_lora(
         self,
@@ -73,6 +77,15 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
         self.lora_b_stacked[index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
+        )
+        self._set_slot_rank(
+            self.lora_b_ranks,
+            self._b_submax_slots,
+            self._has_submax_b_ranks_cpu,
+            index,
+            0,
+            lora_b.shape[1],
+            self.lora_b_stacked.shape[3],
         )
         # A scaled embedding (e.g. a Transformers `*ScaledWordEmbedding`) scales
         # the lookup in its forward; PEFT scales the LoRA delta by the same factor.
@@ -104,7 +117,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             )
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_embedding(
-            full_output, full_lora_a_embeddings, self.lora_b_stacked, add_input=True
+            full_output,
+            full_lora_a_embeddings,
+            self.lora_b_stacked,
+            add_input=True,
+            lora_b_ranks=self.lora_b_ranks,
+            lora_b_has_submax_cpu=self._has_submax_b_ranks_cpu,
         )
 
         if not current_platform.can_update_inplace():

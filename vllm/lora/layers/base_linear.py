@@ -155,12 +155,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             )
             for _ in range(self.n_slices)
         )
+        self._init_lora_rank_buffers(self.n_slices, max_loras, self.device)
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
+        self._clear_lora_rank_slot(index)
 
     def set_lora(
         self,
@@ -188,6 +190,24 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
         self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
+        )
+        self._set_slot_rank(
+            self.lora_a_ranks,
+            self._a_submax_slots,
+            self._has_submax_a_ranks_cpu,
+            index,
+            0,
+            lora_a.shape[0],
+            self.lora_a_stacked[0].shape[2],
+        )
+        self._set_slot_rank(
+            self.lora_b_ranks,
+            self._b_submax_slots,
+            self._has_submax_b_ranks_cpu,
+            index,
+            0,
+            lora_b.shape[1],
+            self.lora_b_stacked[0].shape[3],
         )
 
     def _get_quant_method(self) -> QuantizeMethodBase:
@@ -233,7 +253,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             x = x.flatten(0, 1)
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+            lora_a_ranks=self.lora_a_ranks,
+            lora_b_ranks=self.lora_b_ranks,
+            lora_a_has_submax_cpu=self._has_submax_a_ranks_cpu,
+            lora_b_has_submax_cpu=self._has_submax_b_ranks_cpu,
         )
         if not current_platform.can_update_inplace():
             output = lora_output
@@ -283,6 +312,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 1.0,
                 self.output_slices,
                 add_inputs=False,
+                lora_a_ranks=self.lora_a_ranks,
+                lora_b_ranks=self.lora_b_ranks,
+                lora_a_has_submax_cpu=self._has_submax_a_ranks_cpu,
+                lora_b_has_submax_cpu=self._has_submax_b_ranks_cpu,
             )
             return lora_output
 

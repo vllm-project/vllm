@@ -126,7 +126,12 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         )
 
         shrunk_buffer: torch.Tensor | None = self.punica_wrapper.add_shrink(
-            buffer, x, self.lora_a_stacked, 1.0
+            buffer,
+            x,
+            self.lora_a_stacked,
+            1.0,
+            lora_ranks=self.lora_a_ranks,
+            lora_has_submax_cpu=self._has_submax_a_ranks_cpu,
         )
         if not current_platform.can_update_inplace():
             buffer = shrunk_buffer
@@ -149,6 +154,8 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             self.output_slices,
             offset_start=offset_start,
             add_input=True,
+            lora_ranks=self.lora_b_ranks,
+            lora_has_submax_cpu=self._has_submax_b_ranks_cpu,
         )
 
         if not current_platform.can_update_inplace():

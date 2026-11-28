@@ -12,7 +12,7 @@ def mm_k(
     ak_stride: int,
     bk_stride: int,
     offset_k: tl.tensor,
-    K: tl.constexpr,
+    K,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -22,6 +22,8 @@ def mm_k(
     b_dtype: tl.constexpr,
     USE_GDC: tl.constexpr,
     base_k: int,
+    MASK_K_TAIL: tl.constexpr = False,
+    SINGLE_K_ITER: tl.constexpr = False,
 ):
     """Given a_ptr and b_ptr, that identify the rows of A (m x k) and columns of
     B (k x n), iterate, through the K dimension to compute the partial/complete
@@ -40,14 +42,19 @@ def mm_k(
         BLOCK_M: M dimension of the output block m x n
         BLOCK_N: N dimension of the output block m x n
         BLOCK_K: K dimension atom
-        EVEN_K: True if the blocks of A and B can be loaded without any
-            masking.
+        EVEN_K: True if the physical K dimension is divisible by BLOCK_K so
+            full BLOCK_K loads stay in-bounds without load-time masking.
         SPLIT_K: Parameter signifying parallelism in the K dimension.
         CAST_TYPE: if True, cast the values from the A matrix to the B
             matrix dtype.
         b_dtype: datatype of the B matrix
         USE_GDC: Whether to use PDL. True indicates use.
         base_k: Base offset along K dimension for current SPLIT_K group
+        MASK_K_TAIL: If True alongside EVEN_K, zero out lanes >= K in registers
+            after vectorized loads (for dynamic per-adapter ranks < padded K).
+        SINGLE_K_ITER: If True when MASK_K_TAIL and (not EVEN_K) and
+            SPLIT_K == 1 (max_K <= BLOCK_K), execute a single unlooped masked
+            step instead of a dynamic loop.
 
     """
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
@@ -55,7 +62,38 @@ def mm_k(
     # Step size along K for each iteration
     STEP_K = BLOCK_K * SPLIT_K
 
-    # Total number of iterations (compile-time constant)
+    if MASK_K_TAIL and (not EVEN_K) and SPLIT_K == 1:
+        # Single-dot, branchless masked path for dynamic per-adapter ranks in
+        # decode (M < 128) or unaligned K: avoids 2 tl.dot live ranges on SM86,
+        # and unloops entirely when physical max rank <= BLOCK_K.
+        if SINGLE_K_ITER:
+            if K > 0:
+                k_offsets = tl.arange(0, BLOCK_K)
+                mask = k_offsets < K
+                tiled_b = tl.load(b_ptr, mask=mask[:, None], other=0.0)
+                if USE_GDC:
+                    tl.extra.cuda.gdc_wait()
+                tiled_a = tl.load(a_ptr, mask=mask[None, :], other=0.0)
+                if CAST_TYPE:
+                    tiled_a = tiled_a.to(b_dtype)
+                accumulator += tl.dot(tiled_a, tiled_b)
+            return accumulator
+        num_iters = tl.cdiv(K, BLOCK_K)
+        k_offsets = tl.arange(0, BLOCK_K)
+        for k in range(num_iters):
+            mask = k * BLOCK_K + k_offsets < K
+            tiled_b = tl.load(b_ptr, mask=mask[:, None], other=0.0)
+            if USE_GDC:
+                tl.extra.cuda.gdc_wait()
+            tiled_a = tl.load(a_ptr, mask=mask[None, :], other=0.0)
+            if CAST_TYPE:
+                tiled_a = tiled_a.to(b_dtype)
+            accumulator += tl.dot(tiled_a, tiled_b)
+            a_ptr += BLOCK_K * ak_stride
+            b_ptr += BLOCK_K * bk_stride
+        return accumulator
+
+    # Total number of iterations
     num_iters = tl.cdiv(K, STEP_K)
 
     for k in range(num_iters):
@@ -66,12 +104,17 @@ def mm_k(
         block_end = iter_k + BLOCK_K
 
         if EVEN_K:
-            # K is divisible by BLOCK_K, no masking ever needed
+            # Physical K is divisible by BLOCK_K: keep 128-bit vectorized loads.
             # pre-fetch lora weight
             tiled_b = tl.load(b_ptr)
             if USE_GDC:
                 tl.extra.cuda.gdc_wait()
             tiled_a = tl.load(a_ptr)
+            if MASK_K_TAIL:
+                k_offsets = tl.arange(0, BLOCK_K)
+                mask = iter_k + k_offsets < K
+                tiled_b = tl.where(mask[:, None], tiled_b, 0.0)
+                tiled_a = tl.where(mask[None, :], tiled_a, 0.0)
             if CAST_TYPE:
                 tiled_a = tiled_a.to(b_dtype)
             accumulator += tl.dot(tiled_a, tiled_b)
@@ -141,6 +184,8 @@ def do_expand_kernel(
     CAST_TYPE: tl.constexpr,
     ADD_INPUTS: tl.constexpr,
     USE_GDC: tl.constexpr,
+    MASK_K_TAIL: tl.constexpr = False,
+    SINGLE_K_ITER: tl.constexpr = False,
 ):
     """Given an array of integers that identifies the rows of A, ram,
     a lora index that identifies which LoRA to use from lora_ptr, lora_index,
@@ -208,6 +253,8 @@ def do_expand_kernel(
         cur_lora_ptr.dtype.element_ty,
         USE_GDC,
         base_k=0,
+        MASK_K_TAIL=MASK_K_TAIL,
+        SINGLE_K_ITER=SINGLE_K_ITER,
     )
 
     tiled_c = accumulator.to(cur_lora_ptr.dtype.element_ty)
@@ -243,6 +290,7 @@ def do_shrink_kernel(
     lora_ptr,
     out_ptr,
     N,
+    cur_N,
     K,
     M_LEN,
     ram,
@@ -341,7 +389,7 @@ def do_shrink_kernel(
         + ram[:, None] * output_d1_stride
         + offset_cn[None, :] * output_d2_stride
     )
-    c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < N)
+    c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < cur_N)
 
     if STORE_PARTIALS:
         # Unscaled FP32 partial per K split; the reducer adds the splits in a
