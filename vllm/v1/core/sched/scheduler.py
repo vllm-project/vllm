@@ -793,14 +793,26 @@ class Scheduler(SchedulerInterface):
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
         # request there is nobody to starve, so let it use the whole budget.
+        # Under pipeline parallelism a lone prefill is still chunked: its
+        # chunks then overlap across the stages instead of one chunk crossing
+        # every stage alone.
         num_running, num_waiting = self.get_request_counts()
         num_eligible_reqs = num_running + num_waiting
         long_prefill_token_threshold = (
             self.scheduler_config.long_prefill_token_threshold
-            if self.scheduler_config.enable_chunked_prefill and num_eligible_reqs > 1
+            if self.scheduler_config.enable_chunked_prefill
+            and (num_eligible_reqs > 1 or self.use_pp)
             else 0
         )
-        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
+        # A lone PP prefill is capped only to pipeline its chunks. Skip that
+        # for a request whose multimodal items must not be split: a cap that
+        # ends inside an item larger than the cap would never make progress.
+        lone_pp_cap = long_prefill_token_threshold > 0 and num_eligible_reqs <= 1
+        if (
+            long_prefill_token_threshold > 0
+            and self.adaptive_long_prefill_threshold
+            and num_eligible_reqs > 1
+        ):
             # Floor the cap at a fair share of the input budget so it never
             # cuts a request below max_num_batched_tokens / num requests.
             long_prefill_token_threshold = max(
@@ -844,7 +856,9 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < long_prefill_token_threshold < num_new_tokens:
+            if 0 < long_prefill_token_threshold < num_new_tokens and not (
+                lone_pp_cap and self._keeps_mm_items_whole(request)
+            ):
                 num_new_tokens = long_prefill_token_threshold
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
@@ -1400,7 +1414,9 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens = padded_num_tokens
                             pad_spec_decode = True
 
-                    if 0 < long_prefill_token_threshold < num_new_tokens:
+                    if 0 < long_prefill_token_threshold < num_new_tokens and not (
+                        lone_pp_cap and self._keeps_mm_items_whole(request)
+                    ):
                         num_new_tokens = long_prefill_token_threshold
 
                     # chunked prefill has to be enabled explicitly to allow
@@ -2149,6 +2165,15 @@ class Scheduler(SchedulerInterface):
 
         for input_id in duplicate_input_ids:
             self.encoder_cache_manager.check_and_update_cache(request, input_id)
+
+    def _keeps_mm_items_whole(self, request: Request) -> bool:
+        """Whether the request has multimodal items that must not be split
+        across prefill chunks (`disable_chunked_mm_input`)."""
+        return (
+            self.scheduler_config.disable_chunked_mm_input
+            and not self.is_encoder_decoder
+            and bool(request.mm_features)
+        )
 
     def _try_schedule_encoder_inputs(
         self,

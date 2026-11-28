@@ -107,13 +107,17 @@ class SchedulerConfig:
     Ignored when chunked prefill is disabled.
 
     The cap is not applied when the request is the only one in the batch,
-    since there is no other request for it to starve."""
+    since there is no other request for it to starve, except with pipeline
+    parallelism, where the chunks of a lone prompt overlap across stages
+    (unless its multimodal items must stay whole, see
+    `disable_chunked_mm_input`)."""
 
     long_prefill_token_threshold_adaptive: bool = Field(default=False)
     """Floor the effective long prefill token threshold at a fair share of
     the token budget: max_num_batched_tokens divided by the number of
     queued and running requests. Only applies when
-    long_prefill_token_threshold is nonzero."""
+    long_prefill_token_threshold is nonzero, and not to a lone request under
+    pipeline parallelism, whose fair share would be the whole budget."""
 
     pp_microbatch_min_tokens: int = Field(default=4096, ge=0)
     """Pipeline parallelism only. Size prefill chunks at the uncached prefill

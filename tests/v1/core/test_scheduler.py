@@ -2177,6 +2177,65 @@ def test_long_prefill_threshold_ignored_when_alone():
     assert output.num_scheduled_tokens[request.request_id] == 1024
 
 
+@pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_long_prefill_threshold_applies_to_lone_request_with_pp(
+    adaptive: bool, async_scheduling: bool
+):
+    """With pipeline parallelism, a lone long prefill is still chunked so that
+    its chunks overlap across the pipeline stages. The adaptive fair-share
+    floor (the whole budget for one request) does not undo that."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+        long_prefill_token_threshold_adaptive=adaptive,
+        async_scheduling=async_scheduling,
+        pipeline_parallel_size=2,
+    )
+    request = create_requests(num_requests=1, num_tokens=1000)[0]
+    scheduler.add_request(request)
+
+    # Further chunks are schedulable before the earlier ones' outputs return.
+    chunks = [scheduler.schedule().total_num_scheduled_tokens for _ in range(3)]
+    assert chunks == [400, 400, 200]
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("image_offset", [0, 800])
+def test_lone_pp_prefill_keeps_unsplittable_mm_item_whole(
+    adaptive: bool, async_scheduling: bool, image_offset: int
+):
+    """The lone-prefill PP cap must not strand a request whose multimodal item
+    may not be split and is larger than the cap: it keeps its old behavior and
+    schedules the whole item, including after an earlier text-only chunk."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        long_prefill_token_threshold=400,
+        long_prefill_token_threshold_adaptive=adaptive,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+        async_scheduling=async_scheduling,
+        pipeline_parallel_size=2,
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=image_offset + 600,
+        mm_positions=[[PlaceholderRange(offset=image_offset, length=576)]],
+    )[0]
+    scheduler.add_request(request)
+
+    if image_offset:
+        # The item crosses the batch budget, so first admit only the text.
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[request.request_id] == image_offset
+        assert request.status == RequestStatus.RUNNING
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 600
+
+
 def test_long_prefill_threshold_applies_with_other_requests():
     """The threshold caps the prefill as soon as another request is queued."""
     scheduler = create_scheduler(
