@@ -86,6 +86,61 @@ def test_quantized_kv_cache_allowed_without_batch_invariance(monkeypatch):
     assert config.cache_config.cache_dtype == "fp8"
 
 
+@pytest.mark.parametrize("batch_invariant", [False, True])
+@pytest.mark.parametrize("triton_override", [None, "0", "1"])
+def test_lora_batch_invariance_selects_triton(
+    monkeypatch, batch_invariant, triton_override
+):
+    """BI must select Triton even when the legacy opt-in is unset or disabled."""
+    from vllm.platforms.xpu import XPUPlatform
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    if triton_override is None:
+        monkeypatch.delenv("XPU_USE_TRITON_KERNEL", raising=False)
+    else:
+        monkeypatch.setenv("XPU_USE_TRITON_KERNEL", triton_override)
+    wrapper = XPUPlatform.get_punica_wrapper()
+    if batch_invariant or triton_override == "1":
+        assert wrapper == "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+    else:
+        assert wrapper == "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+
+
+def test_llm_lora_batch_invariance_selects_triton_without_opt_in(
+    monkeypatch, tiny_qwen3_moe_path, vllm_runner
+):
+    """LLM must install Triton LoRA wrappers with only BI enabled."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.delenv("XPU_USE_TRITON_KERNEL", raising=False)
+
+    def lora_wrapper_types(model):
+        from vllm.lora.layers.base import BaseLayerWithLoRA
+
+        return {
+            type(layer.punica_wrapper).__name__
+            for layer in model.modules()
+            if isinstance(layer, BaseLayerWithLoRA)
+        }
+
+    with vllm_runner(
+        str(tiny_qwen3_moe_path),
+        dtype="bfloat16",
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        enable_lora=True,
+        max_lora_rank=8,
+        max_num_seqs=4,
+        max_model_len=32,
+        max_num_batched_tokens=128,
+        kv_cache_memory_bytes=8 * 1024 * 1024,
+        attention_config={"backend": "TRITON_ATTN"},
+    ) as runner:
+        assert runner.llm.apply_model(lora_wrapper_types) == [{"PunicaWrapperGPU"}]
+
+
 # These dimensions and seeds locally reproduce non-invariant norm mismatches.
 # They make the invariant equality assertion exercise a discriminating case.
 @pytest.mark.parametrize(
