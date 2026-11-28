@@ -23,6 +23,7 @@ from vllm.config import (
     AttentionConfig,
     CacheConfig,
     CUDAGraphMode,
+    KVTransferConfig,
     LoRAConfig,
     ModelConfig,
     ParallelConfig,
@@ -338,6 +339,27 @@ def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
         "weight transfer on",
         "kv_cache_dtype=fp8 (kernel: bf16)",
     ]
+
+
+@pytest.mark.parametrize(
+    "connector, refused",
+    [
+        ("SimpleCPUOffloadConnector", False),
+        ("UMBPStoreConnector", False),
+        ("ExampleConnector", True),
+    ],
+)
+def test_deployment_guard_keeps_the_kernels_for_a_canonical_kv_connector(
+    checkpoints, connector, refused
+) -> None:
+    """Connectors that restore only whole blocks of this cache layout keep the
+    monokernel; any other connector may load foreign bytes and is refused."""
+    config = _vllm_config(checkpoints / "tiny", checkpoints / "dspark", tp=8)
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector=connector, kv_role="kv_both"
+    )
+    reasons = deployment_refusals(config, 3, 8, _moe_parallel())
+    assert reasons == (["KV connector on"] if refused else [])
 
 
 # ------------------------------------------------- the tiny model on one GPU

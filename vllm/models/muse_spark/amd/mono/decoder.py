@@ -17,6 +17,9 @@ import torch
 from torch import nn
 
 from vllm.config import CUDAGraphMode
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    kv_connector_may_load_foreign_kv,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -276,7 +279,7 @@ def deployment_refusals(
         reasons.append("sleep mode on")
     if vllm_config.weight_transfer_config is not None:
         reasons.append("weight transfer on")
-    if vllm_config.kv_transfer_config is not None:
+    if kv_connector_may_load_foreign_kv(vllm_config):
         reasons.append("KV connector on")
     cache = vllm_config.cache_config
     if getattr(cache, "kv_offloading_size", None):
