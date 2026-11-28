@@ -189,6 +189,11 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
 MIN_FUSED_UP_M = 48
 
 
+# Benchmarked on the full PDL chain (not isolated kernels), so the crossover
+# includes the early-trigger overlap.
+SM100_DOWN_MIN_M = 9
+
+
 def hc_down_silu_sm100_supported(
     w_down: torch.Tensor, rank: int, hc_count: int
 ) -> bool:
@@ -318,6 +323,9 @@ def hc_up_gate_mix(
     """Fuse the BF16 up projection and gate mix for four streams, H=2560, K=320.
 
     SM90 rounds the gate to BF16 before sigmoid. SM100 keeps it in FP32.
+
+    `w_up` must be a static weight: the kernel loads it before its PDL wait,
+    so it must not be written by the kernel launched just before.
     """
     if current_platform.is_device_capability(90):
         assert lowrank.shape == (xn.shape[0], 320)
@@ -472,6 +480,8 @@ def _hc_combine_norm_kernel(
 
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
+        # Early at every M on purpose: neutral at large M, faster at small M.
+        tl.extra.cuda.gdc_launch_dependents()
 
     # Start the uncached residual load first, then issue the other combine
     # loads before consuming any of them.
@@ -496,9 +506,6 @@ def _hc_combine_norm_kernel(
     out = out.to(tl.float32)
     sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
     rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
-
-    if launch_pdl:
-        tl.extra.cuda.gdc_launch_dependents()
 
     if inj_ptr is not None:
         # Loading the weight earlier helps decode but keeps the tile live across

@@ -167,6 +167,7 @@ class SparseNCCLWeightTransferEngine(
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """Initialize the NCCL process group with the trainer."""
+        self.shutdown()
         self.model_update_group = self._init_process_group(init_info)
         # after the group forms, so the error reaches the trainer; destroy the
         # group, so a retry starts clean
