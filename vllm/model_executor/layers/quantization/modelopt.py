@@ -38,6 +38,7 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -902,6 +903,37 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         )
 
 
+def fold_w13_global_scale_into_w2(
+    w13_weight_scale_2: torch.Tensor, w2_weight_scale_2: torch.Tensor
+) -> torch.Tensor:
+    """Fold a gate/up global-scale mismatch into the w2 global scale, in place.
+
+    The fused w13 kernels dequantize both halves of w13 with one global scale,
+    the gate's (`w13_weight_scale_2[:, 0]`). When an export gives the up half
+    its own scale, the up output comes out scaled by `1 / r` with
+    `r = gs_up / gs_gate`. For `act(gate) * up` with no up bias and a w2
+    input kept in high precision (weight-only kernels), that factor passes
+    linearly into w2, so multiplying each expert's w2 global scale by `r`
+    cancels it in fp32, with no re-rounding of the e4m3 block scales. This is
+    exact without a swiglu clamp. With a clamp `+-L` the up half still clamps
+    at `+-L*r` (as it does without the fold). Experts with a zero gate scale
+    keep `r = 1`. Returns `r` per expert.
+    """
+    gs_gate = w13_weight_scale_2[:, 0].float()
+    ratio = torch.where(
+        gs_gate > 0,
+        w13_weight_scale_2[:, 1].float() / gs_gate,
+        torch.ones_like(gs_gate),
+    )
+    w2_weight_scale_2.copy_(
+        (
+            w2_weight_scale_2.float()
+            * ratio.view(-1, *([1] * (w2_weight_scale_2.dim() - 1)))
+        ).to(w2_weight_scale_2.dtype)
+    )
+    return ratio
+
+
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """MoE Method for FP4 Quantization.
 
@@ -1136,14 +1168,42 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_input_scale.data.fill_(1.0)
             layer.w2_input_scale.data.fill_(1.0)
 
-        # Use a single gscale for w13.
-        if self.moe.is_act_and_mul and not torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ):
-            logger.warning_once(
-                "w1_weight_scale_2 must match w3_weight_scale_2. "
-                "Accuracy may be affected."
+        # Use a single gscale for w13. Humming is the exception: its converter
+        # reads both halves' scales from the layer (a per-channel global scale),
+        # so a w1/w3 mismatch needs neither the fold nor the warning there.
+        if (
+            self.moe.is_act_and_mul
+            and self.nvfp4_backend != NvFp4MoeBackend.HUMMING
+            and not torch.allclose(
+                layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
             )
+        ):
+            can_fold = (
+                self.nvfp4_backend == NvFp4MoeBackend.MARLIN
+                and layer.activation
+                in (MoEActivation.SILU, MoEActivation.GELU, MoEActivation.GELU_TANH)
+                and getattr(layer, "swiglu_alpha", None) in (None, 1.0)
+                and getattr(layer, "swiglu_beta", None) in (None, 0.0)
+                and not self.moe.has_bias
+            )
+            if can_fold:
+                ratio = fold_w13_global_scale_into_w2(
+                    layer.w13_weight_scale_2.data, layer.w2_weight_scale_2.data
+                )
+                logger.info_once(
+                    "NVFP4 MoE: w1/w3 global scales differ (gs_up/gs_gate "
+                    "%.4g..%.4g); folded the ratio into the w2 global scale "
+                    "(weight-only %s, swiglu_limit=%s).",
+                    ratio.min().item(),
+                    ratio.max().item(),
+                    self.nvfp4_backend.value,
+                    getattr(layer, "swiglu_limit", None),
+                )
+            else:
+                logger.warning_once(
+                    "w1_weight_scale_2 must match w3_weight_scale_2. "
+                    "Accuracy may be affected."
+                )
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
         (
