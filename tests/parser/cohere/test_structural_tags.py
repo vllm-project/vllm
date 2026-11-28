@@ -9,6 +9,7 @@ from collections import UserDict
 from types import SimpleNamespace
 
 import pytest
+import xgrammar as xgr
 from pydantic import ValidationError
 from xgrammar.testing import _is_grammar_accept_string
 
@@ -480,3 +481,76 @@ class TestCollectToolSchemaDefs:
             [CohereNormalizedTool(name="get_weather", parameters=params)]
         )
         assert params == NESTED_DEFS_PARAMETERS
+
+
+class TestCollectToolSchemaToolNames:
+    """Tool names are request-controlled; they must not break grammar
+    construction when they carry regex-replacement or EBNF metacharacters."""
+
+    @staticmethod
+    def _tool_calls_json(name: str, parameters: dict) -> str:
+        return json.dumps(
+            [{"tool_call_id": "0", "tool_name": name, "parameters": parameters}]
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            pytest.param(r"x\g<9>", id="resub_replacement_template"),
+            pytest.param("my tool", id="whitespace"),
+        ],
+    )
+    def test_hostile_name_grammar_matches_that_name(self, name: str) -> None:
+        # ``\g<9>`` would raise re.error as an re.sub replacement template; a
+        # space would corrupt the EBNF rule names. Both must now build a grammar
+        # that still pins the real name as the ``tool_name`` const.
+        grammar = collect_tool_schema([CohereNormalizedTool(name=name, parameters={})])
+        assert _is_grammar_accept_string(grammar, self._tool_calls_json(name, {}))
+        assert not _is_grammar_accept_string(
+            grammar, self._tool_calls_json("other", {})
+        )
+
+    def test_ebnf_metacharacters_do_not_corrupt_grammar(self) -> None:
+        # A name full of EBNF syntax must not leak into the rule structure; the
+        # emitted grammar still compiles.
+        grammar = collect_tool_schema(
+            [CohereNormalizedTool(name='evil ::= "x" ; junk', parameters={})]
+        )
+        xgr.Grammar.from_ebnf(grammar)
+
+    def test_duplicate_names_both_available(self) -> None:
+        # Rules are not keyed by tool name, so a repeated name is not dropped.
+        grammar = collect_tool_schema(
+            [
+                CohereNormalizedTool(name="dup", parameters={}),
+                CohereNormalizedTool(name="dup", parameters={}),
+            ]
+        )
+        assert _is_grammar_accept_string(grammar, self._tool_calls_json("dup", {}))
+
+    def test_tool_named_like_a_rule(self) -> None:
+        # A tool named ``root`` is called by that name, not a renamed one.
+        grammar = collect_tool_schema(
+            [CohereNormalizedTool(name="root", parameters={})]
+        )
+        assert _is_grammar_accept_string(grammar, self._tool_calls_json("root", {}))
+
+    def test_string_literals_matching_rule_names_untouched(self) -> None:
+        # Enum values that equal generated rule names must stay as written.
+        parameters = {
+            "type": "object",
+            "properties": {"role": {"enum": ["root", "admin"]}},
+        }
+        grammar = collect_tool_schema(
+            [
+                CohereNormalizedTool(name="a", parameters=parameters),
+                CohereNormalizedTool(name="b", parameters=SCHEMA_B),
+            ]
+        )
+        assert _is_grammar_accept_string(
+            grammar, self._tool_calls_json("a", {"role": "root"})
+        )
+        assert _is_grammar_accept_string(grammar, self._tool_calls_json("b", {"b": 1}))
+        assert not _is_grammar_accept_string(
+            grammar, self._tool_calls_json("a", {"role": "user"})
+        )
