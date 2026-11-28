@@ -341,6 +341,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Alpamayo2Super": ("alpamayo2_super", "Alpamayo2SuperForConditionalGeneration"),
+    "Apertus1p5ForConditionalGeneration": (
+        "apertus_mm",
+        "Apertus1p5ForConditionalGeneration",
+    ),
     "AudioFlamingo3ForConditionalGeneration": (
         "audioflamingo3",
         "AudioFlamingo3ForConditionalGeneration",
