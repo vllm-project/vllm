@@ -17,6 +17,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 
 __all__ = ["CompressedTensorsW8A8Mxfp8"]
 
@@ -32,6 +33,11 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
     - Per-group E8M0 scales (uint8) with group_size=32
     - Activations dynamically quantized to MXFP8 during inference
     """
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        kernel = getattr(self, "kernel", None)
+        return kernel is not None and kernel.supports_pre_processed_weights
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -79,6 +85,12 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
         self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Compressed-tensors MXFP8 backend cannot use pre-processed weights"
+                )
+            return
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(

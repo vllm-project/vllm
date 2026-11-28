@@ -584,6 +584,11 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   Serialized `compressed-tensors` WNA16 linear layers can reuse Marlin-packed
   weights with FP16/BF16 activations. Humming, other WNA16 backends and MoE
   are not enabled by this support.
+  Serialized `compressed-tensors` MXFP8 dense linear layers support CUDA IPC
+  with the FlashInfer CUTLASS and CuTe-DSL MXFP8 backends. Use the same
+  linear backend on the daemon and engine to reuse processed weights and
+  swizzled scales. MXFP8 MoE and the FlashInfer TRT-LLM MXFP8 backend are
+  not enabled by this support.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.
