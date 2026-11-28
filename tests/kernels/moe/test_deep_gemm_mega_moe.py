@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
     MegaMoEWeightSpec,
+    deep_gemm_supports_sm90_situ,
 )
 from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
@@ -55,6 +56,7 @@ requires_sm90_mega_moe_on_sm90 = pytest.mark.skipif(
     is_sm90 and not has_sm90_mega_moe,
     reason="The installed DeepGEMM has no SM90 MegaMoE kernel",
 )
+has_sm90_situ = not is_sm90 or deep_gemm_supports_sm90_situ()
 requires_sm100 = pytest.mark.skipif(
     not is_sm100, reason="NVFP4 MegaMoE input staging only feeds the SM100 kernel"
 )
@@ -796,6 +798,60 @@ def test_deep_gemm_mega_moe_rejects_unsupported_activation():
         MegaMoEActivation("situ", clamp=10.0)
 
 
+def test_deep_gemm_mega_moe_sm90_accepts_situ(monkeypatch):
+    """Kimi K3.1 SITU experts run on the SM90 per-128 FP32 staging format."""
+    assert "situ" in MEGA_MOE_MXFP4_SM90.activations
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
+        "deep_gemm_supports_sm90_situ",
+        lambda: True,
+    )
+    experts = _make_experts(
+        num_experts=2,
+        num_local_experts=2,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=128,
+        intermediate_size=128,
+        weight_format=MEGA_MOE_MXFP4_SM90,
+        activation=MegaMoEActivation("situ", alpha=4.0, beta=25.0),
+    )
+    assert experts.weight_format == MEGA_MOE_MXFP4_SM90
+    assert experts._kernel_kwargs == {
+        "activation_clamp": None,
+        "activation": "situ",
+        "activation_alpha": 4.0,
+        "activation_beta": 25.0,
+    }
+
+
+def test_deep_gemm_mega_moe_sm90_situ_requires_deep_gemm_support(monkeypatch):
+    """An older DeepGEMM fails at construction, naming the missing kernel."""
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
+        "deep_gemm_supports_sm90_situ",
+        lambda: False,
+    )
+    with pytest.raises(NotImplementedError, match="situ_beta"):
+        _make_experts(
+            num_experts=2,
+            num_local_experts=2,
+            experts_start_idx=0,
+            top_k=1,
+            hidden_size=128,
+            intermediate_size=128,
+            weight_format=MEGA_MOE_MXFP4_SM90,
+            activation=MegaMoEActivation("situ", alpha=4.0, beta=25.0),
+        )
+
+
+def test_deep_gemm_mega_moe_fp8_block_sm90_excludes_situ():
+    """SM90 SiTU is validated for FP8 x FP4 experts only, so the block-FP8
+    format must not inherit it from `MEGA_MOE_MXFP4_SM90`."""
+    assert "situ" not in MEGA_MOE_FP8_BLOCK_SM90.activations
+    assert MEGA_MOE_FP8_BLOCK_SM90.activations == frozenset({"swiglu"})
+
+
 @pytest.mark.parametrize("fused", [False, True])
 def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
     """The fusion decided at init fixes the launch; forward adds only an
@@ -1435,6 +1491,7 @@ KERNEL_FORMATS = {"mxfp4": MEGA_MOE_MXFP4_SM90} if is_sm90 else MEGA_MOE_WEIGHT_
         for act_name, act in ACTIVATIONS.items()
         for name, fmt in KERNEL_FORMATS.items()
         if act.name in fmt.activations
+        if act.name != "situ" or has_sm90_situ
         for shared in (None, *(spec.dtype for spec in fmt.shared))
     ],
 )
