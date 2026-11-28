@@ -149,6 +149,7 @@ class CustomAllreduce:
         symm_mem_enabled=False,
         *,
         register_graph_buffers: bool = True,
+        symm_mem_group: ProcessGroup | None = None,
     ) -> None:
         """Args:
             group: the process group to work on. If None, it will use the
@@ -156,6 +157,8 @@ class CustomAllreduce:
             device: the device to bind the CustomAllreduce to. If None,
                 it will be bound to f"cuda:{local_rank}".
             register_graph_buffers: whether graph capture IPC-registers its buffers.
+            symm_mem_group: the group for PyTorch symmetric-memory rendezvous,
+                if not `group` (the NCCL group under the NCCL backend).
         It is the caller's responsibility to make sure each communicator
         is bound to a unique device. CUDA IPC collectives require all ranks
         to be on the same node; cross-node groups only support MNNVL
@@ -197,6 +200,8 @@ class CustomAllreduce:
             return
 
         self.group = group
+        # Group for PyTorch symmetric-memory rendezvous (MNNVL buffers).
+        self.symm_mem_group = symm_mem_group or group
 
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "CustomAllreduce should be attached to a non-NCCL group."
@@ -374,7 +379,7 @@ class CustomAllreduce:
             buffer = torch_symm_mem.empty(
                 buffer_size, dtype=torch.uint8, device=self.device
             )
-            handle = torch_symm_mem.rendezvous(buffer, self.group.group_name)
+            handle = torch_symm_mem.rendezvous(buffer, self.symm_mem_group.group_name)
             if handle.multicast_ptr == 0:
                 return
             peer_buffers = [
@@ -448,7 +453,7 @@ class CustomAllreduce:
 
         handle = None
         try:
-            handle = torch_symm_mem.rendezvous(buffer, self.group.group_name)
+            handle = torch_symm_mem.rendezvous(buffer, self.symm_mem_group.group_name)
             if handle is not None:
                 buffer[:signal_size].zero_()
                 torch.accelerator.synchronize()

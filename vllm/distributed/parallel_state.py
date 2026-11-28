@@ -160,6 +160,19 @@ def _get_unique_name(name: str) -> str:
 _groups: dict[str, Callable[[], "GroupCoordinator | None"]] = {}
 
 
+def _uses_nccl_symm_mem(device: torch.device, group: ProcessGroup | None) -> bool:
+    """Whether this process selected PyTorch's NCCL symmetric-memory backend."""
+    from vllm.distributed.device_communicators.symm_mem import (
+        uses_nccl_symm_mem_backend,
+    )
+
+    return (
+        group is not None
+        and uses_nccl_symm_mem_backend(device)
+        and "nccl" in str(torch.distributed.get_backend(group))
+    )
+
+
 def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
@@ -551,6 +564,12 @@ class GroupCoordinator:
 
         self.use_device_communicator = use_device_communicator
         self.device_communicator = None
+        if self.world_size > 1 and _uses_nccl_symm_mem(self.device, self.device_group):
+            # The NCCL symmetric-memory backend rendezvouses through the group's
+            # NCCL communicator, which PyTorch creates on the first collective.
+            torch.distributed.barrier(
+                group=self.device_group, device_ids=[self.device.index]
+            )
         if use_device_communicator and self.world_size > 1:
             device_comm_cls = resolve_obj_by_qualname(
                 current_platform.get_device_communicator_cls()

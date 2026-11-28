@@ -402,6 +402,26 @@ def has_flashinfer_comm() -> bool:
 
 
 @functools.cache
+def has_flashinfer_dcp_a2a_lse_reduce() -> bool:
+    """Return whether FlashInfer has the fused DCP A2A + LSE reduce with the
+    token mask and the `layout` argument (FlashInfer >= 0.7.6).
+
+    FlashInfer 0.7.1-0.7.5 export `decode_cp_a2a_lse_reduce` with a head-major
+    layout and no mask. Probe the signature rather than the version so dev
+    builds carry the gate.
+    """
+    if not has_flashinfer_comm():
+        return False
+    mod = _get_submodule("flashinfer.comm.dcp_lse_reduce")
+    reduce = getattr(mod, "decode_cp_a2a_lse_reduce", None)
+    return (
+        callable(reduce)
+        and callable(getattr(mod, "decode_cp_a2a_lse_reduce_create_workspace", None))
+        and {"mask", "layout"} <= inspect.signature(reduce).parameters.keys()
+    )
+
+
+@functools.cache
 def has_flashinfer_packed_fused_kda_decode() -> bool:
     """Return whether FlashInfer's packed fused KDA decode API is available."""
     if not has_flashinfer():

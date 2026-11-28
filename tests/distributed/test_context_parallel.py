@@ -20,6 +20,7 @@ from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_dcp_a2a_lse_reduce
 
 from ..models.registry import HF_EXAMPLE_MODELS
 
@@ -62,6 +63,7 @@ class ParallelSetup(NamedTuple):
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
     attn_backend: str | None = None
+    dcp_comm_backend: str | None = None
 
 
 @dataclass(slots=True)
@@ -81,6 +83,7 @@ class CPTestSettings:
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         attn_backend: str | None = None,
+        dcp_comm_backend: str | None = None,
     ):
         parallel_setups = []
         if dcp_multipliers is None:
@@ -108,6 +111,7 @@ class CPTestSettings:
             test_options=CPTestOptions(
                 multi_node_only=multi_node_only,
                 attn_backend=attn_backend,
+                dcp_comm_backend=dcp_comm_backend,
             ),
         )
 
@@ -142,6 +146,11 @@ else:
                 dcp_multipliers=[0.5],
                 cp_kv_cache_interleave_size=64,
                 attn_backend="FLASHMLA",
+            ),
+            CPTestSettings.detailed(
+                dcp_multipliers=[1],
+                attn_backend="FLASHMLA",
+                dcp_comm_backend="flashinfer_a2a_fused",
             ),
         ],
         "Qwen/Qwen2.5-1.5B-Instruct": [
@@ -181,7 +190,7 @@ def _test_cp_gsm8k(
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, attn_backend = test_options
+    multi_node_only, attn_backend, dcp_comm_backend = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -201,6 +210,11 @@ def _test_cp_gsm8k(
         )
     if multi_node_only and not VLLM_MULTI_NODE:
         pytest.skip("Not in multi-node setting")
+    if (
+        dcp_comm_backend == "flashinfer_a2a_fused"
+        and not has_flashinfer_dcp_a2a_lse_reduce()
+    ):
+        pytest.skip("Needs FlashInfer >= 0.7.6.")
 
     server_args = [
         # use half precision for speed and memory savings in CI environment
@@ -241,6 +255,8 @@ def _test_cp_gsm8k(
 
     if attn_backend:
         server_args.append(f"--attention-backend={attn_backend}")
+    if dcp_comm_backend:
+        server_args.append(f"--dcp-comm-backend={dcp_comm_backend}")
 
     with RemoteOpenAIServer(
         model_id,

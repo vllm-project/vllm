@@ -1672,6 +1672,14 @@ class VllmConfig:
             )
 
             self.model_config.verify_with_parallel_config(self.parallel_config)
+            if (
+                self.parallel_config.dcp_comm_backend == "flashinfer_a2a_fused"
+                and self.parallel_config.decode_context_parallel_size > 1
+                and not self.model_config.use_mla
+            ):
+                raise ValueError(
+                    "dcp_comm_backend='flashinfer_a2a_fused' supports MLA models only"
+                )
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 

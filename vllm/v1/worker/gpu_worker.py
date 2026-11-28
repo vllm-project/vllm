@@ -1951,6 +1951,17 @@ def init_worker_distributed_environment(
         moe_backend=getattr(vllm_config.kernel_config, "moe_backend", None),
     )
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+    if (
+        parallel_config.dcp_comm_backend == "flashinfer_a2a_fused"
+        and parallel_config.decode_context_parallel_size > 1
+    ):
+        # FlashInfer's DCP workspace needs this process-wide backend, which
+        # must be selected before any communicator allocates.
+        from vllm.distributed.device_communicators.symm_mem import (
+            select_nccl_symm_mem_backend,
+        )
+
+        select_nccl_symm_mem_backend()
 
     init_method = distributed_init_method or "env://"
 

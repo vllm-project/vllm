@@ -101,7 +101,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
         )
-        from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
+        from vllm.distributed.device_communicators.symm_mem import (
+            SymmMemCommunicator,
+            uses_nccl_symm_mem_backend,
+        )
 
         self.pynccl_comm: PyNcclCommunicator | None = None
         if self.world_size > 1:
@@ -125,10 +128,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
         config = get_current_vllm_config_or_none()
         register = config is None or not config.use_cumem_cudagraph_pool
 
+        # PyTorch's NCCL symmetric-memory backend rendezvouses through the
+        # group's NCCL communicator, so it needs the device group, not Gloo's.
+        symm_mem_group = (
+            self.device_group
+            if self.device_group is not None and uses_nccl_symm_mem_backend(self.device)
+            else None
+        )
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
                 device=self.device,
+                symm_mem_group=symm_mem_group,
             )
 
         if self.use_flashinfer_allreduce and self.world_size > 1:
@@ -164,6 +175,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
                 ),
                 register_graph_buffers=register,
+                symm_mem_group=symm_mem_group,
             )
 
         # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine.
@@ -873,6 +885,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        # Under PyTorch's NCCL symmetric-memory backend this buffer is
+        # deregistered through the device group's NCCL communicator.
+        self.symm_mem_comm = None
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None

@@ -38,6 +38,10 @@ from vllm.v1.attention.ops.cp_common import (
     direct_cp_enabled,
     direct_cp_multicast_enabled,
 )
+from vllm.v1.attention.ops.flashinfer_dcp import (
+    FlashInferDCPWorkspace,
+    get_flashinfer_dcp_workspace,
+)
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
@@ -1687,7 +1691,10 @@ class MLADCPManager:
         self.device = torch.device(device)
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
-        self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
+        comm_backend = parallel_config.dcp_comm_backend
+        self.use_flashinfer = comm_backend == "flashinfer_a2a_fused"
+        # FlashInfer falls back to the NCCL A2A combine for oversized batches.
+        self.use_a2a = comm_backend in ("a2a", "flashinfer_a2a_fused")
         self.padded_num_heads = padded_num_heads
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.num_heads = num_heads
@@ -1769,6 +1776,22 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         use_pcp: bool,
     ) -> DCPCombine:
+        if self.use_flashinfer:
+            flashinfer_workspace = get_flashinfer_dcp_workspace(
+                self.group,
+                self.device,
+                self.max_num_tokens,
+                num_heads,
+                head_dim,
+                dtype,
+            )
+            self._has_direct_a2a_workspace = True
+            logger.info_once("Using FlashInfer fused DCP A2A + LSE reduce for MLA.")
+            return functools.partial(
+                self._direct_workspace_combine,
+                flashinfer_workspace,
+                is_lse_base_on_e=is_lse_base_on_e,
+            )
         direct_workspace = None
         if self.use_a2a:
             direct_workspace = get_direct_dcp_a2a_workspace(
@@ -1811,7 +1834,7 @@ class MLADCPManager:
 
     def _direct_workspace_combine(
         self,
-        direct_workspace: DirectDCPA2AWorkspace,
+        direct_workspace: DirectDCPA2AWorkspace | FlashInferDCPWorkspace,
         partial_output: torch.Tensor,
         partial_lse: torch.Tensor,
         is_lse_base_on_e: bool,
