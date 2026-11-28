@@ -69,3 +69,18 @@ steps:
       - vllm/config/compilation.py
       - vllm/compilation
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 18GB) Last-layer FFN pruning"
+  key: last-layer-ffn-pruning
+  device: h200_18gb
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - tests/v1/cudagraph/test_last_layer_ffn.py
+  - vllm/model_executor/layers/last_layer_ffn.py
+  - vllm/model_executor/layers/utils.py
+  - vllm/v1/worker/gpu/last_layer_ffn.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/model_executor/models/transformers/
+  - vllm/model_executor/models/qwen3.py
+  commands:
+    - pytest -v -s v1/cudagraph/test_last_layer_ffn.py

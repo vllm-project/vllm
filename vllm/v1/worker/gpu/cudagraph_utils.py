@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
@@ -623,7 +624,16 @@ class CudaGraphManager:
         self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
     ) -> None:
         if self.breakable_cg_runner is None:
-            self.breakable_cg_runner = BreakableCUDAGraphWrapper(
+            wrapper_cls = BreakableCUDAGraphWrapper
+            if key_fn is None and envs.VLLM_ENABLE_LAST_LAYER_FFN_PRUNING:
+                from vllm.v1.worker.gpu.last_layer_ffn import (
+                    LastLayerFFNGraphWrapper,
+                    last_layer_ffn_graph_key,
+                )
+
+                key_fn = last_layer_ffn_graph_key
+                wrapper_cls = LastLayerFFNGraphWrapper
+            self.breakable_cg_runner = wrapper_cls(
                 model,
                 self.vllm_config,
                 runtime_mode=CUDAGraphMode.PIECEWISE,

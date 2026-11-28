@@ -54,6 +54,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.last_layer_ffn import using_last_layer_ffn_indices
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -146,6 +147,7 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
+from vllm.v1.worker.gpu.last_layer_ffn import LastLayerFFNPruner
 from vllm.v1.worker.gpu.lora_utils import (
     LoraState,
     create_lora_capture_hook,
@@ -209,6 +211,7 @@ logger = init_logger(__name__)
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
+        self.last_layer_ffn_pruner = LastLayerFFNPruner()
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -2157,6 +2160,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
             del intermediate_tensors
 
+        ffn_indices = self.last_layer_ffn_pruner.prepare(
+            self, input_batch, batch_desc, dummy_run, ubatch_state
+        )
         # Update the EPLB meta.
         ubatch_slices = ubatch_state.slices if ubatch_state is not None else None
         self.eplb.prepare_forward(
@@ -2185,18 +2191,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_active_loras=batch_desc.num_active_loras,
             )
 
-            with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=input_batch.num_tokens_after_padding,
-                cudagraph_runtime_mode=batch_desc.cg_mode,
-                num_tokens_across_dp=dp_sync_state
-                and dp_sync_state.num_tokens_across_dp,
-                batch_descriptor=batch_descriptor,
-                ubatch_slices=ubatch_slices,
-                slot_mapping=slot_mappings_by_layer,
-                skip_compiled=skip_compiled,
-                is_padding=input_batch.is_padding,
+            with (
+                set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch.num_tokens_after_padding,
+                    cudagraph_runtime_mode=batch_desc.cg_mode,
+                    num_tokens_across_dp=dp_sync_state
+                    and dp_sync_state.num_tokens_across_dp,
+                    batch_descriptor=batch_descriptor,
+                    ubatch_slices=ubatch_slices,
+                    slot_mapping=slot_mappings_by_layer,
+                    skip_compiled=skip_compiled,
+                    is_padding=input_batch.is_padding,
+                ),
+                using_last_layer_ffn_indices(ffn_indices),
             ):
                 self.kv_connector.pre_forward(
                     scheduler_output, input_batch, attn_metadata=attn_metadata

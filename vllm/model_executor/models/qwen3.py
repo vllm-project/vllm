@@ -39,6 +39,10 @@ from vllm.model_executor.layers.attention.encoder_only_attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.last_layer_ffn import (
+    apply_pruned_last_ffn,
+    restore_pruned_last_ffn,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -300,8 +304,10 @@ class Qwen3DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
-
-        # Fully Connected
+        if getattr(self, "prune_last_ffn", False):
+            return apply_pruned_last_ffn(
+                hidden_states, residual, self.post_attention_layernorm, self.mlp
+            )
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -371,6 +377,8 @@ class Qwen3Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        if self.end_layer > self.start_layer:
+            self.layers[self.end_layer - 1].prune_last_ffn = True
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
@@ -425,6 +433,7 @@ class Qwen3Model(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = restore_pruned_last_ffn(hidden_states, positions.shape[-1])
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -485,6 +494,8 @@ class Qwen3ForCausalLM(
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+
+    supports_last_layer_ffn_pruning = True
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

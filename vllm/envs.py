@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    VLLM_ENABLE_LAST_LAYER_FFN_PRUNING: bool = False
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
@@ -630,6 +631,10 @@ removed_environment_variables: dict[str, str] = {
 }
 
 environment_variables: dict[str, Callable[[], Any]] = {
+    # Opt-in last-layer FFN row pruning. Disabled by default.
+    "VLLM_ENABLE_LAST_LAYER_FFN_PRUNING": lambda: (
+        os.getenv("VLLM_ENABLE_LAST_LAYER_FFN_PRUNING", "0") == "1"
+    ),
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
