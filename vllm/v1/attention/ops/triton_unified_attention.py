@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -37,14 +38,15 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 # Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
 MAX_3D_QUERY_LEN = 8
 
-# RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
-# (RDNA3).
-is_gfx1201 = is_gfx1100 = False
+# Launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4), gfx1100 (RDNA3)
+# and gfx950 (CDNA4).
+is_gfx1201 = is_gfx1100 = is_gfx950 = False
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1100, on_gfx1201
+    from vllm.platforms.rocm import on_gfx950, on_gfx1100, on_gfx1201
 
     is_gfx1201 = on_gfx1201()
     is_gfx1100 = on_gfx1100()
+    is_gfx950 = on_gfx950()
 
 # The tables are keyed by the padded head size (next power of 2), which the kernel's
 # tiles use: head_size 96 runs as 128, 192 as 256.
@@ -1414,6 +1416,31 @@ def unified_attention(
                 )
                 if config is not None:
                     TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = config
+
+    # gfx950 split-K launch. The context length must not set it: CUDA graphs replay
+    # the captured launch for any context length.
+    if is_gfx950 and use_3d and not use_td and not 0 < sliding_window_val < 2048:
+        if (
+            k.element_size() == 2
+            and BLOCK_M < 32
+            and 32 % num_queries_per_kv == 0
+            and max_seqlen_q * num_queries_per_kv > BLOCK_M
+        ):
+            BLOCK_M = 32
+            BLOCK_Q = BLOCK_M // num_queries_per_kv
+            total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+            TILE_SIZE_DECODE = 32
+        units = (
+            num_seqs * num_kv_heads * triton.cdiv(max_seqlen_q * num_queries_per_kv, 16)
+        )
+        max_rows = softmax_segm_max.numel() // num_query_heads
+        segments = 128
+        while segments > num_par_softmax_segments and (
+            units * segments > 2 * num_compute_units()
+            or q.shape[0] * segments > max_rows
+        ):
+            segments //= 2
+        num_par_softmax_segments = segments
 
     # With a sliding window, splitting the whole sequence into segments leaves
     # most of them outside the window once seq_len exceeds it. For a plain
