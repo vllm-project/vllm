@@ -183,3 +183,44 @@ def test_cpu_offloaded_table_keeps_storage_and_loader_across_updates(monkeypatch
             assert torch.equal(table.finalized[-1][name], expected[name])
         assert linear.weight is linear_weight
         assert torch.equal(linear.weight, new_linear_weight)
+
+
+class _HashRoutedGate(torch.nn.Module):
+    """A float weight beside a frozen integer routing table, as in DeepSeek-V4."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(4, 8), requires_grad=False)
+        self.tid2eid = torch.nn.Parameter(
+            torch.zeros(64, 2, dtype=torch.int64), requires_grad=False
+        )
+
+
+class _GateModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate = _HashRoutedGate()
+
+    def load_weights(self, weights):
+        params = dict(self.named_parameters())
+        for name, weight in weights:
+            param = params[name]
+            getattr(param, "weight_loader", default_weight_loader)(param, weight)
+        return set(params)
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"], ids=["direct", "layerwise"])
+def test_partial_update_keeps_the_tensors_it_does_not_write(monkeypatch, mode):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    model = _GateModel()
+    record_metadata_for_reloading(model)
+    table = torch.randint(1, 16, (64, 2), generator=torch.Generator().manual_seed(0))
+    model.load_weights([("gate.weight", torch.ones(4, 8)), ("gate.tid2eid", table)])
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+
+    start_reload(model)
+    model.load_weights([("gate.weight", torch.full((4, 8), 2.0))])
+    finish_reload(model, _MODEL_CONFIG, _DEVICE)
+
+    torch.testing.assert_close(model.gate.weight, torch.full((4, 8), 2.0))
+    torch.testing.assert_close(model.gate.tid2eid, table)

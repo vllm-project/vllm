@@ -398,6 +398,10 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
 
+    # Reloading part of a layer: tensors no loaded weight writes keep their values
+    if info.kernel_tensors is not None:
+        _seed_unloaded_tensors(layer, info)
+
     # Unwrap layerwise loading wrappers
     for param in get_layer_tensors(layer).values():
         param.weight_loader = _get_original_loader(param)
@@ -469,6 +473,31 @@ def _get_original_loader(tensor: torch.Tensor) -> Callable:
 
 def _get_weight_loader(tensor: torch.Tensor):
     return getattr(tensor, "weight_loader", default_weight_loader)
+
+
+def _seed_unloaded_tensors(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    """Seed each reloaded tensor that no loaded weight writes with its current value.
+
+    Only a live tensor that kept its created layout can seed; one that processing
+    transformed is left for processing to recompute.
+    """
+    assert info.kernel_tensors is not None
+    loaded = {name for name, _ in info.loaded_weights}
+    parameters, buffers = info.kernel_tensors
+    for name, tensor in get_layer_tensors(layer).items():
+        live = parameters.get(name, buffers.get(name))
+        # Tensors kept live through the reload (vLLM's skip list) need no seed
+        if name in loaded or live is None or live is tensor:
+            continue
+        if live.shape == tensor.shape and live.dtype == tensor.dtype:
+            tensor.data.copy_(live)
+        else:
+            logger.debug(
+                "%s: %s was not reloaded and its processed layout differs; "
+                "processing recomputes it",
+                layer.__class__.__name__,
+                name,
+            )
 
 
 def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
