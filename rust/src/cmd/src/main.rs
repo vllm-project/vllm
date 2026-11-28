@@ -165,6 +165,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
+            args.validate()?;
             let topology = args.data_parallel_lb.resolve(&args.managed_engine, args.headless)?;
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 

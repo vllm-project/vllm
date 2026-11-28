@@ -299,6 +299,17 @@ impl EngineCoreLlm {
         mut req: GenerateRequest,
         n: NonZeroU32,
     ) -> Result<Vec<GenerateOutputStream>> {
+        if self.client.is_faulted() {
+            let status = self.client.fault_tolerance_engine_status().and_then(|entry| {
+                entry.get("status").and_then(|value| value.as_str()).map(str::to_owned)
+            });
+            tracing::info!(
+                status = status.as_deref().unwrap_or("unknown"),
+                request_id = %req.request_id,
+                "Engine faulted - rejecting request."
+            );
+            return Err(Error::EngineFaulted);
+        }
         self.check_prompt_logprobs_supported(&req.sampling_params)?;
         self.check_mm_embeds_fit(req.mm_features.as_ref())?;
 

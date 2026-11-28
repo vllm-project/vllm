@@ -394,6 +394,13 @@ class RustFrontendProcessManager:
                 "data_parallel_hybrid_lb",
             },
         )
+        # Passing `--fault-tolerance-config` automatically enables fault
+        # tolerance in EngineArgs.__post_init__, even when
+        # `--enable-fault-tolerance` is omitted on the CLI.
+        if args_dict.get("fault_tolerance_config") is not None and not args_dict.get(
+            "enable_fault_tolerance"
+        ):
+            args_dict["enable_fault_tolerance"] = True
 
         # `model_tag` is the positional `vllm serve` model argument. When the
         # model is supplied only through `--config`, argparse populates `model`

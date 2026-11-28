@@ -338,6 +338,7 @@ fn handshake_test_config(
         model_name: model_name.to_string(),
         client_index,
         engine_stats_enabled: true,
+        enable_fault_tolerance: false,
     }
 }
 
@@ -369,6 +370,7 @@ fn bootstrapped_test_config(
         model_name: "test-model".to_string(),
         client_index,
         engine_stats_enabled: true,
+        enable_fault_tolerance: false,
     }
 }
 
@@ -422,6 +424,7 @@ fn client_config_validates_bootstrapped_dp_range() {
         model_name: "test-model".to_string(),
         client_index: 0,
         engine_stats_enabled: true,
+        enable_fault_tolerance: false,
     };
     config.validate().expect("frontend may own a subset of global DP ranks");
 
@@ -4802,4 +4805,382 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
     assert!(final_output.is_some());
 
     client.shutdown().await.unwrap();
+}
+
+#[test]
+fn client_config_rejects_fault_tolerance_with_multiple_engines() {
+    let config = handshake_test_config(
+        "ipc:///tmp/vllm-rs-ft-invalid".to_string(),
+        2,
+        "test-model",
+        Duration::from_secs(1),
+        0,
+        None,
+    )
+    .with_fault_tolerance(true);
+
+    let err = config.validate().unwrap_err();
+    assert!(
+        err.to_report_string()
+            .contains("fault tolerance requires a single engine per frontend"),
+        "unexpected error: {}",
+        err.to_report_string()
+    );
+}
+
+async fn push_ft_status(push: &mut PushSocket, engine_index: u32, payload: serde_json::Value) {
+    use crate::protocol::fault_tolerance::FT_STATUS_CALL_ID;
+    send_outputs(
+        push,
+        UtilityCallOutput {
+            engine_index,
+            timestamp: 0.0,
+            output: UtilityOutput {
+                call_id: FT_STATUS_CALL_ID.into(),
+                failure_message: None,
+                result: Some(utility_result_value(payload)),
+            },
+        }
+        .into(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fault_tolerance_status_pushes_and_recovery_lifecycle() {
+    use crate::protocol::fault_tolerance::{
+        FT_UTILITY_METHOD, FaultToleranceRequest, FaultToleranceResult,
+    };
+
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (push_stage_tx, mut push_stage_rx) = mpsc::unbounded_channel::<serde_json::Value>();
+    let (utility_seen_tx, utility_seen_rx) = oneshot::channel::<(u64, FaultToleranceRequest)>();
+    let (complete_recovery_tx, complete_recovery_rx) = oneshot::channel::<()>();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        EngineId::from_engine_index(0).to_vec(),
+        move |dealer, push| {
+            Box::pin(async move {
+                // Push 3 status transitions driven by the test.
+                for _ in 0..3 {
+                    let payload = push_stage_rx.recv().await.expect("status stage");
+                    push_ft_status(push, 0, payload).await;
+                }
+
+                // Receive `handle_fault_tolerance` utility RPC and verify wire shape.
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]);
+                let array = payload.as_array().expect("utility payload array");
+                assert_eq!(array[2], Value::from(FT_UTILITY_METHOD));
+                let call_id = array[1].as_u64().expect("call_id");
+                let args = array[3].as_array().expect("utility args array");
+                assert_eq!(args.len(), 1);
+                assert!(
+                    matches!(args[0], Value::Map(_)),
+                    "FaultToleranceRequest must be encoded as msgpack map, got {:?}",
+                    args[0]
+                );
+                let ft_req: FaultToleranceRequest =
+                    rmpv::ext::from_value(args[0].clone()).expect("decode FaultToleranceRequest");
+                utility_seen_tx.send((call_id, ft_req.clone())).unwrap();
+
+                // Hold recovery open until test verifies `recovering` & concurrent rejection.
+                complete_recovery_rx.await.unwrap();
+
+                // Python sentinel pushes healthy status before sending utility reply.
+                push_ft_status(push, 0, serde_json::json!({"id": 0, "status": "healthy"})).await;
+                reply_utility(
+                    push,
+                    call_id,
+                    utility_result_value(FaultToleranceResult {
+                        request_id: ft_req.request_id,
+                        success: true,
+                        reason: None,
+                    }),
+                )
+                .await;
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        )
+        .with_fault_tolerance(true),
+        &ipc,
+    )
+    .await;
+
+    assert!(client.fault_tolerance_enabled());
+    assert!(!client.is_faulted());
+    assert_eq!(
+        serde_json::to_value(client.fault_tolerance_status()).unwrap(),
+        serde_json::json!({
+            "schema_version": 1,
+            "total_engines": 1,
+            "engines": [{"id": 0, "status": "healthy"}],
+        })
+    );
+
+    let mut status_rx = client.subscribe_fault_tolerance_status();
+    let readiness_rx = client.subscribe_readiness();
+    assert!(*readiness_rx.borrow());
+
+    // 1. Push diagnosing -> faulted, readiness withdrawn, liveness unchanged
+    push_stage_tx
+        .send(serde_json::json!({"id": 0, "status": "diagnosing"}))
+        .unwrap();
+    timeout(Duration::from_secs(2), status_rx.changed()).await.unwrap().unwrap();
+    assert!(client.is_faulted());
+    assert!(!*readiness_rx.borrow());
+    assert!(client.is_healthy());
+    assert_eq!(
+        serde_json::to_value(client.fault_tolerance_status()).unwrap(),
+        serde_json::json!({
+            "schema_version": 1,
+            "total_engines": 1,
+            "engines": [{"id": 0, "status": "diagnosing"}],
+        })
+    );
+
+    // 2. Push unhealthy with fault_info and mask -> faulted
+    push_stage_tx
+        .send(serde_json::json!({
+            "id": 0,
+            "status": "unhealthy",
+            "fault_info": "NCCL watchdog timeout",
+            "mask": [1, 0],
+        }))
+        .unwrap();
+    timeout(Duration::from_secs(2), status_rx.changed()).await.unwrap().unwrap();
+    assert!(client.is_faulted());
+    assert_eq!(
+        serde_json::to_value(client.fault_tolerance_status()).unwrap(),
+        serde_json::json!({
+            "schema_version": 1,
+            "total_engines": 1,
+            "engines": [{
+                "id": 0,
+                "status": "unhealthy",
+                "fault_info": "NCCL watchdog timeout",
+                "mask": [1, 0],
+            }],
+        })
+    );
+
+    // 3. Push dead -> still faulted
+    push_stage_tx.send(serde_json::json!({"id": 0, "status": "dead"})).unwrap();
+    timeout(Duration::from_secs(2), status_rx.changed()).await.unwrap().unwrap();
+    assert!(client.is_faulted());
+
+    // 4. Start recovery instruction; verify `recovering` state & concurrent rejection.
+    let mut params = serde_json::Map::new();
+    params.insert("abort".to_string(), serde_json::json!(true));
+    let req1 = FaultToleranceRequest {
+        instruction: "scale_down".to_string(),
+        params,
+        request_id: "ft-round-1".to_string(),
+    };
+    let req2 = FaultToleranceRequest {
+        instruction: "retry".to_string(),
+        params: serde_json::Map::new(),
+        request_id: "ft-round-2".to_string(),
+    };
+
+    let (result1, result2) = tokio::join!(client.handle_fault(req1.clone()), async {
+        let (_call_id, seen_req) =
+            timeout(Duration::from_secs(2), utility_seen_rx).await.unwrap().unwrap();
+        assert_eq!(seen_req, req1);
+        assert_eq!(
+            serde_json::to_value(client.fault_tolerance_status()).unwrap(),
+            serde_json::json!({
+                "schema_version": 1,
+                "total_engines": 1,
+                "engines": [{
+                    "id": 0,
+                    "status": "dead",
+                    "ft_state": "recovering",
+                    "last_ft_request_id": "ft-round-1",
+                }],
+            })
+        );
+        // Second concurrent recovery is rejected immediately without mutating state.
+        let rejected = client.handle_fault(req2).await;
+        assert_eq!(
+            serde_json::to_value(client.fault_tolerance_status()).unwrap()["engines"][0]["last_ft_request_id"],
+            serde_json::json!("ft-round-1")
+        );
+        complete_recovery_tx.send(()).unwrap();
+        rejected
+    });
+
+    assert_eq!(
+        result2,
+        FaultToleranceResult {
+            request_id: "ft-round-2".to_string(),
+            success: false,
+            reason: Some("another recovery is in progress".to_string()),
+        }
+    );
+    assert_eq!(
+        result1,
+        FaultToleranceResult {
+            request_id: "ft-round-1".to_string(),
+            success: true,
+            reason: None,
+        }
+    );
+    // Healthy status push replaced the entry and cleared ft_state/last_ft_request_id.
+    assert!(!client.is_faulted());
+    assert!(*readiness_rx.borrow());
+    assert_eq!(
+        serde_json::to_value(client.fault_tolerance_status()).unwrap(),
+        serde_json::json!({
+            "schema_version": 1,
+            "total_engines": 1,
+            "engines": [{"id": 0, "status": "healthy"}],
+        })
+    );
+
+    let _ = shutdown_tx.send(());
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fault_tolerance_records_failed_recovery_after_status_push_and_clears_error_on_retry() {
+    use crate::protocol::fault_tolerance::{
+        FT_UTILITY_METHOD, FaultToleranceRequest, FaultToleranceResult,
+    };
+
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        EngineId::from_engine_index(0).to_vec(),
+        move |dealer, push| {
+            Box::pin(async move {
+                // First recovery: engine pushes `dead` status then returns failure.
+                let call1 = recv_utility_call(dealer, FT_UTILITY_METHOD).await;
+                push_ft_status(push, 0, serde_json::json!({"id": 0, "status": "dead"})).await;
+                reply_utility(
+                    push,
+                    call1,
+                    utility_result_value(FaultToleranceResult {
+                        request_id: "ft-fail-1".to_string(),
+                        success: false,
+                        reason: Some("rank 1 did not respond".to_string()),
+                    }),
+                )
+                .await;
+
+                // Second recovery: returns a utility failure_message (transport/RPC error).
+                let call2 = recv_utility_call(dealer, FT_UTILITY_METHOD).await;
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
+                            call_id: call2.into(),
+                            failure_message: Some("sentinel crashed".to_string()),
+                            result: None,
+                        },
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        )
+        .with_fault_tolerance(true),
+        &ipc,
+    )
+    .await;
+
+    let res1 = client
+        .handle_fault(FaultToleranceRequest {
+            instruction: "retry".to_string(),
+            params: serde_json::Map::new(),
+            request_id: "ft-fail-1".to_string(),
+        })
+        .await;
+    assert_eq!(
+        res1,
+        FaultToleranceResult {
+            request_id: "ft-fail-1".to_string(),
+            success: false,
+            reason: Some("rank 1 did not respond".to_string()),
+        }
+    );
+    assert!(client.is_faulted());
+    assert_eq!(
+        serde_json::to_value(client.fault_tolerance_status()).unwrap(),
+        serde_json::json!({
+            "schema_version": 1,
+            "total_engines": 1,
+            "engines": [{
+                "id": 0,
+                "status": "dead",
+                "ft_state": "failed",
+                "last_ft_request_id": "ft-fail-1",
+                "ft_error": "rank 1 did not respond",
+            }],
+        })
+    );
+
+    let res2 = client
+        .handle_fault(FaultToleranceRequest {
+            instruction: "scale_down".to_string(),
+            params: serde_json::Map::new(),
+            request_id: "ft-fail-2".to_string(),
+        })
+        .await;
+    assert!(!res2.success);
+    assert_eq!(res2.request_id, "ft-fail-2");
+    assert!(
+        res2.reason.as_deref().unwrap_or("").contains("sentinel crashed"),
+        "unexpected reason: {:?}",
+        res2.reason
+    );
+    let status2 = serde_json::to_value(client.fault_tolerance_status()).unwrap();
+    assert_eq!(
+        status2["engines"][0]["ft_state"],
+        serde_json::json!("failed")
+    );
+    assert_eq!(
+        status2["engines"][0]["last_ft_request_id"],
+        serde_json::json!("ft-fail-2")
+    );
+    assert!(
+        status2["engines"][0]["ft_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("sentinel crashed")
+    );
+
+    let _ = shutdown_tx.send(());
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
 }

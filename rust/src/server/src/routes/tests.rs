@@ -1900,6 +1900,7 @@ where
                 dev_mode: true,
                 runtime_lora_updating: true,
                 scale_out: true,
+                fault_tolerance: false,
             },
         ),
         engine_task,
@@ -12970,20 +12971,28 @@ async fn provided_engine_core_llm_is_opaque() {
         Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
         RouteGates {
             dev_mode: true,
+            fault_tolerance: true,
             ..RouteGates::default()
         },
     );
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/reset_prefix_cache")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for (method, uri) in [
+        ("POST", "/reset_prefix_cache"),
+        ("GET", "/v1/fault_tolerance/status"),
+        ("POST", "/v1/fault_tolerance/apply"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
 
     engine_task.abort_and_join().await;
 }
@@ -15854,6 +15863,510 @@ async fn render_forwards_n_to_the_generate_request() {
     .await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["sampling_params"]["n"], 2, "{json}");
+}
+
+fn ft_status_outputs(engine_index: u32, payload: serde_json::Value) -> EngineCoreOutputs {
+    use vllm_engine_core_client::protocol::fault_tolerance::FT_STATUS_CALL_ID;
+    use vllm_engine_core_client::protocol::output::UtilityCallOutput;
+    use vllm_engine_core_client::protocol::utility::UtilityOutput;
+
+    UtilityCallOutput {
+        engine_index,
+        timestamp: 0.0,
+        output: UtilityOutput {
+            call_id: FT_STATUS_CALL_ID.into(),
+            failure_message: None,
+            result: Some(utility_result_value(payload)),
+        },
+    }
+    .into()
+}
+
+async fn test_fault_tolerance_app<F>(
+    enable_fault_tolerance: bool,
+    script: F,
+) -> (axum::Router, Arc<AppState>, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = vllm_engine_core_client::EngineId::from_engine_index(0).to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id,
+        move |dealer, push| script(dealer, push),
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_fault_tolerance(enable_fault_tolerance)
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let state = Arc::new(
+        AppState::new(vec!["test-model".to_string()], chat)
+            .with_engine_core_client()
+            .with_api_server_options(ApiServerOptions {
+                enable_fault_tolerance,
+                ..Default::default()
+            }),
+    );
+    (build_router(state.clone()), state, engine_task)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn fault_tolerance_routes_return_404_when_disabled() {
+    let (app, _state, _engine_task) =
+        test_fault_tolerance_app(false, |_dealer, _push| boxed_test_future(async {})).await;
+
+    let status_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/fault_tolerance/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), StatusCode::NOT_FOUND);
+
+    let apply_resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/fault_tolerance/apply")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"instruction": "retry", "request_id": "req-1"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(apply_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn fault_tolerance_apply_validates_payloads() {
+    let (mut app, _state, _engine_task) =
+        test_fault_tolerance_app(true, |_dealer, _push| boxed_test_future(async {})).await;
+
+    let cases = [
+        (json!([]), "Request body must be a JSON object."),
+        (json!({}), "'instruction' is required."),
+        (
+            json!({"instruction": "", "request_id": "r1"}),
+            "'instruction' is required.",
+        ),
+        (
+            json!({"instruction": null, "request_id": "r1"}),
+            "'instruction' is required.",
+        ),
+        (
+            json!({"instruction": "restart", "request_id": "r1"}),
+            "Invalid instruction: 'restart'.",
+        ),
+        (
+            json!({"instruction": "retry", "params": null, "request_id": "r1"}),
+            "'params' must be an object.",
+        ),
+        (
+            json!({"instruction": "retry", "params": [], "request_id": "r1"}),
+            "'params' must be an object.",
+        ),
+        (
+            json!({"instruction": "scale_down", "params": {"abort": "yes"}, "request_id": "r1"}),
+            "'abort' must be a boolean.",
+        ),
+        (
+            json!({"instruction": "retry"}),
+            "'request_id' must be a non-empty string.",
+        ),
+        (
+            json!({"instruction": "retry", "request_id": ""}),
+            "'request_id' must be a non-empty string.",
+        ),
+        (
+            json!({"instruction": "retry", "request_id": 123}),
+            "'request_id' must be a non-empty string.",
+        ),
+    ];
+
+    for (payload, expected_message) in cases {
+        let (status, body) =
+            post_json(&mut app, "/v1/fault_tolerance/apply", payload.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "payload={payload} body={body}"
+        );
+        assert_eq!(
+            body["error"]["message"], expected_message,
+            "payload={payload} body={body}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn fault_tolerance_rejects_requests_with_503_and_recovers_via_http_routes() {
+    use tokio::sync::oneshot;
+    use vllm_engine_core_client::protocol::fault_tolerance::{
+        FT_UTILITY_METHOD, FaultToleranceRequest, FaultToleranceResult,
+    };
+
+    let (push_unhealthy_tx, push_unhealthy_rx) = oneshot::channel::<()>();
+    let (utility_seen_tx, utility_seen_rx) = oneshot::channel::<FaultToleranceRequest>();
+    let (finish_recovery_tx, finish_recovery_rx) = oneshot::channel::<()>();
+    let (finish_fail_tx, finish_fail_rx) = oneshot::channel::<()>();
+
+    let (mut app, state, engine_task) = test_fault_tolerance_app(true, move |dealer, push| {
+        boxed_test_future(async move {
+            // 1. Handle initial healthy completion request.
+            let add1_frames = recv_engine_message(dealer).await;
+            let add1 = decode_add_request(&add1_frames);
+            send_outputs(
+                push,
+                engine_outputs_for_request(
+                    &add1.request_id,
+                    vec![(vec![101], Some(EngineCoreFinishReason::Stop))],
+                ),
+            )
+            .await;
+
+            // 2. Push unhealthy status with fault_info and mask.
+            push_unhealthy_rx.await.unwrap();
+            send_outputs(
+                push,
+                ft_status_outputs(
+                    0,
+                    json!({
+                        "id": 0,
+                        "status": "unhealthy",
+                        "fault_info": "NCCL error",
+                        "mask": [1, 0],
+                    }),
+                ),
+            )
+            .await;
+
+            // 3. Receive first recovery utility call (`scale_down`).
+            let frames = recv_engine_message(dealer).await;
+            assert_eq!(frames[0].as_ref(), &[0x03]);
+            let payload = vllm_engine_core_client::protocol::decode_value(&frames[1])
+                .expect("decode msgpack");
+            let array = payload.as_array().expect("utility payload array");
+            assert_eq!(array[2], rmpv::Value::from(FT_UTILITY_METHOD));
+            let call_id = array[1].as_u64().expect("call_id");
+            let args = array[3].as_array().expect("utility args array");
+            assert_eq!(args.len(), 1);
+            let ft_req: FaultToleranceRequest =
+                rmpv::ext::from_value(args[0].clone()).expect("decode FaultToleranceRequest");
+            utility_seen_tx.send(ft_req.clone()).unwrap();
+
+            // Hold recovery until test observes `recovering` & sends concurrent request.
+            finish_recovery_rx.await.unwrap();
+            send_outputs(
+                push,
+                ft_status_outputs(0, json!({"id": 0, "status": "healthy"})),
+            )
+            .await;
+            send_outputs(
+                push,
+                utility_outputs(
+                    call_id,
+                    utility_result_value(FaultToleranceResult {
+                        request_id: ft_req.request_id,
+                        success: true,
+                        reason: None,
+                    }),
+                ),
+            )
+            .await;
+
+            // 4. Serve another completion after recovery.
+            let add2_frames = recv_engine_message(dealer).await;
+            let add2 = decode_add_request(&add2_frames);
+            send_outputs(
+                push,
+                engine_outputs_for_request(
+                    &add2.request_id,
+                    vec![(vec![102], Some(EngineCoreFinishReason::Stop))],
+                ),
+            )
+            .await;
+
+            // 5. Receive second recovery (`retry`), push `dead` and reply failure.
+            let frames = recv_engine_message(dealer).await;
+            assert_eq!(frames[0].as_ref(), &[0x03]);
+            let payload = vllm_engine_core_client::protocol::decode_value(&frames[1])
+                .expect("decode msgpack");
+            let array = payload.as_array().expect("utility payload array");
+            assert_eq!(array[2], rmpv::Value::from(FT_UTILITY_METHOD));
+            let call_id2 = array[1].as_u64().expect("call_id");
+            finish_fail_rx.await.unwrap();
+            send_outputs(
+                push,
+                ft_status_outputs(0, json!({"id": 0, "status": "dead"})),
+            )
+            .await;
+            send_outputs(
+                push,
+                utility_outputs(
+                    call_id2,
+                    utility_result_value(FaultToleranceResult {
+                        request_id: "ft-round-fail".to_string(),
+                        success: false,
+                        reason: Some("recovery timed out".to_string()),
+                    }),
+                ),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    let mut status_rx = state.engine_core_client().subscribe_fault_tolerance_status();
+
+    // Initial status is healthy.
+    let status_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/fault_tolerance/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), StatusCode::OK);
+    let status_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(status_resp.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        status_json,
+        json!({
+            "schema_version": 1,
+            "total_engines": 1,
+            "engines": [{"id": 0, "status": "healthy"}],
+        })
+    );
+
+    // Completions work while healthy.
+    let (code, body) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({"model": "test-model", "prompt": "hello", "max_tokens": 1}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+
+    // Transition engine to unhealthy.
+    push_unhealthy_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), status_rx.changed())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // `/health` stays 200 OK while faulted (engine process is still alive).
+    let health_resp = app
+        .clone()
+        .oneshot(Request::builder().method("GET").uri("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(health_resp.status(), StatusCode::OK);
+
+    // Inference endpoints reject with HTTP 503 and exact Python message.
+    let expected_503 = "The engine has faulted and cannot accept new requests. \
+                        Please try again later or on a different instance.";
+    for (uri, payload) in [
+        (
+            "/v1/completions",
+            json!({"model": "test-model", "prompt": "hello", "max_tokens": 1}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 1,
+            }),
+        ),
+    ] {
+        let (code, body) = post_json(&mut app, uri, payload).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{uri} {body}");
+        assert_eq!(body["error"]["type"], "ServiceUnavailableError");
+        assert_eq!(body["error"]["message"], expected_503);
+    }
+
+    // Dispatch recovery via POST /v1/fault_tolerance/apply -> 202 Accepted.
+    let (code, apply_body) = post_json(
+        &mut app,
+        "/v1/fault_tolerance/apply",
+        json!({
+            "instruction": "scale_down",
+            "params": {"abort": true},
+            "request_id": "ft-round-1",
+        }),
+    )
+    .await;
+    assert_eq!(code, StatusCode::ACCEPTED, "{apply_body}");
+    assert_eq!(
+        apply_body,
+        json!({
+            "message": "Request accepted; poll /v1/fault_tolerance/status for updates.",
+            "request_id": "ft-round-1",
+        })
+    );
+
+    // Immediate status poll deterministically observes `recovering`.
+    let status_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/fault_tolerance/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let recovering_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(status_resp.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovering_json["engines"][0]["ft_state"], "recovering");
+    assert_eq!(
+        recovering_json["engines"][0]["last_ft_request_id"],
+        "ft-round-1"
+    );
+
+    // Concurrent second apply returns 202 but does not overwrite `last_ft_request_id`.
+    let (code2, apply_body2) = post_json(
+        &mut app,
+        "/v1/fault_tolerance/apply",
+        json!({"instruction": "retry", "request_id": "ft-round-concurrent"}),
+    )
+    .await;
+    assert_eq!(code2, StatusCode::ACCEPTED, "{apply_body2}");
+    assert_eq!(
+        state.engine_core_client().fault_tolerance_status().engines[0]["last_ft_request_id"],
+        "ft-round-1"
+    );
+
+    let seen_req = tokio::time::timeout(Duration::from_secs(2), utility_seen_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(seen_req.instruction, "scale_down");
+    assert_eq!(seen_req.request_id, "ft-round-1");
+    assert_eq!(seen_req.params.get("abort"), Some(&json!(true)));
+
+    // Complete recovery -> engine pushes healthy and replies success.
+    // Mark current status as seen before waking engine.
+    let _ = status_rx.borrow_and_update();
+    finish_recovery_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), status_rx.changed())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let recovered_status =
+        serde_json::to_value(state.engine_core_client().fault_tolerance_status()).unwrap();
+    assert_eq!(
+        recovered_status,
+        json!({
+            "schema_version": 1,
+            "total_engines": 1,
+            "engines": [{"id": 0, "status": "healthy"}],
+        })
+    );
+
+    // Inference succeeds again after healthy status push.
+    let (code, body) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({"model": "test-model", "prompt": "after recovery", "max_tokens": 1}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+
+    // Dispatch a failing recovery and verify `dead` + `ft_state: failed` + `ft_error`.
+    let (code, _) = post_json(
+        &mut app,
+        "/v1/fault_tolerance/apply",
+        json!({"instruction": "retry", "request_id": "ft-round-fail"}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::ACCEPTED);
+    let _ = status_rx.borrow_and_update();
+    finish_fail_tx.send(()).unwrap();
+
+    // Wait until `ft_state == "failed"` is published (after `dead` push).
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            status_rx.changed().await.unwrap();
+            let snapshot = status_rx.borrow().clone();
+            if snapshot.engines[0].get("ft_state").and_then(|v| v.as_str()) == Some("failed") {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let failed_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/fault_tolerance/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let failed_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(failed_resp.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        failed_json,
+        json!({
+            "schema_version": 1,
+            "total_engines": 1,
+            "engines": [{
+                "id": 0,
+                "status": "dead",
+                "ft_state": "failed",
+                "last_ft_request_id": "ft-round-fail",
+                "ft_error": "recovery timed out",
+            }],
+        })
+    );
+
+    // Ensure AppState can be dropped & shut down cleanly (no dangling Arc<AppState> in background FT task).
+    drop(app);
+    drop(status_rx);
+    AppState::shutdown(state, tokio::time::Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    engine_task.finish().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

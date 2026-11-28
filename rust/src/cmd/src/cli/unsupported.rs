@@ -229,15 +229,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub reasoning_parser_plugin: Option<Unsupported>,
 
-    /// Enable fault tolerance for detailed error recovery, such as scaling
-    /// down fault DPEngineCore.
-    #[arg(
-        long,
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_fault_tolerance: Option<Unsupported>,
-
     /// Enable elastic expert parallelism with stateless NCCL groups for DP/EP.
     #[arg(
         long,

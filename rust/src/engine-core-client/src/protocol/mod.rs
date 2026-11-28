@@ -23,6 +23,7 @@ fn is_false(v: &bool) -> bool {
 }
 
 pub mod dtype;
+pub mod fault_tolerance;
 pub mod handshake;
 pub mod kv_hints;
 pub mod logprobs;

@@ -634,6 +634,16 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_scale_out: Option<bool>,
 
+    /// Enable fault tolerance for detailed error recovery, such as scaling
+    /// down a faulted DP engine core.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_fault_tolerance: bool,
+
     /// If set to True, only enable the Tokens In<>Out endpoint.
     /// This is intended for use in a Disaggregated Everything setup.
     ///
@@ -1255,6 +1265,7 @@ impl SharedRuntimeArgs {
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.tokens_only
                 || self.enable_scale_out.unwrap_or(self.server_dev_mode),
+            enable_fault_tolerance: self.enable_fault_tolerance,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
             allow_runtime_lora_updating: self.allow_runtime_lora_updating,
@@ -1608,6 +1619,30 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
+    /// Whether fault tolerance is enabled directly (`--enable-fault-tolerance`)
+    /// or implicitly via `--fault-tolerance-config` forwarded to Python.
+    pub fn effective_enable_fault_tolerance(&self) -> bool {
+        self.runtime.enable_fault_tolerance
+            || self.managed_engine.python_args.iter().any(|arg| {
+                arg == "--fault-tolerance-config"
+                    || arg.starts_with("--fault-tolerance-config=")
+                    || arg.starts_with("--fault-tolerance-config.")
+            })
+    }
+
+    /// Validate `vllm-rs serve` arguments before spawning the managed engine.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // The managed engine is launched as a `--headless` DP node without the
+        // external-LB flags, which Python's fault tolerance requires, so it
+        // would refuse to start.
+        if self.effective_enable_fault_tolerance() {
+            anyhow::bail!(
+                "Fault tolerance is not supported by `vllm-rs serve` yet: the managed engine runs without external load balancer mode. Launch with `vllm serve --enable-fault-tolerance --data-parallel-rank <RANK>` and `VLLM_USE_RUST_FRONTEND=1` instead."
+            );
+        }
+        Ok(())
+    }
+
     /// Build the OpenAI-server runtime config used after the managed Python
     /// engine starts.
     pub fn to_frontend_config(

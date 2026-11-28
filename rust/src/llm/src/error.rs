@@ -58,6 +58,12 @@ pub enum Error {
          a different instance."
     )]
     PrefillBacklogFull,
+    /// The engine has faulted and is awaiting fault-tolerance recovery.
+    #[error(
+        "The engine has faulted and cannot accept new requests. Please try again later or on a \
+         different instance."
+    )]
+    EngineFaulted,
     /// A remote implementation rejected the request as invalid.
     #[error("{message}")]
     RemoteInvalidRequest { message: String },

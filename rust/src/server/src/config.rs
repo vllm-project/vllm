@@ -92,6 +92,9 @@ pub struct ApiServerOptions {
     pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// When `true`, enable fault tolerance status tracking, faulted-engine
+    /// request rejection, and `/v1/fault_tolerance/{apply,status}` routes.
+    pub enable_fault_tolerance: bool,
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
@@ -532,6 +535,12 @@ impl EngineCoreConfig {
             );
         }
         self.transport_mode.validate()?;
+        if config.api_server_options.enable_fault_tolerance && self.engine_count() != 1 {
+            bail!(
+                "Fault tolerance requires external load balancer mode (one engine per frontend), got engine_count={}",
+                self.engine_count()
+            );
+        }
         Ok(())
     }
 

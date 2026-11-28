@@ -211,6 +211,7 @@ mod tests {
             model_name: "test-model".to_string(),
             client_index: 0,
             engine_stats_enabled: true,
+            enable_fault_tolerance: false,
         }));
         let mut engine_sockets = Vec::new();
         for (rank, max_model_len, num_gpu_blocks, attention_block_size) in

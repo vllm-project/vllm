@@ -6,6 +6,7 @@ mod cache;
 mod checkpoint;
 mod collective_rpc;
 pub(crate) mod decisions;
+mod fault_tolerance;
 mod generative_scoring;
 mod health;
 mod inference;
@@ -103,6 +104,8 @@ struct RouteGates {
     runtime_lora_updating: bool,
     /// `--enable-scale-out`: scale-out routes, which answer 403 when disabled.
     scale_out: bool,
+    /// `--enable-fault-tolerance`: fault-tolerance control and status routes.
+    fault_tolerance: bool,
 }
 
 impl RouteGates {
@@ -111,6 +114,7 @@ impl RouteGates {
             dev_mode: state.api_server_options.server_dev_mode,
             runtime_lora_updating: state.api_server_options.allow_runtime_lora_updating,
             scale_out: state.api_server_options.enable_scale_out,
+            fault_tolerance: state.api_server_options.enable_fault_tolerance,
         }
     }
 }
@@ -128,6 +132,7 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
     let has_engine_core = state.has_engine_core_client();
     gates.dev_mode &= has_engine_core;
     gates.runtime_lora_updating &= has_engine_core;
+    gates.fault_tolerance &= has_engine_core;
 
     let mut router = Router::new()
         // Health & monitoring
@@ -230,6 +235,12 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
             .route("/checkpoint/prepare", post(checkpoint::prepare))
             .route("/checkpoint/restore", post(checkpoint::restore))
             .route("/checkpoint/status", get(checkpoint::status));
+    }
+
+    if gates.fault_tolerance {
+        router = router
+            .route("/v1/fault_tolerance/apply", post(fault_tolerance::apply))
+            .route("/v1/fault_tolerance/status", get(fault_tolerance::status));
     }
 
     if gates.runtime_lora_updating {

@@ -251,6 +251,7 @@ async fn connect_engine_core(
         model_name: metrics_model_name,
         client_index: 0,
         engine_stats_enabled: !engine_core.disable_log_stats,
+        enable_fault_tolerance: config.api_server_options.enable_fault_tolerance,
     })
     .await
     .context("failed to connect to engine core")?;

@@ -10,10 +10,11 @@ use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use futures::future::join_all;
 use parking_lot::Mutex;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use vllm_metrics::{LoraInfoExporter, METRICS};
 use zeromq::RouterSendHalf;
 
@@ -26,6 +27,10 @@ use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::{EngineSleepState, IterationMetricHandles, SchedulerStatsRecorder};
+use crate::protocol::fault_tolerance::{
+    FT_STATUS_CALL_ID, FT_UTILITY_METHOD, FaultToleranceRequest, FaultToleranceResult,
+    FaultToleranceStatusResponse,
+};
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
@@ -62,17 +67,30 @@ pub(crate) struct ClientInner {
     /// Whether the engines can accept and process new requests, maintained
     /// around the control calls this client sends.
     readiness: Arc<Readiness>,
+    /// Whether fault tolerance is enabled for this client.
+    enable_fault_tolerance: bool,
+    /// Primary managed engine rank used for fault-tolerance status and recovery.
+    ft_primary_rank: u32,
+    /// Locally-cached fault-tolerance status per managed engine rank, updated
+    /// from unsolicited `FT_STATUS_CALL_ID` pushes and recovery transitions.
+    ft_engine_status: Mutex<BTreeMap<u32, JsonMap<String, JsonValue>>>,
+    /// Watch channel publishing the latest fault-tolerance status snapshot on
+    /// every status push or recovery state transition.
+    ft_status_tx: watch::Sender<FaultToleranceStatusResponse>,
 }
 
 impl ClientInner {
     /// Create a new instance with the given input send half after the startup
     /// handshake completes.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input_send: RouterSendHalf,
         handle: Handle,
         model_name: String,
         client_index: u32,
         engine_stats_enabled: bool,
+        enable_fault_tolerance: bool,
+        engine_start_index: u32,
         engines: &[ConnectedEngine],
     ) -> Self {
         let scheduler_stats_recorder = engine_stats_enabled
@@ -88,6 +106,25 @@ impl ClientInner {
         // Every engine reports the same `max_loras`, validated before the
         // client is built.
         let max_loras = engines[0].ready_response.max_loras;
+        let engine_ranks: Vec<u32> = engines
+            .iter()
+            .enumerate()
+            .map(|(offset, engine)| {
+                engine.engine_id.engine_index().unwrap_or(engine_start_index + offset as u32)
+            })
+            .collect();
+        let ft_primary_rank = engine_ranks.first().copied().unwrap_or(engine_start_index);
+        let mut initial_ft_status = BTreeMap::new();
+        if enable_fault_tolerance {
+            for &rank in &engine_ranks {
+                initial_ft_status.insert(rank, default_healthy_ft_status(rank));
+            }
+        }
+        let initial_ft_snapshot = FaultToleranceStatusResponse {
+            schema_version: 1,
+            total_engines: engines.len(),
+            engines: initial_ft_status.values().cloned().collect(),
+        };
         Self {
             input_send,
             handle,
@@ -104,6 +141,10 @@ impl ClientInner {
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
             readiness: Arc::new(Readiness::new()),
+            enable_fault_tolerance,
+            ft_primary_rank,
+            ft_engine_status: Mutex::new(initial_ft_status),
+            ft_status_tx: watch::Sender::new(initial_ft_snapshot),
         }
     }
 
@@ -273,6 +314,214 @@ impl ClientInner {
 
     pub fn readiness(&self) -> &Arc<Readiness> {
         &self.readiness
+    }
+
+    pub fn fault_tolerance_enabled(&self) -> bool {
+        self.enable_fault_tolerance
+    }
+
+    fn build_ft_status_snapshot(
+        &self,
+        status_map: &BTreeMap<u32, JsonMap<String, JsonValue>>,
+    ) -> FaultToleranceStatusResponse {
+        FaultToleranceStatusResponse {
+            schema_version: 1,
+            total_engines: self.engine_ids.len(),
+            engines: status_map.values().cloned().collect(),
+        }
+    }
+
+    /// Cached fault-tolerance status entry of the primary managed engine.
+    pub fn fault_tolerance_engine_status(&self) -> Option<JsonMap<String, JsonValue>> {
+        self.ft_engine_status.lock().get(&self.ft_primary_rank).cloned()
+    }
+
+    /// Return whether fault tolerance is enabled and the primary managed engine
+    /// is currently not in `"healthy"` status.
+    pub fn is_faulted(&self) -> bool {
+        if !self.enable_fault_tolerance {
+            return false;
+        }
+        self.ft_engine_status
+            .lock()
+            .get(&self.ft_primary_rank)
+            .and_then(|entry| entry.get("status"))
+            .and_then(JsonValue::as_str)
+            != Some("healthy")
+    }
+
+    /// Return the current `/v1/fault_tolerance/status` payload.
+    pub fn fault_tolerance_status(&self) -> FaultToleranceStatusResponse {
+        let guard = self.ft_engine_status.lock();
+        self.build_ft_status_snapshot(&guard)
+    }
+
+    /// Subscribe to fault-tolerance status changes (pushes and recovery state
+    /// transitions).
+    pub fn subscribe_fault_tolerance_status(
+        &self,
+    ) -> watch::Receiver<FaultToleranceStatusResponse> {
+        self.ft_status_tx.subscribe()
+    }
+
+    /// Apply an unsolicited `FT_STATUS_CALL_ID` utility push from an engine.
+    pub fn handle_ft_status_push(&self, engine_index: u32, output: UtilityOutput) {
+        match output
+            .into_typed_result::<Option<JsonMap<String, JsonValue>>>("fault_tolerance_status")
+        {
+            Ok(Some(status)) => {
+                let healthy = status.get("status").and_then(JsonValue::as_str) == Some("healthy");
+                let snapshot = {
+                    let mut guard = self.ft_engine_status.lock();
+                    guard.insert(engine_index, status);
+                    self.build_ft_status_snapshot(&guard)
+                };
+                // Withdraw gRPC readiness while the engine is not healthy, so
+                // load balancers stop routing to it; liveness is unaffected.
+                if self.enable_fault_tolerance && engine_index == self.ft_primary_rank {
+                    self.readiness.set_faulted(!healthy);
+                }
+                self.ft_status_tx.send_replace(snapshot);
+                trace!(engine_index, "updated cached fault-tolerance engine status");
+            }
+            Ok(None) => {
+                trace!(engine_index, "ignoring empty fault-tolerance status push");
+            }
+            Err(error) => {
+                warn!(
+                    engine_index,
+                    error = %error.as_report(),
+                    "failed to decode fault-tolerance status push"
+                );
+            }
+        }
+    }
+
+    /// Transition the primary engine into `"recovering"` state unless another
+    /// recovery is already in progress.
+    pub fn try_begin_fault_recovery(
+        &self,
+        ft_request: &FaultToleranceRequest,
+    ) -> std::result::Result<(), FaultToleranceResult> {
+        let snapshot = {
+            let mut guard = self.ft_engine_status.lock();
+            let entry = guard
+                .entry(self.ft_primary_rank)
+                .or_insert_with(|| default_healthy_ft_status(self.ft_primary_rank));
+            if entry.get("ft_state").and_then(JsonValue::as_str) == Some("recovering") {
+                return Err(FaultToleranceResult {
+                    request_id: ft_request.request_id.clone(),
+                    success: false,
+                    reason: Some("another recovery is in progress".to_string()),
+                });
+            }
+            entry.insert(
+                "ft_state".to_string(),
+                JsonValue::String("recovering".to_string()),
+            );
+            entry.insert(
+                "last_ft_request_id".to_string(),
+                JsonValue::String(ft_request.request_id.clone()),
+            );
+            entry.remove("ft_error");
+            self.build_ft_status_snapshot(&guard)
+        };
+        self.ft_status_tx.send_replace(snapshot);
+        Ok(())
+    }
+
+    /// Execute the `handle_fault_tolerance` utility RPC after
+    /// [`Self::try_begin_fault_recovery`] succeeded, and record failure state
+    /// if recovery did not succeed.
+    pub async fn execute_fault_recovery(
+        self: &Arc<Self>,
+        ft_request: FaultToleranceRequest,
+    ) -> FaultToleranceResult {
+        let result = match self
+            .call_utility::<FaultToleranceResult, _>(FT_UTILITY_METHOD, (&ft_request,), None)
+            .await
+        {
+            Ok(mut results) => results.pop().unwrap_or_else(|| FaultToleranceResult {
+                request_id: ft_request.request_id.clone(),
+                success: false,
+                reason: Some("engine returned no fault-tolerance result".to_string()),
+            }),
+            Err(error) => FaultToleranceResult {
+                request_id: ft_request.request_id.clone(),
+                success: false,
+                reason: Some(error.to_report_string()),
+            },
+        };
+
+        if !result.success {
+            // Status pushes replace the cached entry; re-read before recording.
+            let snapshot = {
+                let mut guard = self.ft_engine_status.lock();
+                let entry = guard
+                    .entry(self.ft_primary_rank)
+                    .or_insert_with(|| default_healthy_ft_status(self.ft_primary_rank));
+                entry.insert(
+                    "ft_state".to_string(),
+                    JsonValue::String("failed".to_string()),
+                );
+                entry.insert(
+                    "last_ft_request_id".to_string(),
+                    JsonValue::String(result.request_id.clone()),
+                );
+                entry.insert(
+                    "ft_error".to_string(),
+                    match &result.reason {
+                        Some(reason) => JsonValue::String(reason.clone()),
+                        None => JsonValue::Null,
+                    },
+                );
+                self.build_ft_status_snapshot(&guard)
+            };
+            self.ft_status_tx.send_replace(snapshot);
+        }
+
+        result
+    }
+
+    /// Run a fault-tolerance recovery instruction to completion, matching
+    /// Python's `AsyncMPClient.handle_fault`.
+    pub async fn handle_fault(
+        self: &Arc<Self>,
+        ft_request: FaultToleranceRequest,
+    ) -> FaultToleranceResult {
+        if let Err(rejected) = self.try_begin_fault_recovery(&ft_request) {
+            return rejected;
+        }
+        self.execute_fault_recovery(ft_request).await
+    }
+
+    /// Dispatch a fault-tolerance recovery instruction in the background on the
+    /// client's runtime so HTTP callers can return `202 Accepted` immediately.
+    ///
+    /// Transitions `ft_state` to `"recovering"` synchronously before returning
+    /// so immediate status polls observe `"recovering"` without a scheduling
+    /// race and concurrent requests are rejected deterministically.
+    pub fn spawn_handle_fault(self: &Arc<Self>, ft_request: FaultToleranceRequest) {
+        if let Err(rejected) = self.try_begin_fault_recovery(&ft_request) {
+            error!(
+                request_id = %ft_request.request_id,
+                reason = rejected.reason.as_deref().unwrap_or("unknown"),
+                "[FT] Recovery failed"
+            );
+            return;
+        }
+        let inner = self.clone();
+        self.handle.spawn(async move {
+            let request_id = ft_request.request_id.clone();
+            let result = inner.execute_fault_recovery(ft_request).await;
+            if !result.success {
+                error!(
+                    request_id = %request_id,
+                    reason = result.reason.as_deref().unwrap_or("unknown"),
+                    "[FT] Recovery failed"
+                );
+            }
+        });
     }
 
     /// Call a typed utility method on every engine. See
@@ -642,7 +891,9 @@ pub(crate) async fn run_output_dispatcher_loop(
                 }
                 EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
-                    if inner.resolve_utility_output(utility.output) {
+                    if call_id.as_i64() == Some(FT_STATUS_CALL_ID) {
+                        inner.handle_ft_status_push(utility.engine_index, utility.output);
+                    } else if inner.resolve_utility_output(utility.output) {
                         trace!(
                             %call_id,
                             engine_index = utility.engine_index,
@@ -671,6 +922,16 @@ pub(crate) async fn run_output_dispatcher_loop(
     inner.close_registries(Arc::new(error));
 }
 
+fn default_healthy_ft_status(rank: u32) -> JsonMap<String, JsonValue> {
+    let mut entry = JsonMap::new();
+    entry.insert("id".to_string(), JsonValue::from(rank));
+    entry.insert(
+        "status".to_string(),
+        JsonValue::String("healthy".to_string()),
+    );
+    entry
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -694,6 +955,8 @@ mod tests {
             "test-model".to_string(),
             0,
             true,
+            false,
+            0,
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
                 ready_response: default_ready_response(),
@@ -720,6 +983,8 @@ mod tests {
                 "test-model".to_string(),
                 0,
                 false,
+                false,
+                0,
                 &[ConnectedEngine {
                     engine_id: engine_id.clone(),
                     ready_response: default_ready_response(),

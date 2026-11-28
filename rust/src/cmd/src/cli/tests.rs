@@ -314,6 +314,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
+                        enable_fault_tolerance: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -2508,6 +2509,7 @@ fn frontend_args_accept_json() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
+                        enable_fault_tolerance: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -3676,6 +3678,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
+                        enable_fault_tolerance: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -3977,6 +3980,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     enable_request_id_headers: false,
                     log_error_stack: false,
                     enable_scale_out: false,
+                    enable_fault_tolerance: false,
                     skip_model_name_validation: false,
                     server_dev_mode: false,
                     allow_runtime_lora_updating: false,
@@ -4131,6 +4135,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                     enable_request_id_headers: false,
                     log_error_stack: false,
                     enable_scale_out: false,
+                    enable_fault_tolerance: false,
                     skip_model_name_validation: false,
                     server_dev_mode: false,
                     allow_runtime_lora_updating: false,
@@ -4391,6 +4396,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                     enable_request_id_headers: false,
                     log_error_stack: false,
                     enable_scale_out: false,
+                    enable_fault_tolerance: false,
                     skip_model_name_validation: false,
                     server_dev_mode: false,
                     allow_runtime_lora_updating: false,
@@ -4726,4 +4732,140 @@ fn mm_processor_kwargs_reach_frontend_engine_and_render() {
         panic!("expected render args")
     };
     assert_eq!(args.into_config().mm_processor_kwargs, expected);
+}
+
+#[test]
+fn serve_rejects_fault_tolerance() {
+    use thiserror_ext::AsReport as _;
+    // The managed engine starts without the external-LB flags Python's fault
+    // tolerance requires, so `vllm-rs serve` rejects it in every DP LB mode.
+    let dp_lb_modes: &[&[&str]] = &[
+        &[],
+        &[
+            "--data-parallel-external-lb",
+            "--data-parallel-size",
+            "2",
+            "--data-parallel-rank",
+            "0",
+            "--data-parallel-rpc-port",
+            "13345",
+        ],
+        &[
+            "--data-parallel-size",
+            "2",
+            "--data-parallel-rank",
+            "1",
+            "--data-parallel-rpc-port",
+            "13345",
+        ],
+    ];
+    let ft_flags: &[&[&str]] = &[
+        &["--enable-fault-tolerance"],
+        // Forwarded to Python, where it implicitly enables fault tolerance.
+        &["--fault-tolerance-config.engine-recovery-timeout-sec", "30"],
+    ];
+    for dp_lb in dp_lb_modes {
+        for ft in ft_flags {
+            let mut argv = vec!["vllm-rs", "serve", "Qwen/Qwen3-0.6B"];
+            argv.extend_from_slice(ft);
+            argv.extend_from_slice(dp_lb);
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            let Command::Serve(args) = cli.command else {
+                panic!("expected serve args");
+            };
+            assert!(args.effective_enable_fault_tolerance(), "{argv:?}");
+            let err = args.validate().unwrap_err();
+            assert!(
+                err.to_report_string()
+                    .contains("Fault tolerance is not supported by `vllm-rs serve` yet"),
+                "unexpected error for {argv:?}: {}",
+                err.to_report_string()
+            );
+        }
+    }
+
+    // Without fault tolerance, external LB mode still validates.
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-rank",
+        "0",
+        "--data-parallel-rpc-port",
+        "13345",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    args.validate().unwrap();
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    assert!(!engine.python_args.iter().any(|arg| arg == "--enable-fault-tolerance"));
+}
+
+#[test]
+fn frontend_fault_tolerance_requires_single_engine() {
+    use thiserror_ext::AsReport as _;
+    // `vllm-rs frontend` accepts `enable_fault_tolerance: true` via `--args-json`
+    // and rejects `engine_count > 1` during config validation.
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "999997",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--engine-start-index",
+        "1",
+        "--engine-count",
+        "1",
+        "--data-parallel-size",
+        "2",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_fault_tolerance":true,"fault_tolerance_config":{"engine_recovery_timeout_sec":30}}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert!(config.server.api_server_options.enable_fault_tolerance);
+    config.server.validate().unwrap();
+    config.engine_core.validate(&config.server).unwrap();
+
+    let cli_multi = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "999997",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--engine-start-index",
+        "0",
+        "--engine-count",
+        "2",
+        "--data-parallel-size",
+        "2",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_fault_tolerance":true}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args_multi) = cli_multi.command else {
+        panic!("expected frontend args");
+    };
+    let multi_config = args_multi.into_config();
+    multi_config.server.validate().unwrap();
+    let err = multi_config.engine_core.validate(&multi_config.server).unwrap_err();
+    assert!(
+        err.to_report_string()
+            .contains("Fault tolerance requires external load balancer mode"),
+        "unexpected error: {}",
+        err.to_report_string()
+    );
 }

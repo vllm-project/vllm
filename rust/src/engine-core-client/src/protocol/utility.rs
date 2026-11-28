@@ -188,6 +188,12 @@ impl From<u64> for UtilityCallId {
     }
 }
 
+impl From<i64> for UtilityCallId {
+    fn from(value: i64) -> Self {
+        Self(value.into())
+    }
+}
+
 impl TryFrom<Value> for UtilityCallId {
     type Error = String;
 

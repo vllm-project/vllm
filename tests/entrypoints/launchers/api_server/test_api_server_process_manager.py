@@ -994,3 +994,62 @@ def test_rust_frontend_spawn_failure_cleans_up_listeners(tmp_path):
     for listener in (input_listener, output_listener):
         assert listener.socket.fileno() == -1
         assert not os.path.exists(listener.address.removeprefix("ipc://"))
+
+
+@pytest.mark.parametrize(
+    "cli_args",
+    [
+        ["--enable-fault-tolerance"],
+        ["--fault-tolerance-config", '{"engine_recovery_timeout_sec": 30}'],
+    ],
+)
+def test_rust_frontend_forwards_fault_tolerance_flags(monkeypatch, cli_args):
+    """Both --enable-fault-tolerance and --fault-tolerance-config enable FT in Rust."""
+    import json
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", *cli_args]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=2,
+        )
+    finally:
+        sock.close()
+
+    [cmd] = popen_calls
+    args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    assert args_json["enable_fault_tolerance"] is True

@@ -162,7 +162,8 @@ impl Error {
                 LlmError::EngineCoreClient(error) => engine_core_error_kind(error),
                 LlmError::Unavailable { .. }
                 | LlmError::QueueFull
-                | LlmError::PrefillBacklogFull => ErrorKind::Unavailable,
+                | LlmError::PrefillBacklogFull
+                | LlmError::EngineFaulted => ErrorKind::Unavailable,
                 LlmError::SamplingMaskTokenCountMismatch { .. }
                 | LlmError::AuxOutputRows(_)
                 | LlmError::Remote { .. } => ErrorKind::Internal,
