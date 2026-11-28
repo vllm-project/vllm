@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -30,9 +32,13 @@ class RLOfflineMixin(OfflineInferenceMixin):
         """Release the trainer connection without shutting down inference."""
         self.llm_engine.collective_rpc("shutdown_weight_transfer_engine")
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(
+        self,
+        lora_adapter: dict[str, Any] | None = None,
+    ) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc("start_weight_update")
+        kwargs = {"lora_adapter": lora_adapter} if lora_adapter is not None else None
+        self.llm_engine.collective_rpc("start_weight_update", kwargs=kwargs)
 
     def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""

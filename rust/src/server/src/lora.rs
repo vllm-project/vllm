@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Context as _;
 use indexmap::IndexMap;
 use itertools::Itertools as _;
+use serde_json::{Value as JsonValue, json};
 use thiserror::Error;
 use thiserror_ext::Macro;
 use tokio::sync::{Mutex, RwLock};
@@ -142,12 +143,33 @@ impl LoraModelResolution {
     }
 }
 
+/// Input specification for one LoRA adapter in `/start_weight_update`.
+#[derive(Debug, Clone)]
+pub(crate) struct LoraWeightUpdateSpec {
+    pub lora_name: String,
+    pub lora_int_id: Option<u64>,
+    pub peft_config: JsonValue,
+    pub base_model_name: Option<String>,
+    pub is_3d_lora_weight: bool,
+}
+
+/// Resolved LoRA adapter metadata and worker RPC payload for `/start_weight_update`.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedLoraWeightUpdate {
+    pub loaded: LoadedLora,
+    pub worker_spec: JsonValue,
+}
+
 /// Runtime registry for dynamically loaded LoRA adapters.
 pub(crate) struct LoraManager {
     /// Dynamically loaded LoRA adapters keyed by public model name, in load order.
     adapters: RwLock<IndexMap<String, LoadedLora>>,
     /// Monotonic adapter id allocator. LoRA ids are one-indexed.
     id_counter: AtomicU64,
+    /// Monotonic revision counter for synthetic in-memory adapter paths.
+    memory_rev_counter: AtomicU64,
+    /// Pending LoRA adapter staged by `/start_weight_update` until `/finish_weight_update`.
+    pending_weight_update: Mutex<Option<LoadedLora>>,
     /// Serialize dynamic LoRA registry updates around engine utility calls.
     update_lock: Mutex<()>,
     /// Modalities whose `--default-mm-loras` adapter, registered under the
@@ -271,6 +293,8 @@ impl LoraManager {
         Self {
             adapters: RwLock::new(IndexMap::new()),
             id_counter: AtomicU64::new(0),
+            memory_rev_counter: AtomicU64::new(0),
+            pending_weight_update: Mutex::new(None),
             update_lock: Mutex::new(()),
             default_mm_modalities: Vec::new(),
         }
@@ -440,6 +464,79 @@ impl LoraManager {
         })?;
 
         Ok(self.adapters.write().await.shift_remove(lora_name).unwrap_or(adapter))
+    }
+
+    /// Validate and resolve one LoRA adapter spec for `/start_weight_update`.
+    pub async fn prepare_weight_update(
+        &self,
+        base_model_names: &[String],
+        spec: &LoraWeightUpdateSpec,
+    ) -> Result<PreparedLoraWeightUpdate, LoadLoraError> {
+        let lora_name = spec.lora_name.trim().to_string();
+        if lora_name.is_empty() {
+            bail_invalid_adapter!("lora_name must not be empty");
+        }
+        if base_model_names.contains(&lora_name) {
+            return Err(LoadLoraError::BaseModelName { lora_name });
+        }
+        if !spec.peft_config.is_object() {
+            bail_invalid_adapter!(
+                "LoRA adapter `{lora_name}` field `peft_config` must be a JSON object"
+            );
+        }
+
+        let adapters = self.adapters.read().await;
+        let lora_int_id = match spec.lora_int_id {
+            Some(0) => bail_invalid_adapter!("`lora_int_id` must be >= 1"),
+            Some(id) => id,
+            None => adapters
+                .get(&lora_name)
+                .map(|existing| existing.lora_int_id)
+                .unwrap_or_else(|| self.id_counter.fetch_add(1, Ordering::Relaxed) + 1),
+        };
+        drop(adapters);
+
+        let rev = self.memory_rev_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let lora_path = format!("memory://{lora_name}@{rev}");
+        let base_model_name = spec
+            .base_model_name
+            .as_ref()
+            .filter(|name| base_model_names.contains(name))
+            .cloned();
+
+        let worker_spec = json!({
+            "lora_name": lora_name,
+            "lora_int_id": lora_int_id,
+            "lora_path": lora_path,
+            "peft_config": spec.peft_config,
+            "base_model_name": base_model_name,
+            "is_3d_lora_weight": spec.is_3d_lora_weight,
+        });
+        let loaded = LoadedLora {
+            lora_name,
+            lora_int_id,
+            lora_path,
+            base_model_name,
+            is_3d_lora_weight: spec.is_3d_lora_weight,
+        };
+        Ok(PreparedLoraWeightUpdate {
+            loaded,
+            worker_spec,
+        })
+    }
+
+    pub async fn set_pending_weight_update(&self, pending: Option<LoadedLora>) {
+        *self.pending_weight_update.lock().await = pending;
+    }
+
+    pub async fn take_pending_weight_update(&self) -> Option<LoadedLora> {
+        self.pending_weight_update.lock().await.take()
+    }
+
+    /// Publish a committed LoRA adapter into the frontend registry.
+    pub async fn commit_weight_update(&self, adapter: LoadedLora) {
+        let _guard = self.update_lock.lock().await;
+        self.adapters.write().await.insert(adapter.lora_name.clone(), adapter);
     }
 }
 

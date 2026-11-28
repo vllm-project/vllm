@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -21,8 +22,65 @@ from vllm.v1.engine import PauseMode
 logger = init_logger(__name__)
 
 
+class LoRAAdapterUpdateRequest(BaseModel):
+    """Specification for one LoRA adapter in `/start_weight_update`."""
+
+    lora_name: str
+    peft_config: dict[str, Any]
+    lora_int_id: int | None = None
+    base_model_name: str | None = None
+    is_3d_lora_weight: bool = False
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
+
+
+def _lora_summary(spec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "lora_name": spec["lora_name"],
+        "lora_int_id": spec["lora_int_id"],
+        "lora_path": spec["lora_path"],
+    }
+
+
+def _prepare_lora_spec_fallback(
+    raw_request: Request,
+    adapter: dict[str, Any],
+) -> dict[str, Any]:
+    """Fallback spec resolution when `openai_serving_models` is absent."""
+    lora_name = str(adapter.get("lora_name", "")).strip()
+    if not lora_name:
+        raise ValueError("'lora_name' must be a non-empty string.")
+    registry: dict[str, dict[str, Any]] = getattr(
+        raw_request.app.state, "_rl_lora_registry", {}
+    )
+    raw_request.app.state._rl_lora_registry = registry
+    next_id: int = getattr(raw_request.app.state, "_rl_lora_next_id", 0)
+    next_rev: int = getattr(raw_request.app.state, "_rl_lora_next_rev", 0)
+
+    raw_int_id = adapter.get("lora_int_id")
+    if raw_int_id is not None:
+        lora_int_id = int(raw_int_id)
+        if lora_int_id < 1:
+            raise ValueError(f"'lora_int_id' must be >= 1, got {lora_int_id}.")
+    elif lora_name in registry:
+        lora_int_id = registry[lora_name]["lora_int_id"]
+    else:
+        next_id += 1
+        lora_int_id = next_id
+
+    next_rev += 1
+    raw_request.app.state._rl_lora_next_id = next_id
+    raw_request.app.state._rl_lora_next_rev = next_rev
+    return {
+        "lora_name": lora_name,
+        "lora_int_id": lora_int_id,
+        "lora_path": f"memory://{lora_name}@{next_rev}",
+        "peft_config": adapter["peft_config"],
+        "base_model_name": adapter.get("base_model_name"),
+        "is_3d_lora_weight": bool(adapter.get("is_3d_lora_weight", False)),
+    }
 
 
 router = APIRouter()
@@ -179,10 +237,46 @@ async def shutdown_weight_transfer_engine(raw_request: Request):
 
 
 @router.post("/start_weight_update")
-async def start_weight_update(raw_request: Request):
+async def start_weight_update(
+    raw_request: Request,
+    lora_adapter: Annotated[LoRAAdapterUpdateRequest | None, Body(embed=True)] = None,
+):
+    client = engine_client(raw_request)
+    if lora_adapter is None:
+        with weight_operation_metrics().record("start"):
+            await client.start_weight_update()
+        raw_request.app.state._pending_lora_weight_update = None
+        return JSONResponse(content={"message": "Weight update started"})
+
+    vllm_config = getattr(client, "vllm_config", None)
+    if vllm_config is not None and getattr(vllm_config, "lora_config", None) is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="LoRA is not enabled on this server. Start vLLM with --enable-lora.",
+        )
+
+    raw_spec = lora_adapter.model_dump()
+    models = getattr(raw_request.app.state, "openai_serving_models", None)
+    try:
+        if models is not None:
+            resolved_spec = models.prepare_lora_weight_update(raw_spec)
+        else:
+            resolved_spec = _prepare_lora_spec_fallback(raw_request, raw_spec)
+    except ValueError as err:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=str(err),
+        ) from err
+
     with weight_operation_metrics().record("start"):
-        await engine_client(raw_request).start_weight_update()
-    return JSONResponse(content={"message": "Weight update started"})
+        await client.start_weight_update(lora_adapter=resolved_spec)
+    raw_request.app.state._pending_lora_weight_update = resolved_spec
+    return JSONResponse(
+        content={
+            "message": "Weight update started",
+            "lora_adapter": _lora_summary(resolved_spec),
+        }
+    )
 
 
 @router.post("/start_draft_weight_update")
@@ -198,9 +292,13 @@ async def update_weights(
     update_info: Annotated[WeightTransferUpdatePayload, Body(embed=True)],
 ):
     with weight_operation_metrics().record("update"):
-        await engine_client(raw_request).update_weights(
-            request=WeightTransferUpdateRequest(update_info=update_info)
-        )
+        try:
+            await engine_client(raw_request).update_weights(
+                request=WeightTransferUpdateRequest(update_info=update_info)
+            )
+        except BaseException:
+            raw_request.app.state._pending_lora_weight_update = None
+            raise
     return JSONResponse(content={"message": "Weights updated"})
 
 
@@ -209,12 +307,33 @@ async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
     baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
+    reset_prefix_cache: Annotated[bool | None, Body(embed=True)] = None,
 ):
     """Finish the weight update; with a baseline, also compare the weights."""
     client = engine_client(raw_request)
+    pending_lora: dict[str, Any] | None = getattr(
+        raw_request.app.state, "_pending_lora_weight_update", None
+    )
+    raw_request.app.state._pending_lora_weight_update = None
+
     with weight_operation_metrics().record("finish"):
         await client.finish_weight_update(weight_version)
+
     content: dict[str, Any] = {"message": "Weight update finished"}
+    if pending_lora is not None:
+        models = getattr(raw_request.app.state, "openai_serving_models", None)
+        if models is not None:
+            models.commit_lora_weight_update(pending_lora)
+        else:
+            registry: dict[str, dict[str, Any]] = getattr(
+                raw_request.app.state, "_rl_lora_registry", {}
+            )
+            registry[pending_lora["lora_name"]] = pending_lora
+        content["lora_adapter"] = _lora_summary(pending_lora)
+
+    if reset_prefix_cache is True:
+        await client.reset_prefix_cache()
+
     if baseline is not None:
         content |= _compare(await _weight_checksums(client), baseline)
     return JSONResponse(content=content)

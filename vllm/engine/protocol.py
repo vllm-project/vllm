@@ -333,7 +333,10 @@ class EngineClient(ABC):
         """Release the trainer connection without shutting down inference."""
         raise NotImplementedError
 
-    async def start_weight_update(self) -> None:
+    async def start_weight_update(
+        self,
+        lora_adapter: dict[str, Any] | None = None,
+    ) -> None:
         """Start a new weight update."""
         raise NotImplementedError
 
