@@ -97,3 +97,12 @@ GPTQModel quantized models are also supported directly through the LLM entrypoin
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-"*50)
     ```
+
+## Asymmetric (`sym=False`) checkpoints
+
+A GPTQ checkpoint quantized with `sym=False` stores a zero point per group next to the scale.
+vLLM loads 4-bit asymmetric GPTQ checkpoints on Intel GPUs (XPU) for linear layers. No flag is needed: the `sym` field of the
+checkpoint's quantization config selects the path, and both the `gptq` and `gptq_v2` checkpoint formats are read.
+
+The following fail at load with an error: asymmetric checkpoints on other platforms, 8-bit asymmetric checkpoints, asymmetric MoE
+expert weights, and asymmetric checkpoints with `VLLM_BATCH_INVARIANT=1`. Symmetric checkpoints are not affected.
