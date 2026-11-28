@@ -31,6 +31,7 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+    from vllm.v1.session.protocol import SessionBinding
 
 
 @dataclass(slots=True)
@@ -210,6 +211,8 @@ class Request:
         # trace_headers
         self.trace_headers = trace_headers
         self.session_id = session_id
+        # Set by the session resolver when session KV reuse is enabled.
+        self.session_binding: SessionBinding | None = None
         self.kv_hints = kv_hints
 
         # True if this request is scheduled as a non-final prefill chunk.
