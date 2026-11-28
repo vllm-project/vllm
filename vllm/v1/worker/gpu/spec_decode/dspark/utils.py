@@ -12,16 +12,41 @@ from vllm.v1.worker.gpu.spec_decode.dspark.config import dspark_draft_supports_e
 logger = init_logger(__name__)
 
 
+def _shares_target_kv(draft_model_config: ModelConfig) -> bool:
+    """DeepSeek-V4 drafts read the target KV layout. Qwen drafts do not."""
+    return draft_model_config.hf_config.model_type in ("deepseek_v4", "deepseek_v41")
+
+
+def _resolve_draft_kv_cache_dtype(
+    explicit_kv_cache_dtype: str | None,
+    target_cache_dtype: str | None,
+    shares_target_kv: bool,
+) -> str | None:
+    """Cache dtype for the DSpark draft model's own KV cache.
+
+    An explicit speculative ``kv_cache_dtype`` always wins. A Qwen-style draft
+    behind an UltraQuant target gets an unquantized (``auto``) cache. That is
+    the measured UltraQuant DSpark config. Any other case keeps the target's
+    cache dtype.
+    """
+    if explicit_kv_cache_dtype is not None:
+        return explicit_kv_cache_dtype
+    if target_cache_dtype == "ultraquant_4bit" and not shares_target_kv:
+        return "auto"
+    return None
+
+
 def _resolve_dspark_attention_backend(
     draft_model_config: ModelConfig,
     draft_backend: AttentionBackendEnum | None,
     target_backend: AttentionBackendEnum | None,
+    target_kv_cache_dtype: str | None = None,
 ) -> AttentionBackendEnum | None:
     if draft_backend is not None:
         return draft_backend
     # DeepSeek-V4(.1) draft layers share the target's KV-cache layout. Other
     # DSpark architectures may use a different attention kind.
-    if draft_model_config.hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
+    if _shares_target_kv(draft_model_config):
         if target_backend is not None:
             logger.info_once(
                 "Using the target model's %s attention backend for the "
@@ -29,6 +54,16 @@ def _resolve_dspark_attention_backend(
                 target_backend.name,
             )
         return target_backend
+    # UltraQuant pages are LBNHC, which shipping AITER FA does not allocate.
+    # The DSpark draft reads a sink plus the last 2048 tokens through that
+    # layout. The sink is 4 tokens rounded up to whole KV pages. This is the
+    # default for the pair, not an environment switch.
+    if target_kv_cache_dtype == "ultraquant_4bit":
+        logger.info_once(
+            "DSpark draft attention is ROCM_AITER_FA_DSPARK because the "
+            "target KV cache is ultraquant_4bit."
+        )
+        return AttentionBackendEnum.ROCM_AITER_FA_DSPARK
     return None
 
 
@@ -94,7 +129,21 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         draft_model_config,
         speculative_config.attention_backend,
         vllm_config.attention_config.backend,
+        vllm_config.cache_config.cache_dtype,
     )
+    # The draft does not share UltraQuant slots, so it takes its own cache
+    # dtype. Behind an UltraQuant target the default is auto, the measured
+    # UltraQuant DSpark config.
+    draft_kv_cache_dtype = _resolve_draft_kv_cache_dtype(
+        speculative_config.kv_cache_dtype,
+        vllm_config.cache_config.cache_dtype,
+        _shares_target_kv(draft_model_config),
+    )
+    if speculative_config.kv_cache_dtype is None and draft_kv_cache_dtype == "auto":
+        logger.info_once(
+            "DSpark draft KV cache is auto (unquantized) because the target "
+            "KV cache is ultraquant_4bit."
+        )
 
     draft_vllm_config = speculative_config.apply_draft_overrides(
         replace(
@@ -113,9 +162,9 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             cache_config=(
                 replace(
                     vllm_config.cache_config,
-                    cache_dtype=speculative_config.kv_cache_dtype,
+                    cache_dtype=draft_kv_cache_dtype,
                 )
-                if speculative_config.kv_cache_dtype is not None
+                if draft_kv_cache_dtype is not None
                 else vllm_config.cache_config
             ),
             load_config=get_draft_load_config(vllm_config),

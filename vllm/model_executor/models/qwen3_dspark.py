@@ -221,6 +221,31 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             ),
         )
         self.confidence_head: DSparkConfidenceHead | None = None
+        # The draft kernel reads a sink plus the last 2048 tokens. The sink is
+        # 4 tokens rounded up to whole KV pages.
+        # The draft model is built with its own cache dtype, so this cannot
+        # key off the target's ultraquant_4bit. Key off the windowed backend.
+        # The attention impl was already built with no sliding window; only the
+        # cache manager sees this window.
+        backend = vllm_config.attention_config.backend
+        if backend is not None and backend.name == "ROCM_AITER_FA_DSPARK":
+            from vllm.v1.attention.ops.dspark_draft_window import (
+                DSPARK_DRAFT_SINK,
+                DSPARK_DRAFT_WINDOW,
+            )
+
+            for layer in self.layers:
+                attn = layer.self_attn.attn
+                if attn.sliding_window is None:
+                    attn.sliding_window = DSPARK_DRAFT_WINDOW
+                    attn.kv_sink_len = DSPARK_DRAFT_SINK
+            logger.info(
+                "DSpark draft KV is a %d-token sink, rounded up to whole KV "
+                "pages, plus the last %d tokens. "
+                "The UltraQuant target cache is not padded up to a full draft page.",
+                DSPARK_DRAFT_SINK,
+                DSPARK_DRAFT_WINDOW,
+            )
         if getattr(config, "enable_confidence_head", False):
             with_markov = getattr(config, "confidence_head_with_markov", False)
             input_dim = config.hidden_size
