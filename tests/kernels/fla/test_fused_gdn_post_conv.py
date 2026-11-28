@@ -19,6 +19,7 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp 
     fused_gdn_decode_post_conv_mtp_triton,
 )
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (
+    _fused_post_conv_kernel,
     fused_post_conv_prep,
 )
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
@@ -517,3 +518,54 @@ def test_fused_post_conv_prep_strided_ba_bitwise() -> None:
     )
     for r, g in zip(ref, got, strict=True):
         torch.testing.assert_close(g, r, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="the b/a alignment specialization is dropped on ROCm only",
+)
+@pytest.mark.parametrize("HV", [8, 12])
+@torch.inference_mode()
+def test_fused_post_conv_prep_packed_ba_reuses_contiguous_variants(HV: int) -> None:
+    """Packed b/a chunk views must run the kernel variants compiled for
+    contiguous b/a, so a warm-up with either layout covers both."""
+    # Specialized on alignment, the layouts compile different variants: at HV 8
+    # by the b/a row strides (8 contiguous, 16 packed), at HV 12 by the address
+    # of the packed a (24 bytes into the row).
+    dtype = torch.bfloat16
+    device = "cuda"
+    H, K, V = 2, 128, 128
+    qkv_dim = 2 * H * K + HV * V
+    A_log = torch.zeros(HV, dtype=torch.float32, device=device)
+    dt_bias = torch.zeros(HV, dtype=torch.float32, device=device)
+    kernel_cache = _fused_post_conv_kernel.device_caches[
+        torch.accelerator.current_device_index()
+    ][0]
+    kernel_cache.clear()
+
+    def run(num_tokens: int, packed: bool) -> None:
+        if packed:
+            ba = torch.zeros(num_tokens, 2 * HV, dtype=dtype, device=device)
+            b, a = ba.chunk(2, dim=-1)
+        else:
+            a = torch.zeros(num_tokens, HV, dtype=dtype, device=device)
+            b = torch.zeros(num_tokens, HV, dtype=dtype, device=device)
+        fused_post_conv_prep(
+            conv_output=torch.zeros(num_tokens, qkv_dim, dtype=dtype, device=device),
+            a=a,
+            b=b,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            num_k_heads=H,
+            head_k_dim=K,
+            head_v_dim=V,
+        )
+
+    # One length per token-count class: 1, a multiple of 16, any other.
+    lengths = (1, 16, 37)
+    for num_tokens in lengths:
+        run(num_tokens, packed=False)
+    contiguous = set(kernel_cache)
+    for num_tokens in lengths:
+        run(num_tokens, packed=True)
+    assert set(kernel_cache) == contiguous
