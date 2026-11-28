@@ -1913,6 +1913,8 @@ class Worker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        if self.worker_sentinel is not None:
+            self.worker_sentinel.shutdown()
         self.elastic_ep_executor.shutdown()
 
         # Release GPU resources held by the model runner so that memory

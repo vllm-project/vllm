@@ -3,6 +3,7 @@
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
+from typing import Any
 from weakref import WeakValueDictionary
 
 import torch
@@ -249,6 +250,10 @@ class DeviceCommunicatorBase:
         self.use_all2all = self.is_ep_communicator and use_all2all
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
+
+    def retire_device_collectives(self) -> "DeviceCommunicatorBase":
+        """Retire stale device collectives after fault-tolerant scale-down."""
+        return FTOnlyCommunicator(self)
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
@@ -505,3 +510,50 @@ class DeviceCommunicatorBase:
 
     def batch_isend_irecv(self, p2p_ops: list):
         raise NotImplementedError
+
+
+class FTOnlyCommunicator(DeviceCommunicatorBase):
+    """Retired device communicator retaining only fault-tolerant all2all."""
+
+    _ALL2ALL_METHODS = frozenset(
+        {
+            "dispatch_router_logits",
+            "dispatch",
+            "combine",
+            "allocate_combine_input",
+            "combine_into_output",
+        }
+    )
+
+    def __init__(self, original: DeviceCommunicatorBase):
+        self.unique_name = original.unique_name
+        self.all2all_manager = original.all2all_manager
+        if self.all2all_manager is not None and not (
+            self.all2all_manager.support_fault_tolerance
+        ):
+            raise ValueError("Retirement requires fault-tolerant all2all")
+        original.all2all_manager = None
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in FTOnlyCommunicator._ALL2ALL_METHODS:
+            assert self.all2all_manager is not None
+            return getattr(self.all2all_manager, name)
+        value = super().__getattribute__(name)
+        if (
+            callable(value)
+            and name not in {"retire_device_collectives", "destroy"}
+            and not (name.startswith("__") and name.endswith("__"))
+        ):
+            raise RuntimeError(
+                f"Device collectives for {self.unique_name!r} are retired; "
+                f"{name!r} is unavailable"
+            )
+        return value
+
+    def retire_device_collectives(self) -> "FTOnlyCommunicator":
+        return self
+
+    def destroy(self):
+        if self.all2all_manager is not None:
+            self.all2all_manager.destroy()
+            self.all2all_manager = None

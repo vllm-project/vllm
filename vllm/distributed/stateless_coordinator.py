@@ -11,6 +11,7 @@ from vllm.distributed.parallel_state import (
     TensorMetadata,
     _get_unique_name,
     _register_group,
+    _RetiredDeviceGroup,
     _split_tensor_dict,
 )
 from vllm.distributed.utils import (
@@ -136,6 +137,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         self.cpu_group = self_cpu_group
         self.device_group = self_device_group
         self.tcp_store_group = self_tcp_store_group
+        self.dead_dp_ranks: set[int] = set()
 
         if current_platform.is_cuda_alike():
             visible_device_index = (
@@ -182,7 +184,9 @@ class StatelessGroupCoordinator(GroupCoordinator):
         if self.device_communicator:
             self.device_communicator.destroy()
         if self.device_group:
-            stateless_destroy_torch_distributed_process_group(self.device_group)
+            device_group = self.device_group
+            if not isinstance(device_group, _RetiredDeviceGroup):
+                stateless_destroy_torch_distributed_process_group(device_group)
         if self.cpu_group:
             stateless_destroy_torch_distributed_process_group(self.cpu_group)
 

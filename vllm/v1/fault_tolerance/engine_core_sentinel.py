@@ -354,6 +354,7 @@ class EngineCoreSentinel:
 
         new_dead = self._dead_dp_ranks | newly_dead
         ft_request.params["dead_dp_ranks"] = sorted(new_dead)
+        ft_request.params["newly_dead_dp_ranks"] = sorted(newly_dead)
         self._prepare_round(ft_request, dead_ranks=new_dead)
         self._recover_and_vote(ft_request, terminal=True)
         # Commit the dead set only after the full recovery succeeded.

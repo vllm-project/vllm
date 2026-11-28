@@ -520,6 +520,17 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         if make_active:
             state.active_ep_size = ep_size
 
+    def disconnect_failed_ranks(self, ranks: list[int]) -> None:
+        """Disconnect already-masked failed peers, preserving original EP slots.
+
+        EP sizes describe the original slot range, not the live rank count.
+        The caller must mask failed ranks before disconnecting them.
+        """
+        with NixlEPAll2AllManager._lock:
+            state = NixlEPAll2AllManager._buffer
+            assert state is not None
+            state.buffer.disconnect_ranks(ranks)
+
     def _disconnect_to_ep_size(self, ep_size: int) -> None:
         assert NixlEPAll2AllManager._buffer is not None
         state = NixlEPAll2AllManager._buffer

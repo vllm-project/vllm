@@ -12,6 +12,7 @@ import torch.distributed
 import vllm.envs as envs
 from tests.utils import ensure_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (
@@ -20,6 +21,7 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     graph_capture,
     init_distributed_environment,
+    init_model_parallel_group,
 )
 from vllm.utils.system_utils import update_environment_variables
 
@@ -79,6 +81,60 @@ def worker_fn():
 )
 def test_pynccl():
     distributed_run(worker_fn, 2)
+
+
+def test_ft_only_communicator_rejects_inherited_cuda_operations():
+    group = torch.distributed.ProcessGroup(0, 1)
+    original = CudaCommunicator(
+        group,
+        device=torch.device("cpu"),
+        device_group=group,
+        unique_name="dp:test",
+        global_ranks=[0],
+        global_world_size=1,
+    )
+    communicator = original.retire_device_collectives()
+    try:
+        for name in ("suspend", "resume", "checkpoint_prepare", "checkpoint_restore"):
+            with pytest.raises(RuntimeError, match="Device collectives.*retired"):
+                getattr(communicator, name)
+    finally:
+        communicator.destroy()
+        original.destroy()
+
+
+@worker_fn_wrapper
+def retire_faulted_nccl_worker_fn():
+    world = get_world_group()
+    group = init_model_parallel_group(
+        [world.ranks], world.local_rank, "nccl", group_name="dp"
+    )
+    try:
+        tensor = torch.ones(1, device=world.device)
+        torch.distributed.all_reduce(tensor, group=group.device_group)
+        torch.accelerator.synchronize()
+        torch.distributed.barrier(group=group.cpu_group)
+        cleanup = group.retire_device_collectives()
+        assert cleanup is not None
+        with pytest.raises(RuntimeError, match="Device collectives.*retired"):
+            group.all_reduce(tensor)
+        with pytest.raises(RuntimeError, match="Device collectives.*retired"):
+            group.broadcast(tensor)
+        assert group.retire_device_collectives() is None
+        cleanup()
+        torch.distributed.barrier(group=group.cpu_group)
+        tensor = torch.ones(1, device="cpu")
+        group.cpu_all_reduce_(tensor)
+        assert tensor.item() == world.world_size
+    finally:
+        group.destroy()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+)
+def test_retire_faulted_nccl_rejects_device_collectives_and_preserves_cpu_group():
+    distributed_run(retire_faulted_nccl_worker_fn, 2)
 
 
 @worker_fn_wrapper

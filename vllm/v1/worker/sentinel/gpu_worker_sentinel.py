@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -26,6 +28,7 @@ from vllm.distributed.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.serial_utils import run_method
@@ -105,6 +108,12 @@ class WorkerSentinel:
             raise ValueError("Fault tolerance does not support MoE draft models yet.")
         if worker.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError("Fault tolerance does not support PCP yet.")
+        self._device_cleanup_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="FTDeviceCleanup"
+        )
+
+    def shutdown(self) -> None:
+        self._device_cleanup_executor.shutdown()
 
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
@@ -201,8 +210,21 @@ class WorkerSentinel:
         # group reinit; placement is fixed by the redistribution below.
         model_runner.eep_eplb_suppressed = True
         self.retry(ft_request)
+        if self.worker.parallel_config.all2all_backend == "nixl_ep":
+            newly_dead_ep_ranks = compute_dead_ep_ranks(
+                ft_request.params["newly_dead_dp_ranks"], tp_size, pcp_size
+            )
+            get_ep_all2all_manager().disconnect_failed_ranks(
+                sorted(newly_dead_ep_ranks)
+            )
 
         self._redistribute_experts(dead_ep_ranks)
+
+        retired = []
+        for group in (get_dp_group(), get_ep_group(), get_eplb_group()):
+            if (cleanup := group.retire_device_collectives()) is not None:
+                retired.append(cleanup)
+        self._device_cleanup_executor.submit(self._run_device_cleanup, retired)
 
         logger.info(
             "[FT] Worker scale_down complete: dp_group_size=%d, "
@@ -211,6 +233,19 @@ class WorkerSentinel:
             ft_request.params["dp_group_rank"],
             sorted(dead_ep_ranks),
         )
+
+    def _run_device_cleanup(
+        self,
+        retired: Sequence[Callable[[], None]],
+    ) -> None:
+        try:
+            device = self.worker.device
+            assert device is not None
+            current_platform.set_device(device)
+            for cleanup in retired:
+                cleanup()
+        except Exception:
+            logger.exception("[FT] Failed to retire device communicators")
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
         """Query the mask on a side stream."""
