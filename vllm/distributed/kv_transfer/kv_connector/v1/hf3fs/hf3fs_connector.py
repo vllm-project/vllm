@@ -70,6 +70,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 HF3FS_AVAILABLE = True
@@ -126,9 +127,12 @@ class AsyncOperationManager:
         self._numjobs = connector._numjobs
         self._max_device_buffer_count = connector._max_device_buffer_count
 
-        # Operation tracking
+        # One request can submit several load batches. Each future keeps the
+        # block ids for that batch. The request is finished only when every
+        # batch has resolved, so an earlier failure is not overwritten.
         self._save_futures: dict[str, list[Future]] = {}
-        self._load_futures: dict[str, Future] = {}
+        self._load_futures: dict[str, list[tuple[Future, list[int]]]] = {}
+        self._load_error_block_ids: set[int] = set()
         self._pending_finished_requests: set[str] = set()
 
         # Initialize resources
@@ -195,16 +199,29 @@ class AsyncOperationManager:
 
     def submit_load_operation(self, request_id: str, block_ids, block_hashes) -> Future:
         """Submit a load operation for async execution."""
+        # Copy so a caller that reuses the lists cannot change the ids this
+        # future will report if the load fails.
+        block_ids = list(block_ids)
+        block_hashes = list(block_hashes)
         future: Future[Any] = Future()
         task = (request_id, block_ids, block_hashes, future)
+        # Track the batch before queueing it so a fast worker cannot finish
+        # the future before this request's batch list contains it.
+        self._load_futures.setdefault(request_id, []).append((future, block_ids))
         self._load_queue.put(task)
-        self._load_futures[request_id] = future
         return future
 
     def get_finished_operations(
-        self, finished_req_ids: set[str]
+        self, finished_req_ids: set[str], unowned_req_ids: set[str] | None = None
     ) -> tuple[set[str], set[str]]:
-        completed_saves = self._check_completed_saves(finished_req_ids)
+        # The scheduler frees the blocks of these requests itself.
+        # Reporting them as finished sending would free those blocks twice.
+        unowned_req_ids = unowned_req_ids or set()
+        for request_id in unowned_req_ids:
+            self._save_futures.pop(request_id, None)
+        completed_saves = self._check_completed_saves(
+            finished_req_ids - unowned_req_ids
+        )
         completed_loads = self._check_completed_loads()
 
         if completed_saves or completed_loads:
@@ -241,13 +258,38 @@ class AsyncOperationManager:
         return completed
 
     def _check_completed_loads(self) -> set[str]:
-        """Check for completed load operations."""
+        """Return requests whose every load batch has finished.
+
+        Failed batches still count as finished. Their block ids are latched
+        in this pass, which is the same pass that reports `finished_recving`.
+        A request with a batch still running stays out of both.
+        """
         completed = set()
         for request_id in list(self._load_futures):
-            if self._load_futures[request_id].done():
-                completed.add(request_id)
-                self._load_futures.pop(request_id)
+            entries = self._load_futures[request_id]
+            if not all(future.done() for future, _block_ids in entries):
+                continue
+            for future, block_ids in entries:
+                if not self._load_succeeded(future):
+                    self._load_error_block_ids.update(block_ids)
+            completed.add(request_id)
+            del self._load_futures[request_id]
         return completed
+
+    def take_load_error_block_ids(self) -> set[int]:
+        """Drain block ids from loads observed as unsuccessful."""
+        failed = self._load_error_block_ids
+        self._load_error_block_ids = set()
+        return failed
+
+    @staticmethod
+    def _load_succeeded(future: Future) -> bool:
+        """True only when the load future resolved to success."""
+        try:
+            return future.result() is True
+        except Exception:
+            logger.exception("HF3FS load future completed with an exception")
+            return False
 
     def _all_saves_done(self, request_id: str) -> bool:
         """Check if all save operations for a request are completed."""
@@ -529,7 +571,12 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
         if self._role == KVConnectorRole.SCHEDULER:
             self._scheduling_states: dict[str, RequestSchedulingState] = {}
-            self._metadata_client = Hf3fsMetadataClient()
+            # Block ids of each load sent to the worker and not yet reported finished.
+            self._loading_block_ids: dict[str, list[int]] = {}
+            self._unowned_finished_req_ids: set[str] = set()
+            # Requests that sent at least one block to save.
+            self._saving_req_ids: set[str] = set()
+            self._metadata_client = Hf3fsMetadataClient(self._metadata_server_url)
             self._metadata_client.initialize(0, role="scheduler")
 
         atexit.register(self.close)
@@ -619,7 +666,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             # Initialize metadata client
             num_pages = self._file_size // self._bytes_per_page
-            self._metadata_client = Hf3fsMetadataClient()
+            self._metadata_client = Hf3fsMetadataClient(self._metadata_server_url)
             self._metadata_client.initialize(self._rank, num_pages, role="worker")
         except Exception as e:
             logger.error("HF3FS client initialization failed: %s", e)
@@ -685,7 +732,25 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        return self._async_manager.get_finished_operations(finished_req_ids)
+        unowned_req_ids: set[str] = set()
+        metadata = getattr(self, "_connector_metadata", None)
+        if isinstance(metadata, HF3FSConnectorMetadata):
+            unowned_req_ids = metadata.unowned_finished_req_ids
+        return self._async_manager.get_finished_operations(
+            finished_req_ids, unowned_req_ids
+        )
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Block ids whose load failed, latched by the latest `get_finished`.
+
+        The worker reads `get_transfer_results` before this method. A request
+        with several batches is finished only after every batch resolves, and
+        each failed batch's block ids are recorded in that same pass.
+        """
+        manager = getattr(self, "_async_manager", None)
+        if manager is None:
+            return set()
+        return manager.take_load_error_block_ids()
 
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
         """Get the KV connector stats collected during the last interval."""
@@ -701,11 +766,51 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     # Scheduler Side Methods
     ############################################################
 
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        """Remember requests whose external load failed.
+
+        The worker reports block ids. The scheduler still has those ids on
+        the load it issued, so a later `get_num_new_matched_tokens` can
+        refuse the same keys without another metadata round trip.
+        """
+        if self._role != KVConnectorRole.SCHEDULER:
+            return
+        invalid = connector_output.invalid_block_ids
+        failed_reqs = connector_output.failed_recving
+        if invalid or failed_reqs:
+            # Only an outstanding load owns its block ids.
+            # A finished load may have released them to another request.
+            for request_id, block_ids in self._loading_block_ids.items():
+                state = self._scheduling_states.get(request_id)
+                if state is None or state.load_op is None:
+                    continue
+                failed = [i for i, b in enumerate(block_ids) if b in invalid]
+                if request_id not in failed_reqs and not failed:
+                    continue
+                state.load_failed = True
+                if failed:
+                    # The scheduler keeps only the blocks before the first failed one.
+                    # Saves then start there, so the recomputed blocks are stored again.
+                    state.load_op.num_blocks_to_load = min(
+                        state.load_op.num_blocks_to_load, failed[0]
+                    )
+        for request_id in connector_output.finished_recving or ():
+            self._loading_block_ids.pop(request_id, None)
+
     def request_finished(
         self,
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        request_id = request.request_id
+        saving = request_id in self._saving_req_ids
+        self._saving_req_ids.discard(request_id)
+        if request_id in self._loading_block_ids or not saving:
+            # With a load outstanding, the scheduler frees the blocks once the
+            # load is reported finished. With no save, nothing is sent.
+            # Either way the worker must not report it as finished sending.
+            self._unowned_finished_req_ids.add(request_id)
+            return False, None
         return True, None
 
     def get_num_new_matched_tokens(
@@ -715,6 +820,13 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         try:
             state = self._get_or_create_scheduling_state(request.request_id)
             state.request = request
+            if state.load_failed:
+                state.load_op = LoadBlockInfo(
+                    num_computed_blocks=num_computed_tokens // self._block_size,
+                    num_blocks_to_load=0,
+                    need_fetch_block_ids=[],
+                )
+                return 0, False
             assert request.prompt_token_ids is not None
 
             num_tokens_to_check = self._align_to_block_size(
@@ -801,6 +913,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     ) -> KVConnectorMetadata:
         """Build connector metadata for scheduling step."""
         metadata = HF3FSConnectorMetadata()
+        metadata.unowned_finished_req_ids = self._unowned_finished_req_ids
+        self._unowned_finished_req_ids = set()
 
         for request_id in scheduler_output.finished_req_ids:
             self._scheduling_states.pop(request_id, None)
@@ -809,6 +923,12 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._process_waiting_to_load_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
+
+        for request_metadata in metadata.requests:
+            save_op = request_metadata.save_block_op
+            num_blocks = len(request_metadata.token_ids) // self._block_size
+            if save_op is not None and num_blocks > save_op.skip_leading_blocks:
+                self._saving_req_ids.add(request_metadata.request_id)
 
         return metadata
 
@@ -842,6 +962,9 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             if request_metadata:
                 metadata.add_request(request_metadata)
                 state.phase = "ACTIVE"
+                self._loading_block_ids[state.request_id] = list(
+                    state.allocated_block_ids
+                )
 
     def _process_new_requests(
         self, scheduler_output: SchedulerOutput, metadata: HF3FSConnectorMetadata

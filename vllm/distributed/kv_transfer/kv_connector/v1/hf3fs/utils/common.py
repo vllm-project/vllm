@@ -55,6 +55,10 @@ class RequestSchedulingState:
 
     # Load operation info
     load_op: LoadBlockInfo | None = None
+    # A failed load must not be offered again while the metadata still
+    # reports the same keys. Otherwise recompute returns to WAITING and
+    # loads those keys forever.
+    load_failed: bool = False
 
     # Scheduling phase
     phase: str = "NEW"  # NEW -> WAITING_TO_LOAD -> ACTIVE -> FINISHED
@@ -133,6 +137,10 @@ class HF3FSConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
         self.requests: list[HF3FSRequestMetadata] = []
+        # Finished requests whose blocks the scheduler frees itself: a load
+        # was outstanding, or nothing was saved. The worker must not report
+        # them as finished sending.
+        self.unowned_finished_req_ids: set[str] = set()
 
     def add_request(self, request_metadata: HF3FSRequestMetadata) -> None:
         """Add request to metadata."""
