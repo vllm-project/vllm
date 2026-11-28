@@ -71,6 +71,31 @@ def test_tool_calls_set_finish_reason_and_respect_parallel_tool_calls():
     assert processor.num_output_tokens == 2
 
 
+def test_named_tool_choice_streams_only_the_first_call():
+    """A named tool choice calls exactly that tool once, so later calls the
+    parser streams are dropped and `finish_reason` stays `stop`."""
+    parser = MagicMock()
+    parser.parse_delta.side_effect = [
+        DeltaMessage(tool_calls=[_tool_call(0), _tool_call(1)]),
+        DeltaMessage(tool_calls=[_tool_call(2)]),
+    ]
+    processor = _processor(
+        _request(
+            tools=TOOLS, tool_choice={"type": "function", "function": {"name": "f"}}
+        ),
+        parser,
+    )
+
+    delta, _ = processor.step("x", [1], None, [0])
+    assert delta is not None
+    assert [tc.index for tc in delta.tool_calls] == [0]
+
+    delta, finish_reason = processor.step("y", [2], "stop", [0])
+    assert delta is not None
+    assert delta.tool_calls == []
+    assert finish_reason == "stop"
+
+
 @pytest.mark.parametrize("tool_choice", ["none", None])
 def test_drops_tool_calls_like_non_streaming(tool_choice):
     """Tool calls the parser extracts for `"none"` (Harmony ignores it) or

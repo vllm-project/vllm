@@ -433,8 +433,8 @@ th {
 | `IQuestLoopCoderForCausalLM` | IQuestLoopCoderV1 | `IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct`, etc. | | |
 | `K2HorizonForCausalLM` | K2-Horizon | `IFM/K2-Horizon-7B`, `IFM/K2-Horizon-375B` | | ✅︎ |
 | `KimiLinearForCausalLM` | Kimi-Linear-48B-A3B-Base, Kimi-Linear-48B-A3B-Instruct | `moonshotai/Kimi-Linear-48B-A3B-Base`, `moonshotai/Kimi-Linear-48B-A3B-Instruct` | | ✅︎ |
-| `Lfm2ForCausalLM` | LFM2 | `LiquidAI/LFM2-1.2B`, `LiquidAI/LFM2-700M`, `LiquidAI/LFM2-350M`, etc. | ✅︎ | ✅︎ |
-| `Lfm2MoeForCausalLM` | LFM2MoE | `LiquidAI/LFM2-8B-A1B-preview`, etc. | ✅︎ | ✅︎ |
+| `Lfm2ForCausalLM` | LFM2.5 | `LiquidAI/LFM2.5-2.6B`, `LiquidAI/LFM2.5-1.2B-Instruct`, `LiquidAI/LFM2.5-350M`, etc. | ✅︎ | ✅︎ |
+| `Lfm2MoeForCausalLM` | LFM2.5 | `LiquidAI/LFM2.5-24B-A2B`, `LiquidAI/LFM2.5-8B-A1B`, etc. | ✅︎ | ✅︎ |
 | `Lfm3ForCausalLM` | LFM3 | `LiquidAI/LFM3-1.7B`, `LiquidAI/LFM3-1.7B-Base`, etc. | ✅︎ | ✅︎ |
 | `LongcatFlashForCausalLM` | LongCat-Flash | `meituan-longcat/LongCat-Flash-Chat`, `meituan-longcat/LongCat-Flash-Chat-FP8` | ✅︎ | ✅︎ |
 | `Mamba2ForCausalLM` | Mamba2 | `mistralai/Mamba-Codestral-7B-v0.1`, etc. | | ✅︎ |
@@ -603,7 +603,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `KimiK31ForConditionalGeneration` | Kimi-K3.1 | T + I<sup>+</sup> | `moonshotai/Kimi-K3.1` | | ✅︎ |
 | `KimiVLForConditionalGeneration` | Kimi-VL-A3B-Instruct, Kimi-VL-A3B-Thinking | T + I<sup>+</sup> | `moonshotai/Kimi-VL-A3B-Instruct`, `moonshotai/Kimi-VL-A3B-Thinking` | | ✅︎ |
 | `LightOnOCRForConditionalGeneration` | LightOnOCR-1B | T + I<sup>E+</sup> | `lightonai/LightOnOCR-1B`, etc | ✅︎ | ✅︎ |
-| `Lfm2VlForConditionalGeneration` | LFM2-VL | T + I<sup>+</sup> | `LiquidAI/LFM2-VL-450M`, `LiquidAI/LFM2-VL-3B`, `LiquidAI/LFM2-VL-8B-A1B`, etc. | ✅︎ | ✅︎ |
+| `Lfm2VlForConditionalGeneration` | LFM2.5-VL | T + I<sup>+</sup> | `LiquidAI/LFM2.5-VL-3B`, `LiquidAI/LFM2.5-VL-1.6B`, `LiquidAI/LFM2.5-VL-450M`, etc. | ✅︎ | ✅︎ |
 | `Lfm3AudioForConditionalGeneration` | LFM3-Audio | T + A<sup>E+</sup> | `LiquidAI/LFM3-Audio-2B`, etc. | | ✅︎ |
 | `Lfm3OmniForConditionalGeneration` | LFM3-Omni | T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>E+</sup> | `LiquidAI/LFM3-Omni-2B` | | ✅︎ |
 | `Lfm3VlForConditionalGeneration` | LFM3-VL | T + I<sup>E+</sup> + V<sup>E+</sup> | `LiquidAI/LFM3-VL-2B` | | ✅︎ |
