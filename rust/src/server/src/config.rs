@@ -467,8 +467,9 @@ pub struct EngineCoreConfig {
     /// engine-reported scheduler stats and request lifecycle events are not
     /// exported.
     pub disable_log_stats: bool,
-    /// Interval between periodic stats logs (`VLLM_LOG_STATS_INTERVAL`,
-    /// default 10s), or `None` to never log while still recording stats.
+    /// Interval between periodic stats logs (`--log-stats-interval`, also
+    /// bound by the deprecated `VLLM_LOG_STATS_INTERVAL`, default 10s), or
+    /// `None` to never log while still recording stats.
     pub log_stats_interval: Option<Duration>,
     /// Replacement bucket bounds for the request and scheduler histogram
     /// families (`--custom-histogram-buckets`); empty keeps the defaults. The

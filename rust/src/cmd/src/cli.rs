@@ -696,9 +696,10 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub custom_histogram_buckets: CustomHistogramBuckets,
 
-    /// Seconds between periodic engine statistics logs (default 10). Like
-    /// Python, it is set only through `VLLM_LOG_STATS_INTERVAL`.
-    #[arg(long, hide = true, env = "VLLM_LOG_STATS_INTERVAL")]
+    /// Seconds between periodic engine statistics logs (default 10).
+    /// Non-positive values fall back to the default. Replaces the deprecated
+    /// `VLLM_LOG_STATS_INTERVAL` environment variable.
+    #[arg(long, env = "VLLM_LOG_STATS_INTERVAL")]
     #[serde(default)]
     pub log_stats_interval: Option<LogStatsInterval>,
 
@@ -1403,7 +1404,8 @@ pub struct StructuredOutputsConfig {
 /// Keys are API effort names, so unknown efforts fail at startup.
 type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
 
-/// Parsed `VLLM_LOG_STATS_INTERVAL`, deserialized from seconds.
+/// Parsed `--log-stats-interval` (or `VLLM_LOG_STATS_INTERVAL`),
+/// deserialized from seconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(from = "f64")]
 pub enum LogStatsInterval {

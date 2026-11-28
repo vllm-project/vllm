@@ -56,7 +56,7 @@ For the full module tree instead, set `VLLM_LOG_MODEL_INSPECTION=1` or call `LLM
 If other strategies don't solve the problem, it's likely that the vLLM instance is stuck somewhere. You can use the following environment variables to help debug the issue:
 
 - `export VLLM_LOGGING_LEVEL=DEBUG` to turn on more logging.
-- `export VLLM_LOG_STATS_INTERVAL=1.` to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
+- `--log-stats-interval 1` (or `export VLLM_LOG_STATS_INTERVAL=1.`, deprecated) to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
 - `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)

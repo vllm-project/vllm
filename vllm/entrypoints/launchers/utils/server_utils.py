@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from vllm import envs
 from vllm.config.logging import LogFormatter
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
@@ -78,7 +77,7 @@ async def lifespan(app: FastAPI):
 
             async def _force_log():
                 while True:
-                    await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
+                    await asyncio.sleep(app.state.log_stats_interval)
                     await engine_client.do_log_stats()
 
             task = asyncio.create_task(_force_log())

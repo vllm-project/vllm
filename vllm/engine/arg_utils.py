@@ -115,7 +115,7 @@ from vllm.config.parallel import (
     ExpertPlacementStrategy,
 )
 from vllm.config.scheduler import SchedulerPolicy
-from vllm.config.utils import get_field, replace
+from vllm.config.utils import get_field, get_from_deprecated_env_if_set, replace
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
@@ -610,6 +610,10 @@ class EngineArgs:
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
     enable_trace_replay: bool = ModelConfig.enable_trace_replay
     disable_log_stats: bool = False
+    log_stats_interval: float = 10.0
+    """Seconds between periodic engine statistics logs. Non-positive values
+    fall back to the default. Replaces the deprecated
+    `VLLM_LOG_STATS_INTERVAL` environment variable."""
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
@@ -920,6 +924,23 @@ class EngineArgs:
         self.quantization_config = resolve_quantization_config(
             self.quantization, self.quantization_config
         )
+
+        # The env var is deprecated; it still sets the interval when the flag
+        # is left at its default.
+        if (
+            get_from_deprecated_env_if_set(
+                "VLLM_LOG_STATS_INTERVAL",
+                removal_version="v0.36.0",
+                field_name="--log-stats-interval",
+            )
+            is not None
+            and self.log_stats_interval == 10.0
+        ):
+            self.log_stats_interval = envs.VLLM_LOG_STATS_INTERVAL
+        # Like the env var and the Rust frontend: a non-positive interval
+        # (including NaN) falls back to the default.
+        if not self.log_stats_interval > 0.0:
+            self.log_stats_interval = 10.0
 
         # Setup plugins
         from vllm.plugins import load_general_plugins
@@ -1949,6 +1970,14 @@ class EngineArgs:
             "--disable-log-stats",
             action="store_true",
             help="Disable logging statistics.",
+        )
+        parser.add_argument(
+            "--log-stats-interval",
+            type=float,
+            default=10.0,
+            help="Seconds between periodic engine statistics logs. "
+            "Non-positive values fall back to the default. Replaces the "
+            "deprecated VLLM_LOG_STATS_INTERVAL environment variable.",
         )
 
         parser.add_argument(
