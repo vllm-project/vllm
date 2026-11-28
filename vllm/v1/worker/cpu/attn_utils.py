@@ -56,8 +56,9 @@ class FastPrefillHelper:
         logits_indices: torch.Tensor,
         cu_num_logits_np: np.ndarray,
         has_prefill: bool,
+        num_active_loras: int = 0,
     ) -> FastPrefillBatchMetadata | None:
-        if not has_prefill:
+        if not has_prefill or num_active_loras > 0:
             return None
 
         num_logits = logits_indices.shape[0]
