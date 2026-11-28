@@ -36,6 +36,7 @@ Example usage:
 """
 
 import contextlib
+import itertools
 import os
 import random
 import time
@@ -70,14 +71,14 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
         max_words = min_words
     target_words = random.randint(min_words, max_words)
 
-    if target_words > 50:
-        padding_text = (
-            " This is an interesting topic that deserves more explanation. "
-            * (target_words // 50)
-        )
-        base_prompt = base_prompt + padding_text
+    template_words = base_prompt.split()
+    missing = target_words - len(template_words)
+    if missing <= 0:
+        return " ".join(template_words[: max(target_words, 0)])
 
-    return base_prompt
+    padding = "This is an interesting topic that deserves more explanation."
+    extra_words = itertools.islice(itertools.cycle(padding.split()), missing)
+    return base_prompt + " " + " ".join(extra_words)
 
 
 def run_benchmark_with_batch_invariant(
