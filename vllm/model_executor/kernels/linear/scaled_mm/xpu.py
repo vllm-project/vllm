@@ -70,6 +70,13 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
     ) -> None:
         super().__init__(c, layer_param_names)
 
+    def input_quant_key(self) -> QuantKey | None:
+        # fp8_gemm takes per-token scales [M, 1] as produced, so a dynamic
+        # per-token activation can be quantized by a fused upstream kernel.
+        if self.config.activation_quant_key == kFp8DynamicTokenSym:
+            return kFp8DynamicTokenSym
+        return None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Ensure weight is stored as C-contiguous [K, N] (KN layout).
 
