@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <stdexcept>
 #include <vector>
 #include <hip/hip_runtime.h>
 #include "quick_reduce_impl.cuh"
@@ -40,6 +42,17 @@ allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, uint32_t num_blocks,
   // All threads compute the same final value; one writer per block is enough.
   if (threadIdx.x == 0 && threadIdx.y == 0) {
     d_flag_counters[blockIdx.x] = flag_color;
+  }
+}
+
+template <typename Kernel, typename T>
+__global__ __quickreduce_launch_bounds_two_shot__ static void
+coll_chunks_prototype(T const* A, T* B, CollChunks chunks, uint32_t num_tiles,
+                      int rank, uint8_t** dbuffer_list, uint64_t data_offset,
+                      uint64_t flag_offset, uint32_t flag_color) {
+  for (uint32_t tile = blockIdx.x; tile < num_tiles; tile += gridDim.x) {
+    Kernel::run(A, B, chunks, tile, rank, dbuffer_list, data_offset,
+                flag_offset, flag_color);
   }
 }
 
@@ -113,11 +126,20 @@ struct DeviceComms {
   std::vector<uint8_t*> buffer_list;
   uint32_t data_offset;
 
+  // Reduce-scatter region past the all-reduce buffers, so a rank still
+  // reading its all-reduce slots never sees chunk traffic. Two copies
+  // (flags, data) alternate between calls; see ReduceScatterRows.
+  int64_t coll_region_size = 0;
+  int64_t coll_flags_size = 0;
+  uint64_t coll_base = 0;
+  uint32_t coll_calls = 0;
+
   DeviceComms() : initialized(false), world_size(1), rank(0) {}
   ~DeviceComms() { destroy(); }
 
   void init(int world_size, int rank,
-            std::optional<int64_t> max_problem_size = std::nullopt) {
+            std::optional<int64_t> max_problem_size = std::nullopt,
+            std::optional<int64_t> coll_max_size = std::nullopt) {
     destroy();
     this->world_size = world_size;
     this->rank = rank;
@@ -127,14 +149,30 @@ struct DeviceComms {
     // Allocate buffer size for worst case: F16 2-stage buffer.
     uint32_t flags_buffer_size =
         2 * world_size * kMaxNumBlocks * sizeof(uint32_t);
-    static int64_t data_buffer_size = 2 * this->kMaxProblemSize;
-    int64_t total_buffer_size = flags_buffer_size + data_buffer_size;
+    int64_t data_buffer_size = 2 * this->kMaxProblemSize;
+    coll_region_size = 0;
+    coll_flags_size = 0;
+    if (coll_max_size.has_value() && coll_max_size.value() > 0) {
+      coll_region_size = divceil(coll_max_size.value(), kTileSize) * kTileSize;
+      // One flag per (tile, source) of the smallest transmitted tile.
+      coll_flags_size =
+          divceil((coll_region_size / 4096 + world_size) * sizeof(uint32_t),
+                  kTileSize) *
+          kTileSize;
+    }
+    coll_base = flags_buffer_size + data_buffer_size;
+    int64_t total_buffer_size =
+        coll_base + 2 * (coll_flags_size + coll_region_size);
     data_offset = flags_buffer_size;
     HIP_CHECK(hipExtMallocWithFlags((void**)&dbuffer, total_buffer_size,
                                     hipDeviceMallocUncached));
 
-    // Clear the flags buffer.
+    // Clear the flags buffers.
     HIP_CHECK(hipMemset(dbuffer, 0, flags_buffer_size));
+    if (coll_flags_size > 0) {
+      HIP_CHECK(hipMemset(dbuffer + coll_base, 0, 2 * coll_flags_size));
+    }
+    coll_calls = 0;
 
     // One flag-color counter per block, advanced by the kernel. Start at 1
     // to stay clear of the flags buffer we just zeroed.
@@ -235,6 +273,105 @@ struct DeviceComms {
         break;
     }
     HIP_CHECK(cudaGetLastError());
+  }
+
+  // Chunk layout of one variable-size call; `unit` is bytes per length unit.
+  // Returns the largest per-rank tile count, or 0 if a chunk is too large.
+  uint32_t make_chunks(std::vector<int64_t> const& lens, int64_t unit,
+                       CollChunks& chunks) const {
+    if (static_cast<int>(lens.size()) != world_size) {
+      throw std::runtime_error("one chunk length per rank is required");
+    }
+    uint32_t max_tiles = 0;
+    int64_t off = 0;
+    for (int r = 0; r < world_size; r++) {
+      int64_t bytes = lens[r] * unit;
+      if (lens[r] < 0 || bytes % 16 != 0) {
+        throw std::runtime_error("chunk bytes must be 16B multiples");
+      }
+      if (bytes > coll_region_size) return 0;
+      chunks.off[r] = static_cast<uint32_t>(off);
+      chunks.len[r] = static_cast<uint32_t>(lens[r]);
+      // An empty chunk still takes a tile: its flags order the calls.
+      chunks.tiles[r] = std::max<uint32_t>(
+          1, static_cast<uint32_t>(divceil(bytes, kTileSize)));
+      max_tiles = std::max(max_tiles, chunks.tiles[r]);
+      off += lens[r];
+    }
+    return max_tiles;
+  }
+
+  // Next call's (data, flag) offsets and flag color, alternating the regions.
+  void next_coll_slots(uint64_t& data_off, uint64_t& flag_off,
+                       uint32_t& color) {
+    if (coll_region_size == 0) {
+      throw std::runtime_error(
+          "quick reduce-scatter needs a nonzero coll_max_size");
+    }
+    int parity = coll_calls & 1;
+    color = ++coll_calls;
+    flag_off = coll_base + parity * coll_flags_size;
+    data_off = coll_base + 2 * coll_flags_size + parity * coll_region_size;
+  }
+
+  template <typename T, bool cast_bf2half, template <typename, int> class Codec>
+  bool launch_reduce_scatter(T const* A, T* B, CollChunks const& chunks,
+                             uint32_t max_tiles, hipStream_t stream) {
+    uint64_t data_off, flag_off;
+    uint32_t color;
+    if (max_tiles == 0 ||
+        int64_t(max_tiles) * world_size * Codec<T, 2>::kTransmittedTileSize >
+            coll_region_size ||
+        int64_t(max_tiles) * world_size * sizeof(uint32_t) > coll_flags_size) {
+      return false;
+    }
+    next_coll_slots(data_off, flag_off, color);
+    uint32_t grid = min(kMaxNumBlocks, max_tiles);
+#define QR_RS_LAUNCH(__ws)                                                    \
+  hipLaunchKernelGGL(                                                         \
+      (coll_chunks_prototype<                                                 \
+          ReduceScatterRows<T, Codec<T, __ws>, cast_bf2half>, T>),            \
+      dim3(grid), dim3(kBlockTwoShot), 0, stream, A, B, chunks, max_tiles,    \
+      rank, dbuffer_list, data_off, flag_off, color)
+    if (world_size == 2) {
+      QR_RS_LAUNCH(2);
+    } else if (world_size == 4) {
+      QR_RS_LAUNCH(4);
+    } else if (world_size == 8) {
+      QR_RS_LAUNCH(8);
+    } else {
+      throw std::runtime_error("reduce-scatter needs world_size 2, 4 or 8");
+    }
+#undef QR_RS_LAUNCH
+    HIP_CHECK(cudaGetLastError());
+    return true;
+  }
+
+  // Rank r receives the sum over ranks of elements [off_r, off_r + lens[r])
+  // of their inputs, off_r = sum(lens[:r]). Returns false, launching nothing,
+  // if the call does not fit the chunk region or the codec is INT3; the
+  // decision only depends on `lens` and the codec, so all ranks agree.
+  template <typename T, bool cast_bf2half>
+  bool reduce_scatterv(T const* A, T* B, std::vector<int64_t> const& lens,
+                       int quant_level, hipStream_t stream) {
+    CollChunks chunks;
+    uint32_t max_tiles = make_chunks(lens, sizeof(T), chunks);
+    switch (static_cast<QuickReduceQuantLevel>(quant_level)) {
+      case QuickReduceQuantLevel::INT8:
+        return launch_reduce_scatter<T, cast_bf2half, CodecQ8>(
+            A, B, chunks, max_tiles, stream);
+      case QuickReduceQuantLevel::INT6:
+        return launch_reduce_scatter<T, cast_bf2half, CodecQ6>(
+            A, B, chunks, max_tiles, stream);
+      case QuickReduceQuantLevel::INT4:
+        return launch_reduce_scatter<T, cast_bf2half, CodecQ4>(
+            A, B, chunks, max_tiles, stream);
+      case QuickReduceQuantLevel::F16:
+        return launch_reduce_scatter<T, cast_bf2half, CodecFP>(
+            A, B, chunks, max_tiles, stream);
+      default:
+        return false;
+    }
   }
 };
 

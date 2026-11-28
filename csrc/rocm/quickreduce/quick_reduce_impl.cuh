@@ -854,4 +854,120 @@ struct AllReduceTwoshot {
   }
 };
 
+static constexpr int DeviceCommsMaxWorldSize = 8;
+
+// Per-rank chunks of a variable-size reduce-scatter, in elements.
+struct CollChunks {
+  uint32_t off[DeviceCommsMaxWorldSize];
+  uint32_t len[DeviceCommsMaxWorldSize];
+  uint32_t tiles[DeviceCommsMaxWorldSize];
+};
+
+template <bool cast_bf2half>
+__quickreduce_device_inline__ int32x4_t load_cast_atom(int32x4_t v) {
+  if constexpr (cast_bf2half) {
+    const nv_bfloat162* bf_buf = reinterpret_cast<const nv_bfloat162*>(&v);
+    half2 half_buf[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      half_buf[j] = __float22half2_rn(__bfloat1622float2(bf_buf[j]));
+    }
+    return *reinterpret_cast<const int32x4_t*>(half_buf);
+  }
+  return v;
+}
+
+template <bool cast_bf2half>
+__quickreduce_device_inline__ int32x4_t store_cast_atom(int32x4_t v) {
+  if constexpr (cast_bf2half) {
+    const half2* half_buf = reinterpret_cast<const half2*>(&v);
+    nv_bfloat162 bf16_buf[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      bf16_buf[j] = __float22bfloat162_rn(__half22float2(half_buf[j]));
+    }
+    return *reinterpret_cast<const int32x4_t*>(bf16_buf);
+  }
+  return v;
+}
+
+// Row-chunk reduce-scatter: rank r ends with the sum over ranks of their
+// chunk r. Tile t of every chunk goes through the codec to the chunk's owner,
+// which reduces the world_size copies. Receive slots are per (tile, source),
+// so a call never overwrites its own data, and the caller alternates two slot
+// regions between calls: a rank can only start call i + 2 after it received
+// call i + 1 from every peer, which they send after finishing call i. Every
+// chunk has at least one tile so that dependency holds for empty chunks too.
+template <typename T, class Codec, bool cast_bf2half>
+struct ReduceScatterRows {
+  static_assert(sizeof(T) == 2);
+  static constexpr int kWorldSize = Codec::kWorldSize;
+
+  __device__ static void run(T const* __restrict__ input,
+                             T* __restrict__ output,
+                             CollChunks const& chunks, uint32_t tile, int rank,
+                             uint8_t** __restrict__ buffer_list,
+                             uint64_t data_offset, uint64_t flag_offset,
+                             uint32_t flag_color) {
+    int thread = threadIdx.x + threadIdx.y * kWavefront;
+    Codec codec(thread, rank);
+    int32x4_t tA[kAtoms];
+    uint32_t const slot_stride = Codec::kTransmittedTileSize;
+
+    for (int r = 0; r < kWorldSize; r++) {
+      if (tile >= chunks.tiles[r]) continue;
+      BufferResource src(const_cast<T*>(input) + chunks.off[r],
+                         chunks.len[r] * sizeof(T));
+      uint32_t src_offset = tile * kTileSize + thread * sizeof(int32x4_t);
+      for (int i = 0; i < kAtoms; i++) {
+        tA[i] = load_cast_atom<cast_bf2half>(
+            buffer_load_dwordx4(src.descriptor, src_offset, 0, 0));
+        src_offset += kAtomStride * sizeof(int32x4_t);
+      }
+      uint8_t* slot = buffer_list[r] + data_offset +
+                      (tile * kWorldSize + rank) * slot_stride;
+      for (int g = 0; g < kWorldSize; g++) {
+        codec.send(reinterpret_cast<int32x4_t*>(
+                       slot + g * Codec::kRankTransmittedTileSize),
+                   &tA[g * Codec::kRankAtoms]);
+      }
+    }
+    __syncthreads();
+    if (thread < kWorldSize && tile < chunks.tiles[thread]) {
+      uint32_t* flag_ptr = reinterpret_cast<uint32_t*>(
+          buffer_list[thread] + flag_offset +
+          (tile * kWorldSize + rank) * sizeof(uint32_t));
+      set_sync_flag(flag_ptr, flag_color);
+    }
+
+    if (tile >= chunks.tiles[rank]) return;
+    uint8_t* rank_buffer = buffer_list[rank];
+    uint32_t* flag_ptr = reinterpret_cast<uint32_t*>(
+        rank_buffer + flag_offset + tile * kWorldSize * sizeof(uint32_t));
+    int32x4_t tR[kAtoms] = {};
+    for (int s = 0; s < kWorldSize; s++) {
+      if (thread == 0) {
+        wait_sync_flag(&flag_ptr[s], flag_color);
+      }
+      __syncthreads();
+      int32x4_t* recv_buffer = reinterpret_cast<int32x4_t*>(
+          rank_buffer + data_offset + (tile * kWorldSize + s) * slot_stride);
+      for (int g = 0; g < kWorldSize; g++) {
+        codec.recv(&recv_buffer, &tA[g * Codec::kRankAtoms]);
+      }
+      for (int i = 0; i < kAtoms; i++) {
+        packed_assign_add<T>(&tR[i], &tA[i]);
+      }
+    }
+
+    BufferResource dst(output, chunks.len[rank] * sizeof(T));
+    uint32_t dst_offset = tile * kTileSize + thread * sizeof(int32x4_t);
+    for (int i = 0; i < kAtoms; i++) {
+      buffer_store_dwordx4(store_cast_atom<cast_bf2half>(tR[i]), dst.descriptor,
+                           dst_offset, 0, 0);
+      dst_offset += kAtomStride * sizeof(int32x4_t);
+    }
+  }
+};
+
 }  // namespace quickreduce
