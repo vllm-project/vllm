@@ -3,27 +3,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark top-k/top-p filtering with Triton, FlashInfer, and optional PyTorch.
 
-All implementations return masked logits. Timings include a fresh-input copy.
+All implementations return masked logits. Each measured iteration restores the
+input and flushes the GPU caches outside the timed region, so only the filtering
+call is timed, on an input in DRAM.
 FlashInfer timings include softmax and mask reconstruction when its APIs require them.
-L2 is flushed before each measured iteration, outside the timed region.
 
 Scenarios:
 - top_k only (whole batch, partial batch)
 - top_p only (whole batch, partial batch)
 - mix of top_k and top_p
+- top_k of 1000 with fewer finite logits than k (a grammar mask) or a forced logit
 - optional sparse inputs via --num-finite-logits
 """
 
 import argparse
 import gc
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-import flashinfer.sampling as fi_sampling
 import pandas as pd
 import torch
-from flashinfer.testing import bench_gpu_time_with_cupti
 
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 from vllm.v1.sample.ops.topk_topp_triton import (
@@ -44,6 +45,7 @@ class BenchmarkConfig:
     p_values: torch.Tensor | None  # [batch_size] or None
     description: str
     ops_pct: float = 0.0  # Percentage of ops relative to batch size
+    modify: Callable[[torch.Tensor], torch.Tensor] | None = None  # on the logits
 
 
 def calculate_ops_pct(
@@ -104,6 +106,8 @@ def create_logits(
 
 def apply_top_k_top_p_flashinfer_mask(logits, k, p):
     """Keep top-k in logits; adapt probability-based top-p back to logits."""
+    import flashinfer.sampling as fi_sampling  # CUDA only: not at import for ROCm
+
     if k is not None:
         logits = fi_sampling.top_k_mask_logits(logits, k)
     if p is not None:
@@ -255,7 +259,40 @@ def create_benchmark_configs(
                 )
             )
 
+            # 7. Top-k of 1000 (above the kernel's tiers) with 500 finite logits per
+            # row (a grammar mask), and with one forced logit (a thinking budget).
+            k_large = torch.full((batch_size,), 1000, dtype=torch.int32, device=device)
+            for name, modify in (
+                ("topk_grammar", mask_all_but_500),
+                ("topk_forced", force),
+            ):
+                configs.append(
+                    BenchmarkConfig(
+                        name=f"{name}_b{batch_size}_v{vocab_size // 1000}k",
+                        batch_size=batch_size,
+                        vocab_size=vocab_size,
+                        k_values=k_large,
+                        p_values=None,
+                        description=f"{name} (k=1000), batch={batch_size}, "
+                        f"vocab={vocab_size}",
+                        ops_pct=calculate_ops_pct(
+                            k_large, None, vocab_size, batch_size
+                        ),
+                        modify=modify,
+                    )
+                )
+
     return configs
+
+
+def mask_all_but_500(logits: torch.Tensor) -> torch.Tensor:
+    rank = torch.rand_like(logits).argsort(dim=-1).argsort(dim=-1)
+    return logits.masked_fill(rank >= 500, -float("inf"))
+
+
+def force(logits: torch.Tensor) -> torch.Tensor:
+    logits[:, 0] = 1e9
+    return logits
 
 
 def format_memory(bytes_val: int) -> str:
@@ -288,6 +325,8 @@ def run_benchmark(
             config.vocab_size,
             num_finite_logits=num_finite_logits,
         )
+        if config.modify is not None:
+            logits = config.modify(logits)
         checks = {}
         if check:
             checks = check_implementations(logits, config, implementations)
@@ -296,14 +335,7 @@ def run_benchmark(
         for name in implementations:
             func = IMPLEMENTATIONS[name]
             reset_memory_stats()
-            times = bench_gpu_time_with_cupti(
-                # note: measured runtime includes logits.clone()
-                lambda func=func, logits=logits, k=k, p=p: func(logits.clone(), k, p),
-                dry_run_iters=warmup_iters,
-                repeat_iters=benchmark_iters,
-                use_cuda_graph=False,  # sampling is outside cuda graph
-                cold_l2_cache=True,
-            )
+            times = bench_gpu_time(func, logits, k, p, warmup_iters, benchmark_iters)
             elapsed = sum(times) / len(times)
             _, memory = measure_memory()
             timings[name] = dict(time_ms=elapsed, peak_memory=memory)
@@ -318,6 +350,32 @@ def run_benchmark(
         reset_memory_stats()
 
     return results
+
+
+def bench_gpu_time(
+    func, logits: torch.Tensor, k, p, warmup_iters: int, benchmark_iters: int
+) -> list[float]:
+    """Milliseconds per call of func(fresh, k, p), with CUDA/HIP events around the
+    call only. Before each call, untimed: restore the input from logits (func may
+    filter in place), then flush the caches, so the input is read from DRAM.
+    Events, not FlashInfer's CUPTI timer: that one times everything its callable
+    launches, so the restore would be counted and would leave the input in L2. Events
+    also run on ROCm, and include the host time between the launches of a call."""
+    fresh = torch.empty_like(logits)
+    # 1 GiB: larger than the L2 of NVIDIA GPUs and the 256 MiB Infinity Cache of MI355X.
+    flush = torch.empty(1 << 30, dtype=torch.int8, device=logits.device)
+    events = [
+        (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+        for _ in range(warmup_iters + benchmark_iters)
+    ]
+    for start, end in events:
+        fresh.copy_(logits)
+        flush.zero_()
+        start.record()
+        func(fresh, k, p)
+        end.record()
+    torch.accelerator.synchronize()
+    return [start.elapsed_time(end) for start, end in events[warmup_iters:]]
 
 
 def check_implementations(
@@ -411,8 +469,8 @@ def main():
         "--implementations",
         nargs="+",
         choices=list(IMPLEMENTATIONS),
-        default=["triton", "flashinfer-mask"],
-        help="Implementations to compare (PyTorch is an optional reference)",
+        default=["triton"],
+        help="Implementations to compare (flashinfer-mask needs FlashInfer, on CUDA)",
     )
 
     parser.add_argument(
@@ -431,6 +489,8 @@ def main():
             "topp_partial",
             "topk_topp_whole",
             "mixed_partial",
+            "topk_grammar",
+            "topk_forced",
         ],
         help="Run only the selected scenarios (default: all)",
     )
