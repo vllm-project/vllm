@@ -496,6 +496,11 @@ class LLMEngine:
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
+        if lora_request.is_composite:
+            raise VLLMValidationError(
+                "Cannot add a composite LoRARequest directly; add each "
+                "constituent adapter individually."
+            )
         self._register_lora(lora_request)
         return self.engine_core.add_lora(lora_request)
 
@@ -511,16 +516,20 @@ class LLMEngine:
         the workers would serve it with the other adapter's weights.
         `load_inplace` replaces the adapter behind the id. The online server
         assigns ids itself, so only offline callers can collide."""
-        adapter = (lora_request.lora_name, lora_request.lora_path)
-        known = self._lora_adapters.get(lora_request.lora_int_id)
-        if known is not None and known != adapter and not lora_request.load_inplace:
-            raise VLLMValidationError(
-                f"lora_int_id {lora_request.lora_int_id} is already used by "
-                f"adapter '{known[0]}' from '{known[1]}', so it can't be used "
-                f"for '{adapter[0]}' from '{adapter[1]}'. Give each adapter its "
-                "own lora_int_id."
-            )
-        self._lora_adapters[lora_request.lora_int_id] = adapter
+        pending: list[tuple[int, tuple[str, str]]] = []
+        for req in lora_request.get_adapter_requests():
+            adapter = (req.lora_name, req.lora_path)
+            known = self._lora_adapters.get(req.lora_int_id)
+            if known is not None and known != adapter and not req.load_inplace:
+                raise VLLMValidationError(
+                    f"lora_int_id {req.lora_int_id} is already used by "
+                    f"adapter '{known[0]}' from '{known[1]}', so it can't be used "
+                    f"for '{adapter[0]}' from '{adapter[1]}'. Give each adapter its "
+                    "own lora_int_id."
+                )
+            pending.append((req.lora_int_id, adapter))
+        for lora_int_id, adapter in pending:
+            self._lora_adapters[lora_int_id] = adapter
 
     def list_loras(self) -> set[int]:
         """List all registered adapters."""

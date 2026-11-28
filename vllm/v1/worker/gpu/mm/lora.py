@@ -38,6 +38,14 @@ def set_active_mm_loras(
         if req_idx is None:
             continue
 
+        lora_request = lora_state.lora_requests.get(req_id)
+        if lora_request is not None and (
+            lora_request.is_composite or lora_request.lora_scale != 1.0
+        ):
+            raise NotImplementedError(
+                "Multi-adapter or scaled LoRA is not supported for multimodal "
+                "tower/connector LoRA."
+            )
         lora_id = int(lora_state.lora_ids[req_idx])
         mm_features = encoder_cache.mm_features[req_id]
         # Map exactly the items EncoderRunner.prepare_mm_inputs will encode,

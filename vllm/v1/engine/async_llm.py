@@ -1357,6 +1357,11 @@ class AsyncLLM(EngineClient):
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
+        if lora_request.is_composite:
+            raise VLLMValidationError(
+                "Cannot add a composite LoRARequest directly; add each "
+                "constituent adapter individually."
+            )
         return await self.engine_core.add_lora_async(lora_request)
 
     async def remove_lora(self, lora_id: int) -> bool:

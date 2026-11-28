@@ -7,11 +7,13 @@ https://arxiv.org/abs/2310.18547
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
-from .utils import compute_meta, convert_mapping
+from vllm.utils.torch_utils import async_tensor_h2d
+
+from .utils import compute_meta, convert_mapping, convert_slot_mapping
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -123,6 +125,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
     Multi-LoRA, and to provide the interface for the punica.
     """
 
+    _supports_multi_slot_and_scales: ClassVar[bool] = False
+
     def __init__(
         self,
         max_num_batched_tokens: int,
@@ -130,18 +134,53 @@ class PunicaWrapperBase(PunicaWrapperABC):
         device: torch.device | str,
         **kwargs,
     ):
-        self._token_lora_indices = torch.empty(
-            max_num_batched_tokens, dtype=torch.long, device=device
+        lora_config = kwargs.get("lora_config")
+        max_loras_per_request = (
+            lora_config.max_loras_per_request
+            if lora_config is not None
+            else kwargs.get("max_loras_per_request", 1)
         )
-        self._sampler_indices = torch.empty(
-            max_num_batched_tokens, dtype=torch.long, device=device
+        if max_loras_per_request < 1:
+            raise ValueError(
+                f"max_loras_per_request must be >= 1, got {max_loras_per_request}"
+            )
+        self.max_loras_per_request: int = max_loras_per_request
+
+        self._slot_token_lora_indices = torch.full(
+            (max_loras_per_request, max_num_batched_tokens),
+            -1,
+            dtype=torch.long,
+            device=device,
         )
+        self._slot_sampler_indices = torch.full(
+            (max_loras_per_request, max_num_batched_tokens),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self._slot_embeddings_indices = torch.zeros(
+            (max_loras_per_request, max_num_batched_tokens),
+            dtype=torch.long,
+            device=device,
+        )
+        self._slot_token_lora_scales = torch.ones(
+            (max_loras_per_request, max_num_batched_tokens),
+            dtype=torch.float32,
+            device=device,
+        )
+        self._slot_sampler_lora_scales = torch.ones(
+            (max_loras_per_request, max_num_batched_tokens),
+            dtype=torch.float32,
+            device=device,
+        )
+
+        # Slot-0 views preserve existing attribute contracts.
+        self._token_lora_indices = self._slot_token_lora_indices[0]
+        self._sampler_indices = self._slot_sampler_indices[0]
         self._sampler_indices_padded = torch.empty(
             max_num_batched_tokens, dtype=torch.long, device=device
         )
-        self._embeddings_indices = torch.empty(
-            max_num_batched_tokens, dtype=torch.long, device=device
-        )
+        self._embeddings_indices = self._slot_embeddings_indices[0]
 
         # 4 is the number of indices tensors.
         # base_indices, sampler_indices, sampler_indices_padded,
@@ -159,6 +198,11 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
+        self._num_active_slots: int = 1
+        self._has_custom_scales: bool = False
+        self._slot_prefill_meta: list[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, bool]
+        ] = []
 
     def _update_base_metadata(
         self,
@@ -167,6 +211,19 @@ class PunicaWrapperBase(PunicaWrapperABC):
         max_loras: int,
         vocab_size: int,
     ):
+        num_slots = mapping.num_slots
+        uses_multi_or_scales = num_slots > 1 or mapping.slot_index_scales is not None
+        if uses_multi_or_scales and not self._supports_multi_slot_and_scales:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support per-request "
+                "multi-adapter composition or static LoRA scales."
+            )
+        if num_slots > self.max_loras_per_request:
+            raise ValueError(
+                f"LoRAMapping has {num_slots} slots, exceeding "
+                f"max_loras_per_request ({self.max_loras_per_request})."
+            )
+
         (
             base_indices,
             sampler_indices,
@@ -180,8 +237,10 @@ class PunicaWrapperBase(PunicaWrapperABC):
             vocab_size,
             self.device,
         )
-        self._token_lora_indices[: base_indices.shape[0]].copy_(base_indices)
-        self._sampler_indices[: sampler_indices.shape[0]].copy_(sampler_indices)
+        num_tokens = base_indices.shape[0]
+        num_prompts = sampler_indices.shape[0]
+        self._token_lora_indices[:num_tokens].copy_(base_indices)
+        self._sampler_indices[:num_prompts].copy_(sampler_indices)
         self._sampler_indices_padded[: sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded
         )
@@ -190,6 +249,77 @@ class PunicaWrapperBase(PunicaWrapperABC):
         )
 
         self.indices_len[:] = indices_len
+
+        if mapping.slot_index_mappings is not None:
+            assert mapping.slot_prompt_mappings is not None
+            for slot_idx in range(1, num_slots):
+                slot_base, slot_sampler, slot_embed = convert_slot_mapping(
+                    mapping.slot_index_mappings[slot_idx],
+                    mapping.slot_prompt_mappings[slot_idx],
+                    lora_index_to_id,
+                    vocab_size,
+                    self.device,
+                )
+                self._slot_token_lora_indices[slot_idx, :num_tokens].copy_(slot_base)
+                self._slot_sampler_indices[slot_idx, :num_prompts].copy_(slot_sampler)
+                self._slot_embeddings_indices[slot_idx, :num_tokens].copy_(slot_embed)
+
+        for slot_idx in range(num_slots, self.max_loras_per_request):
+            self._slot_token_lora_indices[slot_idx, :num_tokens].fill_(-1)
+            self._slot_sampler_indices[slot_idx, :num_prompts].fill_(-1)
+            self._slot_embeddings_indices[slot_idx, :num_tokens].fill_(0)
+
+        if mapping.slot_index_scales is not None:
+            assert mapping.slot_prompt_scales is not None
+            token_scales = async_tensor_h2d(
+                list(mapping.slot_index_scales),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            prompt_scales = async_tensor_h2d(
+                list(mapping.slot_prompt_scales),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            self._slot_token_lora_scales[:num_slots, :num_tokens].copy_(token_scales)
+            self._slot_sampler_lora_scales[:num_slots, :num_prompts].copy_(
+                prompt_scales
+            )
+            if num_slots < self.max_loras_per_request:
+                self._slot_token_lora_scales[num_slots:, :num_tokens].fill_(0.0)
+                self._slot_sampler_lora_scales[num_slots:, :num_prompts].fill_(0.0)
+
+            slot_index_ids = (
+                mapping.slot_index_mappings
+                if mapping.slot_index_mappings is not None
+                else (mapping.index_mapping,)
+            )
+            slot_prompt_ids = (
+                mapping.slot_prompt_mappings
+                if mapping.slot_prompt_mappings is not None
+                else (mapping.prompt_mapping,)
+            )
+            self._has_custom_scales = any(
+                lora_id > 0 and scale != 1.0
+                for id_row, scale_row in zip(slot_index_ids, mapping.slot_index_scales)
+                for lora_id, scale in zip(id_row, scale_row)
+            ) or any(
+                lora_id > 0 and scale != 1.0
+                for id_row, scale_row in zip(
+                    slot_prompt_ids, mapping.slot_prompt_scales
+                )
+                for lora_id, scale in zip(id_row, scale_row)
+            )
+        else:
+            if self.max_loras_per_request > 1 or self._has_custom_scales:
+                self._slot_token_lora_scales[:num_slots, :num_tokens].fill_(1.0)
+                self._slot_sampler_lora_scales[:num_slots, :num_prompts].fill_(1.0)
+                if num_slots < self.max_loras_per_request:
+                    self._slot_token_lora_scales[num_slots:, :num_tokens].fill_(0.0)
+                    self._slot_sampler_lora_scales[num_slots:, :num_prompts].fill_(0.0)
+            self._has_custom_scales = False
+
+        self._num_active_slots = num_slots
 
     def _update_prefill_metadata(self, token_lora_tensor: torch.Tensor) -> None:
         (
@@ -212,6 +342,22 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.token_nums = token_nums
         self.no_lora = no_lora
 
+        self._slot_prefill_meta = [
+            (
+                self._seq_start_locs[:batch_size],
+                self._seq_lengths[:batch_size],
+                self._lora_indices_per_batch[:batch_size],
+                batch_size,
+                max_length,
+                token_nums,
+                no_lora,
+            )
+        ]
+        for slot_idx in range(1, self._num_active_slots):
+            self._slot_prefill_meta.append(
+                compute_meta(self.get_token_lora_indices(slot_idx))
+            )
+
     def _select_full_linear_output(
         self,
         y: torch.Tensor,
@@ -219,6 +365,11 @@ class PunicaWrapperBase(PunicaWrapperABC):
         bias_stacked: torch.Tensor,
         module_enabled: torch.Tensor,
     ) -> torch.Tensor:
+        if self.has_multi_slot or self.has_custom_scales:
+            raise NotImplementedError(
+                "Multi-adapter or scaled LoRA is not supported for full-module "
+                "classification head replacement."
+            )
         indices = self.sampler_indices
         assert indices.size(0) == y.size(0), (
             "Full linear rows do not match LoRA request mapping"
@@ -227,6 +378,50 @@ class PunicaWrapperBase(PunicaWrapperABC):
         use_full = (indices >= 0) & module_enabled[safe_indices]
         adapter_y = adapter_y.to(y.dtype) + bias_stacked[safe_indices].to(y.dtype)
         return torch.where(use_full.unsqueeze(-1), adapter_y, y)
+
+    @property
+    def num_active_slots(self) -> int:
+        return self._num_active_slots
+
+    @property
+    def has_multi_slot(self) -> bool:
+        return self._num_active_slots > 1
+
+    @property
+    def has_custom_scales(self) -> bool:
+        return self._has_custom_scales
+
+    def get_prefill_metadata(
+        self, slot_idx: int = 0
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
+        if slot_idx == 0:
+            return self.prefill_metadata
+        meta = self._slot_prefill_meta[slot_idx]
+        return meta[:6]
+
+    def is_slot_no_lora(self, slot_idx: int = 0) -> bool:
+        if slot_idx == 0:
+            return self.no_lora
+        return self._slot_prefill_meta[slot_idx][6]
+
+    def get_token_lora_indices(self, slot_idx: int = 0) -> torch.Tensor:
+        token_lora_len = self.indices_len[0]
+        return self._slot_token_lora_indices[slot_idx, :token_lora_len]
+
+    def get_sampler_indices(self, slot_idx: int = 0) -> torch.Tensor:
+        sampler_indices_len = self.indices_len[1]
+        return self._slot_sampler_indices[slot_idx, :sampler_indices_len]
+
+    def get_embeddings_indices(
+        self, num_tokens: int, slot_idx: int = 0
+    ) -> torch.Tensor:
+        return self._slot_embeddings_indices[slot_idx, :num_tokens]
+
+    def get_token_lora_scales(self, slot_idx: int, num_tokens: int) -> torch.Tensor:
+        return self._slot_token_lora_scales[slot_idx, :num_tokens]
+
+    def get_sampler_lora_scales(self, slot_idx: int, num_prompts: int) -> torch.Tensor:
+        return self._slot_sampler_lora_scales[slot_idx, :num_prompts]
 
     @property
     def prefill_metadata(

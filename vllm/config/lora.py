@@ -45,6 +45,9 @@ class LoRAConfig:
     by `VLLM_BATCH_INVARIANT=1` (which selects `kernel`), then this option.
     See https://github.com/vllm-project/vllm/issues/70061.
     """
+    max_loras_per_request: int = Field(default=1, ge=1)
+    """Maximum number of LoRA adapters that can be activated simultaneously for
+    a single request. Defaults to 1 (single-adapter behavior)."""
     fully_sharded_loras: bool = False
     """By default, only half of the LoRA computation is sharded with tensor
     parallelism. Enabling this will use the fully sharded layers. At high
@@ -139,6 +142,23 @@ class LoRAConfig:
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
+        if self.max_loras_per_request > self.max_loras:
+            raise ValueError(
+                f"max_loras_per_request ({self.max_loras_per_request}) must be <= "
+                f"max_loras ({self.max_loras})."
+            )
+        if self.max_loras_per_request > 1 and self.enable_tower_connector_lora:
+            raise ValueError(
+                "max_loras_per_request > 1 is not supported with "
+                "enable_tower_connector_lora=True."
+            )
+        if self.max_loras_per_request > 1 and not (
+            current_platform.is_cpu() or current_platform.is_cuda_alike()
+        ):
+            raise ValueError(
+                "max_loras_per_request > 1 is currently only supported on "
+                "CPU and CUDA-alike platforms."
+            )
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:

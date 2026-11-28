@@ -26,6 +26,8 @@ class PunicaWrapperCPU(PunicaWrapperBase):
     Multi-LoRA, and to provide the interface for the pytorch punica ops.
     """
 
+    _supports_multi_slot_and_scales = True
+
     def __init__(
         self,
         max_num_batched_tokens: int,
@@ -33,7 +35,9 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         device: torch.device | str,
         **kwargs,
     ):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
+        PunicaWrapperBase.__init__(
+            self, max_num_batched_tokens, max_batches, device, **kwargs
+        )
 
     def _shrink_prefill(
         self,
@@ -41,15 +45,16 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         x: torch.Tensor,
         w_t_all: torch.Tensor,
         scale: float,
+        slot_idx: int = 0,
     ):
         # No LoRA request, so return directly
-        if self.no_lora:
+        if self.is_slot_no_lora(slot_idx):
             return
         sgmv_shrink(
             x,
             w_t_all,
             y,
-            *self.prefill_metadata,
+            *self.get_prefill_metadata(slot_idx),
             scale,
         )
 
@@ -59,8 +64,9 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         x: torch.Tensor,
         w_t_all: torch.Tensor,
         scale: float,
+        slot_idx: int = 0,
     ):
-        bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
+        bgmv_shrink(x, w_t_all, y, self.get_token_lora_indices(slot_idx), scale)
 
     def _expand_prefill(
         self,
@@ -68,15 +74,16 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         x: torch.Tensor,
         w_t_all: torch.Tensor,
         add_inputs: bool,
+        slot_idx: int = 0,
     ):
         # No LoRA request, so return directly
-        if self.no_lora:
+        if self.is_slot_no_lora(slot_idx):
             return
         sgmv_expand(
             x,
             w_t_all,
             y,
-            *self.prefill_metadata,
+            *self.get_prefill_metadata(slot_idx),
             add_inputs,
         )
 
@@ -86,8 +93,9 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         x: torch.Tensor,
         w_t_all: torch.Tensor,
         add_inputs: bool,
+        slot_idx: int = 0,
     ):
-        bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
+        bgmv_expand(x, w_t_all, y, self.get_token_lora_indices(slot_idx), add_inputs)
 
     def _expand_slice_prefill(
         self,
@@ -97,15 +105,16 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y_offset: int,
         y_slice_size: int,
         add_inputs: bool,
+        slot_idx: int = 0,
     ):
         # No LoRA request, so return directly
-        if self.no_lora:
+        if self.is_slot_no_lora(slot_idx):
             return
         sgmv_expand_slice(
             x,
             w_t_all,
             y,
-            *self.prefill_metadata,
+            *self.get_prefill_metadata(slot_idx),
             y_offset,
             y_slice_size,
             add_inputs,
@@ -119,9 +128,16 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y_offset: int,
         y_slice_size: int,
         add_inputs: bool,
+        slot_idx: int = 0,
     ):
         bgmv_expand_slice(
-            x, w_t_all, y, self.token_lora_indices, y_offset, y_slice_size, add_inputs
+            x,
+            w_t_all,
+            y,
+            self.get_token_lora_indices(slot_idx),
+            y_offset,
+            y_slice_size,
+            add_inputs,
         )
 
     def _apply_expand(
@@ -132,6 +148,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y_offset: int,
         y_slice_size: int,
         add_inputs: bool = True,
+        slot_idx: int = 0,
     ):
         """Perform the `y[:,y_offset:y_offset+y_slice_size]+=x@w_t_all`
         computation, which is suitable for the
@@ -140,10 +157,17 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         expand_slice_fun: Callable = (
             self._expand_slice_prefill if self.is_prefill else self._expand_slice_decode
         )
-        expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
+        expand_slice_fun(
+            y, x, w_t_all, y_offset, y_slice_size, add_inputs, slot_idx=slot_idx
+        )
 
     def _apply_shrink(
-        self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: torch.Tensor,
+        scale: float,
+        slot_idx: int = 0,
     ):
         """Perform the `y+=x@w_t_all` computation, which is suitable for the
         GEMM of lora'a.
@@ -157,7 +181,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         shrink_fun: Callable = (
             self._shrink_prefill if self.is_prefill else self._shrink_decode
         )
-        shrink_fun(y, x, w_t_all, scale)
+        shrink_fun(y, x, w_t_all, scale, slot_idx=slot_idx)
         y = y.view_as(y_org)
 
     def add_shrink(
@@ -183,13 +207,26 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `slot_idx` (defaults to 0).
 
         """
+        slot_idx: int = kwargs.pop("slot_idx", 0)
+        if self.is_prefill and self.is_slot_no_lora(slot_idx):
+            return
         x = x.view(-1, x.shape[-1])
+        scales = (
+            self.get_token_lora_scales(slot_idx, x.size(0))
+            if self.has_custom_scales
+            else None
+        )
         # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
+            self._apply_shrink(
+                y[slice_idx], x, lora_a_stacked[slice_idx], scale, slot_idx=slot_idx
+            )
+            if scales is not None:
+                y_slice = y[slice_idx].view(-1, y[slice_idx].shape[-1])
+                y_slice.mul_(scales.to(y_slice.dtype).unsqueeze(-1))
 
     def add_expand(
         self,
@@ -216,9 +253,10 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             output_slices (tuple[int, ...]): Every slice's size
             offset_start (int): The starting position of y, defaults to 0.
             add_inputs (bool):  Defaults to True.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `slot_idx` (defaults to 0).
 
         """
+        slot_idx: int = kwargs.pop("slot_idx", 0)
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start
@@ -230,6 +268,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
                 offset_left,
                 output_slices[slice_idx],
                 add_inputs=add_inputs,
+                slot_idx=slot_idx,
             )
             offset_left += output_slices[slice_idx]
         y = y.view_as(y_org)
@@ -252,14 +291,18 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `slot_idx` (defaults to 0).
 
         """
+        slot_idx: int = kwargs.pop("slot_idx", 0)
+        if self.has_custom_scales:
+            scales = self.get_token_lora_scales(slot_idx, x.size(0))
+            x = (x.float() * scales.unsqueeze(-1)).to(x.dtype)
         # Embedding layer only need expand op
         expand_fun: Callable = (
             self._expand_prefill if self.is_prefill else self._expand_decode
         )
-        expand_fun(y, x, lora_b_stacked, add_inputs)
+        expand_fun(y, x, lora_b_stacked, add_inputs, slot_idx=slot_idx)
 
     def add_lora_linear(
         self,
@@ -292,7 +335,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `add_inputs` (defaults to True).
 
         """
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
@@ -305,10 +348,25 @@ class PunicaWrapperCPU(PunicaWrapperBase):
                 torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
                 for _ in range(len(output_slices))
             )
-        self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-        self.add_expand(
-            y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs
-        )
+        add_inputs = kwargs.pop("add_inputs", True)
+        for slot_idx in range(self.num_active_slots):
+            if slot_idx > 0:
+                if self.is_prefill and self.is_slot_no_lora(slot_idx):
+                    continue
+                for buf in buffer:
+                    buf.zero_()
+            self.add_shrink(
+                buffer, x, lora_a_stacked, scale, slot_idx=slot_idx, **kwargs
+            )
+            self.add_expand(
+                y,
+                buffer,
+                lora_b_stacked,
+                output_slices,
+                add_inputs=add_inputs if slot_idx == 0 else True,
+                slot_idx=slot_idx,
+                **kwargs,
+            )
 
     def add_lora_logits(
         self,
@@ -346,8 +404,17 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             # triton op
             buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
         # LogitsProcessorWithLoRA always using bgmv.
-        bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
-        bgmv_expand(buffer, lora_b_stacked, y, self.sampler_indices, add_inputs=True)
+        for slot_idx in range(self.num_active_slots):
+            sampler_indices = self.get_sampler_indices(slot_idx)
+            if slot_idx > 0:
+                buffer.zero_()
+            bgmv_shrink(x, lora_a_stacked, buffer, sampler_indices, scale)
+            if self.has_custom_scales:
+                scales = self.get_sampler_lora_scales(slot_idx, x.size(0)).to(
+                    buffer.dtype
+                )
+                buffer.mul_(scales.unsqueeze(-1))
+            bgmv_expand(buffer, lora_b_stacked, y, sampler_indices, add_inputs=True)
         y = y.view_as(y_org)
 
     def apply_lora_full_linear(

@@ -301,6 +301,20 @@ class InputProcessor:
                 f"Got lora_request {lora_request} but LoRA is not enabled!"
             )
 
+        num_adapters = len(lora_request.get_adapters())
+        if num_adapters > self.lora_config.max_loras_per_request:
+            raise VLLMValidationError(
+                f"Request specifies {num_adapters} LoRA adapters, which exceeds "
+                f"max_loras_per_request ({self.lora_config.max_loras_per_request})."
+            )
+        if self.lora_config.enable_tower_connector_lora and (
+            lora_request.is_composite or lora_request.lora_scale != 1.0
+        ):
+            raise VLLMValidationError(
+                "Per-request multi-adapter composition and static LoRA scales "
+                "are not supported with enable_tower_connector_lora=True."
+            )
+
         if self.tokenizer is not None:
             logger.warning_once(
                 "vLLM has deprecated support for supporting different "
@@ -327,9 +341,18 @@ class InputProcessor:
             or not self.lora_config.enable_tower_connector_lora
         ):
             return mm_hash
-        adapter_hash = hash_factors(
-            {"lora_name": lora_request.lora_name, "lora_path": lora_request.lora_path}
-        )
+        adapters = lora_request.get_adapters()
+        if len(adapters) == 1 and adapters[0][1] == 1.0:
+            adapter = adapters[0][0]
+            adapter_hash = hash_factors(
+                {"lora_name": adapter.lora_name, "lora_path": adapter.lora_path}
+            )
+        else:
+            entries = [
+                (adapter.lora_name, adapter.lora_path, scale)
+                for adapter, scale in adapters
+            ]
+            adapter_hash = hash_factors({"lora_adapters": entries})
         return f"{adapter_hash}:{mm_hash}"
 
     def inject_into_mm_cache(

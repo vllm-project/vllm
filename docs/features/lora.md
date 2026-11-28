@@ -449,6 +449,36 @@ For token-classification models that support LoRA, use `pooling_task="token_clas
 
 Classification heads support LoRA A/B weights (matching the base head's output size) or `modules_to_save=["classifier"]`. Full heads follow the [sequence-classification configuration](#sequence-classification-lora-adapters) above, including `max_lora_cls_labels` for different label counts.
 
+## Composing Multiple LoRA Adapters per Request
+
+To activate multiple independently-loaded LoRA adapters simultaneously on a single offline request with static per-adapter scales (`y = Wx + sum_i s_i * (alpha_i / r_i) * B_i A_i x`), set `max_loras_per_request` (bounded by `max_loras`) and construct a composite `LoRARequest`:
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
+
+llm = LLM(
+    model="meta-llama/Llama-3.2-3B-Instruct",
+    enable_lora=True,
+    max_loras=4,
+    max_loras_per_request=2,
+)
+
+style_lora = LoRARequest("style", 1, "/path/to/style")
+domain_lora = LoRARequest("domain", 2, "/path/to/domain")
+composite = LoRARequest.from_adapters([(style_lora, 0.7), (domain_lora, 0.5)])
+
+outputs = llm.generate(
+    ["Explain paged attention."],
+    SamplingParams(temperature=0, max_tokens=64),
+    lora_request=composite,
+)
+```
+
+Each constituent adapter counts against `max_loras` in the scheduler and stays loaded independently without offline merging. Single-adapter requests can also pass `lora_scale` directly (for example `LoRARequest("style", 1, "/path/to/style", lora_scale=0.5)`). The corresponding CLI flag is `--max-loras-per-request` (defaults to `1`).
+
+Phase 1 supports dense linear, embedding, and `lm_head` LoRA layers on CPU and CUDA-alike backends. FusedMoE LoRA layers, MLA KV-B projections, full-module classification head replacement, and multimodal tower/connector LoRA (`--enable-tower-connector-lora`) are not yet supported for multi-adapter or scaled requests and raise an explicit error instead of silently dropping adapters or scales.
+
 ## Using Tips
 
 ### Configuring `max_lora_rank`

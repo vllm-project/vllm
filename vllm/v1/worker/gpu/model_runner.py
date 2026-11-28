@@ -367,7 +367,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cudagraph_manager: ModelCudaGraphManager | None = None
 
         # LoRA-related workers.
-        self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
+        self.lora_state = LoraState(
+            max_num_reqs=self.max_num_reqs,
+            max_loras_per_request=(
+                self.lora_config.max_loras_per_request
+                if self.lora_config is not None
+                else 1
+            ),
+        )
         self.lora_capture_cases = [0]
         if self.lora_config:
             self.lora_capture_cases = get_lora_capture_cases(
@@ -1924,6 +1931,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         skip_compiled = False
+        if (
+            self.lora_config
+            and not dummy_run
+            and self.lora_config.max_loras_per_request == 1
+            and self.lora_state.has_custom_scales(req_ids)
+        ):
+            # Graphs captured with max_loras_per_request=1 omit the scale
+            # multiply for zero overhead; run eager when a single-adapter
+            # request supplies a non-unit lora_scale.
+            skip_compiled = True
         if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
             # Encoder-decoder models such as Whisper should run eager/non-compiled
             # when encoder inputs are scheduled, because this step updates
@@ -1977,13 +1994,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.lora_config:
                 # Activate LoRA adapters.
-                lora_inputs = self.lora_state.make_lora_inputs(
+                lora_mapping, active_lora_requests = self.lora_state.make_lora_mapping(
                     input_batch.req_ids,
                     input_batch.idx_mapping_np,
                     input_batch.num_scheduled_tokens,
                     np.diff(input_batch.cu_num_logits_np),
                 )
-                self._set_active_loras(*lora_inputs)
+                self._set_active_lora_mapping(lora_mapping, active_lora_requests)
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             # DP padding can exceed max_model_len; split so each dummy request

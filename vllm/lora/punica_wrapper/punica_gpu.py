@@ -36,6 +36,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     Multi-LoRA, and to provide the interface for the punica triton kernel.
     """
 
+    _supports_multi_slot_and_scales = True
+
     def __init__(
         self,
         max_num_batched_tokens: int,
@@ -43,7 +45,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         device: torch.device | str,
         **kwargs,
     ):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
+        PunicaWrapperBase.__init__(
+            self, max_num_batched_tokens, max_batches, device, **kwargs
+        )
 
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
@@ -53,12 +57,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self.max_loras, self.lora_config.specialize_active_lora
         )
 
-        self.token_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras,
-            max_num_batched_tokens,
-            device=device,
-            captured_lora_counts=captured_lora_counts,
-        )
+        self._slot_token_mapping_metas: list[LoRAKernelMeta] = [
+            LoRAKernelMeta.make(
+                self.max_loras,
+                max_num_batched_tokens,
+                device=device,
+                captured_lora_counts=captured_lora_counts,
+            )
+            for _ in range(self.max_loras_per_request)
+        ]
+        self.token_mapping_meta = self._slot_token_mapping_metas[0]
 
         self.all_lora_ids = torch.arange(
             -1, self.max_loras, dtype=torch.int32, device=device
@@ -68,12 +76,19 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # max_batches * (num_speculative_decoding_tokens + 1).
         # This line can be optimized by replacing max_num_batched_tokens
         # to  max_batches * (num_speculative_decoding_tokens + 1).
-        self.prompt_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras,
-            max_num_batched_tokens,
-            device=device,
-            captured_lora_counts=captured_lora_counts,
-        )
+        self._slot_prompt_mapping_metas: list[LoRAKernelMeta] = [
+            LoRAKernelMeta.make(
+                self.max_loras,
+                max_num_batched_tokens,
+                device=device,
+                captured_lora_counts=captured_lora_counts,
+            )
+            for _ in range(self.max_loras_per_request)
+        ]
+        self.prompt_mapping_meta = self._slot_prompt_mapping_metas[0]
+
+    def _should_apply_scales(self) -> bool:
+        return self.max_loras_per_request > 1 or self._has_custom_scales
 
     def update_metadata(
         self,
@@ -91,6 +106,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             # Prepare cuda kernel metadata tensors
             self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
             self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+            for slot_idx in range(1, self.max_loras_per_request):
+                token_meta = self._slot_token_mapping_metas[slot_idx]
+                prompt_meta = self._slot_prompt_mapping_metas[slot_idx]
+                if slot_idx < self._num_active_slots:
+                    token_meta.prepare_tensors(self.get_token_lora_indices(slot_idx))
+                    prompt_meta.prepare_tensors(self.get_sampler_indices(slot_idx))
+                else:
+                    token_meta._reset()
+                    token_meta.no_lora_flag_cpu[0] = True
+                    prompt_meta._reset()
+                    prompt_meta.no_lora_flag_cpu[0] = True
 
     def add_shrink(
         self,
@@ -111,20 +137,23 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `slot_idx` (defaults to 0).
 
         """
+        slot_idx: int = kwargs.pop("slot_idx", 0)
         x = x.view(-1, x.shape[-1])
+        token_meta = self._slot_token_mapping_metas[slot_idx]
         lora_shrink(
             x,
             lora_a_stacked,
             y,
-            *self.token_mapping_meta.meta_args(
-                x.size(0), self.lora_config.specialize_active_lora
-            ),
+            *token_meta.meta_args(x.size(0), self.lora_config.specialize_active_lora),
             scale,
             split_k_reduction=self.lora_config.split_k_reduction,
         )
+        if self._should_apply_scales():
+            scales = self.get_token_lora_scales(slot_idx, x.size(0)).to(y.dtype)
+            y.mul_(scales.view(1, x.size(0), 1))
 
     def add_expand(
         self,
@@ -153,9 +182,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_inputs (bool): If True, add LoRA output to y; if False, write
                 LoRA-only output to y (used for dual-stream when base and LoRA
                 run on different CUDA streams). Defaults to True.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `slot_idx` (defaults to 0).
 
         """
+        slot_idx: int = kwargs.pop("slot_idx", 0)
         y_org = y
         y = y.view(-1, y.shape[-1])
 
@@ -163,13 +193,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         assert x.size(0) == len(output_slices)
         num_tokens = x.size(1)  # first dimension is the num slices
 
+        token_meta = self._slot_token_mapping_metas[slot_idx]
         lora_expand(
             x,
             lora_b_stacked,
             y,
-            *self.token_mapping_meta.meta_args(
-                num_tokens, self.lora_config.specialize_active_lora
-            ),
+            *token_meta.meta_args(num_tokens, self.lora_config.specialize_active_lora),
             offset_start=offset_start,
             add_inputs=add_inputs,
         )
@@ -194,16 +223,19 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor.
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
-            **kwargs: Unused; accepted for compatibility with the base class signature.
+            **kwargs: Accepts optional `slot_idx` (defaults to 0).
 
         """
+        slot_idx: int = kwargs.pop("slot_idx", 0)
+        if self._should_apply_scales():
+            scales = self.get_token_lora_scales(slot_idx, x.size(0))
+            x = (x.float() * scales.unsqueeze(-1)).to(x.dtype)
+        token_meta = self._slot_token_mapping_metas[slot_idx]
         lora_expand(
             x.unsqueeze(dim=0),
             (lora_b_stacked,),
             y,
-            *self.token_mapping_meta.meta_args(
-                x.size(0), self.lora_config.specialize_active_lora
-            ),
+            *token_meta.meta_args(x.size(0), self.lora_config.specialize_active_lora),
             offset_start=0,
             add_inputs=add_inputs,
         )
@@ -257,21 +289,24 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
         )
         add_inputs = kwargs.pop("add_inputs", True)
-        self.add_shrink(
-            buffer,  # type: ignore
-            x,
-            lora_a_stacked,
-            scale,
-            **kwargs,
-        )
-        self.add_expand(
-            y,
-            buffer,  # type: ignore
-            lora_b_stacked,
-            output_slices,
-            add_inputs=add_inputs,
-            **kwargs,
-        )
+        for slot_idx in range(self._num_active_slots):
+            self.add_shrink(
+                buffer,  # type: ignore
+                x,
+                lora_a_stacked,
+                scale,
+                slot_idx=slot_idx,
+                **kwargs,
+            )
+            self.add_expand(
+                y,
+                buffer,  # type: ignore
+                lora_b_stacked,
+                output_slices,
+                add_inputs=add_inputs if slot_idx == 0 else True,
+                slot_idx=slot_idx,
+                **kwargs,
+            )
 
     def add_lora_logits(
         self,
@@ -314,26 +349,32 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # Note: buffer is zeroed inside the shrink op
         buffer = torch.empty((x.size(0), r), dtype=torch.float32, device=x.device)
 
-        lora_shrink(
-            x,
-            [lora_a_stacked],
-            buffer.unsqueeze(dim=0),
-            *self.prompt_mapping_meta.meta_args(
-                x.size(0), self.lora_config.specialize_active_lora
-            ),
-            scale,
-            split_k_reduction=self.lora_config.split_k_reduction,
-        )
-
-        lora_expand(
-            buffer.unsqueeze(dim=0),
-            [lora_b_stacked],
-            y,
-            *self.prompt_mapping_meta.meta_args(
-                buffer.size(0), self.lora_config.specialize_active_lora
-            ),
-            add_inputs=True,
-        )
+        for slot_idx in range(self._num_active_slots):
+            prompt_meta = self._slot_prompt_mapping_metas[slot_idx]
+            lora_shrink(
+                x,
+                [lora_a_stacked],
+                buffer.unsqueeze(dim=0),
+                *prompt_meta.meta_args(
+                    x.size(0), self.lora_config.specialize_active_lora
+                ),
+                scale,
+                split_k_reduction=self.lora_config.split_k_reduction,
+            )
+            if self._should_apply_scales():
+                scales = self.get_sampler_lora_scales(slot_idx, x.size(0)).to(
+                    buffer.dtype
+                )
+                buffer.mul_(scales.unsqueeze(-1))
+            lora_expand(
+                buffer.unsqueeze(dim=0),
+                [lora_b_stacked],
+                y,
+                *prompt_meta.meta_args(
+                    buffer.size(0), self.lora_config.specialize_active_lora
+                ),
+                add_inputs=True,
+            )
         y = y.view_as(y_org)
 
     def apply_lora_full_linear(
@@ -486,6 +527,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         add_inputs: bool = True,
     ):
         """Perform a fused forward computation for a LoRA MoE layer."""
+        if self.has_multi_slot or self.has_custom_scales:
+            raise NotImplementedError(
+                "Multi-adapter or scaled LoRA is not supported for FusedMoE "
+                "LoRA layers."
+            )
         token_lora_mapping, lora_ids, no_lora, num_active_loras = self._moe_meta_args(
             x.size(0), token_lora_mapping
         )

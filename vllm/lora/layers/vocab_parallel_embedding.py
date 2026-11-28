@@ -84,12 +84,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]
-        embeddings_indices = self.punica_wrapper._embeddings_indices[:num_tokens]
-
-        full_lora_a_embeddings = F.embedding(
-            x + embeddings_indices,
-            self.lora_a_stacked_2d,
-        )
         full_output = self.base_layer.forward(x)
 
         full_output_org = full_output
@@ -97,18 +91,31 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             full_output = full_output.view(
                 full_output.shape[0] * full_output.shape[1], -1
             )
-        if full_lora_a_embeddings.ndim == 3:
-            full_lora_a_embeddings = full_lora_a_embeddings.view(
-                full_lora_a_embeddings.shape[0] * full_lora_a_embeddings.shape[1],
-                -1,
+
+        for slot_idx in range(self.punica_wrapper.num_active_slots):
+            embeddings_indices = self.punica_wrapper.get_embeddings_indices(
+                num_tokens, slot_idx
+            )
+            full_lora_a_embeddings = F.embedding(
+                x + embeddings_indices,
+                self.lora_a_stacked_2d,
+            )
+            if full_lora_a_embeddings.ndim == 3:
+                full_lora_a_embeddings = full_lora_a_embeddings.view(
+                    full_lora_a_embeddings.shape[0] * full_lora_a_embeddings.shape[1],
+                    -1,
+                )
+
+            lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_embedding(
+                full_output,
+                full_lora_a_embeddings,
+                self.lora_b_stacked,
+                add_inputs=True,
+                slot_idx=slot_idx,
             )
 
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_embedding(
-            full_output, full_lora_a_embeddings, self.lora_b_stacked, add_input=True
-        )
-
-        if not current_platform.can_update_inplace():
-            full_output = lora_output
+            if not current_platform.can_update_inplace():
+                full_output = lora_output
 
         return full_output.view_as(full_output_org)
 
