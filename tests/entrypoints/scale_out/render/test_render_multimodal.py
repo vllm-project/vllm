@@ -3,14 +3,92 @@
 
 """Multimodal tests for the /render endpoints that expose prompt preprocessing."""
 
+from io import BytesIO
+
 import httpx
+import numpy as np
+import pybase64
 import pytest
 import pytest_asyncio
+import soundfile as sf
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteLaunchRenderServer, RemoteOpenAIServer
 from vllm.multimodal.utils import encode_image_url
 
 VISION_MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
+AUDIO_MODEL_NAME = "Qwen/Qwen2-Audio-7B-Instruct"
+
+
+@pytest.fixture(scope="module")
+def audio_render_server():
+    args = [
+        "--media-io-kwargs",
+        '{"audio": {"audio_backend": "torchcodec"}}',
+        "--limit-mm-per-prompt.audio",
+        "1",
+    ]
+    with RemoteLaunchRenderServer(
+        AUDIO_MODEL_NAME,
+        args,
+        env_dict={"VLLM_MAX_AUDIO_DECODE_BYTES": "65536"},
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", ["input_audio", "audio_url"])
+async def test_audio_render_rejects_oversized_unknown_duration(
+    audio_render_server, content_type
+):
+    """Missing duration must not bypass the byte cap or break later requests."""
+    async with httpx.AsyncClient(
+        base_url=audio_render_server.url_for(""), timeout=60.0
+    ) as client:
+        for sample_rate, channels, expected_status in [
+            (48000, 8, 400),
+            (16000, 1, 200),
+        ]:
+            buffer = BytesIO()
+            sf.write(
+                buffer,
+                np.zeros((sample_rate, channels), dtype=np.int16),
+                sample_rate,
+                format="FLAC",
+            )
+            payload = bytearray(buffer.getvalue())
+            # FLAC STREAMINFO: zero means unknown sample count and absent MD5.
+            payload[21] &= 0xF0
+            payload[22:42] = bytes(20)
+            encoded = pybase64.b64encode(payload).decode("ascii")
+            content = (
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": encoded, "format": "wav"},
+                }
+                if content_type == "input_audio"
+                else {
+                    "type": "audio_url",
+                    "audio_url": {"url": f"data:audio/flac;base64,{encoded}"},
+                }
+            )
+            response = await client.post(
+                "/v1/chat/completions/render",
+                json={
+                    "model": AUDIO_MODEL_NAME,
+                    "messages": [{"role": "user", "content": [content]}],
+                },
+            )
+            assert response.status_code == expected_status, response.text
+            data = response.json()
+            if expected_status == 400:
+                assert data["error"]["type"] == "BadRequestError"
+                assert "VLLM_MAX_AUDIO_DECODE_BYTES" in data["error"]["message"]
+            else:
+                assert data["token_ids"]
+                assert len(data["features"]["mm_hashes"]["audio"]) == 1
+                placeholders = data["features"]["mm_placeholders"]["audio"]
+                assert len(placeholders) == 1
+                assert placeholders[0]["length"] > 0
 
 
 @pytest.fixture(scope="module")

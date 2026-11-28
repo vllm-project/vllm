@@ -2,14 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
+import av
 import numpy as np
 import pybase64 as base64
 import pytest
 import soundfile as sf
+from torch.profiler import ProfilerActivity, profile
 
 import vllm.envs as envs
 from vllm.multimodal.media import AudioMediaIO
@@ -111,41 +114,9 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
     ids=["duration", "decoded-bytes", "both"],
 )
 def test_load_audio_zero_decode_limits_are_disabled(
-    backend, duration_limit, decode_limit, dummy_audio_bytes, monkeypatch
+    backend, duration_limit, decode_limit, dummy_audio_bytes
 ):
     """Zero decode limits are disabled consistently across backends."""
-    if backend == "torchcodec":
-
-        class FakeSamples:
-            sample_rate = 16000
-
-            def __init__(self):
-                self.data = audio_module.torch.zeros(
-                    (1, 1600), dtype=audio_module.torch.float32
-                )
-
-        class FakeMetadata:
-            duration_seconds = 0.1
-            sample_rate = 16000
-            num_channels = 1
-            codec = "pcm_s16le"
-
-        class FakeDecoder:
-            metadata = FakeMetadata()
-
-            def __init__(self, _path, sample_rate=None):
-                assert sample_rate is None
-
-            @staticmethod
-            def get_all_samples():
-                return FakeSamples()
-
-            @staticmethod
-            def get_samples_played_in_range(_start, _end):
-                return FakeSamples()
-
-        monkeypatch.setattr(audio_module, "AudioDecoder", FakeDecoder)
-
     audio, sample_rate = load_audio(
         BytesIO(dummy_audio_bytes),
         sr=None,
@@ -174,6 +145,223 @@ def _make_flac_bytes(frames: int, channels: int, samplerate: int) -> bytes:
     buf = BytesIO()
     sf.write(buf, data, samplerate, format="FLAC")
     return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("declared_frames", "max_duration_s", "sample_rate"),
+    [(0, None, None), (0, 600, 16000), (1, 600, None), (1, None, 16000)],
+)
+def test_torchcodec_bounds_allocation_with_unreliable_duration(
+    declared_frames, max_duration_s, sample_rate
+):
+    """Missing or understated duration must not allow a full PCM allocation."""
+    payload = bytearray(_make_flac_bytes(768000, 8, 192000))
+    stream_info = int.from_bytes(payload[18:26], "big")
+    stream_info = (stream_info & ~((1 << 36) - 1)) | declared_frames
+    payload[18:26] = stream_info.to_bytes(8, "big")
+    payload[26:42] = bytes(16)
+    load_audio_torchcodec(BytesIO(_make_flac_bytes(32, 1, 16000)))
+
+    with (
+        profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof,
+        pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"),
+    ):
+        load_audio_torchcodec(
+            BytesIO(payload),
+            sr=sample_rate,
+            max_duration_s=max_duration_s,
+            max_decode_bytes=64 * 1024,
+        )
+
+    # Allow codec-frame buffers and concatenation, but not the full 2–24 MiB PCM.
+    largest_allocation = max(event.cpu_memory_usage for event in prof.events())
+    assert 0 < largest_allocation < 1024 * 1024
+
+
+@pytest.mark.parametrize("mono", [False, True])
+def test_torchcodec_unknown_duration_preserves_audio_at_byte_limit(mono):
+    """A short high-rate stream remains valid even without a declared length."""
+    payload = bytearray(_make_flac_bytes(4096, 8, 192000))
+    payload[21] &= 0xF0
+    payload[22:26] = bytes(4)
+    payload[26:42] = bytes(16)
+    expected, expected_sr = load_audio_torchcodec(BytesIO(payload), sr=None, mono=mono)
+
+    actual, actual_sr = load_audio_torchcodec(
+        BytesIO(payload),
+        sr=None,
+        mono=mono,
+        max_duration_s=600,
+        max_decode_bytes=4096 * 8 * 4,
+    )
+
+    assert actual_sr == expected_sr == 192000
+    np.testing.assert_array_equal(actual, expected)
+
+
+def _make_timestamped_flac_bytes(
+    frames: int,
+    *,
+    sample_rate: int = 16000,
+    start_samples: int = 0,
+    constant_pts: bool = False,
+) -> bytes:
+    buffer = BytesIO()
+    with av.open(
+        buffer,
+        mode="w",
+        format="matroska",
+        options={"live": "1", "avoid_negative_ts": "disabled"},
+    ) as container:
+        stream = container.add_stream("flac", rate=sample_rate)
+        stream.layout = "mono"
+        frame = av.AudioFrame.from_ndarray(
+            np.arange(frames, dtype=np.int16).reshape(1, -1),
+            format="s16",
+            layout="mono",
+        )
+        frame.sample_rate = sample_rate
+        frame.pts = start_samples
+        frame.time_base = Fraction(1, sample_rate)
+        for packet in stream.encode(frame):
+            if constant_pts:
+                packet.pts = packet.dts = 0
+            container.mux(packet)
+        for packet in stream.encode(None):
+            if constant_pts:
+                packet.pts = packet.dts = 0
+            container.mux(packet)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("start_samples", [4000, -4000])
+@pytest.mark.parametrize("over_limit", [False, True])
+@pytest.mark.parametrize("output_rate", [None, 22050])
+def test_torchcodec_byte_limit_preserves_timestamped_audio(
+    start_samples, over_limit, output_rate
+):
+    """Keep native playback trimming before any bounded sample-rate conversion."""
+    payload = _make_timestamped_flac_bytes(12800, start_samples=start_samples)
+    metadata = audio_module.AudioDecoder(BytesIO(payload)).metadata
+    assert metadata.duration_seconds is None
+    assert metadata.begin_stream_seconds == start_samples / 16000
+    expected, expected_sr = load_audio_torchcodec(BytesIO(payload), sr=output_rate)
+    if output_rate is not None and start_samples < 0:
+        # Native trimming has different boundaries from integrated resampling.
+        native, native_sr = load_audio_torchcodec(BytesIO(payload), sr=None)
+        expected = audio_module.resample_audio_pyav(
+            native, orig_sr=native_sr, target_sr=output_rate
+        )
+    # The budget also counts the frames discarded before playback time zero.
+    decode_limit = max(12800 * 4, expected.nbytes)
+    decode_limit -= 4 if over_limit else 0
+    if over_limit:
+        with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
+            load_audio_torchcodec(
+                BytesIO(payload), sr=output_rate, max_decode_bytes=decode_limit
+            )
+    else:
+        actual, actual_sr = load_audio_torchcodec(
+            BytesIO(payload), sr=output_rate, max_decode_bytes=decode_limit
+        )
+        assert actual_sr == expected_sr
+        np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("output_rate", [8000, 48000])
+@pytest.mark.parametrize("mono", [False, True])
+def test_torchcodec_byte_limit_preserves_resampled_audio(output_rate, mono):
+    """Ordinary resampling and downmixing match the unlimited decoder exactly."""
+    buffer = BytesIO()
+    sf.write(
+        buffer,
+        np.arange(8192, dtype=np.int16).reshape(4096, 2),
+        16000,
+        format="FLAC",
+    )
+    payload = buffer.getvalue()
+    expected, expected_sr = load_audio_torchcodec(
+        BytesIO(payload), sr=output_rate, mono=mono
+    )
+    # Both channels are allocated before downmixing.
+    decode_limit = max(4096, 4096 * output_rate // 16000) * 2 * 4
+    actual, actual_sr = load_audio_torchcodec(
+        BytesIO(payload), sr=output_rate, mono=mono, max_decode_bytes=decode_limit
+    )
+    assert actual_sr == expected_sr == output_rate
+    np.testing.assert_array_equal(actual, expected)
+    with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
+        load_audio_torchcodec(
+            BytesIO(payload),
+            sr=output_rate,
+            mono=mono,
+            max_decode_bytes=decode_limit - 1,
+        )
+
+
+@pytest.mark.parametrize("output_rate", [8000, 48000])
+def test_torchcodec_resampling_budget_includes_short_input_padding(output_rate):
+    """Reject padded resampler allocations even when the final waveform fits."""
+    payload = _make_timestamped_flac_bytes(64)
+    native, native_sr = load_audio_torchcodec(BytesIO(payload), sr=None)
+    expected = audio_module.resample_audio_pyav(
+        native, orig_sr=native_sr, target_sr=output_rate
+    )
+    decode_limit = 1024 * output_rate // native_sr * 4
+    assert expected.nbytes < decode_limit
+    with pytest.raises(ValueError, match="Audio resampling would exceed"):
+        load_audio_torchcodec(
+            BytesIO(payload), sr=output_rate, max_decode_bytes=decode_limit - 1
+        )
+    actual, actual_sr = load_audio_torchcodec(
+        BytesIO(payload), sr=output_rate, max_decode_bytes=decode_limit
+    )
+    assert actual_sr == output_rate
+    assert actual.shape == (64 * output_rate // native_sr,)
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "sample_rate,output_rate,constant_pts",
+    [(16000, None, True), (1, 16000, False)],
+)
+def test_torchcodec_bounds_allocation_before_accumulation_or_resampling(
+    sample_rate, output_rate, constant_pts
+):
+    """Neither packet timestamps nor resampling may bypass the PCM budget."""
+    frames = 640000 if constant_pts else 64
+    payload = _make_timestamped_flac_bytes(
+        frames, sample_rate=sample_rate, constant_pts=constant_pts
+    )
+    load_audio_torchcodec(BytesIO(_make_flac_bytes(32, 1, 16000)))
+
+    with (
+        profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof,
+        pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"),
+    ):
+        load_audio_torchcodec(
+            BytesIO(payload), sr=output_rate, max_decode_bytes=64 * 1024
+        )
+
+    largest_allocation = max(event.cpu_memory_usage for event in prof.events())
+    assert 0 < largest_allocation < 1024 * 1024
+
+
+def test_torchcodec_preflight_respects_duration_limit():
+    """A generous byte budget must not defer the duration rejection."""
+    payload = _make_timestamped_flac_bytes(64000, constant_pts=True)
+    with (
+        profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof,
+        pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_DURATION_S"),
+    ):
+        load_audio_torchcodec(
+            BytesIO(payload),
+            sr=None,
+            max_duration_s=0.1,
+            max_decode_bytes=1024 * 1024,
+        )
+    largest_allocation = max(event.cpu_memory_usage for event in prof.events())
+    assert 0 < largest_allocation < 64 * 1024
 
 
 @pytest.mark.skip_global_cleanup
@@ -379,6 +567,21 @@ def test_load_audio_torchcodec_preserves_vorbis_length(dummy_audio_bytes):
     assert sr == expected_sr
     assert audio.shape == expected.shape
     np.testing.assert_allclose(audio, expected, atol=1e-4)
+
+
+@pytest.mark.parametrize("sample_rate", [16000, 22050])
+def test_torchcodec_byte_limit_preserves_vorbis_resampling(
+    dummy_audio_bytes, sample_rate
+):
+    """Budget checks preserve Vorbis trimming at the requested output rate."""
+    expected, expected_sr = load_audio_torchcodec(
+        BytesIO(dummy_audio_bytes), sr=sample_rate
+    )
+    audio, audio_sr = load_audio_torchcodec(
+        BytesIO(dummy_audio_bytes), sr=sample_rate, max_decode_bytes=256 * 1024 * 1024
+    )
+    assert audio_sr == expected_sr
+    np.testing.assert_array_equal(audio, expected)
 
 
 def test_load_audio_unknown_backend_rejected(dummy_audio_bytes):

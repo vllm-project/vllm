@@ -299,10 +299,8 @@ def load_audio_torchcodec(
 ) -> tuple[npt.NDArray, float]:
     """Load an audio file using torchcodec, returning a float32 waveform.
 
-    Unlike `load_audio_pyav`, which drives FFmpeg through a per-frame
-    Python generator, torchcodec decodes inside a single call that releases
-    the GIL. Resampling also happens in C++ (`sample_rate=sr`), so this
-    backend never falls back to PyAV or libsndfile.
+    When a byte limit is enabled, check native frames before the final decode
+    and bound any subsequent PyAV resampling of the decoded PCM.
 
     Args:
         path: A `BytesIO` buffer, a filesystem
@@ -333,11 +331,15 @@ def load_audio_torchcodec(
     if sr is not None and sr != int(sr):
         raise ValueError(f"torchcodec requires an integer sample rate, got {sr}")
     sample_rate = int(sr) if sr is not None else None
+    if max_decode_bytes is not None and sample_rate is not None and sample_rate <= 0:
+        raise ValueError("torchcodec requires a positive sample rate")
 
     # Opening the source and reading container metadata both touch untrusted
     # input; torchcodec signals corrupt/unsupported data with RuntimeError.
     try:
-        decoder = AudioDecoder(path, sample_rate=sample_rate)
+        decoder = AudioDecoder(
+            path, sample_rate=None if max_decode_bytes is not None else sample_rate
+        )
         metadata = decoder.metadata
     except RuntimeError as e:
         # torchcodec loads its ffmpeg-backed core lazily at construction, so
@@ -353,8 +355,8 @@ def load_audio_torchcodec(
     # post-decode check below is authoritative.
     if max_decode_bytes is not None:
         est_duration_s = metadata.duration_seconds
-        # Estimate at the *output* rate: when `sr` is set torchcodec
-        # resamples to it during decode.
+        # Estimate the requested output size; the frame pass also bounds the
+        # native PCM independently of metadata.
         est_sample_rate = sr if sr is not None else metadata.sample_rate
         est_num_channels = metadata.num_channels
         if (
@@ -390,10 +392,55 @@ def load_audio_torchcodec(
             )
 
     # Decode the stream. RuntimeError here covers a corrupt stream or a
-    # container that lies about its length. Bounding the range (when a
-    # duration limit is set) keeps an under-reported duration from expanding
-    # into unbounded PCM.
+    # container that lies about its length.
     try:
+        if max_decode_bytes is not None:
+            # The public range API accumulates frames using untrusted timestamps.
+            # The core iterator (torchcodec >= 0.14) lets us check
+            # each frame without retaining PCM or allocating a resampled frame.
+            from torchcodec._core import get_next_frame
+
+            native_sr = metadata.sample_rate or 0
+            if (sample_rate is not None or max_duration_s is not None) and (
+                native_sr <= 0
+            ):
+                raise ValueError(
+                    "Cannot enforce audio decode limits without a valid "
+                    "native audio sample rate."
+                )
+            native_max_samples = (
+                int(native_sr * max_duration_s) if max_duration_s is not None else None
+            )
+            decoded_bytes = 0
+            decoded_samples = 0
+            while True:
+                try:
+                    frame, _, _ = get_next_frame(decoder._decoder)
+                except IndexError:
+                    break
+                decoded_bytes += frame.nbytes
+                decoded_samples += frame.shape[-1]
+                del frame
+                if (
+                    native_max_samples is not None
+                    and decoded_samples > native_max_samples
+                ):
+                    raise ValueError(
+                        f"Audio exceeds maximum allowed duration of "
+                        f"{max_duration_s}s. Set VLLM_MAX_AUDIO_DECODE_DURATION_S "
+                        "to increase this limit."
+                    )
+                if decoded_bytes > max_decode_bytes:
+                    raise ValueError(
+                        "Audio decode exceeded the memory limit. "
+                        "Set VLLM_MAX_AUDIO_DECODE_BYTES to increase this limit."
+                    )
+
+            # Reopen: formats with missing seek metadata may not rewind at EOF.
+            # Keep this decode native: frame rates can differ from metadata.
+            if isinstance(path, BytesIO):
+                path.seek(0)
+            decoder = AudioDecoder(path, sample_rate=None)
         if max_duration_s is None:
             samples = decoder.get_all_samples()
         else:
@@ -403,30 +450,8 @@ def load_audio_torchcodec(
     except RuntimeError as e:
         raise _CorruptAudioError(_CORRUPT_AUDIO_MSG) from e
 
-    # FFmpeg < 5.0 misses Ogg end_trimming, leaving up to one Vorbis block of
-    # padding at the tail; we need to trim for valid audio length.
-    if metadata.codec == "vorbis" and metadata.duration_seconds is not None:
-        expected_samples = round(metadata.duration_seconds * samples.sample_rate)
-        padding = samples.data.shape[-1] - expected_samples
-        native_sr = metadata.sample_rate or samples.sample_rate
-        max_padding = cdiv(_VORBIS_MAX_BLOCK_SAMPLES * samples.sample_rate, native_sr)
-        if 0 < padding <= max_padding:
-            samples.data = samples.data[..., :expected_samples]
-
     # Authoritative post-decode checks: the metadata estimates above can be
     # bypassed by a container that lies about its duration or size.
-    if max_duration_s is not None:
-        # Same `int()` semantics as load_audio_pyav's
-        # `total_samples > int(sr * max_duration_s)`.
-        max_samples = int(samples.sample_rate * max_duration_s)
-        if samples.data.shape[-1] > max_samples:
-            raise ValueError(
-                f"Audio exceeds maximum allowed duration of "
-                f"{max_duration_s}s (decoded {samples.data.shape[-1]} "
-                f"samples at {samples.sample_rate}Hz). Set "
-                f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
-                f"increase this limit."
-            )
     if max_decode_bytes is not None and samples.data.nbytes > max_decode_bytes:
         raise ValueError(
             f"Audio decode exceeded "
@@ -439,6 +464,53 @@ def load_audio_torchcodec(
     audio = samples.data.numpy()  # (num_channels, num_samples), float32
     if audio.size == 0:
         raise ValueError("No audio found in the input.")
+
+    if (
+        max_decode_bytes is not None
+        and sample_rate is not None
+        and sample_rate != out_sr
+    ):
+        if out_sr <= 0:
+            raise ValueError("Cannot resample audio without a positive sample rate.")
+        # resample_audio_pyav pads short inputs to 1024 samples before converting.
+        resampled_samples = cdiv(max(audio.shape[-1], 1024) * sample_rate, out_sr)
+        resampled_bytes = resampled_samples * audio.shape[0] * audio.itemsize
+        if resampled_bytes > max_decode_bytes:
+            raise ValueError(
+                "Audio resampling would exceed the memory limit. "
+                "Set VLLM_MAX_AUDIO_DECODE_BYTES to increase this limit."
+            )
+        audio = resample_audio_pyav(audio, orig_sr=out_sr, target_sr=sample_rate)
+        out_sr = sample_rate
+
+    # FFmpeg < 5.0 misses Ogg end_trimming, leaving up to one Vorbis block of
+    # padding at the tail; trim at the final rate for a consistent audio length.
+    if metadata.codec == "vorbis" and metadata.duration_seconds is not None:
+        expected_samples = round(metadata.duration_seconds * out_sr)
+        padding = audio.shape[-1] - expected_samples
+        native_sr = metadata.sample_rate or out_sr
+        max_padding = cdiv(_VORBIS_MAX_BLOCK_SAMPLES * out_sr, native_sr)
+        if 0 < padding <= max_padding:
+            audio = audio[..., :expected_samples]
+
+    if audio.size == 0:
+        raise ValueError("No audio found in the input.")
+
+    if max_duration_s is not None:
+        # Match load_audio_pyav's integer sample-count comparison.
+        max_samples = int(out_sr * max_duration_s)
+        if audio.shape[-1] > max_samples:
+            raise ValueError(
+                f"Audio exceeds maximum allowed duration of "
+                f"{max_duration_s}s (decoded {audio.shape[-1]} "
+                f"samples at {out_sr}Hz). Set "
+                f"VLLM_MAX_AUDIO_DECODE_DURATION_S to increase this limit."
+            )
+    if max_decode_bytes is not None and audio.nbytes > max_decode_bytes:
+        raise ValueError(
+            "Audio decode exceeded the memory limit. "
+            "Set VLLM_MAX_AUDIO_DECODE_BYTES to increase this limit."
+        )
 
     if mono and audio.ndim > 1:
         # Same reduction as load_audio_pyav, so both backends agree at the
