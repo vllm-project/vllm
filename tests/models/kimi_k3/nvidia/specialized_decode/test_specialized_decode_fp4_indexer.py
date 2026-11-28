@@ -867,8 +867,8 @@ EXCHANGE8_CASES = {
 @pytest.mark.parametrize("case", list(EXCHANGE8_CASES))
 def test_dcp8_topk_exchange_merge_digits(case, monkeypatch):
     """The same over 8 ranks at 5, 10 and 15 rows: the "digits" form on half the
-    warps (MERGE_SELECT for DCP8 with VLLM_KIMI_K3_LOW_LATENCY_DECODE=1) against
-    the radix merge and the #63 merge, bit-equal."""
+    warps (DIGITS_HALF, VLLM_KIMI_K3_LOW_LATENCY_DECODE=1) against the radix
+    merge and the #63 merge, bit-equal."""
     _check_exchange_merge_digits(*EXCHANGE8_CASES[case], 8, case, monkeypatch)
 
 
