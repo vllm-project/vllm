@@ -9,13 +9,18 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.host_memory import (
     host_registration_ranges,
     pin_tensor,
     unpin_tensor,
 )
 from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
+from vllm.v1.simple_kv_offload.copy_backend import (
+    CopyEvent,
+    DmaCopyBackend,
+    TorchCopyBackend,
+)
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.host_buffer import alloc_host_buffer
 from vllm.v1.simple_kv_offload.metadata import (
@@ -66,12 +71,11 @@ class SimpleCPUOffloadWorker:
         self.load_stream: torch.cuda.Stream | None = None
         self.store_stream: torch.cuda.Stream | None = None
 
-        self._backend: DmaCopyBackend | DiskBackend | None = None
-        self._pinned_host_ranges: list[torch.Tensor] = []
+        self._backend: DmaCopyBackend | DiskBackend | TorchCopyBackend | None = None
 
         # Ordered (event_idx, Event). Events pre-allocated on main thread.
-        self._load_events: list[tuple[int, torch.Event]] = []
-        self._store_events: list[tuple[int, torch.Event]] = []
+        self._load_events: list[tuple[int, CopyEvent]] = []
+        self._store_events: list[tuple[int, CopyEvent]] = []
         # High-water marks: highest event_idx completed per stream.
         # When the event list is empty, the hwm covers all prior events.
         self._load_hwm: int = -1
@@ -176,10 +180,11 @@ class SimpleCPUOffloadWorker:
             total_bytes_per_block,
         )
 
-        # Use lowest priority so KV cache I/O yields to compute streams.
-        low_pri, _ = torch.cuda.Stream.priority_range()
-        self.load_stream = torch.cuda.Stream(priority=low_pri)
-        self.store_stream = torch.cuda.Stream(priority=low_pri)
+        if current_platform.is_cuda_alike():
+            # Use lowest priority so KV cache I/O yields to compute streams.
+            low_pri, _ = torch.cuda.Stream.priority_range()
+            self.load_stream = torch.cuda.Stream(priority=low_pri)
+            self.store_stream = torch.cuda.Stream(priority=low_pri)
 
         self.gpu_kv_caches = unique_gpu_caches
 
@@ -209,6 +214,15 @@ class SimpleCPUOffloadWorker:
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
+        # Disk mode stages every transfer through cudaHostRegister'd buffers
+        # and torch.cuda copy streams, so it needs a CUDA/HIP stack.
+        if not current_platform.is_cuda_alike():
+            raise RuntimeError(
+                "kv_offload_backend='disk' needs CUDA/HIP pinned staging "
+                f"buffers and copy streams; {current_platform.device_type} is "
+                "not supported. Use kv_offload_backend='cpu'."
+            )
+
         logger.info(
             "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
             len(unique_gpu_caches),
@@ -252,14 +266,20 @@ class SimpleCPUOffloadWorker:
 
         self.cpu_kv_caches = self._alloc_cpu_caches(unique_gpu_caches, pin_memory)
 
-        self._backend = DmaCopyBackend()
-        self._backend.init(
-            unique_gpu_caches,
-            self.cpu_kv_caches,
-            device,
-            self.load_stream,
-            self.store_stream,
-        )
+        # CUDA supports GPU-side KV cache IO; others use a CPU-side
+        # generic path.
+        if current_platform.is_cuda_alike():
+            self._backend = DmaCopyBackend()
+            self._backend.init(
+                unique_gpu_caches,
+                self.cpu_kv_caches,
+                device,
+                self.load_stream,
+                self.store_stream,
+            )
+        else:
+            self._backend = TorchCopyBackend()
+            self._backend.init(unique_gpu_caches, self.cpu_kv_caches, device)
 
     def _alloc_cpu_caches(
         self, unique_gpu_caches: dict[str, torch.Tensor], pin_memory: bool
@@ -277,7 +297,7 @@ class SimpleCPUOffloadWorker:
             view = buf[offset : offset + size].view(gpu_tensor.dtype)
             cpu_kv_caches[name] = view.view(cpu_shape)
             offset += size
-        if pin_memory:
+        if pin_memory and current_platform.is_cuda_alike():
             registered = []
             try:
                 for start, end in host_registration_ranges(
@@ -294,6 +314,16 @@ class SimpleCPUOffloadWorker:
                     unpin_tensor(tensor)
                 raise
             self._pinned_host_ranges = registered
+            logger.info(
+                "SimpleCPUOffloadWorker [CPU]: host caches pinned in %d registrations.",
+                len(registered),
+            )
+        elif pin_memory:
+            logger.info(
+                "SimpleCPUOffloadWorker [CPU]: host caches are pageable; %s has no "
+                "CUDA host registration, using the torch copy backend.",
+                current_platform.device_type,
+            )
         return cpu_kv_caches
 
     def shutdown(self) -> None:
@@ -352,9 +382,16 @@ class SimpleCPUOffloadWorker:
         if metadata is not None and metadata.store_gpu_blocks:
             backend = self._backend
             assert backend is not None
-            if self._store_compute_done is None:
-                self._store_compute_done = torch.Event()
-            self._store_compute_done.record(torch.cuda.current_stream())
+            compute_done = self._store_compute_done
+            if compute_done is None:
+                compute_done = torch.Event()
+                self._store_compute_done = compute_done
+            compute_stream = (
+                torch.cuda.current_stream()
+                if current_platform.is_cuda_alike()
+                else torch.accelerator.current_stream()
+            )
+            compute_done.record(compute_stream)
             backend.launch_copy(
                 metadata.store_gpu_blocks,
                 metadata.store_cpu_blocks,
