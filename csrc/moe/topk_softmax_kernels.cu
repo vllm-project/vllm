@@ -356,12 +356,15 @@ __device__ __forceinline__ FullWarpTopk selectTopkFullWarp(
 }
 #endif
 
+// PADDED rows have fewer than NUM_EXPERTS columns or a padded row stride: each thread loads its columns one at a
+// time and the missing ones score -FLT_MAX, so they are never selected.
 template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, int WARP_SIZE_PARAM, typename IndType,
-          typename InputType = float, ScoringFunc SF, bool FULL_WARP_SELECT = false>
+          typename InputType = float, ScoringFunc SF, bool FULL_WARP_SELECT = false, bool PADDED = false>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     void topkGating(const InputType* input, const bool* finished, float* output, const int num_rows, IndType* indices,
         int* source_rows, const int k, const int start_expert, const int end_expert, const bool renormalize,
-        const float* bias, const double routed_scaling_factor, const bool* is_padding)
+        const float* bias, const double routed_scaling_factor, const bool* is_padding, const int num_cols,
+        const int64_t row_stride)
 {
     static_assert(std::is_same_v<InputType, float> || std::is_same_v<InputType, __nv_bfloat16> ||
                       std::is_same_v<InputType, __half>,
@@ -384,6 +387,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
     // Restrictions based on previous section.
     static_assert(VPT % ELTS_PER_LDG == 0, "The elements per thread must be a multiple of the elements per ldg");
+    static_assert(!PADDED || ELTS_PER_LDG == 1, "Padded rows are loaded one element at a time");
     static_assert(WARP_SIZE_PARAM % THREADS_PER_ROW == 0, "The threads per row must cleanly divide the threads per warp");
     static_assert(THREADS_PER_ROW == (THREADS_PER_ROW & -THREADS_PER_ROW), "THREADS_PER_ROW must be power of 2");
     static_assert(THREADS_PER_ROW <= WARP_SIZE_PARAM, "THREADS_PER_ROW can be at most warp size");
@@ -425,7 +429,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
     // We finally start setting up the read pointers for each thread. First, each thread jumps to the start of the
     // row it will read.
-    const InputType* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
+    const int ncols = PADDED ? num_cols : NUM_EXPERTS;
+    const InputType* thread_row_ptr = input + (PADDED ? thread_row * row_stride : thread_row * ELTS_PER_ROW);
 
     // Now, we compute the group each thread belong to in order to determine the first column to start loads.
     const int thread_group_idx = threadIdx.x % THREADS_PER_ROW;
@@ -435,8 +440,24 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     // Finally, we pull in the data from global mem
     float row_chunk[VPT];
 
+    if constexpr (PADDED) {
+#pragma unroll
+        for (int ii = 0; ii < VPT; ++ii) {
+            const int col = first_elt_read_by_thread + ii * THREADS_PER_ROW;
+            float val = -FLT_MAX;
+            if (col < ncols) {
+                if constexpr (std::is_same_v<InputType, float>) {
+                    val = thread_row_ptr[col];
+                } else if constexpr (std::is_same_v<InputType, __nv_bfloat16>) {
+                    val = __bfloat162float(thread_row_ptr[col]);
+                } else {
+                    val = __half2float(thread_row_ptr[col]);
+                }
+            }
+            row_chunk[ii] = val;
+        }
     // NOTE(zhuhaoran): dispatch different input types loading, BF16/FP16 convert to float
-    if constexpr (std::is_same_v<InputType, float>) {
+    } else if constexpr (std::is_same_v<InputType, float>) {
         using VecType = AlignedArray<float, ELTS_PER_LDG>;
         VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(&row_chunk);
         const VecType* vec_thread_read_ptr = reinterpret_cast<const VecType*>(thread_read_ptr);
@@ -579,7 +600,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         const int idx = k * thread_row + thread_group_idx;
         output[idx] = selection.score * scale;
         indices[idx] = is_pad_row ? static_cast<IndType>(-1)
-                                   : (should_process_row ? (selection.expert - start_expert) : NUM_EXPERTS);
+                                   : (should_process_row ? (selection.expert - start_expert) : ncols);
         source_rows[idx] = thread_group_idx * num_rows + thread_row;
       }
       return;
@@ -595,7 +616,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 #pragma unroll
         for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
           const int expert = first_elt_read_by_thread + ldg * COLS_PER_GROUP_LDG + ii;
-          float bias_val = expert < NUM_EXPERTS ? bias[expert] : 0.0f;
+          // A masked column must lose even to a negatively biased expert.
+          float bias_val = expert < ncols ? bias[expert] : -FLT_MAX;
           row_chunk_for_choice[ldg * ELTS_PER_LDG + ii] = row_chunk[ldg * ELTS_PER_LDG + ii] + bias_val;
         }
       }
@@ -669,7 +691,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
             const int idx = k * thread_row + k_idx;
             output[idx] = max_val;
             indices[idx] = is_pad_row ? static_cast<IndType>(-1)
-                                       : (should_process_row ? (expert - start_expert) : NUM_EXPERTS);
+                                       : (should_process_row ? (expert - start_expert) : ncols);
             source_rows[idx] = k_idx * num_rows + thread_row;
             if (renormalize) {
                 selected_sum += max_val;
@@ -721,10 +743,12 @@ struct TopkConstants
 };
 } // namespace detail
 
-template <int EXPERTS, int WARPS_PER_TB, int WARP_SIZE_PARAM, int MAX_BYTES_PER_LDG, typename IndType, typename InputType, ScoringFunc SF>
+template <int EXPERTS, int WARPS_PER_TB, int WARP_SIZE_PARAM, int MAX_BYTES_PER_LDG, typename IndType, typename InputType, ScoringFunc SF,
+          bool PADDED = false>
 void topkGatingLauncherHelper(const InputType* input, const bool* finished, float* output, IndType* indices,
     int* source_row, const int num_rows, const int k, const int start_expert, const int end_expert, const bool renormalize,
-    const float* bias, const double routed_scaling_factor, cudaStream_t stream, const bool* is_padding)
+    const float* bias, const double routed_scaling_factor, cudaStream_t stream, const bool* is_padding,
+    const int num_cols, const int64_t row_stride)
 {
     static constexpr int BYTES_PER_LDG = MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
     using Constants = detail::TopkConstants<EXPERTS, BYTES_PER_LDG, WARP_SIZE_PARAM, InputType>;
@@ -747,10 +771,11 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
     config.attrs = &attr;
     config.numAttrs = use_pdl ? 1 : 0;
     // A separate instantiation for the full-warp redux.sync selection leaves the code generation of the existing
-    // loop (used with a bias, k > WARP_SIZE_PARAM or sub-warp rows) unchanged. Before SM80 the device code of
-    // this instantiation is the existing loop.
-    auto kernel = topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, false>;
-    if constexpr (Constants::THREADS_PER_ROW == WARP_SIZE_PARAM) {
+    // loop (used with a bias, k > WARP_SIZE_PARAM, sub-warp or masked rows) unchanged. Before SM80 the device code
+    // of this instantiation is the existing loop.
+    auto kernel =
+        topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, false, PADDED>;
+    if constexpr (!PADDED && Constants::THREADS_PER_ROW == WARP_SIZE_PARAM) {
         if (bias == nullptr && k <= WARP_SIZE_PARAM) {
             kernel = topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, true>;
         }
@@ -759,11 +784,12 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
         &config,
         kernel,
         input, finished, output, num_rows, indices, source_row, k, start_expert,
-        end_expert, renormalize, bias, routed_scaling_factor, is_padding);
+        end_expert, renormalize, bias, routed_scaling_factor, is_padding, num_cols, row_stride);
     STD_TORCH_CHECK(err == cudaSuccess, "PDL topkGating launch failed: ", cudaGetErrorString(err));
 #else
-    topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF><<<num_blocks, block_dim, 0, stream>>>(
-        input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert, renormalize, bias, routed_scaling_factor, is_padding);
+    topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, false, PADDED><<<num_blocks, block_dim, 0, stream>>>(
+        input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert, renormalize, bias, routed_scaling_factor, is_padding,
+        num_cols, row_stride);
 #endif
 }
 
@@ -775,7 +801,17 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
                              IndType, InputType, SF>(                         \
         gating_output, nullptr, topk_weights, topk_indices,                   \
         token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,  \
-        bias, routed_scaling_factor, stream, is_padding);
+        bias, routed_scaling_factor, stream, is_padding, num_experts,         \
+        num_experts);
+  // Masked rows: one element per load, real column count and row stride.
+  #define LAUNCH_TOPK_PADDED(NUM_EXPERTS)                                     \
+    topkGatingLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, WARP_SIZE,            \
+                             sizeof(InputType), IndType, InputType, SF,       \
+                             true>(                                           \
+        gating_output, nullptr, topk_weights, topk_indices,                   \
+        token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,  \
+        bias, routed_scaling_factor, stream, is_padding, num_experts,         \
+        input_row_stride);
 #else
   #define LAUNCH_TOPK(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                    \
     if (WARP_SIZE == 64) {                                                     \
@@ -783,18 +819,57 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
                                IndType, InputType, SF>(                        \
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
-          bias, routed_scaling_factor, stream, is_padding);                                            \
+          bias, routed_scaling_factor, stream, is_padding, num_experts,        \
+          num_experts);                                                        \
     } else if (WARP_SIZE == 32) {                                              \
       topkGatingLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 32, MAX_BYTES,       \
                                IndType, InputType, SF>(                        \
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
-          bias, routed_scaling_factor, stream, is_padding);                                            \
+          bias, routed_scaling_factor, stream, is_padding, num_experts,        \
+          num_experts);                                                        \
     } else {                                                                   \
       assert(false &&                                                          \
              "Unsupported warp size. Only 32 and 64 are supported for ROCm");  \
     }
 #endif
+
+// The packed-row topkGating instantiation for num_experts, or 0 if none.
+template <ScoringFunc SF>
+inline int topkExactExperts(const int num_experts) {
+#ifndef USE_ROCM
+    for (const int experts : {1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512, 576}) {
+        if (experts == num_experts) {
+            return experts;
+        }
+    }
+    return SF == SCORING_SIGMOID && num_experts == 352 ? 352 : 0;
+#else
+    // Only the power-of-two sizes exist for ROCm's 64-lane warps.
+    const bool is_pow_2 = num_experts > 0 && (num_experts & (num_experts - 1)) == 0;
+    return is_pow_2 && num_experts <= 512 ? num_experts : 0;
+#endif
+}
+
+// The masked topkGating instantiation for rows with no packed one (e.g.
+// expert-pruned models, or Inductor padding a [M, 60] GEMM output to a stride
+// of 64), or 0 if the unfused kernels must run.
+inline int topkPaddedExperts(const int num_experts) {
+#ifndef USE_ROCM
+    for (const int experts : {16, 64, 128, 256, 384, 512}) {
+        if (experts >= num_experts) {
+            return experts;
+        }
+    }
+#endif
+    return 0;
+}
+
+template <ScoringFunc SF>
+inline bool topkNeedsWorkspace(const int num_experts, const int64_t row_stride) {
+    const bool exact = row_stride == num_experts && topkExactExperts<SF>(num_experts) != 0;
+    return !exact && topkPaddedExperts(num_experts) == 0;
+}
 
 template <typename IndType, typename InputType, ScoringFunc SF>
 void topkGatingKernelLauncher(
@@ -821,29 +896,7 @@ void topkGatingKernelLauncher(
     static constexpr int BYTES_PER_LDG_MULTIPLE_64 =
     (std::is_same_v<InputType, __nv_bfloat16> || std::is_same_v<InputType, __half>) ? 4 : 8;
 #endif
-    // Inductor can pad GEMM outputs (for example, a [M, 60] view with a row
-    // stride of 64). The fused kernels assume packed rows, so use the
-    // stride-aware unfused path for row-padded inputs.
-    if (input_row_stride != num_experts) {
-        STD_TORCH_CHECK(workspace != nullptr,
-            "workspace must be provided for row-padded gating output.");
-        static constexpr int TPB = 256;
-        if constexpr (SF == SCORING_SOFTMAX) {
-          moeSoftmax<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
-            gating_output, nullptr, workspace, num_experts, input_row_stride);
-        } else if constexpr (SF == SCORING_SIGMOID) {
-          moeSigmoid<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
-            gating_output, nullptr, workspace, num_experts, input_row_stride);
-        } else {
-            STD_TORCH_CHECK(false, "Unsupported scoring func");
-        }
-        moeTopK<TPB><<<num_tokens, TPB, 0, stream>>>(
-            workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
-            num_experts, topk, 0, num_experts, renormalize, bias,
-            routed_scaling_factor, is_padding);
-        return;
-    }
-    switch (num_experts) {
+    switch (input_row_stride == num_experts ? topkExactExperts<SF>(num_experts) : 0) {
         case 1:
             LAUNCH_TOPK(1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
             return;
@@ -905,9 +958,33 @@ void topkGatingKernelLauncher(
         default:
             break;
     }
+#ifndef USE_ROCM
+    switch (topkPaddedExperts(num_experts)) {
+        case 16:
+            LAUNCH_TOPK_PADDED(16);
+            return;
+        case 64:
+            LAUNCH_TOPK_PADDED(64);
+            return;
+        case 128:
+            LAUNCH_TOPK_PADDED(128);
+            return;
+        case 256:
+            LAUNCH_TOPK_PADDED(256);
+            return;
+        case 384:
+            LAUNCH_TOPK_PADDED(384);
+            return;
+        case 512:
+            LAUNCH_TOPK_PADDED(512);
+            return;
+        default:
+            break;
+    }
+#endif
 
     STD_TORCH_CHECK(workspace != nullptr,
-        "workspace must be provided for num_experts that are not a power of 2 or multiple of 64.");
+        "workspace must be provided when no topkGating instantiation fits num_experts.");
     static constexpr int TPB = 256;
     if constexpr (SF == SCORING_SOFTMAX) {
       moeSoftmax<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
@@ -1012,9 +1089,8 @@ void topk_softmax(
     const auto num_tokens = gating_output.numel() / num_experts;
     const int topk = topk_weights.size(-1);
 
-    const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
-    const bool needs_workspace = !is_pow_2 || num_experts > 256 ||
-                                 gating_output.stride(0) != num_experts;
+    const bool needs_workspace =
+        vllm::moe::topkNeedsWorkspace<vllm::moe::SCORING_SOFTMAX>(num_experts, gating_output.stride(0));
     const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
     torch::stable::accelerator::DeviceGuard guard(gating_output.get_device_index());
@@ -1058,9 +1134,8 @@ void topk_sigmoid(
     const auto num_tokens = gating_output.numel() / num_experts;
     const int topk = topk_weights.size(-1);
 
-    const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
-    const bool needs_workspace = !is_pow_2 || num_experts > 256 ||
-                                 gating_output.stride(0) != num_experts;
+    const bool needs_workspace =
+        vllm::moe::topkNeedsWorkspace<vllm::moe::SCORING_SIGMOID>(num_experts, gating_output.stride(0));
     const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
     torch::stable::accelerator::DeviceGuard guard(gating_output.get_device_index());
