@@ -18,6 +18,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
+from contextlib import nullcontext
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -76,6 +77,9 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+from vllm.model_executor.layers.quantization.online.requantization import (
+    skip_checkpoint_backend_selection,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -119,6 +123,10 @@ from vllm.models.minimax_m3.amd.indexer_msa import (
 from vllm.models.minimax_m3.amd.indexer_nvfp4 import (
     MiniMaxM3IndexerRocmNvfp4Impl,
     init_rocm_nvfp4_indexer_decode_cp,
+)
+from vllm.models.minimax_m3.amd.nvfp4_experts import (
+    keep_nvfp4_experts,
+    nvfp4_moe_supported,
 )
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
@@ -458,10 +466,11 @@ class MiniMaxM3MoE(nn.Module):
             )
 
         # MiniMax-M3.1 like checkpoints (`quant_method: mxfp8`, `moe_quant_algo:
-        # NVFP4`) have no native NVFP4 MoE backend on ROCm: the routed experts must be
+        # NVFP4`): without an online MoE config the routed experts run natively on
+        # the AITER NVFP4 MoE kernels (gfx950 only); otherwise they must be
         # re-quantized online.
         experts_prefix = f"{prefix}.experts"
-        if (
+        keep_nvfp4 = (
             isinstance(quant_config, ModelOptMxFp8Config)
             and quant_config.moe_quant_algo == "NVFP4"
             and not quant_config.is_layer_excluded(experts_prefix)
@@ -472,13 +481,14 @@ class MiniMaxM3MoE(nn.Module):
                 )
                 is None
             )
-        ):
+        )
+        if keep_nvfp4 and not nvfp4_moe_supported():
             raise NotImplementedError(
                 "This MiniMax model with NVFP4 MoE experts "
                 "(`moe_quant_algo: NVFP4`, `moe_quant_format: nvfp4-pack-quantized`) "
-                "is not supported on ROCm. Please use `--quantization-config.moe "
-                "mxfp8` (or `--quantization-config.moe mxfp4`) to re-quantize the "
-                "MoE to MXFP8 (or MXFP4) when loading to serve on ROCm."
+                "needs gfx950 and AITER `moe_nvfp4` on ROCm. Otherwise use "
+                "`--quantization-config.moe mxfp8` (or `--quantization-config.moe "
+                "mxfp4`) to re-quantize the MoE to MXFP8 (or MXFP4) when loading."
             )
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
@@ -538,37 +548,44 @@ class MiniMaxM3MoE(nn.Module):
         # always-on shared expert; aiter applies the routed scaling internally.
         # Every other path (vLLM top-k bias router, or no fusion) applies the
         # routed scaling to the MoE output here.
-        self.experts = FusedMoEFactory(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            intermediate_pad=0,
-            scoring_func="sigmoid",
-            e_score_correction_bias=self.e_score_correction_bias,
-            renormalize=True,
-            use_grouped_topk=self.use_aiter_moe_fse,
-            num_expert_group=1 if self.use_aiter_moe_fse else None,
-            topk_group=1 if self.use_aiter_moe_fse else None,
-            activation="swigluoai_uninterleave",
-            swiglu_limit=config.swiglu_limit,
-            swiglu_alpha=config.swiglu_alpha,
-            swiglu_beta=1.0,
-            routed_scaling_factor=self.routed_scaling_factor,
-            routed_scale_mode=RoutedScaleMode.ROUTER
-            if self.use_aiter_moe_fse
-            else RoutedScaleMode.OUTPUT,
-            router_logits_dtype=self.gate.out_dtype,
-            shared_experts=self.shared_experts,
-            n_shared_experts=(
-                self.n_shared_experts if self.is_fused_shared_expert_enabled else None
-            ),
-            fuse_shared_experts=self.is_fused_shared_expert_enabled,
-            shared_expert_prefix=f"{prefix}.shared_experts",
-            quant_config=quant_config,
-            ckpt_names=("w1", "w2", "w3"),
-            prefix=f"{prefix}.experts",
-        )
+        # The NVFP4 HIP path only reads the checkpoint weights of the NVFP4 method,
+        # so its MoE backend selection is skipped.
+        with skip_checkpoint_backend_selection() if keep_nvfp4 else nullcontext():
+            self.experts = FusedMoEFactory(
+                num_experts=config.num_local_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                intermediate_pad=0,
+                scoring_func="sigmoid",
+                e_score_correction_bias=self.e_score_correction_bias,
+                renormalize=True,
+                use_grouped_topk=self.use_aiter_moe_fse,
+                num_expert_group=1 if self.use_aiter_moe_fse else None,
+                topk_group=1 if self.use_aiter_moe_fse else None,
+                activation="swigluoai_uninterleave",
+                swiglu_limit=config.swiglu_limit,
+                swiglu_alpha=config.swiglu_alpha,
+                swiglu_beta=1.0,
+                routed_scaling_factor=self.routed_scaling_factor,
+                routed_scale_mode=RoutedScaleMode.ROUTER
+                if self.use_aiter_moe_fse
+                else RoutedScaleMode.OUTPUT,
+                router_logits_dtype=self.gate.out_dtype,
+                shared_experts=self.shared_experts,
+                n_shared_experts=(
+                    self.n_shared_experts
+                    if self.is_fused_shared_expert_enabled
+                    else None
+                ),
+                fuse_shared_experts=self.is_fused_shared_expert_enabled,
+                shared_expert_prefix=f"{prefix}.shared_experts",
+                quant_config=quant_config,
+                ckpt_names=("w1", "w2", "w3"),
+                prefix=f"{prefix}.experts",
+            )
+        if keep_nvfp4:
+            keep_nvfp4_experts(self.experts)
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:

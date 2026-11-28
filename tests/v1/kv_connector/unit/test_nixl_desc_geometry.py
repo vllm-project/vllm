@@ -172,20 +172,30 @@ def _make_packed_mla_view_worker(
     backend_names=("FLASHMLA",),
     indexer_layer=None,
     worker_cls=NixlPushConnectorWorker,
+    use_mla=True,
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
     block_size = 16
     raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
     tensors, groups, caches = [], [], {}
     for name, (offset, page_size) in layouts.items():
-        spec = MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=page_size // block_size,
-            dtype=torch.uint8,
-            cache_role=SparseCacheRole.INDEXER
-            if name == indexer_layer
-            else SparseCacheRole.SPARSE,
+        spec = (
+            MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=page_size // block_size,
+                dtype=torch.uint8,
+                cache_role=SparseCacheRole.INDEXER
+                if name == indexer_layer
+                else SparseCacheRole.SPARSE,
+            )
+            if use_mla
+            else AttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=page_size // (2 * block_size),
+                dtype=torch.uint8,
+            )
         )
         tensor = KVCacheTensor(
             size=raw.nbytes,
@@ -234,7 +244,7 @@ def _make_packed_mla_view_worker(
             "producer" if pp_size > 1 else "consumer",
             KVCacheConfig(num_blocks, tensors, groups),
         )
-        worker.use_mla = True
+        worker.use_mla = use_mla
         worker.register_kv_caches(caches)
     return worker, raw
 
@@ -260,6 +270,35 @@ def test_packed_mla_pp1_transfers_whole_rows(num_layers, worker_cls):
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
     assert metadata.packed_member_layouts == layouts
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "worker_cls", [NixlPullConnectorWorker, NixlPushConnectorWorker]
+)
+def test_packed_head_sharded_pp1_transfers_whole_rows(worker_cls):
+    # Non-MLA BLHNC: a row holds this rank's heads of every layer, so at equal
+    # P/D TP a block is still one descriptor, not one per layer.
+    layouts = {"L0": (0, 128), "L1": (128, 128)}
+    worker, raw = _make_packed_mla_view_worker(
+        layouts, 256, worker_cls=worker_cls, use_mla=False
+    )
+    assert worker.num_regions == 1
+    assert worker.num_descs == 4
+    assert worker.src_blocks_data.tolist() == [[raw.data_ptr(), 256, 0, 256, 4]]
+    assert worker.region_members == [list(layouts)]
+
+
+@pytest.mark.cpu_test
+def test_packed_head_sharded_rows_reject_tp_mismatch():
+    producer, _ = _make_packed_mla_view_worker({"L0": (0, 128)}, 128, use_mla=False)
+    consumer, _ = _make_packed_mla_view_worker({"L0": (0, 128)}, 128, use_mla=False)
+    metadata = msgspec.msgpack.decode(
+        producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    metadata.engine_id = "remote"
+    with pytest.raises(RuntimeError, match="need the same TP"):
+        consumer.add_remote_agent(metadata, remote_tp_size=2)
 
 
 @pytest.mark.cpu_test

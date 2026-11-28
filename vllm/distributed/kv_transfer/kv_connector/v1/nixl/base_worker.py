@@ -1773,6 +1773,14 @@ class NixlBaseConnectorWorker:
             and self.use_mla
             and not self._has_mamba
         )
+        # A non-MLA packed row holds this rank's heads of every layer, so it
+        # may transfer whole when P and D shard heads alike (equal TP, checked
+        # at handshake).
+        packed_head_sharded_storage = (
+            _share_storage_and_block_stride(list(xfer_buffers.values()))
+            and not self.use_mla
+            and not self._has_mamba
+        )
         if split_packed_rows and any(
             not isinstance(spec, MLAAttentionSpec)
             for spec in self._layer_specs.values()
@@ -1893,13 +1901,16 @@ class NixlBaseConnectorWorker:
                     and cache[0].is_contiguous()
                     and cache[0].nbytes == physical_page_size
                 )
-                # Block-outermost MLA: one block row holds every layer's page.
+                # Block-outermost: one block row holds every layer's page (in an
+                # MLA model, only its MLA layers' pages travel as rows).
                 packed_mla = (
                     self._has_packed_cache
                     and not self._has_mamba
-                    and replicated_shared_storage
+                    and (
+                        (replicated_shared_storage and is_mla_region)
+                        or packed_head_sharded_storage
+                    )
                     and storage_is_block_major
-                    and is_mla_region
                 )
                 if not self._has_packed_cache and _splits_kernel_rows(
                     layer_name, cache, num_blocks, physical_page_size
@@ -3189,6 +3200,13 @@ class NixlBaseConnectorWorker:
                 "NIXL KV-head re-sharding is not supported for NVFP4 KV cache "
                 f"(local TP {self.transfer_topo.tp_size}, remote TP "
                 f"{remote_tp_size}). Use matching TP sizes on prefill and decode."
+            )
+        # A whole row holds this rank's heads of every layer: no re-sharding.
+        if self._packed_member_layouts and not self.use_mla and tp_ratio != 1:
+            raise RuntimeError(
+                "Packed KV rows of a non-MLA model need the same TP on prefill "
+                f"and decode (local TP {self.transfer_topo.tp_size}, remote TP "
+                f"{remote_tp_size}). Use LBHNC for heterogeneous TP."
             )
 
         # Per-region block_len validation enforcing the P/D invariant.

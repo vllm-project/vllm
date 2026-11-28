@@ -111,6 +111,17 @@ class M3Glue:
             layer.block_sparse_moe.shared_experts is None for layer in layers
         ):
             reasons.append("no MoE layers or fused shared experts")
+        from vllm.models.minimax_m3.amd.nvfp4_experts import MiniMaxM3NvFp4HipMoEMethod
+
+        experts = [layer.block_sparse_moe.experts for layer in layers]
+        if any(
+            isinstance(
+                getattr(getattr(e, "routed_experts", e), "quant_method", None),
+                MiniMaxM3NvFp4HipMoEMethod,
+            )
+            for e in experts
+        ):
+            reasons.append("NVFP4 routed experts (AITER moe_nvfp4, not A16W4)")
         return reasons
 
     def __init__(self, model, vllm_config) -> None:
