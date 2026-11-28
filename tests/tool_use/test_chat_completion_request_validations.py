@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -228,5 +229,68 @@ def test_multiple_structured_outputs_rejected():
                     "json": {"type": "object"},
                     "regex": ".*",
                 },
+            }
+        )
+
+
+SAMPLE_TOOL_CALL = {
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": "{}"},
+}
+
+
+def test_generator_tool_calls_are_materialized():
+    """One-shot tool_calls generators must be consumed into a list."""
+
+    def tool_calls():
+        yield SAMPLE_TOOL_CALL
+
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": None, "tool_calls": tool_calls()},
+            ],
+            "model": "facebook/opt-125m",
+        }
+    )
+    assistant_msg = request.messages[1]
+    assert isinstance(assistant_msg["tool_calls"], list)
+    assert assistant_msg["tool_calls"][0]["id"] == "call_1"
+    assert assistant_msg["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+def test_tuple_tool_calls_are_materialized():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": (SAMPLE_TOOL_CALL,),
+                }
+            ],
+            "model": "facebook/opt-125m",
+        }
+    )
+    assert isinstance(request.messages[0]["tool_calls"], list)
+    assert request.messages[0]["tool_calls"][0]["id"] == "call_1"
+
+
+@pytest.mark.parametrize("tool_calls", [1, True, 1.5, object()])
+def test_non_iterable_tool_calls_are_validation_errors(tool_calls):
+    """Non-iterable tool_calls must be HTTP 400, not an uncaught TypeError."""
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "hi",
+                        "tool_calls": tool_calls,
+                    }
+                ],
+                "model": "facebook/opt-125m",
             }
         )

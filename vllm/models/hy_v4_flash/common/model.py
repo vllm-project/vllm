@@ -13,10 +13,14 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    is_pp_missing_parameter,
+)
 from vllm.models.hy_v4.weight_utils import HYV4_WEIGHTS_MAPPER
 
-from .engram import FlashEngram, FlashNgramHashState
+from .engram import FlashEngram, FlashNgramHashState, loads_dummy_weights
 
 _EXPERT_WEIGHT = re.compile(
     r"(.*)\.experts\.(?:(\d+)\.)?(gate_proj|up_proj|down_proj|gate_up_proj)"
@@ -38,11 +42,16 @@ class HYV4FlashModelMixin(nn.Module):
     def init_engram(self, vllm_config: VllmConfig, prefix: str) -> None:
         self.loaded_parts: dict[str, set[Any]] = {}
         self.engram_hash: FlashNgramHashState | None = None
-        if self.config.engram_layer_ids:
+        self.local_engram_layer_ids = [
+            layer_id
+            for layer_id in self.config.engram_layer_ids or ()
+            if self.start_layer <= layer_id - 1 < self.end_layer
+        ]
+        if self.local_engram_layer_ids:
             self.engram_hash = FlashNgramHashState(
-                self.config, dummy=vllm_config.load_config.load_format == "dummy"
+                self.config, dummy=loads_dummy_weights(vllm_config)
             )
-            for layer_id in self.config.engram_layer_ids:
+            for layer_id in self.local_engram_layer_ids:
                 self.layers[layer_id - 1].engram_layer = FlashEngram(
                     vllm_config,
                     self.engram_hash.layout,
@@ -50,7 +59,7 @@ class HYV4FlashModelMixin(nn.Module):
                     f"{prefix}.layers.{layer_id - 1}.engram_layer",
                 )
         self.token_lookback_depth = (
-            self.config.engram_max_ngram_size - 1 if self.engram_hash is not None else 0
+            self.config.engram_max_ngram_size - 1 if self.config.engram_layer_ids else 0
         )
 
     def _record_part(self, name: str, part: Any) -> None:
@@ -67,6 +76,8 @@ class HYV4FlashModelMixin(nn.Module):
         }
         loaded: set[str] = set()
         for name, value in HYV4_WEIGHTS_MAPPER.apply(weights):
+            if is_pp_missing_parameter(name, self):
+                continue
             engram = re.fullmatch(r"layers\.(\d+)\.engram_layer\.(.+)", name)
             if engram is not None:
                 assert self.engram_hash is not None
@@ -140,7 +151,7 @@ class HYV4FlashModelMixin(nn.Module):
         return loaded
 
     def verify_loaded_parts(self) -> None:
-        for layer_id in self.config.engram_layer_ids or ():
+        for layer_id in self.local_engram_layer_ids:
             prefix = f"layers.{layer_id - 1}.engram_layer."
             required = {
                 prefix + "lookup_table",
