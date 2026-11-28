@@ -256,6 +256,26 @@ def bind_passthrough_all2all_backend(
         )
 
 
+def validate_deepep_v2_cpu_sync(
+    *,
+    do_cpu_sync: bool,
+    use_all2all: bool,
+    all2all_backend: str,
+    enforce_eager: bool,
+) -> None:
+    if (
+        do_cpu_sync
+        and use_all2all
+        and all2all_backend == "deepep_v2"
+        and not enforce_eager
+    ):
+        raise ValueError(
+            "KernelConfig.deepep_v2_do_cpu_sync requires eager execution because "
+            "DeepEP v2 CPU count synchronization cannot be CUDA graph captured. "
+            "Pass --enforce-eager."
+        )
+
+
 def validate_flashinfer_moe_ep_model(
     moe_backend: str, architectures: Iterable[str]
 ) -> None:
@@ -338,6 +358,15 @@ class KernelConfig:
 
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
+
+    deepep_v2_do_expand: bool = False
+    """Expand DeepEP v2 dispatch into one row per token/expert pair."""
+
+    deepep_v2_do_cpu_sync: bool = False
+    """Wait for DeepEP v2 receive counts to reduce unused capacity.
+
+    Requires eager execution; CPU count polling cannot be CUDA graph captured.
+    """
 
     monokernel: bool = False
     """If True, run decode steps on the model's specialized decode (RFC #60904),
@@ -574,6 +603,12 @@ class KernelConfig:
         if vllm_config.model_config is not None:
             validate_flashinfer_moe_ep_model(
                 self.moe_backend, vllm_config.model_config.architectures
+            )
+            validate_deepep_v2_cpu_sync(
+                do_cpu_sync=self.deepep_v2_do_cpu_sync,
+                use_all2all=vllm_config.parallel_config.use_all2all,
+                all2all_backend=vllm_config.parallel_config.all2all_backend,
+                enforce_eager=vllm_config.model_config.enforce_eager,
             )
         bind_passthrough_all2all_backend(self.moe_backend, vllm_config.parallel_config)
 

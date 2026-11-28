@@ -70,10 +70,26 @@ def _unpack_mxfp8_scale(
     return scale
 
 
+def _expanded_recv_metadata(
+    prefix: torch.Tensor, num_rows: int, alignment: int, expert_offset: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode real expert counts and routing IDs from aligned GPU prefixes."""
+    aligned_ends = (prefix + alignment - 1) // alignment * alignment
+    starts = torch.cat((torch.zeros_like(prefix[:1]), aligned_ends[:-1]))
+    counts = prefix - starts
+    rows = torch.arange(num_rows, device=prefix.device, dtype=prefix.dtype)
+    experts = torch.searchsorted(aligned_ends, rows, right=True)
+    valid = (experts < prefix.numel()) & (
+        rows < prefix[experts.clamp_max(prefix.numel() - 1)]
+    )
+    ids = torch.where(valid, experts + expert_offset, -1).to(torch.int64)
+    return ids.unsqueeze(1), counts
+
+
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
-    Uses non-expanded dispatch without CPU synchronization in every forward.
+    Defaults to non-expanded dispatch without CPU synchronization.
     The receive capacity is bounded by the DP-wide padded token count. Expert
     kernels consume routing IDs and GPU-side receive counts.
 
@@ -103,6 +119,10 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_topk: int,
         use_fp8_dispatch: bool = False,
         sp_size: int = 1,
+        *,
+        do_expand: bool = False,
+        do_cpu_sync: bool = False,
+        expert_alignment: int = 1,
     ):
         super().__init__()
         self.buffer = buffer
@@ -113,6 +133,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
         self.sp_size = sp_size
+        self.do_expand = do_expand
+        self.do_cpu_sync = do_cpu_sync
+        if expert_alignment < 1:
+            raise ValueError("Expert alignment must be positive")
+        self.expert_alignment = expert_alignment
 
         # Set by FusedMoEKernelModularImpl when the experts globalize
         # recv_topk_idx themselves, letting the decode path skip the standalone
@@ -149,6 +174,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
     ) -> Callable:
+        if self.do_cpu_sync and torch.cuda.is_current_stream_capturing():
+            raise ValueError("DeepEP CPU count synchronization cannot be captured")
         token_data = tokens
         if token_scales is not None:
             token_data = (tokens, token_scales)
@@ -181,8 +208,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             topk_weights=rank_topk_weights,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            do_expand=False,
-            do_cpu_sync=False,
+            do_expand=self.do_expand,
+            do_cpu_sync=self.do_cpu_sync,
+            expert_alignment=self.expert_alignment,
             async_with_compute_stream=False,
         )
 
@@ -194,7 +222,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             recv_x,
             recv_topk_idx,
             recv_topk_weights,
-            handle.psum_num_recv_tokens_per_scaleup_rank,
+            handle,
             a1_scale,
             quant_config,
             defer_input_quant=defer_input_quant,
@@ -204,9 +232,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self,
         event: deep_ep.EventOverlap,
         recv_x: tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
-        recv_topk_idx: torch.Tensor,
+        recv_topk_idx: torch.Tensor | None,
         recv_topk_weights: torch.Tensor | None,
-        psum_recv_per_rank: torch.Tensor,
+        handle: deep_ep.EPHandle,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
@@ -219,22 +247,53 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             expert_x, expert_x_scale = recv_x, None
 
-        # Dispatch leaves padding rows uninitialized. Convert local expert IDs
-        # to global IDs and mask padding unless the expert backend handles it.
-        if not self.defer_globalize:
-            recv_topk_idx = _globalize_recv_topk_idx(
-                recv_topk_idx,
-                psum_recv_per_rank,
+        psum_recv_per_rank = None
+        num_valid_recv = None
+        row_valid_recv = None
+        if self.do_expand:
+            recv_topk_idx, counts = _expanded_recv_metadata(
+                handle.psum_num_recv_tokens_per_expert,
+                expert_x.shape[0],
+                handle.expert_alignment,
                 self.rank_expert_offset,
-                self.num_experts,
             )
-        expert_tokens_meta = mk.ExpertTokensMetadata(
-            expert_num_tokens=None,
-            expert_num_tokens_cpu=None,
-        )
-        expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
-        if self.defer_globalize:
-            expert_tokens_meta.rank_expert_offset = self.rank_expert_offset
+            valid = recv_topk_idx >= 0
+            row_valid_recv = valid[:, 0]
+            # Quantizers read padding; already quantized rows are skipped by
+            # expert routing and can retain the dispatch allocation directly.
+            if not _quantize_before_dispatch(quant_config, defer_input_quant):
+                expert_x = torch.where(valid, expert_x.view(torch.uint8), 0).view(
+                    expert_x.dtype
+                )
+            if expert_x_scale is not None:
+                expert_x_scale = torch.where(valid, expert_x_scale, 0)
+            if recv_topk_weights is not None:
+                recv_topk_weights = torch.where(valid, recv_topk_weights[:, None], 0)
+            expert_tokens_meta = mk.ExpertTokensMetadata(
+                expert_num_tokens=counts,
+                expert_num_tokens_cpu=None,
+                expert_input_alignment=handle.expert_alignment,
+            )
+        else:
+            psum_recv_per_rank = handle.psum_num_recv_tokens_per_scaleup_rank
+            num_valid_recv = psum_recv_per_rank[-1:]
+            assert recv_topk_idx is not None
+            # Dispatch leaves padding rows uninitialized. Convert local expert
+            # IDs to global IDs and mask padding unless the backend handles it.
+            if not self.defer_globalize:
+                recv_topk_idx = _globalize_recv_topk_idx(
+                    recv_topk_idx,
+                    psum_recv_per_rank,
+                    self.rank_expert_offset,
+                    self.num_experts,
+                )
+            expert_tokens_meta = mk.ExpertTokensMetadata(
+                expert_num_tokens=None,
+                expert_num_tokens_cpu=None,
+                psum_recv_per_rank=psum_recv_per_rank,
+            )
+            if self.defer_globalize:
+                expert_tokens_meta.rank_expert_offset = self.rank_expert_offset
 
         if _quantize_before_dispatch(quant_config, defer_input_quant):
             if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:
@@ -248,11 +307,19 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             if expert_x.numel() != 0:
                 scale = a1_scale
                 if quant_config.act_scale_is_tensor_wide(a1_scale):
-                    scale = masked_amax_scale(
-                        expert_x,
-                        quant_config.quant_dtype,
-                        num_valid=psum_recv_per_rank[-1:],
-                    )
+                    if row_valid_recv is not None:
+                        scale = masked_amax_scale(
+                            expert_x,
+                            quant_config.quant_dtype,
+                            row_valid=row_valid_recv,
+                        )
+                    else:
+                        assert num_valid_recv is not None
+                        scale = masked_amax_scale(
+                            expert_x,
+                            quant_config.quant_dtype,
+                            num_valid=num_valid_recv,
+                        )
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
                     scale,

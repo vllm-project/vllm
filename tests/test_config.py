@@ -4942,6 +4942,39 @@ def test_fusion_pass_op_priority():
     assert cfg4.compilation_config.pass_config.fuse_norm_quant
 
 
+@pytest.mark.parametrize(
+    "all2all_backend,enforce_eager,should_raise",
+    [
+        ("deepep_v2", False, True),
+        ("deepep_v2", True, False),
+        ("deepep_low_latency", False, False),
+    ],
+)
+def test_deepep_v2_cpu_sync_requires_eager(
+    monkeypatch, all2all_backend, enforce_eager, should_raise
+):
+    kernel_config = KernelConfig(deepep_v2_do_cpu_sync=True)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architectures=["Qwen3ForCausalLM"], enforce_eager=enforce_eager
+        ),
+        parallel_config=SimpleNamespace(
+            all2all_backend=all2all_backend, use_all2all=True
+        ),
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "get_default_ir_op_priority",
+        lambda _: IrOpPriorityConfig(),
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError, match="Pass --enforce-eager"):
+            kernel_config.set_platform_defaults(vllm_config)
+    else:
+        kernel_config.set_platform_defaults(vllm_config)
+
+
 def test_scheduler_config_init():
     with pytest.raises(ValidationError):
         # Positional InitVars missing

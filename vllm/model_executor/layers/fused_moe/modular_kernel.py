@@ -161,6 +161,8 @@ class ExpertTokensMetadata:
     # local->global expert-id offset, set when globalization is deferred to the
     # experts' fused align kernel.
     rank_expert_offset: int | None = None
+    expert_input_alignment: int | None = None
+    """Alignment of input rows already grouped by expert, including padding."""
 
     @staticmethod
     def make_from_list(

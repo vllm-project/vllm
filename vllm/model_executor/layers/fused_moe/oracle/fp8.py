@@ -898,6 +898,12 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
+    expert_input_alignment = 1
+    if fp8_backend == Fp8MoeBackend.DEEPGEMM:
+        from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+
+        expert_input_alignment = get_mk_alignment_for_contiguous_layout()[0]
+
     return make_moe_kernel(
         moe_quant_config,
         moe_config,
@@ -912,5 +918,6 @@ def make_fp8_moe_kernel(
                 and moe_quant_config.is_block_quantized
                 else None
             ),
+            "expert_input_alignment": expert_input_alignment,
         },
     )

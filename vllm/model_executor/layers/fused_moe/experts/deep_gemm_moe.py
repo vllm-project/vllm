@@ -15,6 +15,8 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     compute_aligned_M_and_alignment,
     deepgemm_moe_permute,
     deepgemm_unpermute_and_reduce,
+    ep_gather,
+    prepare_expanded_deepgemm_input,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -136,6 +138,19 @@ def _valid_deep_gemm(
     return True
 
 
+def _expanded_expert_ends(
+    metadata: mk.ExpertTokensMetadata | None, alignment: int
+) -> torch.Tensor:
+    assert metadata is not None and metadata.expert_num_tokens is not None
+    counts = metadata.expert_num_tokens.to(torch.int32)
+    aligned_counts = (
+        torch.div(counts + alignment - 1, alignment, rounding_mode="floor") * alignment
+    )
+    return (
+        torch.cumsum(aligned_counts, dim=0, dtype=torch.int32) - aligned_counts + counts
+    )
+
+
 class DeepGemmExperts(mk.FusedMoEExpertsModular):
     """DeepGemm-based fused MoE expert implementation."""
 
@@ -206,6 +221,16 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def _grouped_input_alignment(
+        self, metadata: mk.ExpertTokensMetadata | None
+    ) -> int | None:
+        if self.mxfp8 or metadata is None:
+            return None
+        alignment = metadata.expert_input_alignment
+        if alignment is None or alignment % get_mk_alignment_for_contiguous_layout()[0]:
+            return None
+        return alignment
+
     def workspace_shapes(
         self,
         M: int,
@@ -221,9 +246,13 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         # Use the contiguous-layout M alignment (matches apply()); block_shape[0]
         # is the quant block (1 for MXFP8) and would under-size the workspace.
         block_m = get_mk_alignment_for_contiguous_layout()[0]
-        M_sum, align_used = compute_aligned_M_and_alignment(
-            M, topk, local_num_experts, block_m, expert_tokens_meta
-        )
+        align_used = self._grouped_input_alignment(expert_tokens_meta)
+        if align_used is not None:
+            M_sum = M
+        else:
+            M_sum, align_used = compute_aligned_M_and_alignment(
+                M, topk, local_num_experts, block_m, expert_tokens_meta
+            )
         assert M_sum % align_used == 0
 
         activation_out_dim = self.adjust_N_for_activation(N, activation)
@@ -246,6 +275,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         activation: MoEActivation,
         expert_ends: torch.Tensor | None = None,
         expert_alignment: int = 0,
+        expert_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.block_shape is not None
         block_k = self.block_shape[1]
@@ -262,6 +292,11 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         )
 
+        if expert_ids is not None and (
+            scale_fmt != DeepGemmQuantScaleFMT.UE8M0 or not fused_gated
+        ):
+            input.masked_fill_((expert_ids < 0)[:, None], 0)
+
         # 1. DeepGemm UE8M0: fused gate+mul+clamp+quant+pack
         if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
             if fused_gated:
@@ -274,6 +309,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                     beta=self.gemm1_beta,
                     expert_ends=expert_ends,
                     expert_alignment=expert_alignment,
+                    expert_ids=expert_ids,
                 )
             act_out = torch.empty(
                 (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
@@ -343,17 +379,6 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
         assert w2.size(1) == K
 
-        M_sum, _ = compute_aligned_M_and_alignment(
-            M=topk_ids.size(0),
-            num_topk=topk_ids.size(1),
-            local_num_experts=local_num_experts,
-            alignment=get_mk_alignment_for_contiguous_layout()[0],
-            expert_tokens_meta=expert_tokens_meta,
-        )
-
-        a1q_perm = _resize_cache(
-            workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, K)
-        )
         # Both GEMMs and quantization must agree on the live expert ranges.
         use_psum_layout = (
             not self.mxfp8
@@ -367,19 +392,48 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             )
             and activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
         )
-        a1q, a1q_scale, grouped_layout, inv_perm, align_used = deepgemm_moe_permute(
-            aq=a1q,
-            aq_scale=a1q_scale,
-            topk_ids=topk_ids,
-            local_num_experts=local_num_experts,
-            expert_map=expert_map,
-            expert_tokens_meta=expert_tokens_meta,
-            aq_out=a1q_perm,
-            # MXFP8 uses a 32-element activation-scale group (block_shape[1]);
-            # FP8-block keeps the default (128) alignment.
-            block_size=self.block_shape[1] if self.mxfp8 else None,
-            use_psum_layout=use_psum_layout,
-        )
+        align_used = self._grouped_input_alignment(expert_tokens_meta)
+        grouped_input = align_used is not None
+        inv_perm = None
+        expert_ids = None
+        if grouped_input:
+            assert align_used is not None
+            assert topk_ids.size(1) == 1
+            assert expert_tokens_meta is not None
+            assert expert_tokens_meta.expert_num_tokens is not None
+            M_sum = a1q.size(0)
+            a1q_scale, expert_ids, expert_ends = prepare_expanded_deepgemm_input(
+                topk_ids,
+                a1q_scale,
+                expert_tokens_meta.expert_num_tokens,
+                expert_map,
+                align_used,
+            )
+            grouped_layout = expert_ends if use_psum_layout else expert_ids
+        else:
+            M_sum, _ = compute_aligned_M_and_alignment(
+                M=topk_ids.size(0),
+                num_topk=topk_ids.size(1),
+                local_num_experts=local_num_experts,
+                alignment=get_mk_alignment_for_contiguous_layout()[0],
+                expert_tokens_meta=expert_tokens_meta,
+            )
+            a1q_perm = _resize_cache(
+                workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, K)
+            )
+            a1q, a1q_scale, grouped_layout, inv_perm, align_used = deepgemm_moe_permute(
+                aq=a1q,
+                aq_scale=a1q_scale,
+                topk_ids=topk_ids,
+                local_num_experts=local_num_experts,
+                expert_map=expert_map,
+                expert_tokens_meta=expert_tokens_meta,
+                aq_out=a1q_perm,
+                # MXFP8 uses a 32-element activation-scale group (block_shape[1]);
+                # FP8-block keeps the default (128) alignment.
+                block_size=self.block_shape[1] if self.mxfp8 else None,
+                use_psum_layout=use_psum_layout,
+            )
         assert a1q.size(0) == M_sum
 
         # MXFP8 (1x32) drives the fp8_fp4-aliased grouped GEMM with recipe
@@ -396,6 +450,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         # Cap DG's BLOCK_M heuristic at the workspace's per-expert alignment;
         # otherwise the scheduler can pick the wrong expert id from m_indices
         # under cudagraph replay.
+        assert align_used is not None
         with mk_alignment_scope(align_used):
             mm1_out = _resize_cache(workspace2, (M_sum, N))
             m_grouped_fp8_gemm_nt_contiguous(
@@ -414,6 +469,9 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                 input=mm1_out.view(-1, N),
                 output=quant_out,
                 activation=activation,
+                expert_ids=expert_ids
+                if grouped_input and not use_psum_layout
+                else None,
                 expert_ends=grouped_layout if use_psum_layout else None,
                 expert_alignment=align_used if use_psum_layout else 0,
             )
@@ -430,14 +488,26 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        deepgemm_unpermute_and_reduce(
-            a=mm2_out,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            inv_perm=inv_perm,
-            expert_map=expert_map,
-            output=output,
-        )
+        if grouped_input:
+            assert expert_ids is not None
+            ep_gather(
+                input_tensor=mm2_out,
+                recv_topk_ids=expert_ids[:, None],
+                recv_topk_weight=topk_weights,
+                input_index=None,
+                expert_map=None,
+                output_tensor=output,
+            )
+        else:
+            assert inv_perm is not None
+            deepgemm_unpermute_and_reduce(
+                a=mm2_out,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                inv_perm=inv_perm,
+                expert_map=expert_map,
+                output=output,
+            )
 
 
 class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
@@ -510,6 +580,20 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def _grouped_input_alignment(
+        self, metadata: mk.ExpertTokensMetadata | None
+    ) -> int | None:
+        if (
+            metadata is None
+            or not current_platform.is_device_capability_family(100)
+            or DeepGemmQuantScaleFMT.from_oracle() != DeepGemmQuantScaleFMT.UE8M0
+        ):
+            return None
+        alignment = metadata.expert_input_alignment
+        if alignment is None or alignment % get_mk_alignment_for_contiguous_layout()[0]:
+            return None
+        return alignment
+
     def workspace_shapes(
         self,
         M: int,
@@ -522,9 +606,13 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         block_m = get_mk_alignment_for_contiguous_layout()[0]
-        M_sum, align_used = compute_aligned_M_and_alignment(
-            M, topk, local_num_experts, block_m, expert_tokens_meta
-        )
+        align_used = self._grouped_input_alignment(expert_tokens_meta)
+        if align_used is not None:
+            M_sum = M
+        else:
+            M_sum, align_used = compute_aligned_M_and_alignment(
+                M, topk, local_num_experts, block_m, expert_tokens_meta
+            )
         assert M_sum % align_used == 0
 
         activation_out_dim = self.adjust_N_for_activation(N, activation)
@@ -626,32 +714,49 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        M_sum, _ = compute_aligned_M_and_alignment(
-            M=topk_ids.size(0),
-            num_topk=topk_ids.size(1),
-            local_num_experts=local_num_experts,
-            alignment=get_mk_alignment_for_contiguous_layout()[0],
-            expert_tokens_meta=expert_tokens_meta,
-        )
-
-        a1q_perm = _resize_cache(
-            workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, K)
-        )
         use_psum_layout = current_platform.is_device_capability_family(100)
-        a1q, a1q_scale, grouped_layout, inv_perm, align_used = deepgemm_moe_permute(
-            aq=a1q,
-            aq_scale=a1q_scale,
-            topk_ids=topk_ids,
-            local_num_experts=local_num_experts,
-            expert_map=expert_map,
-            expert_tokens_meta=expert_tokens_meta,
-            aq_out=a1q_perm,
-            use_psum_layout=use_psum_layout,
-        )
+        align_used = self._grouped_input_alignment(expert_tokens_meta)
+        grouped_input = align_used is not None and use_psum_layout
+        inv_perm = None
+        if grouped_input:
+            assert align_used is not None
+            assert topk_ids.size(1) == 1
+            M_sum = a1q.size(0)
+            assert expert_tokens_meta is not None
+            assert expert_tokens_meta.expert_num_tokens is not None
+            a1q_scale, expert_ids, grouped_layout = prepare_expanded_deepgemm_input(
+                topk_ids,
+                a1q_scale,
+                expert_tokens_meta.expert_num_tokens,
+                expert_map,
+                align_used,
+            )
+        else:
+            M_sum, _ = compute_aligned_M_and_alignment(
+                M=topk_ids.size(0),
+                num_topk=topk_ids.size(1),
+                local_num_experts=local_num_experts,
+                alignment=get_mk_alignment_for_contiguous_layout()[0],
+                expert_tokens_meta=expert_tokens_meta,
+            )
+            a1q_perm = _resize_cache(
+                workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, K)
+            )
+            a1q, a1q_scale, grouped_layout, inv_perm, align_used = deepgemm_moe_permute(
+                aq=a1q,
+                aq_scale=a1q_scale,
+                topk_ids=topk_ids,
+                local_num_experts=local_num_experts,
+                expert_map=expert_map,
+                expert_tokens_meta=expert_tokens_meta,
+                aq_out=a1q_perm,
+                use_psum_layout=use_psum_layout,
+            )
         assert a1q.size(0) == M_sum
 
         # Cap DG's BLOCK_M heuristic at the workspace's per-expert alignment;
         # see DeepGemmExperts.apply for rationale.
+        assert align_used is not None
         with mk_alignment_scope(align_used):
             # FC1: FP8 activations x FP4 weights
             # DeepGEMM 2.4.2 requires FP4-packed weights as int8 (kPackedFP4).
@@ -694,11 +799,22 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        deepgemm_unpermute_and_reduce(
-            a=mm2_out,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            inv_perm=inv_perm,
-            expert_map=expert_map,
-            output=output,
-        )
+        if grouped_input:
+            ep_gather(
+                input_tensor=mm2_out,
+                recv_topk_ids=expert_ids[:, None],
+                recv_topk_weight=topk_weights,
+                input_index=None,
+                expert_map=None,
+                output_tensor=output,
+            )
+        else:
+            assert inv_perm is not None
+            deepgemm_unpermute_and_reduce(
+                a=mm2_out,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                inv_perm=inv_perm,
+                expert_map=expert_map,
+                output=output,
+            )

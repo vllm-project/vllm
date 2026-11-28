@@ -445,7 +445,7 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
-@multi_gpu_test(num_gpus=2)
+@multi_gpu_test(num_gpus=2, method="spawn")
 @requires_deep_ep
 @requires_deep_gemm
 def test_ht_deepep_deepgemm_moe(
@@ -514,7 +514,7 @@ USE_FP8_DISPATCH = [False]
 @pytest.mark.parametrize("use_fp8_dispatch", USE_FP8_DISPATCH)
 @pytest.mark.parametrize("block_size", [[128, 128]])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
-@multi_gpu_test(num_gpus=2)
+@multi_gpu_test(num_gpus=2, method="spawn")
 @requires_deep_ep
 @requires_deep_gemm
 def test_ll_deepep_deepgemm_moe(
