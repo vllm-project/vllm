@@ -176,3 +176,18 @@ publishing a stored-object event. It periodically rechecks tracked objects
 during engine steps to report removals. These checks do not delay the release
 of GPU source blocks after a completed transfer. With events disabled, no
 historical object identities are retained for event reporting.
+
+## Model notes
+
+### Qwen3.8-Flash-Next
+
+`Qwen/Qwen3.8-Flash-Next-FP8` is validated with `UMBPStoreConnector` on ROCm
+(4x MI350X, TP4) in embedded and standalone modes, with the default KV cache
+dtype. Octave KV cache dtypes and MTP speculative decoding are not validated.
+
+Like other hybrid models, its recurrent state is checkpointed on block
+boundaries when prefix caching is enabled, so a prefix is reused in whole
+blocks: 832 tokens in the validated configuration (see the
+`Setting attention block size` startup log). With default options, a prompt
+shorter than one block is not restored, and the tokens after a prompt's last
+full block are recomputed.

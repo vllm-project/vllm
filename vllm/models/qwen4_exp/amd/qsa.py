@@ -160,7 +160,9 @@ class Qwen4ExpQSABackend(AttentionBackend):
 
     @classmethod
     def supports_kv_connector(cls) -> bool:
-        return False
+        # Whole-block restore through a KV connector (UMBPStoreConnector)
+        # matches the GPU prefix cache; see test_gsm8k_offloading.py.
+        return True
 
 
 class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
