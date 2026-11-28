@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_down, round_up
 
 # Default values for packed tensor transfer.
@@ -26,8 +27,8 @@ MIN_PACKED_BUFFER_BYTES = 64 * 1024 * 1024
 # stream they were allocated on, so fresh streams at every call would strand the
 # packed buffers' reserved memory per call. See gh-52950.
 @cache
-def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.cuda.Stream, ...]:
-    return tuple(torch.cuda.Stream(device=device_idx) for _ in range(num_buffers))
+def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.Stream, ...]:
+    return tuple(current_platform.Stream(device=device_idx) for _ in range(num_buffers))
 
 
 # ── Packed layout (shared by NCCL and IPC) ─────────────────────────────
@@ -106,7 +107,7 @@ def grow_buffer(
 
 
 def _record_sources(
-    srcs: list[torch.Tensor], device: torch.device, stream: torch.cuda.Stream
+    srcs: list[torch.Tensor], device: torch.device, stream: torch.Stream
 ) -> None:
     """Keep GPU `srcs` alive until their copies end: on `stream` on `device`, on
     the source device's current stream (where `copy_` runs) on another GPU."""
@@ -114,7 +115,7 @@ def _record_sources(
         if t.device == device:
             t.record_stream(stream)
         elif t.device.type != "cpu":  # host copies are synchronous
-            t.record_stream(torch.cuda.current_stream(t.device))
+            t.record_stream(current_platform.current_stream(t.device))
 
 
 def dtype_name(dtype: torch.dtype) -> str:
@@ -288,7 +289,7 @@ def packed_nccl_broadcast_producer(
     capacity = chunk_capacity(buffer_size_bytes)
     device = group.device
     streams = _get_streams(device.index, num_buffers)
-    caller_stream = torch.cuda.current_stream(device)
+    caller_stream = current_platform.current_stream(device)
     done: list[torch.Event | None] = [None] * num_buffers
     bufs: list[torch.Tensor | None] = [None] * num_buffers
     k = 0  # the chunk being packed
@@ -306,7 +307,7 @@ def packed_nccl_broadcast_producer(
             prev.synchronize()
             done[slot] = None
         # On the caller stream, so the source's next writes wait for the copies.
-        with torch.cuda.stream(caller_stream):
+        with current_platform.stream(caller_stream):
             buf = bufs[slot] = grow_buffer(bufs[slot], end, capacity, device, filled)
             dsts, srcs = _pack_copies(buf, pieces, tensors)
             torch._foreach_copy_(dsts, srcs)
@@ -320,7 +321,7 @@ def packed_nccl_broadcast_producer(
             assert buf is not None
             streams[slot].wait_stream(caller_stream)
             buf.record_stream(streams[slot])
-            with torch.cuda.stream(streams[slot]):
+            with current_platform.stream(streams[slot]):
                 group.broadcast(buf[: chunk.nbytes], src=src)
                 event = torch.Event()
                 event.record(streams[slot])
@@ -381,7 +382,7 @@ def packed_nccl_broadcast_consumer(
         done = unpacked[slot]
         if done is not None:
             done.synchronize()
-        with torch.cuda.stream(recv_streams[slot]):
+        with current_platform.stream(recv_streams[slot]):
             packed = torch.empty(chunk.nbytes, dtype=torch.uint8, device=device)
             if chunk.sent:
                 group.broadcast(packed, src=src)
@@ -390,7 +391,7 @@ def packed_nccl_broadcast_consumer(
         # Read on the unpack stream and by the caller after return.
         packed.record_stream(unpack_stream)
         packed.record_stream(caller_stream)
-        with torch.cuda.stream(unpack_stream):
+        with current_platform.stream(unpack_stream):
             unpack_stream.wait_event(received)
             load(packed, chunk.pieces)
             event = torch.Event()
