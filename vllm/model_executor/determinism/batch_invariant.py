@@ -16,6 +16,7 @@ from vllm.model_executor.determinism.batch_invariant_configs import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import has_flashinfer_batch_invariant_quantizers
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.nccl import pin_nccl_env
 from vllm.utils.platform_utils import num_compute_units
@@ -1358,6 +1359,24 @@ _fp32_block_size_n = 128
 _fp32_num_stages = 3
 _BLOCK_SIZES_RESOLVED = False
 _NUM_SMS: int = 0
+
+
+# Whether the MXFP8 linear kernels run FlashInfer's batch-invariant quantizer
+# and GEMM (the mode, on a part and FlashInfer release that has them): resolved
+# once per value of the mode, so the layers read a flag that agrees with the
+# kernel selection, which reads the mode live.
+_FLASHINFER_QUANTIZERS: tuple[bool, bool] | None = None
+
+
+def flashinfer_quantizers_enabled() -> bool:
+    global _FLASHINFER_QUANTIZERS
+    mode = bool(envs.VLLM_BATCH_INVARIANT)
+    if _FLASHINFER_QUANTIZERS is None or _FLASHINFER_QUANTIZERS[0] != mode:
+        _FLASHINFER_QUANTIZERS = (
+            mode,
+            mode and has_flashinfer_batch_invariant_quantizers(),
+        )
+    return _FLASHINFER_QUANTIZERS[1]
 
 
 def _resolve_block_sizes():

@@ -237,20 +237,32 @@ def _mxfp8_e4m3_quantize_impl(
     x: torch.Tensor,
     is_sf_swizzled_layout: bool = False,
     alignment: int = 0,
+    batch_invariant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm.platforms import current_platform
-
     flashinfer_mxfp8_quantize = _flashinfer_mxfp8_quantize()
+    if batch_invariant and flashinfer_mxfp8_quantize is None:
+        raise RuntimeError(
+            "Batch-invariant MXFP8 quantization needs FlashInfer on an "
+            "SM100-family GPU."
+        )
     if flashinfer_mxfp8_quantize is not None:
+        # FlashInfer's batch-invariant quantizer takes backend="auto" only.
+        backend_kwargs = (
+            {"backend": "auto", "batch_invariant": True}
+            if batch_invariant
+            else {"backend": "cute-dsl"}
+        )
         x_q, x_scales = flashinfer_mxfp8_quantize(
             x,
             is_sf_swizzled_layout=is_sf_swizzled_layout,
             alignment=alignment if alignment > 0 else 32,
-            backend="cute-dsl",
+            **backend_kwargs,
         )
         if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
             x_scales = x_scales.view(x.size(0), -1)
         return x_q, x_scales
+
+    from vllm.platforms import current_platform
 
     # ROCm: a single fused Triton kernel beats the multi-pass torch path for the
     # common 2D, non-swizzled activation-quant case (used by the native MX
@@ -270,11 +282,16 @@ def mxfp8_e4m3_quantize(
     x: torch.Tensor,
     is_sf_swizzled_layout: bool = False,
     alignment: int = 0,
+    batch_invariant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # The custom op is only needed as a Dynamo boundary.
     if not torch.compiler.is_compiling():
-        return _mxfp8_e4m3_quantize_impl(x, is_sf_swizzled_layout, alignment)
-    return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout, alignment)
+        return _mxfp8_e4m3_quantize_impl(
+            x, is_sf_swizzled_layout, alignment, batch_invariant
+        )
+    return torch.ops.vllm.mxfp8_quantize(
+        x, is_sf_swizzled_layout, alignment, batch_invariant
+    )
 
 
 def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
@@ -314,6 +331,7 @@ def mxfp8_e4m3_quantize_fake(
     x: torch.Tensor,
     is_sf_swizzled_layout: bool = False,
     alignment: int = 0,
+    batch_invariant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile tracing."""
     fp_data = torch.empty_like(x, dtype=MXFP8_VALUE_DTYPE)

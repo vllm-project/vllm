@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant import (
+    flashinfer_quantizers_enabled,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -18,9 +25,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupChoices,
+    WarmupIntRange,
+)
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
-from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl
+from vllm.utils.flashinfer import (
+    flashinfer_batch_invariant_quantizer_fits,
+    has_flashinfer,
+    has_flashinfer_batch_invariant_quantizers,
+    has_flashinfer_cutedsl,
+)
 from vllm.utils.math_utils import round_up
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
@@ -39,6 +56,30 @@ def _check_mm_mxfp8_shape(weight_shape: tuple[int, int]) -> tuple[bool, str | No
         )
     if N < 128:
         return False, f"mm_mxfp8 requires N >= 128, got N={N}."
+    return True, None
+
+
+def _check_batch_invariant_rules(c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+    """Under VLLM_BATCH_INVARIANT with FlashInfer's batch-invariant kernels, the
+    limits they add to `_check_mm_mxfp8_shape`'s rules: activation rows of at
+    most 128 KiB (bf16 and fp16 activations have the same row bytes) and a bf16
+    or fp16 layer, the GEMM's output types; a layer outside them falls through
+    to the next batch-invariant kernel as before."""
+    if not (envs.VLLM_BATCH_INVARIANT and has_flashinfer_batch_invariant_quantizers()):
+        return True, None
+    _, K = c.weight_shape
+    if not flashinfer_batch_invariant_quantizer_fits(
+        K, torch.bfloat16, MXFP8_BLOCK_SIZE
+    ):
+        return (
+            False,
+            f"FlashInfer's batch-invariant MXFP8 quantizer does not take K={K} rows.",
+        )
+    if c.params_dtype not in (None, torch.bfloat16, torch.float16):
+        return False, (
+            "FlashInfer's batch-invariant MXFP8 GEMM does not write "
+            f"{c.params_dtype} outputs."
+        )
     return True, None
 
 
@@ -62,10 +103,216 @@ def _pad_n(
     return padded_weight, padded_scale
 
 
-class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
-    """MXFP8 W8A8 GEMM via FlashInfer CUTLASS (SM100+)."""
+def _next_row_count(m: int) -> int:
+    # FlashInfer's dispatchers change configuration at small powers of two and
+    # at tile boundaries (multiples of 32 rows, plus one): dense below 64 rows,
+    # then every 32.
+    return m + 1 if m < 64 else m + 32
+
+
+def _flashinfer_quant_key(
+    num_tokens: int, k: int, dtype: torch.dtype, device_index: int
+) -> tuple[Any, ...]:
+    """The configuration FlashInfer's batch-invariant quantizer picks for
+    `num_tokens` rows of `k` elements, as its compile entry's arguments."""
+    from flashinfer.batch_invariant.quantization import mx_api, mx_schedule
+    from flashinfer.utils import device_support_pdl
+
+    device = torch.device("cuda", device_index)
+    cfg = mx_schedule.default_config(
+        num_tokens, k, dtype.itemsize, mx_api.device_sm_count(device), "128x4"
+    )
+    dtype_str = "bf16" if dtype == torch.bfloat16 else "f16"
+    return dtype_str, k, cfg, device_support_pdl(device)
+
+
+def _flashinfer_gemm_key(
+    num_tokens: int, n: int, k: int, dtype: torch.dtype, device_index: int
+) -> tuple[Any, ...]:
+    """The configuration FlashInfer's batch-invariant MXFP8 GEMM picks for
+    (`num_tokens`, `n`, `k`), as its compile entry's arguments."""
+    from flashinfer.gemm.batch_invariant import api as gemm_api
+    from flashinfer.gemm.batch_invariant import schedule as gemm_schedule
+
+    device = torch.device("cuda", device_index)
+    in_fmt = gemm_api.mx_format_for(device)
+    sm_count, family = gemm_api.part_of(device)
+    chunks = gemm_schedule.chunks_for(n, k, in_fmt)
+    cfg = gemm_schedule.default_config(
+        num_tokens, n, k, chunks, "k", sm_count, family, in_fmt
+    )
+    clusters = gemm_api.persistent_clusters(device, cfg)
+    return cfg, chunks, clusters, in_fmt, gemm_api.OUT_FMT_OF_DTYPE[dtype], family
+
+
+class _FlashInferBatchInvariantMxfp8Warmup(
+    VllmJitKernel["_FlashInferBatchInvariantMxfp8Warmup.CompileKey"]
+):
+    """Compile-only warm-up of FlashInfer's batch-invariant MXFP8 quantizer and
+    GEMM for one weight shape. FlashInfer compiles one kernel per configuration
+    on first use and its dispatchers pick the configuration from the row count,
+    so `dispatch` asks those dispatchers for a row count's configurations and
+    `compile` materializes them through FlashInfer's cached compile entries,
+    without a launch."""
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        quant: tuple[Any, ...]
+        gemm: tuple[Any, ...]
+
+    def dispatch(
+        self, num_tokens: int, n: int, k: int, dtype: torch.dtype, device_index: int
+    ) -> CompileKey:
+        quant = _flashinfer_quant_key(num_tokens, k, dtype, device_index)
+        gemm = _flashinfer_gemm_key(num_tokens, n, k, dtype, device_index)
+        return self.CompileKey(quant=quant, gemm=gemm)
+
+    def get_warmup_keys(
+        self,
+        n: int,
+        k: int,
+        dtype: torch.dtype,
+        device_index: int,
+        max_tokens: int,
+        m_values: tuple[int, ...],
+    ) -> list[CompileKey]:
+        trace = self._trace_dispatch(self.dispatch)
+        try:
+            keys = trace(
+                num_tokens=WarmupIntRange(1, max_tokens + 1, advance=_next_row_count),
+                n=n,
+                k=k,
+                dtype=dtype,
+                device_index=device_index,
+            )
+            keys += trace(
+                num_tokens=WarmupChoices(*m_values),
+                n=n,
+                k=k,
+                dtype=dtype,
+                device_index=device_index,
+            )
+        except Exception as exc:
+            _warn_warmup_skipped(exc)
+            return []
+        return list(dict.fromkeys(keys))
+
+    def compile(self, compile_key: CompileKey) -> None:
+        from flashinfer.batch_invariant.quantization.mx_kernel import (
+            get_compiled_kernel,
+        )
+        from flashinfer.batch_invariant.quantization.mx_spec import (
+            DEFAULT_RULE,
+            MXFP8,
+        )
+        from flashinfer.gemm.batch_invariant.blocks.compile_blockscaled import (
+            get_compiled_blockscaled,
+        )
+        from flashinfer.gemm.batch_invariant.fixup import get_fixup
+
+        if compile_key in self._compiled_cache:
+            return
+        # The entries are cached on their arguments, so the calls below take
+        # FlashInfer's own positional / keyword split (mx_api.mx_quantize and
+        # gemm.batch_invariant.api._run_mx).
+        try:
+            dtype_str, k, quant_cfg, pdl = compile_key.quant
+            get_compiled_kernel(
+                dtype_str, k, quant_cfg, MXFP8, DEFAULT_RULE, "128x4", pdl
+            )
+            gemm_cfg, chunks, clusters, in_fmt, out_fmt, family = compile_key.gemm
+            get_compiled_blockscaled(
+                gemm_cfg, chunks, clusters, in_fmt, out_fmt, family=family
+            )
+            if not gemm_cfg.swap_ab and not (
+                chunks == 1 or gemm_cfg.cta_chunks or gemm_cfg.cluster_k > 1
+            ):
+                # The fixed-chunk split folds fp32 partials in the fixup kernel.
+                get_fixup(chunks, out_fmt, alpha_given=False)
+        except Exception as exc:
+            _warn_warmup_skipped(exc)
+            return
+        self._compiled_cache[compile_key] = True
+
+
+def _warn_warmup_skipped(exc: Exception) -> None:
+    logger.warning_once(
+        "Skipping the compile-only warm-up of FlashInfer's batch-invariant MXFP8 "
+        "kernels (%s: %s); they compile on first use instead.",
+        type(exc).__name__,
+        str(exc),
+    )
+
+
+_BATCH_INVARIANT_WARMUP = _FlashInferBatchInvariantMxfp8Warmup()
+
+
+class _FlashInferMmMxfp8LinearKernel(Mxfp8LinearKernel):
+    """Base of the kernels on FlashInfer's `mm_mxfp8`. Under
+    VLLM_BATCH_INVARIANT with FlashInfer's batch-invariant quantizer and GEMM
+    available (SM100 / SM103 / SM107, FlashInfer >= 0.7.4) they quantize the
+    activations with `mxfp8_quantize(..., batch_invariant=True)` and run
+    `mm_mxfp8(..., batch_invariant=True)` in place of the backend named below:
+    a row's output bits then do not depend on the batch. The shape rules are
+    `_check_mm_mxfp8_shape`'s with N padded to a multiple of 8, plus
+    `_check_batch_invariant_rules` under the mode.
+    """
 
     supports_pre_processed_weights = True
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return has_flashinfer_batch_invariant_quantizers()
+
+    def input_quant_key(self) -> QuantKey:
+        # Activations use FlashInfer's F8_128x4 swizzled scale layout.
+        return kMxfp8Dynamic
+
+    def _register_batch_invariant_warmup(
+        self, layer: torch.nn.Module, n: int, k: int
+    ) -> None:
+        """Under the mode, register the layer's quantizer and GEMM with the JIT
+        warm-up registry, which compiles them before CUDA graph capture."""
+        from vllm.config import get_current_vllm_config_or_none
+
+        if not flashinfer_quantizers_enabled():
+            return
+        config = get_current_vllm_config_or_none()
+        if config is None or not config.kernel_config.enable_jit_warmup:
+            return
+        max_tokens = config.scheduler_config.max_num_batched_tokens
+        sizes = set(config.compilation_config.cudagraph_capture_sizes or [])
+        device = layer.weight.device
+        _BATCH_INVARIANT_WARMUP.register_warmup(
+            n,
+            k,
+            layer.params_dtype,
+            device.index
+            if device.index is not None
+            else torch.accelerator.current_device_index(),
+            max_tokens,
+            tuple(sorted(sizes | {max_tokens})),
+        )
+
+    def _quantize_input(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | QuantizedActivation,
+        K: int,
+        batch_invariant: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.dtype, torch.Size]:
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            return qa.data, qa.scale, qa.orig_dtype, qa.orig_shape
+        assert isinstance(x, torch.Tensor)
+        input_mxfp8, input_scale = mxfp8_e4m3_quantize(
+            x.view(-1, K), is_sf_swizzled_layout=True, batch_invariant=batch_invariant
+        )
+        return input_mxfp8, input_scale, layer.params_dtype, x.shape
+
+
+class FlashInferCutlassMxfp8LinearKernel(_FlashInferMmMxfp8LinearKernel):
+    """MXFP8 W8A8 GEMM via FlashInfer CUTLASS (SM100+)."""
 
     @classmethod
     def is_supported(
@@ -90,11 +337,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
                 False,
                 f"mm_mxfp8 on SM12x requires N to be divisible by 32, got N={N}.",
             )
-        return True, None
-
-    def input_quant_key(self) -> QuantKey:
-        # Activations use FlashInfer's F8_128x4 swizzled scale layout.
-        return kMxfp8Dynamic
+        return _check_batch_invariant_rules(c)
 
     # The CUTLASS MXFP8 GEMM requires N (output features) to be a multiple of 32.
     _N_ALIGNMENT = 32
@@ -114,6 +357,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale_swizzled.contiguous())
+        self._register_batch_invariant_warmup(layer, weight.shape[0], K)
 
     def apply_weights(
         self,
@@ -126,16 +370,10 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         padded_n, K = weight.shape
         N = layer.output_size_per_partition
 
-        qa = as_quantized_activation(x, self.input_quant_key())
-        if qa is not None:
-            input_mxfp8, input_scale = qa.data, qa.scale
-            out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
-        else:
-            assert isinstance(x, torch.Tensor)
-            out_dtype, input_shape = layer.params_dtype, x.shape
-            input_mxfp8, input_scale = mxfp8_e4m3_quantize(
-                x.view(-1, K), is_sf_swizzled_layout=True
-            )
+        batch_invariant = flashinfer_quantizers_enabled()
+        input_mxfp8, input_scale, out_dtype, input_shape = self._quantize_input(
+            layer, x, K, batch_invariant
+        )
 
         if not weight.is_contiguous():
             weight = weight.contiguous()
@@ -147,6 +385,7 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             weight_scale,
             out_dtype=out_dtype,
             backend="cutlass",
+            batch_invariant=batch_invariant,
         )
         if padded_n != N:
             output = output[:, :N].contiguous()
@@ -158,10 +397,8 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         return output.view(output_shape)
 
 
-class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
+class FlashInferCutedslMxfp8LinearKernel(_FlashInferMmMxfp8LinearKernel):
     """MXFP8 W8A8 GEMM via FlashInfer CuTe-DSL (SM100/SM103)."""
-
-    supports_pre_processed_weights = True
 
     @classmethod
     def is_supported(
@@ -178,11 +415,10 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        return _check_mm_mxfp8_shape(c.weight_shape)
-
-    def input_quant_key(self) -> QuantKey:
-        # Activations use FlashInfer's F8_128x4 swizzled scale layout.
-        return kMxfp8Dynamic
+        can_implement, reason = _check_mm_mxfp8_shape(c.weight_shape)
+        if not can_implement:
+            return False, reason
+        return _check_batch_invariant_rules(c)
 
     # The CuTe-DSL MXFP8 GEMM stores its bf16/fp16 output with TMA, which needs
     # 16-byte aligned rows, so N must be a multiple of 8.
@@ -204,6 +440,7 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         # Store weight column-major [K, N] as mm_mxfp8 expects for operand B.
         replace_parameter(layer, "weight", weight.contiguous().t())
         replace_parameter(layer, "weight_scale", weight_scale_swizzled.contiguous())
+        self._register_batch_invariant_warmup(layer, weight.shape[0], K)
 
     def apply_weights(
         self,
@@ -216,16 +453,10 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
         K, padded_n = weight.shape
         N = layer.output_size_per_partition
 
-        qa = as_quantized_activation(x, self.input_quant_key())
-        if qa is not None:
-            input_mxfp8, input_scale = qa.data, qa.scale
-            out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
-        else:
-            assert isinstance(x, torch.Tensor)
-            out_dtype, input_shape = layer.params_dtype, x.shape
-            input_mxfp8, input_scale = mxfp8_e4m3_quantize(
-                x.view(-1, K), is_sf_swizzled_layout=True
-            )
+        batch_invariant = flashinfer_quantizers_enabled()
+        input_mxfp8, input_scale, out_dtype, input_shape = self._quantize_input(
+            layer, x, K, batch_invariant
+        )
 
         output = vllm_flashinfer.mm_mxfp8(
             input_mxfp8,
@@ -234,6 +465,7 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
             weight_scale,
             out_dtype=out_dtype,
             backend="cute-dsl",
+            batch_invariant=batch_invariant,
         )
         if padded_n != N:
             output = output[:, :N].contiguous()

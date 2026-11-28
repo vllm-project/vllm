@@ -38,6 +38,7 @@ from cutlass.cute.runtime import make_fake_stream, make_fake_tensor, make_ptr, n
 from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.utils import get_smem_capacity_in_bytes
 
+import vllm.envs as envs
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
 from vllm.distributed.device_communicators.nvlink_fabric import (
@@ -962,6 +963,11 @@ class GemmRsAr:
             if linear.weight.dtype != torch.bfloat16:
                 return False
         else:
+            # Batch-invariant runs keep the MXFP8 linear followed by the
+            # reduce-scatter: the fused kernel quantizes the activation itself
+            # and switches by token count.
+            if envs.VLLM_BATCH_INVARIANT:
+                return False
             method = getattr(linear, "scheme", linear.quant_method)
             kernel = getattr(method, "kernel", None)
             if not isinstance(

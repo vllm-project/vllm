@@ -158,6 +158,12 @@ When batch invariance is enabled, vLLM:
 5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
+7. On SM100, SM103 and SM107 with FlashInfer >= 0.7.4, runs the dense MXFP8 linear layers on FlashInfer's batch-invariant MXFP8
+   quantizer and GEMM (`mxfp8_quantize(..., batch_invariant=True)`, `mm_mxfp8(..., batch_invariant=True)`): the activations are
+   quantized and a row's output bits do not depend on the batch, where before the mode dequantized the weights to bf16 at load
+   and ran an unquantized bf16 linear. Online MXFP8 weight quantization takes the same quantizer under the mode; MoE experts are
+   unchanged. The warm-up compiles the kernels for the CUDA graph sizes. Where FlashInfer's batch-invariant kernels are
+   unavailable, or a layer's shape is outside their rules, the previous Emulation path is kept.
 
 For multimodal vision attention, `VLLM_BATCH_INVARIANT=1` disables Split-KV when
 the `FLASH_ATTN` encoder backend uses FlashAttention 3 on Hopper. On B200,

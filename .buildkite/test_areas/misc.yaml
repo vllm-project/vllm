@@ -1026,6 +1026,10 @@ steps:
     - vllm/lora/ops/triton_ops
     - vllm/model_executor/kernels/linear
     - vllm/model_executor/determinism
+    - vllm/model_executor/layers/quantization/
+    - vllm/models/deepseek_v41/
+    - vllm/models/minimax_m3/
+    - vllm/utils/flashinfer.py
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -1038,6 +1042,7 @@ steps:
     - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
     - pytest -v -s v1/determinism/test_online_batch_invariance.py
+    - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
   mirror:
     amd:
       label: ":amd: (MI355) Batch Invariance"

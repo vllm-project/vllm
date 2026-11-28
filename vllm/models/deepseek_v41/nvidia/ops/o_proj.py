@@ -7,6 +7,7 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
 )
@@ -37,7 +38,10 @@ def _can_fuse_wo_a(layer: nn.Module) -> bool:
         return False
     method = getattr(layer.wo_b, "scheme", layer.wo_b.quant_method)
     return (
-        current_platform.is_device_capability_family(100)
+        # Batch-invariant runs keep the unfused projection: the fusion
+        # switches by token count.
+        not envs.VLLM_BATCH_INVARIANT
+        and current_platform.is_device_capability_family(100)
         # WO-A is FP8 with per-32 scales, and WO-B takes MXFP8 input directly.
         and layer._einsum_recipe == (1, 1, 32)
         and get_input_quant_key(layer.wo_b) == kMxfp8Dynamic

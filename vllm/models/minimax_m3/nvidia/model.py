@@ -169,7 +169,11 @@ def _supports_qkv_fused_epilogue(attn: "MiniMaxM3SparseAttention") -> bool:
         FlashInferCutlassMxfp8LinearKernel,
     )
 
-    if not current_platform.is_device_capability_family(100):
+    # Batch-invariant runs keep qkv_proj's own path: the fused epilogue
+    # switches by token count.
+    if envs.VLLM_BATCH_INVARIANT or not current_platform.is_device_capability_family(
+        100
+    ):
         return False
     # Both keep the weight K-major and its scales F8_128x4-swizzled.
     kernel = getattr(attn.qkv_proj.quant_method, "kernel", None)
@@ -188,6 +192,17 @@ def _supports_qkv_fused_epilogue(attn: "MiniMaxM3SparseAttention") -> bool:
         and attn.rotary_emb.rotary_dim == 64
         and attn.hidden_size % 128 == 0
     )
+
+
+def _fuses_moe_finalize(vllm_config: VllmConfig) -> bool:
+    """Whether MoE layers may defer their top-k finalize to the next layer's
+    fused input norm. Batch-invariant runs keep the stock finalize: the fused
+    one switches by token count and quantizes the next layer's input itself."""
+    from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
+        supports_fused_moe_finalize,
+    )
+
+    return not envs.VLLM_BATCH_INVARIANT and supports_fused_moe_finalize(vllm_config)
 
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
@@ -327,7 +342,8 @@ def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
     """Whether `linear` takes a pre-quantized MXFP8 activation whose UE8M0
     scales are in FlashInfer's 128x4 swizzled layout (what the MXFP8 norm
     kernels write)."""
-    if get_input_quant_key(linear) != kMxfp8Dynamic:
+    # Batch-invariant runs keep the linear's own quantizer.
+    if envs.VLLM_BATCH_INVARIANT or get_input_quant_key(linear) != kMxfp8Dynamic:
         return False
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
         FlashInferCutedslMxfp8LinearKernel,
@@ -1507,10 +1523,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         """
         from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
             init_fused_moe_finalize,
-            supports_fused_moe_finalize,
         )
 
-        if not supports_fused_moe_finalize(vllm_config):
+        if not _fuses_moe_finalize(vllm_config):
             return
         from .specialized_decode import fused_finalize_max_tokens
 

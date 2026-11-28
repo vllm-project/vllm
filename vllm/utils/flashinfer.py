@@ -172,6 +172,36 @@ def has_flashinfer_bf16_gemm() -> bool:
 
 
 @functools.cache
+def has_flashinfer_batch_invariant_quantizers() -> bool:
+    """Return whether FlashInfer's batch-invariant quantizers and MXFP8 GEMM
+    (`batch_invariant=True`, FlashInfer >= 0.7.4) can run on this device: CUDA
+    on SM100, SM103 or SM107."""
+    if not current_platform.is_cuda() or not has_flashinfer():
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.to_int() not in (100, 103, 107):
+        return False
+    version = _installed_version("flashinfer-python")
+    return version is not None and Version(version) >= Version("0.7.4")
+
+
+# FlashInfer's batch-invariant quantizers take rows of at most this many bytes.
+_FLASHINFER_BATCH_INVARIANT_QUANTIZER_MAX_ROW_BYTES = 128 * 1024
+
+
+def flashinfer_batch_invariant_quantizer_fits(
+    k: int, dtype: torch.dtype, block_size: int
+) -> bool:
+    """Return whether FlashInfer's batch-invariant quantizer takes rows of `k`
+    elements of `dtype` with `block_size` elements per scale (K a multiple of
+    the block, rows of at most 128 KiB); other rows keep vLLM's kernel."""
+    return (
+        k % block_size == 0
+        and k * dtype.itemsize <= _FLASHINFER_BATCH_INVARIANT_QUANTIZER_MAX_ROW_BYTES
+    )
+
+
+@functools.cache
 def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
     """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
     if not has_flashinfer():
@@ -1286,9 +1316,23 @@ if has_flashinfer():
         out_dtype: torch.dtype,
         backend: str = "cutlass",
         use_8x4_sf_layout: bool = False,
+        batch_invariant: bool = False,
     ) -> torch.Tensor:
         from flashinfer import mm_mxfp8 as mm_mxfp8_
 
+        if batch_invariant:
+            # FlashInfer's batch-invariant GEMM accepts only backend="auto".
+            return mm_mxfp8_(
+                A,
+                B,
+                A_scale,
+                B_scale,
+                out=None,
+                out_dtype=out_dtype,
+                backend="auto",
+                use_8x4_sf_layout=use_8x4_sf_layout,
+                batch_invariant=True,
+            )
         return mm_mxfp8_(
             A,
             B,
@@ -1308,6 +1352,7 @@ if has_flashinfer():
         out_dtype: torch.dtype,
         backend: str = "cutlass",
         use_8x4_sf_layout: bool = False,
+        batch_invariant: bool = False,
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
@@ -1494,6 +1539,8 @@ __all__ = [
     "flashinfer_bf16_mm",
     "is_flashinfer_autotuning",
     "has_flashinfer_bf16_gemm",
+    "has_flashinfer_batch_invariant_quantizers",
+    "flashinfer_batch_invariant_quantizer_fits",
     "has_flashinfer_concat_mla_kv_quant_fp8",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",

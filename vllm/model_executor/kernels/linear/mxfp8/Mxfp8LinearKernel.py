@@ -3,6 +3,8 @@
 
 from dataclasses import dataclass
 
+import torch
+
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp8Dynamic,
@@ -22,12 +24,15 @@ class Mxfp8LinearLayerConfig:
     Attributes:
         weight_shape: The layer's `(out_features, in_features)`, i.e. `(N, K)`.
         activation_quant_key: Requested activation format; None means weight-only.
+        params_dtype: The layer's parameter and output dtype, so that kernels
+            with a bf16 / fp16 output can decline other layers. None if unknown.
 
     """
 
     weight_shape: tuple[int, int]
     bmm_batch_size: int | None = None
     activation_quant_key: QuantKey | None = kMxfp8Dynamic
+    params_dtype: torch.dtype | None = None
 
 
 class Mxfp8LinearKernel(LinearKernel[Mxfp8LinearLayerConfig]):

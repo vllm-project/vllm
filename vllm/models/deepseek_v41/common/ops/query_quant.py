@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -147,7 +148,8 @@ def fused_q_kv_rmsnorm_quant(
 
 def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
     """Require both local projections to use the same MXFP8 activation ABI."""
-    if not current_platform.is_cuda():
+    # Batch-invariant runs keep the projections' own quantizer.
+    if envs.VLLM_BATCH_INVARIANT or not current_platform.is_cuda():
         return False
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
         FlashInferCutedslMxfp8LinearKernel,
