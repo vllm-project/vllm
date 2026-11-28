@@ -14,6 +14,14 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config.kv_transfer import KVCacheAccess
+from vllm.device_allocator.alloc_conf import (
+    EXPANDABLE_SEGMENTS,
+    alloc_conf_from_env,
+    current_alloc_conf,
+    expandable_segments_enabled,
+    set_alloc_conf,
+    with_conf_flag,
+)
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
@@ -377,12 +385,33 @@ class ExtensibleKVCache:
     def set_torch_memory_limit(self, num_bytes: int | None) -> None:
         """Cap what torch's caching allocator reserves on this device, or lift
         the cap (None). At the cap it releases cached segments before growing,
-        rather than taking memory other allocations need."""
+        rather than taking memory other allocations need.
+
+        On ROCm, torch allocates from expandable segments while capped, whose
+        free memory it can release in 20 MiB chunks. Otherwise a small tensor
+        placed in a cached block keeps the rest of the block reserved, and a
+        larger request fails at the cap with that memory free. An
+        `expandable_segments` setting in the environment is left alone.
+        """
         self.torch_memory_limit = num_bytes
         total = torch.accelerator.get_memory_info(self.buffer.device)[1]
         fraction = 1.0 if num_bytes is None else min(num_bytes / total, 1.0)
         # torch.accelerator has no per-process memory fraction.
         torch.cuda.set_per_process_memory_fraction(fraction, self.buffer.device)
+        if current_platform.is_rocm():
+            self._set_expandable_segments(num_bytes is not None)
+
+    @staticmethod
+    def _set_expandable_segments(enabled: bool) -> None:
+        if EXPANDABLE_SEGMENTS in alloc_conf_from_env():
+            return
+        if expandable_segments_enabled() is (not enabled):
+            if not enabled:
+                # Torch does not reuse cached expandable blocks once it is off.
+                torch.accelerator.empty_cache()
+            set_alloc_conf(
+                with_conf_flag(current_alloc_conf(), EXPANDABLE_SEGMENTS, enabled)
+            )
 
     def free(self) -> None:
         # The process may start another engine, which must not inherit the cap.

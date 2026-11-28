@@ -10,6 +10,8 @@ import torch
 
 from tests.v1.core.utils import full_layer, new_kv_cache_group
 from vllm.config import ModelConfig, VllmConfig
+from vllm.device_allocator.alloc_conf import expandable_segments_enabled
+from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
@@ -470,6 +472,40 @@ def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
     kv_cache.free()
     assert fractions == [0.25, 1.0]
     assert kv_cache.torch_memory_limit is None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="Only ROCm allocates from expandable segments under the cap.",
+)
+def test_capped_torch_serves_a_tensor_whose_cached_block_was_split(vmm):
+    """Under the torch memory cap, a small tensor placed in the cached block
+    of a larger one (a model output in the block the logits freed) must not
+    keep the next step's logits and their soft-capped copy from fitting the
+    room measured for them."""
+    mib = 1 << 20
+    device = torch.device("cuda")
+    config, _ = _make_config(KVCacheLayout.LBNHC)
+    kv_cache = ExtensibleKVCache(config, device, KVCacheLayout.LBNHC)
+
+    def transient(num_mib: int) -> torch.Tensor:
+        return torch.empty(num_mib * mib, dtype=torch.uint8, device=device)
+
+    expandable = expandable_segments_enabled()
+    torch.accelerator.empty_cache()
+    try:
+        limit = torch.accelerator.memory_reserved(device) + 700 * mib
+        kv_cache.set_torch_memory_limit(limit)
+        logits = transient(300)
+        del logits
+        hidden_states = transient(20)
+        logits = transient(300)
+        soft_capped = transient(300)
+        assert torch.accelerator.memory_reserved(device) <= limit
+        del hidden_states, logits, soft_capped
+    finally:
+        kv_cache.free()
+    assert expandable_segments_enabled() == expandable
 
 
 def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
