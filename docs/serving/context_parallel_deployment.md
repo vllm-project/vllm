@@ -16,6 +16,18 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### Short prompts
+
+Splitting a prompt across the ranks pays off when it is long. A short prompt
+split into chunks makes every rank attend a few new tokens against the rest of
+the prompt as context, and gathering and projecting that context every layer
+costs more than the attention it feeds. With
+`--pcp-whole-prefill-max-tokens N`, prefills of at most `N` scheduled tokens
+are instead given whole to one rank each, one per rank at a time so the ranks
+stay balanced, and need no context pass. A step with fewer such prefills than
+ranks, or with lengths too uneven to balance, splits them as usual. The option
+applies without DCP and is off (`0`) by default.
+
 ### DeepSeek-V4.1-Flash on ROCm
 
 ROCm supports eager prefill context parallelism for the text-only

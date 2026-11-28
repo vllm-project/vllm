@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Largest rank load over the mean that whole prefills may cause in a step.
+_WHOLE_PREFILL_MAX_SKEW = 1.125
+
 
 @dataclass(frozen=True, slots=True)
 class PCPBatchMetadata:
@@ -73,6 +76,7 @@ class PCPManager:
         dcp_rank: int = 0,
         cp_interleave: int = 1,
         moe_gathers_tokens: bool = False,
+        whole_prefill_max_tokens: int = 0,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -81,6 +85,10 @@ class PCPManager:
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
         self.shard_decode_requests = shard_decode_requests
+        # DCP shards the KV cache, so every rank needs rows of every prefill.
+        self.whole_prefill_max_tokens = (
+            whole_prefill_max_tokens if dcp_world_size == 1 else 0
+        )
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
@@ -260,6 +268,43 @@ class PCPManager:
             replicated |= drops_a_chunk
         return replicated
 
+    def whole_prefill_owners(
+        self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray
+    ) -> np.ndarray:
+        """Per global request, the one PCP rank that takes it whole, or -1.
+
+        A prefill cut into `2 * pcp_world_size` chunks makes every rank attend
+        its two chunks against the rest of the request as context, which it
+        gathers from the cache and projects every layer. For short prefills
+        that context pass costs more than the attention it feeds. They are
+        handed out whole instead, one per rank at a time and longest first, so
+        every rank gets the same number; the remainder is split as usual, and
+        so is everything when the lengths are too uneven to balance.
+        """
+        query_lens = np.asarray(num_scheduled_tokens, dtype=np.int64)
+        owners = np.full(query_lens.shape[0], -1, dtype=np.int64)
+        if self.whole_prefill_max_tokens == 0:
+            return owners
+        eligible = np.flatnonzero(
+            np.asarray(is_prefilling, dtype=np.bool_)
+            & (query_lens > 0)
+            & (query_lens <= self.whole_prefill_max_tokens)
+        )
+        num_whole = eligible.size // self.pcp_world_size * self.pcp_world_size
+        order = eligible[np.argsort(-query_lens[eligible], kind="stable")][:num_whole]
+        loads = np.zeros(self.pcp_world_size, dtype=np.int64)
+        for start in range(0, num_whole, self.pcp_world_size):
+            # The longest of this round goes to the rank that is lightest so far.
+            round_reqs = order[start : start + self.pcp_world_size]
+            round_owners = np.argsort(loads, kind="stable")
+            owners[round_reqs] = round_owners
+            loads[round_owners] += query_lens[round_reqs]
+        # Every rank is padded to the largest one, so lengths too uneven to
+        # balance cost more than the context pass they would save.
+        if loads.max() * self.pcp_world_size > _WHOLE_PREFILL_MAX_SKEW * loads.sum():
+            owners[:] = -1
+        return owners
+
     def _iter_rank_chunks(
         self,
         rank: int,
@@ -281,12 +326,18 @@ class PCPManager:
         decode_ordinal = 0
         num_chunks = 2 * self.pcp_world_size
         replicated = self.replicated_requests(num_scheduled_tokens, is_prefilling)
+        whole_owners = self.whole_prefill_owners(num_scheduled_tokens, is_prefilling)
         for global_batch_req_idx, num_tokens in enumerate(num_scheduled_tokens):
             query_len = int(num_tokens)
             if query_len == 0:
                 continue
             chunk_indices: tuple[int, ...]
-            if not replicated[global_batch_req_idx]:
+            if whole_owners[global_batch_req_idx] >= 0:
+                chunk_size = query_len
+                chunk_indices = (
+                    (0,) if rank == whole_owners[global_batch_req_idx] else ()
+                )
+            elif not replicated[global_batch_req_idx]:
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
                 chunk_indices = (rank, num_chunks - 1 - rank)
             elif self.shard_decode_requests:
@@ -935,4 +986,5 @@ def maybe_build_pcp_manager(
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
         # Without EP all2all kernels, MoERunner all-gathers PCP tokens to route.
         moe_gathers_tokens=not parallel_config.enable_expert_parallel,
+        whole_prefill_max_tokens=parallel_config.pcp_whole_prefill_max_tokens,
     )

@@ -524,6 +524,76 @@ def test_replicated_draft_cache_inputs_keep_unexpanded_slot_mapping(monkeypatch)
     assert torch.equal(cache_slot_mapping, slot_mapping)
 
 
+def _whole_prefill_segments(
+    num_scheduled_tokens: list[int],
+    is_prefilling: list[bool] | None = None,
+    pcp_world_size: int = 4,
+    dcp_world_size: int = 1,
+) -> list[list]:
+    scheduled = np.array(num_scheduled_tokens, dtype=np.int32)
+    prefilling = np.array(
+        is_prefilling if is_prefilling is not None else [True] * len(scheduled)
+    )
+    manager = PCPManager(
+        pcp_world_size=pcp_world_size,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=dcp_world_size == 1,
+        dcp_world_size=dcp_world_size,
+        whole_prefill_max_tokens=128,
+    )
+    query_start_loc_np = np.concatenate([[0], np.cumsum(scheduled)]).astype(np.int32)
+    return [
+        manager._get_rank_segments(rank, scheduled, prefilling, query_start_loc_np)
+        for rank in range(pcp_world_size)
+    ]
+
+
+def test_short_prefills_go_whole_to_one_rank_each():
+    # Nine short prefills, a long one and a decode at PCP 4: two rounds of four
+    # go whole, the ninth short one and the long one are split.
+    scheduled = [100, 96, 90, 80, 100, 64, 70, 88, 72, 4096, 1]
+    is_prefilling = [True] * 10 + [False]
+    segments_by_rank = _whole_prefill_segments(scheduled, is_prefilling)
+    starts = np.concatenate([[0], np.cumsum(scheduled)])
+
+    whole_per_rank = []
+    covered = np.zeros(starts[-1], dtype=np.int64)
+    for segments in segments_by_rank:
+        whole = 0
+        for segment in segments:
+            req_idx = segment.global_batch_req_idx
+            covered[segment.global_batch_slice] += 1
+            if scheduled[req_idx] <= 128 and is_prefilling[req_idx]:
+                is_whole = segment.num_tokens == scheduled[req_idx]
+                # The shortest of the nine is the one left to split.
+                assert is_whole == (scheduled[req_idx] != 64)
+                whole += is_whole
+        whole_per_rank.append(whole)
+    assert whole_per_rank == [2, 2, 2, 2]
+    assert np.all(covered == 1)
+    loads = [sum(segment.num_tokens for segment in s) for s in segments_by_rank]
+    assert max(loads) - min(loads) <= 16
+
+
+@pytest.mark.parametrize(
+    ("num_scheduled_tokens", "dcp_world_size"),
+    [
+        ([100, 100, 100], 1),  # fewer than the ranks
+        ([128, 16, 16, 16], 1),  # too uneven to balance
+        ([100, 100, 100, 100], 4),  # DCP needs rows of every prefill on every rank
+    ],
+)
+def test_short_prefills_stay_split(num_scheduled_tokens, dcp_world_size):
+    segments_by_rank = _whole_prefill_segments(
+        num_scheduled_tokens, dcp_world_size=dcp_world_size
+    )
+    for segments in segments_by_rank:
+        assert {segment.global_batch_req_idx for segment in segments} == set(
+            range(len(num_scheduled_tokens))
+        )
+
+
 def _rank_rows(
     pcp_rank: int,
     pcp_world_size: int,
