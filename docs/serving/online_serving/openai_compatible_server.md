@@ -129,11 +129,11 @@ The `X-Request-Id` HTTP request header can be enabled with
     print(completion._request_id)
     ```
 
-The Completions, Chat Completions, and Responses APIs also support the
-`X-Vllm-Priority` request header. Its value must be an integer and overrides
-the `priority` value in the JSON request body. The header and the body
-`priority` share the range `[-2**31, 2**31 - 1]`, and a header value or body
-`priority` outside it is rejected.
+The Completions, Chat Completions, Responses, Transcriptions, and Translations
+APIs also support the `X-Vllm-Priority` request header. Its value must be an
+integer and overrides the `priority` value in the request body. The header and
+the body `priority` share the range `[-2**31, 2**31 - 1]`, and a header value or
+body `priority` outside it is rejected.
 Non-zero priorities require the server to use priority scheduling.
 
 ```python
