@@ -32,7 +32,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnectorScheduler,
     HiSparseConnectorWorkerMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiConnector,
+    MultiKVConnectorWorkerMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
@@ -812,9 +815,10 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     assert not coordinator.has_pending_work()
 
 
-@pytest.mark.parametrize("has_room", [True, False])
-def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
-    """An import lands on host; spare GPU pages bring its whole prefix back."""
+@pytest.mark.parametrize("room", [4, 1, 0])
+def test_hisparse_import_promotes_host_pages_when_pool_has_room(room):
+    """An import lands on host; GPU pages left free above the transition
+    watermark and in-flight prefill reservations bring its prefix back."""
     manager = make_hisparse_kv_cache_manager(256, 16)
     num_tokens = 4 * HISPARSE_BLOCK_SIZE + 1
     request = make_request(
@@ -825,22 +829,23 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
     coordinator = get_hisparse_coordinator(manager)
     pool = coordinator.gpu_pool
     assert pool is not None
-    if not has_room:
-        # Other requests hold everything above the transition watermark.
-        pool.get_new_blocks(
-            pool.get_num_free_blocks() - coordinator.transition_watermark
-        )
+    reserved = pool.get_num_free_blocks() - coordinator.transition_watermark - room
 
-    coordinator.finish_host_import(request.request_id, failed=False)
+    coordinator.finish_host_import(
+        request.request_id, failed=False, reserved_blocks=reserved
+    )
     transfers = _build_offload_command(manager).page_transfers
     assert all(transfer.restore for transfer in transfers)
-    promoted = range(4) if has_room else range(0)
+    promoted = range(room)
     assert [t.host_block_id for t in transfers] == [
         source[-1].block_id,
         *(source[page].block_id for page in promoted),
     ]
     row = _resident_block_ids(manager, request.request_id)
-    assert [block_id != 0 for block_id in row] == [has_room] * 4 + [True]
+    assert [block_id != 0 for block_id in row] == [
+        *(page in promoted for page in range(4)),
+        True,
+    ]
     assert [t.resident_block_ids for t in transfers[1:]] == [
         (row[page],) for page in promoted
     ]
@@ -860,6 +865,112 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
     manager.free(request)
     assert all(block.ref_cnt == 0 for block in gpu_blocks if not block.is_null)
     assert not coordinator.has_pending_work()
+
+
+def test_hisparse_import_respects_prefill_admitted_while_receiving():
+    """A prefill admitted while an import is in flight is promised the free
+    blocks it still needs; promoting the import's pages when it lands must not
+    take them, or the prefill's later chunks preempt. Once no prefill is in
+    flight, that reservation is released and imports promote again."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_request,
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    config = create_vllm_config(
+        max_num_seqs=2, max_num_batched_tokens=160, max_model_len=256
+    )
+    config.kv_transfer_config = KVTransferConfig(
+        kv_role="kv_consumer",
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+                {
+                    "kv_connector": "HiSparseConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_connector_extra_config": {"host_pool_gib": 1},
+                },
+            ],
+        },
+    )
+    config.scheduler_config.async_scheduling = True
+    config.scheduler_config.long_prefill_token_threshold = 64
+    scheduler = create_scheduler(
+        config, 80, make_hisparse_kv_cache_config(80, 64, num_resident_groups=3)
+    )
+    manager = scheduler.kv_cache_manager
+    imported = create_request(
+        num_tokens=80, do_remote_prefill=True, num_remote_blocks=5
+    )
+    scheduler.add_request(imported)
+    admission = scheduler.schedule()
+    assert imported.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    host, _, *gpu_groups = manager.get_blocks(imported.request_id).blocks
+    tail = (host[-1].block_id, tuple(group[-1].block_id for group in gpu_groups[::2]))
+    scheduler.update_from_output(admission, ModelRunnerOutput(req_ids=[]))
+
+    prefill = create_request(num_tokens=224)
+    scheduler.add_request(prefill)
+    chunk = scheduler.schedule()
+    assert chunk.num_scheduled_tokens == {prefill.request_id: 64}
+
+    def page_transfers(output):
+        return output.kv_connector_metadata.metadata[1].command.page_transfers
+
+    def complete(output, *, received=None):
+        counts = {t.transfer_id: 1 for t in page_transfers(output)}
+        req_ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[
+                    [] if req_id == prefill.request_id else [123] for req_id in req_ids
+                ],
+                kv_connector_output=KVConnectorOutput(
+                    finished_recving=received,
+                    kv_connector_worker_meta=MultiKVConnectorWorkerMetadata(
+                        (None, HiSparseConnectorWorkerMetadata(counts, counts))
+                    ),
+                ),
+            ),
+        )
+
+    complete(chunk, received={imported.request_id})
+    pending = None
+    # Keep one batch in flight: promotion must also protect later prefill chunks.
+    for expected_tokens in (64, 64, 32):
+        following = scheduler.schedule()
+        assert following.num_scheduled_tokens.get(prefill.request_id) == expected_tokens
+        if pending is None:
+            assert [
+                (t.host_block_id, t.resident_block_ids)
+                for t in page_transfers(following)
+                if t.restore
+            ] == [tail]
+        else:
+            complete(pending)
+        pending = following
+    complete(pending)
+    assert prefill.num_preemptions == 0
+
+    # With no prefill in flight, the next import's history is promoted.
+    scheduler.finish_requests(
+        (imported.request_id, prefill.request_id), RequestStatus.FINISHED_ABORTED
+    )
+    second = create_request(num_tokens=80, do_remote_prefill=True, num_remote_blocks=5)
+    scheduler.add_request(second)
+    output = scheduler.schedule()
+    assert second.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    second_host = manager.get_blocks(second.request_id).blocks[0]
+    complete(output, received={second.request_id})
+    transfers = page_transfers(scheduler.schedule())
+    assert [t.host_block_id for t in transfers if t.restore] == [
+        second_host[-1].block_id,
+        *(block.block_id for block in second_host[:-1]),
+    ]
 
 
 def test_hisparse_import_promotion_keeps_cached_prefixes():

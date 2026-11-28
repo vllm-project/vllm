@@ -545,6 +545,12 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_manager = kv_cache_manager
         self.bind_gpu_block_pool(kv_cache_manager.block_pool)
 
+    def bind_reserved_blocks(self, reserved_blocks: Callable[[], int]) -> None:
+        """Bind the scheduler's count of free GPU blocks promised to admitted
+        requests. Optional GPU allocations must leave that many blocks free.
+        """
+        return
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the GPU block pool to the connector for per-GPU block status tracking.
         For example, inc/dec ref counts, or iterate over the prefix cache blocks.

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -101,6 +102,7 @@ class HiSparseConnectorScheduler:
         import_step_tokens: int = 0,
     ) -> None:
         self.coordinator: HiSparseCoordinator | None = None
+        self.reserved_blocks: Callable[[], int] = lambda: 0
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
         self.import_step_tokens = import_step_tokens
@@ -203,11 +205,14 @@ class HiSparseConnectorScheduler:
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self.coordinator is not None
-        for request_id in connector_output.finished_recving or ():
+        finished_recving = connector_output.finished_recving or ()
+        reserved_blocks = self.reserved_blocks() if finished_recving else 0
+        for request_id in finished_recving:
             self.coordinator.finish_host_import(
                 request_id,
                 failed=request_id in connector_output.failed_recving,
                 restore=request_id in self.requests,
+                reserved_blocks=reserved_blocks,
             )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
@@ -282,6 +287,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                 num_reprefillable_tokens=self._vllm_config.num_reprefillable_tokens,
             )
         )
+
+    def bind_reserved_blocks(self, reserved_blocks: Callable[[], int]) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.reserved_blocks = reserved_blocks
 
     @property
     def requires_kv_delivery(self) -> bool:

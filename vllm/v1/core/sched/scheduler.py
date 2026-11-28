@@ -413,6 +413,7 @@ class Scheduler(SchedulerInterface):
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
+            self.connector.bind_reserved_blocks(self._inflight_prefill_reserved_blocks)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         # PP, not with DP, whose busy loop runs a dummy batch on idle steps.
