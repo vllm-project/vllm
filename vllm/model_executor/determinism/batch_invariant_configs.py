@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 
@@ -1340,6 +1340,71 @@ _BATCH_INVARIANT_MOE_DEFAULT_CONFIG: dict[str, int] = {
     "GROUP_SIZE_M": 8,
     "SPLIT_K": 1,
 }
+
+
+HOPPER_DETERMINISTIC_INDUCTOR_CONFIG = {
+    "deterministic": True,
+    "max_autotune": False,
+    "max_autotune_pointwise": False,
+    "max_autotune_gemm": False,
+    "coordinate_descent_tuning": False,
+    "triton.autotune_pointwise": False,
+}
+
+
+_HOPPER_NATIVE_DISPATCH: bool | None = None
+
+
+def supports_hopper_native_dispatch() -> bool:
+    """Return whether the worker runs on Hopper (SM90)."""
+    global _HOPPER_NATIVE_DISPATCH
+    if _HOPPER_NATIVE_DISPATCH is None:
+        _HOPPER_NATIVE_DISPATCH = (
+            current_platform.is_cuda() and current_platform.is_device_capability((9, 0))
+        )
+    return _HOPPER_NATIVE_DISPATCH
+
+
+def use_hopper_native_linear(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> bool:
+    # Narrow projections can switch to GEMV at M=1 even with split-K disabled.
+    n, k = weight.shape
+    return (
+        supports_hopper_native_dispatch()
+        and bias is None
+        and x.dtype == weight.dtype == torch.bfloat16
+        and weight.is_contiguous()
+        and n >= 128
+        and n % 8 == k % 8 == 0
+    )
+
+
+def allow_hopper_moe_tuned_config(
+    E: int,
+    N: int,
+    dtype: str | None,
+    block_n: int | None,
+    block_k: int | None,
+    down_moe: bool,
+    json_file_name: str | None = None,
+) -> bool:
+    # Validated H200 unquantized BF16 Qwen3-30B-A3B (E=128, N=768) table: all
+    # entries use SPLIT_K=1, and SM90 WGMMA BF16 tl.dot(..., acc=accumulator)
+    # lowers with scaleD=1 sequential k=16 accumulation across BLOCK_SIZE_K.
+    return (
+        supports_hopper_native_dispatch()
+        and dtype is None
+        and not block_n
+        and not block_k
+        and not down_moe
+        and (E, N) == (128, 768)
+        and (json_file_name is None or json_file_name.endswith("NVIDIA_H200.json"))
+    )
+
+
+def is_batch_invariant_moe_tuned_table(tuned_config: dict[str, Any]) -> bool:
+    return all(tile.get("SPLIT_K", 1) == 1 for tile in tuned_config.values())
 
 
 def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | None:
