@@ -83,6 +83,38 @@ def test_with_bool_flag(parser):
     assert args.enable_feature is True
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--size", "1", "--initial", "2"],
+        ["--initial", "2", "--size", "1"],
+        ["-s", "1", "--initial=2"],
+        ["--size=1", "--initial", "2"],
+    ],
+)
+def test_mutually_exclusive_options_reject_explicit_default(options, capsys):
+    """An explicit value still conflicts when it equals the option's default."""
+    parser = FlexibleArgumentParser()
+    group = parser.add_argument_group("sizes").add_mutually_exclusive_group()
+    group.add_argument("--size", "-s", type=int, default=1)
+    group.add_argument("--initial", type=int)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(options)
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_mutually_exclusive_options_do_not_leak_between_parses():
+    parser = FlexibleArgumentParser()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--size", type=int, default=1)
+    group.add_argument("--initial", type=int)
+
+    assert parser.parse_args(["--size", "1"]).size == 1
+    assert parser.parse_args(["--initial", "2"]).initial == 2
+    assert parser.parse_args([]).size == 1
+
+
 @pytest.fixture
 def bool_parser():
     parser = FlexibleArgumentParser()

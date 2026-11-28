@@ -1438,6 +1438,20 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
+    bootstrap_server = None
+    if (
+        parallel_config.uses_external_elastic_ep
+        and parallel_config.data_parallel_rank == 0
+    ):
+        from vllm.distributed.elastic_ep.bootstrap import (
+            ExternalElasticEPBootstrapServer,
+        )
+
+        bootstrap_server = ExternalElasticEPBootstrapServer(
+            parallel_config.data_parallel_size,
+            [int.from_bytes(engine.identity, "little") for engine in core_engines],
+            scale_up=False,
+        )
     # (engine index, parallel config hash) of the first READY engine, which
     # the other engines' hashes are compared with.
     reference_config_hash: tuple[int, str | None] | None = None
@@ -1504,13 +1518,32 @@ def wait_for_engine_startup(
 
         # Receive HELLO and READY messages from the input socket.
         eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
+        msg = msgspec.msgpack.decode(ready_msg_bytes)
+        if msg["status"] == "BOOTSTRAP":
+            if bootstrap_server is None:
+                error = "This listener does not support automatic Elastic EP bootstrap"
+            else:
+                bootstrap_server.reply(
+                    handshake_socket,
+                    eng_identity,
+                    msg,
+                    available_ranks={
+                        int.from_bytes(engine.identity, "little")
+                        for engine in core_engines
+                        if not engine.local and engine.state == CoreEngineState.NEW
+                    },
+                )
+                continue
+            handshake_socket.send_multipart(
+                (eng_identity, msgspec.msgpack.encode({"error": error}))
+            )
+            continue
         eng_index = int.from_bytes(eng_identity, "little")
         engine = next((e for e in core_engines if e.identity == eng_identity), None)
         if engine is None:
             raise RuntimeError(
                 f"Message from engine with unexpected data parallel rank: {eng_index}"
             )
-        msg = msgspec.msgpack.decode(ready_msg_bytes)
         status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:
             raise RuntimeError(
@@ -1536,6 +1569,14 @@ def wait_for_engine_startup(
                 )
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
+            if bootstrap_server is not None:
+                try:
+                    bootstrap_server.validate(eng_index, msg.get("bootstrap"))
+                except ValueError as error:
+                    handshake_socket.send_multipart(
+                        (eng_identity, msgspec.msgpack.encode({"error": str(error)}))
+                    )
+                    continue
             # Send init message with DP config info.
             parallel_config_payload: dict[str, int | str | list[int]] = {}
             if coordinated_dp and not (
