@@ -589,12 +589,15 @@ steps:
   - vllm/config/speculative.py
   - vllm/config/attention.py
   - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  - tests/models/deepseek_v32/test_moe_deferred_allreduce.py
+  - vllm/model_executor/layers/fused_moe/layer.py
   - tests/models/hy_v4/test_shardq_sinks.py
   - tests/models/hy_v4/test_sequence_parallel.py
   commands:
   - >-
     pytest -v -s
     tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+    tests/models/deepseek_v32/test_moe_deferred_allreduce.py
     tests/models/hy_v4/test_shardq_sinks.py
     tests/models/hy_v4/test_sequence_parallel.py
   mirror:
