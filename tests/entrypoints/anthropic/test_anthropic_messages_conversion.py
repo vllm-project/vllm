@@ -559,6 +559,32 @@ class TestThinkingBlockConversion:
         assert asst.get("reasoning") == "I should write a simple example."
         assert asst.get("content") == "Sure! Here is the code."
 
+    def test_consecutive_assistant_messages_form_one_turn(self):
+        """One step sent as an assistant message per block converts like one
+        assistant message, as the Anthropic API combines consecutive turns."""
+        thinking = {
+            "type": "thinking",
+            "thinking": "Check the reflog.",
+            "signature": "s",
+        }
+        text = {"type": "text", "text": "Let me read the reflog."}
+        call = {"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {}}
+        first = {"role": "user", "content": "Find the lost commit."}
+        result = {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "c4997"}
+            ],
+        }
+        split = [{"role": "assistant", "content": [b]} for b in (thinking, text, call)]
+        merged = [{"role": "assistant", "content": [thinking, text, call]}]
+
+        got = _convert(_make_request([first, *split, result])).messages
+        want = _convert(_make_request([first, *merged, result])).messages
+
+        assert got == want
+        assert [m["role"] for m in got] == ["user", "assistant", "tool"]
+
     def test_thinking_only_in_assistant_message(self):
         """Assistant message with only a thinking block (no visible text).
 
