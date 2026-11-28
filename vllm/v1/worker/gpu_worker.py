@@ -779,6 +779,18 @@ class Worker(WorkerBase):
                 getattr(self.parallel_config, "_api_process_count", 1),
             )
 
+        # When torch.compile is enabled, run an initial pass to trigger JIT compilation
+        # inside the active vLLM config and split-limited allocator context.
+        if self.vllm_config.compilation_config.mode != CompilationMode.NONE:
+            with (
+                set_current_vllm_config(self.vllm_config),
+                self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
+            ):
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
+            torch.accelerator.synchronize()
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with (
