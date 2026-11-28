@@ -40,10 +40,15 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         self.inputs_embeds: torch.Tensor | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # Under PCP, draft prefill all-gathers rank-local hidden states, whose
+        # partition changes every step; keep it out of FULL graphs.
+        prefill_cudagraph_mode = cudagraph_mode
+        if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            prefill_cudagraph_mode = cudagraph_mode.mixed_mode()
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
-            cudagraph_mode,
+            prefill_cudagraph_mode,
             self.vllm_config.get_decode_cudagraph_query_lens(
                 self.num_speculative_steps + 1
             ),
@@ -278,12 +283,15 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        draft_prefill: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_buffers: InputBatch | InputBuffers = self.input_buffers
         is_padding = None
         if self.pcp_manager is not None:
+            # Draft prefill reads the PCP buffers in both capture and replay.
             input_buffers, is_padding = self.pcp_manager.get_draft_input_buffers(
-                self.input_buffers, num_tokens
+                self.pcp_manager.input_buffers if draft_prefill else self.input_buffers,
+                num_tokens,
             )
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -362,6 +370,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
+            draft_prefill=True,
         )
         if self.pcp_manager is not None:
             last_hidden_states, hidden_states = self.pcp_manager.restore_draft_prefill(
