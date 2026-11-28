@@ -78,6 +78,30 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         self.layer_idx = layer_idx
         self.use_mha = False
         self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.replicate_attn = envs.VLLM_DSA_REPLICATE_ATTN
+        if self.replicate_attn:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
+
+            # A sort fixes the order of the selected indices, not which ties
+            # the atomic top-k keeps: replicated ranks need the canonical set.
+            from vllm.model_executor.layers.canonical_topk import (
+                require_deterministic_sparse_topk,
+            )
+
+            require_deterministic_sparse_topk("VLLM_DSA_REPLICATE_ATTN")
+        if self.replicate_attn and (
+            parallel_config.use_sequence_parallel_moe
+            or parallel_config.enable_expert_parallel
+            or parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "VLLM_DSA_REPLICATE_ATTN is not supported with expert parallelism, "
+                "sequence-parallel MoE or decode/prefill context parallelism."
+            )
 
         self.self_attn = DeepseekV32Attention(
             vllm_config=vllm_config,
@@ -85,6 +109,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             index_group_builder=index_group_builder,
+            replicate=self.replicate_attn,
         )
 
         if (
@@ -150,6 +175,13 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         if use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+        elif self.replicate_attn and not self.self_attn.use_tp_path(
+            hidden_states.shape[0]
+        ):
+            # Replicated attention output is already complete on every rank.
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
