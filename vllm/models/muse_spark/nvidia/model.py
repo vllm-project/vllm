@@ -685,10 +685,13 @@ class MuseSparkMoE(nn.Module):
     def _load_router_weight(
         self, param: nn.Parameter, loaded_weight: torch.Tensor
     ) -> None:
-        self.router.weight_loader(param, loaded_weight)
+        # Scale the incoming weight, not the stored one: a sparse patch leaves
+        # the other elements already folded.
         if self.router_output_multiplier is not None:
-            with torch.no_grad():
-                param.mul_(self.router_output_multiplier)
+            loaded_weight = (
+                loaded_weight.to(param.dtype) * self.router_output_multiplier
+            )
+        self.router.weight_loader(param, loaded_weight)
 
     def _can_shard_projection(self, num_tokens: int, sp_active: bool) -> bool:
         return num_tokens <= _SHARDED_PROJECTION_MAX_TOKENS and (
