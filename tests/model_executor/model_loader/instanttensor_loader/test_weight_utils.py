@@ -41,22 +41,39 @@ def mock_instanttensor(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("weight_name", "local_ids", "collective"),
+    ("weight_name", "local_ids", "ep_filter_enabled", "collective"),
     [
-        ("mlp.experts.gate_proj.weight", {0}, True),
-        ("mlp.experts.0.gate_proj.weight", {0}, False),
-        ("mlp.experts.0.gate_proj.weight", set(), False),
+        ("mlp.experts.gate_proj.weight", {0}, True, True),
+        ("mlp.experts.0.gate_proj.weight", {0}, True, False),
+        ("mlp.experts.0.gate_proj.weight", set(), True, False),
+        # A rank without an expert set, e.g. on a stage without MoE layers,
+        # must not load collectively while the filter is on.
+        ("mlp.experts.0.gate_proj.weight", None, True, False),
+        # With the filter off, every rank loads collectively.
+        ("mlp.experts.0.gate_proj.weight", None, False, True),
     ],
 )
 def test_instanttensor_ep_collective_loading(
-    mock_instanttensor, tmp_path, weight_name, local_ids, collective
+    mock_instanttensor,
+    tmp_path,
+    weight_name,
+    local_ids,
+    ep_filter_enabled,
+    collective,
 ):
     """Keep fused checkpoints collective and expert decisions rank-independent."""
     native_open, group = mock_instanttensor
     path = tmp_path / "model.safetensors"
     save_file({weight_name: torch.ones(1)}, str(path))
 
-    list(instanttensor_weights_iterator([str(path)], False, local_expert_ids=local_ids))
+    list(
+        instanttensor_weights_iterator(
+            [str(path)],
+            False,
+            local_expert_ids=local_ids,
+            ep_filter_enabled=ep_filter_enabled,
+        )
+    )
     kwargs = native_open.call_args.kwargs
     assert kwargs["process_group"] is (group.device_group if collective else None)
 
@@ -127,6 +144,7 @@ def test_instanttensor_embedding_table_routing(
         LoadConfig(load_format="instanttensor", use_tqdm_on_load=False)
     )
     loader.local_expert_ids = local_ids
+    loader.ep_filter_enabled = local_ids is not None
     model_config = SimpleNamespace(model=str(tmp_path), revision=None)
     loaded = list(loader.get_all_weights(model_config, torch.nn.Module()))
     kwargs = native_open.call_args.kwargs
@@ -197,6 +215,7 @@ def test_instanttensor_ep_filter_cuda(tmp_path, load_engram_on_cpu):
             [str(path)],
             False,
             local_expert_ids={0},
+            ep_filter_enabled=True,
             load_engram_on_cpu=load_engram_on_cpu,
         )
     )
