@@ -221,6 +221,8 @@ def _bias_kernel(
             logits,
             mask=mask,
         )
+        # A different warp may read the same token in the bias step below.
+        tl.debug_barrier()
 
     # Logit bias.
     num_logit_bias = tl.load(num_logit_bias_ptr + req_state_idx)
