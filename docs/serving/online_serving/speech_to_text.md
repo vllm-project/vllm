@@ -77,7 +77,8 @@ The Transcriptions API supports uploading audio files in various formats includi
   `nvidia/canary-1b-v2`, which cannot detect the language)
 - `prompt`: Optional text to guide the transcription style (optional)
 - `response_format`: Format of the response ("json", "text", "verbose_json", or
-  "diarized_json") (optional)
+  "diarized_json") (optional). Non-streaming `"text"` requests return the
+  transcript directly as `text/plain; charset=utf-8` without a JSON envelope.
 - `temperature`: Sampling temperature between 0 and 1 (optional)
 
 For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/speech_to_text/transcription/protocol.py).

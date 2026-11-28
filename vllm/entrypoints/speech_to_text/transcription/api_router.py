@@ -8,7 +8,7 @@ from typing import Annotated
 
 from anyio import CancelScope
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -48,7 +48,12 @@ def transcription(request: Request) -> OpenAIServingTranscription:
 @router.post(
     "/v1/audio/transcriptions",
     responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.OK.value: {
+            "content": {
+                "text/event-stream": {},
+                "text/plain": {"schema": {"type": "string"}},
+            }
+        },
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
@@ -73,6 +78,8 @@ async def create_transcriptions(
         )
 
     elif isinstance(generator, TranscriptionResponseVariant):
+        if request.response_format == "text":
+            return PlainTextResponse(content=generator.text)
         return JSONResponse(content=generator.model_dump())
 
     if request.response_format == "diarized_json":

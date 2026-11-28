@@ -102,7 +102,7 @@ async def transcribe_and_check(
     expected_text: str,
     expected_seconds: int | None = None,
     case_sensitive: bool = False,
-    response_format: str = "text",
+    response_format: str = "json",
     extra_body: dict | None = None,
 ):
     """Run a transcription request and assert the output contains
@@ -110,20 +110,41 @@ async def transcribe_and_check(
 
     Provides detailed failure messages with the actual transcription output.
     """
-    transcription = await client.audio.transcriptions.create(
-        model=model_name,
-        file=file,
-        language=language,
-        response_format=response_format,
-        temperature=0.0,
-        extra_body=extra_body,
-    )
-    out = (
-        json.loads(transcription)
-        if isinstance(transcription, str)
-        else transcription.model_dump()
-    )
-    out_text = out["text"]
+    if response_format == "text":
+        assert expected_seconds is None, (
+            "usage is only returned for JSON response formats"
+        )
+        raw_response = await client.audio.transcriptions.with_raw_response.create(
+            model=model_name,
+            file=file,
+            language=language,
+            response_format=response_format,
+            temperature=0.0,
+            extra_body=extra_body,
+        )
+        assert raw_response.headers["content-type"] == "text/plain; charset=utf-8"
+        out_text = raw_response.parse()
+        assert isinstance(out_text, str)
+        assert not out_text.lstrip().startswith("{"), (
+            f"Expected plain text for response_format='text', got JSON: {out_text!r}"
+        )
+    else:
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=file,
+            language=language,
+            response_format=response_format,
+            temperature=0.0,
+            extra_body=extra_body,
+        )
+        out = transcription.model_dump()
+        out_text = out["text"]
+        if expected_seconds is not None:
+            out_usage = out["usage"]
+            assert out_usage["seconds"] == expected_seconds, (
+                f"Expected {expected_seconds}s of audio, "
+                f"got {out_usage['seconds']}s. Full usage: {out_usage!r}"
+            )
 
     if case_sensitive:
         assert expected_text in out_text, (
@@ -133,13 +154,6 @@ async def transcribe_and_check(
         assert expected_text.lower() in out_text.lower(), (
             f"Expected {expected_text!r} (case-insensitive) in transcription "
             f"output, got: {out_text!r}"
-        )
-
-    if expected_seconds is not None:
-        out_usage = out["usage"]
-        assert out_usage["seconds"] == expected_seconds, (
-            f"Expected {expected_seconds}s of audio, "
-            f"got {out_usage['seconds']}s. Full usage: {out_usage!r}"
         )
 
     return out_text
@@ -384,6 +398,7 @@ async def test_basic_audio_foscolo(foscolo, model_name):
             foscolo,
             language="it",
             expected_text="ove il mio corpo fanciulletto",
+            response_format="text",
         )
 
 

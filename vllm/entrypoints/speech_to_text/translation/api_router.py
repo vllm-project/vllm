@@ -6,7 +6,7 @@ from http import HTTPStatus
 from typing import Annotated
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -31,7 +31,12 @@ def translation(request: Request) -> OpenAIServingTranslation:
 @router.post(
     "/v1/audio/translations",
     responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.OK.value: {
+            "content": {
+                "text/event-stream": {},
+                "text/plain": {"schema": {"type": "string"}},
+            }
+        },
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
@@ -56,6 +61,8 @@ async def create_translations(
         )
 
     elif isinstance(generator, TranslationResponseVariant):
+        if request.response_format == "text":
+            return PlainTextResponse(content=generator.text)
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")

@@ -137,7 +137,9 @@ async def test_basic_audio_with_lora(mary_had_lamb):
             response_format="text",
             temperature=0.0,
         )
-    out = json.loads(translation)["text"].strip().lower()
+    assert isinstance(translation, str)
+    assert not translation.lstrip().startswith("{")
+    out = translation.strip().lower()
     assert "pequeño" in out.split(" ")
 
 
@@ -159,7 +161,9 @@ async def test_canary_translation(mary_had_lamb):
             response_format="text",
             temperature=0.0,
         )
-        out = json.loads(translation)["text"].strip().lower()
+        assert isinstance(translation, str)
+        assert not translation.lstrip().startswith("{")
+        out = translation.strip().lower()
         assert "kleines lamm" in out
 
         mary_had_lamb.seek(0)
@@ -207,7 +211,7 @@ async def test_transcription_only_model_rejects_translation(mary_had_lamb):
 @pytest.mark.asyncio
 async def test_basic_audio(foscolo, client_and_model):
     client, model_name = client_and_model
-    translation = await client.audio.translations.create(
+    raw_response = await client.audio.translations.with_raw_response.create(
         model=model_name,
         file=foscolo,
         response_format="text",
@@ -215,7 +219,11 @@ async def test_basic_audio(foscolo, client_and_model):
         extra_body=dict(language="it", to_language="en"),
         temperature=0.0,
     )
-    out = json.loads(translation)["text"].strip().lower()
+    assert raw_response.headers["content-type"] == "text/plain; charset=utf-8"
+    translation = raw_response.parse()
+    assert isinstance(translation, str)
+    assert not translation.lstrip().startswith("{")
+    out = translation.strip().lower()
     assert "greek sea" in out
 
 
@@ -232,9 +240,10 @@ async def test_audio_prompt(foscolo, client_and_model):
         response_format="text",
         temperature=0.0,
     )
-    out = json.loads(transcription)["text"]
-    assert "Nor will I ever touch the sacred" not in out
-    assert prompt not in out
+    assert isinstance(transcription, str)
+    assert not transcription.lstrip().startswith("{")
+    assert "Nor will I ever touch the sacred" not in transcription
+    assert prompt not in transcription
 
 
 @pytest.mark.asyncio
@@ -347,7 +356,9 @@ async def test_long_audio_request(foscolo, client_and_model):
         response_format="text",
         temperature=0.0,
     )
-    out = json.loads(translation)["text"].strip().lower()
+    assert isinstance(translation, str)
+    assert not translation.lstrip().startswith("{")
+    out = translation.strip().lower()
     assert out.count("greek sea") == 2
 
 
@@ -361,13 +372,13 @@ async def test_audio_with_max_tokens(mary_had_lamb, client_and_model):
         temperature=0.0,
         extra_body={"max_completion_tokens": 1},
     )
-    out = json.loads(transcription)
-    out_text = out["text"]
-    print(out_text)
+    assert isinstance(transcription, str)
+    assert not transcription.lstrip().startswith("{")
+    print(transcription)
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(model_name)
-    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    out_tokens = tok(transcription, add_special_tokens=False)["input_ids"]
     assert len(out_tokens) == 1
     # max_completion_tokens > max_model_len
     # max_model_len=32768 for Gemma-3n-E2B-it
@@ -381,8 +392,8 @@ async def test_audio_with_max_tokens(mary_had_lamb, client_and_model):
             "repetition_penalty": 1.3,
         },
     )
-    out = json.loads(transcription)
-    out_text = out["text"]
-    print(out_text)
-    out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
+    assert isinstance(transcription, str)
+    assert not transcription.lstrip().startswith("{")
+    print(transcription)
+    out_tokens = tok(transcription, add_special_tokens=False)["input_ids"]
     assert len(out_tokens) < 450  # ~Whisper max output len
