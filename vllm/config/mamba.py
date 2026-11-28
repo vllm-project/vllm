@@ -58,8 +58,7 @@ class MambaConfig:
 
     prefill_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     """Kernel backend for the SSD scan of Mamba2 prefills. "flashinfer" runs
-    FlashInfer's fused SSD scan (SM100/SM103 only); prefills that store Mamba
-    checkpoints always use "triton"."""
+    FlashInfer's fused SSD scan (SM100/SM103 only)."""
 
     @field_validator("backend", "prefill_backend", mode="before")
     @classmethod

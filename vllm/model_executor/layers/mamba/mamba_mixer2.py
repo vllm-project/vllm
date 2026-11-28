@@ -37,6 +37,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
@@ -566,8 +569,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 f"{FLASHINFER_SSD_STATE_SIZE}; got head_dim {self.head_dim}, "
                 f"ssm_state_size {self.ssm_state_size}"
             )
-        self.D_bf16_cache: torch.Tensor | None = None
-        self.D_bf16_version = -1
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
@@ -645,14 +646,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         output, _ = self.out_proj(hidden_states)
 
         return output
-
-    def D_bf16(self) -> torch.Tensor:
-        """`D` cast to bfloat16 for FlashInfer's SSD, refreshed whenever the
-        float32 parameter is (re)loaded."""
-        if self.D_bf16_cache is None or self.D_bf16_version != self.D._version:
-            self.D_bf16_cache = self.D.detach().to(torch.bfloat16)
-            self.D_bf16_version = self.D._version
-        return self.D_bf16_cache
 
     def _warmup_ssd_kernels(self, projected_states: torch.Tensor) -> None:
         """Run a minimal SSD forward pass to trigger Triton autotuning
@@ -762,22 +755,42 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 )
 
         if self.use_flashinfer_prefill:
-            for use_initial_states in (False, True):
+            # FlashInfer always gets initial states (zeros without a cached
+            # one); checkpoint capture, used only with prefix caching, is a
+            # separate program.
+            initial_states = torch.zeros_like(final_states)
+            exports_checkpoints = (
+                self.cache_config is not None
+                and self.cache_config.enable_prefix_caching
+            )
+            for capture in (False, True) if exports_checkpoints else (False,):
+                checkpoint_args = (
+                    dict(
+                        checkpoint_token_indices=torch.tensor(
+                            [seqlen // 2], device=device, dtype=torch.int32
+                        ),
+                        checkpoint_state_slots=torch.zeros(
+                            batch, device=device, dtype=torch.int32
+                        ),
+                        checkpoint_states=torch.empty_like(final_states),
+                    )
+                    if capture
+                    else {}
+                )
                 mamba_chunk_scan_flashinfer(
                     x,
                     dt,
                     self.A,
                     B,
                     C,
-                    self.D_bf16(),
+                    self.D,
                     self.dt_bias,
                     cu_seqlens,
                     out,
                     final_states,
                     final_state_indices,
-                    torch.ones(batch, device=device, dtype=torch.bool)
-                    if use_initial_states
-                    else None,
+                    initial_states,
+                    **checkpoint_args,
                 )
 
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
@@ -910,8 +923,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
             assert preallocated_ssm_out_p is not None
             assert state_indices_tensor_p is not None
             has_checkpoints = checkpoint_chunk_idx is not None
-            if self.use_flashinfer_prefill and not has_checkpoints:
+            if self.use_flashinfer_prefill:
                 assert query_start_loc_p is not None
+                fi_initial_states = (
+                    gather_initial_states(
+                        ssm_state, state_indices_tensor_p, has_initial_states_p
+                    )
+                    if has_initial_states_p is not None and prep_initial_states
+                    else attn_metadata.zero_initial_states_p
+                )
+                assert fi_initial_states is not None
                 mamba_chunk_scan_flashinfer(
                     hidden_states_p.view(
                         num_prefill_tokens,
@@ -922,14 +943,20 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     self.A,
                     B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
                     C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                    self.D_bf16(),
+                    self.D,
                     self.dt_bias,
                     query_start_loc_p,
                     preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
                     ssm_state,
                     state_indices_tensor_p,
-                    has_initial_states_p if prep_initial_states else None,
+                    fi_initial_states,
+                    checkpoint_token_indices=attn_metadata.checkpoint_token_indices_p,
+                    checkpoint_state_slots=checkpoint_chunk_idx,
+                    checkpoint_states=attn_metadata.checkpoint_states_p,
                 )
+                # FlashInfer wrote the final states; checkpoints are in its
+                # buffer, one row per prefill.
+                checkpoint_states = attn_metadata.checkpoint_states_p
             else:
                 initial_states = None
                 if has_initial_states_p is not None and prep_initial_states:
@@ -972,23 +999,28 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     else state_indices_tensor_p,
                 )
 
+                # With checkpoints, the scan returns every chunk's state
+                # (num_chunks, nheads, headdim, dstate); the final states are
+                # written below.
+                checkpoint_states = varlen_states
+
             if has_checkpoints:
-                # update ssm states
-                # - varlen state is a (num_chunks, nheads, headdim, dstate)
-                #   tensor
-                final_states = varlen_states[last_chunk_indices_p]
                 assert checkpoint_meta is not None
+                assert checkpoint_states is not None
                 assert query_start_loc_p is not None
                 self._checkpoint_exporter.export(
                     checkpoint_meta,
                     raw_qkv=x.transpose(0, 1),
                     conv_state=conv_state,
-                    recurrent_checkpoint=varlen_states,
+                    recurrent_checkpoint=checkpoint_states,
                     recurrent_state=ssm_state,
                     cu_seqlens=query_start_loc_p,
                     recurrent_rows=checkpoint_chunk_idx,
                 )
-                ssm_state[state_indices_tensor_p] = final_states
+                if not self.use_flashinfer_prefill:
+                    ssm_state[state_indices_tensor_p] = checkpoint_states[
+                        last_chunk_indices_p
+                    ]
             if (
                 ring_start is not None
                 and not self.use_replayssm_trackers

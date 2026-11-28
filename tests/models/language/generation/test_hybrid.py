@@ -6,14 +6,17 @@ from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 
 import pytest
+import torch
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm import LLM
 from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
+from vllm.v1.metrics.reader import Counter
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
@@ -1016,6 +1019,69 @@ def test_apc_common_prefix_same_batch(
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         assert "two" in output.outputs[0].text
+
+
+def _uses_flashinfer_prefill(model: torch.nn.Module) -> set[bool]:
+    return {
+        module.use_flashinfer_prefill
+        for module in model.modules()
+        if isinstance(module, MambaMixer2)
+    }
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FlashInfer SSD needs SM10x",
+)
+def test_flashinfer_ssd_prefill_matches_triton_with_prefix_caching(
+    vllm_runner, example_prompts, monkeypatch
+) -> None:
+    """FlashInfer SSD prefill matches Triton, including prompts resumed from the
+    prefix-cache checkpoints it wrote."""
+    # In-process, so the mixers' prefill backend can be checked.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    max_tokens, num_logprobs = 32, 5
+    prompts = [APC_MULTIPLY_BY * prompt for prompt in example_prompts]
+    max_model_len = max(len(prompt) + max_tokens for prompt in prompts)
+    kwargs = _get_vllm_runner_params(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4", max_model_len
+    )
+    kwargs.update(mamba_ssm_cache_dtype="float32", trust_remote_code=True)
+
+    (baseline,), _ = _get_vLLM_output(
+        vllm_runner,
+        {**kwargs, "mamba_prefill_backend": "triton"},
+        prompts,
+        max_tokens,
+        num_logprobs,
+    )
+    kwargs.update(
+        enable_prefix_caching=True,
+        mamba_prefill_backend="flashinfer",
+        disable_log_stats=False,
+    )
+    with vllm_runner(**kwargs) as vllm_model:
+        assert vllm_model.apply_model(_uses_flashinfer_prefill) == [{True}]
+        filled = vllm_model.generate_greedy_logprobs(prompts, max_tokens, num_logprobs)
+        hits_before = _prefix_cache_hits(vllm_model.llm)
+        cached = vllm_model.generate_greedy_logprobs(prompts, max_tokens, num_logprobs)
+        assert _prefix_cache_hits(vllm_model.llm) > hits_before
+
+    for name, outputs in (("filled", filled), ("cached", cached)):
+        check_logprobs_close(
+            outputs_0_lst=baseline,
+            outputs_1_lst=outputs,
+            name_0="triton",
+            name_1=f"flashinfer_{name}",
+        )
+
+
+def _prefix_cache_hits(llm: LLM) -> int:
+    return sum(
+        metric.value
+        for metric in llm.get_metrics()
+        if isinstance(metric, Counter) and metric.name == "vllm:prefix_cache_hits"
+    )
 
 
 @pytest.fixture(scope="module")
