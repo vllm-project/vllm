@@ -418,6 +418,16 @@ class RequestSpecDecodeMetrics:
             self.per_step_drafted.append(num_draft_tokens)
             self.per_step_verified.append(num_verified_tokens)
 
+    def merge(self, other: "RequestSpecDecodeMetrics") -> None:
+        """Accumulate the verification steps from another engine output."""
+        for i, count in enumerate(other.histogram):
+            self.histogram[i] += count
+        self.num_draft_tokens += other.num_draft_tokens
+        self.num_verified_tokens += other.num_verified_tokens
+        self.per_step_accepted.extend(other.per_step_accepted)
+        self.per_step_drafted.extend(other.per_step_drafted)
+        self.per_step_verified.extend(other.per_step_verified)
+
     def to_dict(self) -> dict[str, Any]:
         """Payload matching `SpeculativeDecodingMetrics` for the response.
 

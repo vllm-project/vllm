@@ -827,8 +827,12 @@ class OutputProcessor:
                 req_state.observe_prefill(engine_core_output)
                 req_state.is_prefilling = False
 
-            if engine_core_output.spec_decode_metrics is not None:
-                req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
+            if (metrics := engine_core_output.spec_decode_metrics) is not None:
+                if engine_core_output.finished or req_state.spec_decode_metrics is None:
+                    # Core terminal outputs already cover the entire request.
+                    req_state.spec_decode_metrics = metrics
+                else:
+                    req_state.spec_decode_metrics.merge(metrics)
 
             request_error = None
             if (
