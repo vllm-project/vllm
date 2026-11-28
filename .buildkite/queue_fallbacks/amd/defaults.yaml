@@ -1,0 +1,8 @@
+- defaults:
+    close_when:
+      rule: infra_failure_rate
+      above: 0.67
+      window: 30m
+      min_jobs: 20
+    reopen_after: 2h
+    probes: 3
