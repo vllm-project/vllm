@@ -598,10 +598,19 @@ class MuseSparkOmniDummyInputsBuilder(
             )
         num_videos = mm_counts.get("video", 0)
         if num_videos:
+            # The dummy must carry the model's per-video frame cap: the
+            # encoder's activation peak is a per-item property, and
+            # get_mm_max_tokens_per_item already declares the matching token
+            # budget (num_frames_per_video / video_downsample_factor
+            # * max_num_tokens_per_frame) regardless of seq_len. Sizing the
+            # dummy from seq_len instead would under-profile the encoder
+            # under chunked prefill, where the dummy's seq_len is clamped to
+            # max_num_batched_tokens (see _get_dummy_seq_len in
+            # vllm/multimodal/processing/processor.py).
             videos = self._get_dummy_videos(
                 width=448,
                 height=448,
-                num_frames=4,
+                num_frames=self.info.preprocess_config.num_frames_per_video,
                 num_videos=num_videos,
                 overrides=cast(VideoDummyOptions | None, mm_options.get("video")),
             )
