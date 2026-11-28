@@ -1041,6 +1041,11 @@ class RoutedExperts(PluggableLayer):
         source_method = getattr(quant_method, "requantization_source", None)
 
         for expert_name, loaded_weight in weights:
+            if param_name := self.quant_method.load_stacked_weight(
+                self, expert_name, loaded_weight
+            ):
+                yield param_name
+                continue
             qual_name = f"{self.layer_name}.{expert_name}"
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (

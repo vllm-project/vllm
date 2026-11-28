@@ -118,7 +118,8 @@ def _transformers_moe_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self._moe_state.topk_ids = topk_ids
-    return self._forward_super(hidden_states, topk_weights)
+    # Kernels that pad hidden_size (e.g. Marlin MXFP4) return a strided view
+    return self._forward_super(hidden_states, topk_weights).contiguous()
 
 
 def _transformers_moe_forward_fake(
@@ -388,6 +389,11 @@ class MoEMixin(MixtureOfExperts, Base):
         shared_down_projs: list[tuple[nn.Module, str]] = []
         fused_shared_layers: dict[tuple[str, str], set[int]] = {}
 
+        is_gpt_oss_mxfp4 = (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "gpt_oss_mxfp4"
+        )
+
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
             # Decoder layers are fused later, in `_pre_decoder_layer_replace`
@@ -400,7 +406,12 @@ class MoEMixin(MixtureOfExperts, Base):
                 # Packed implementations will have experts as 3D tensors of shapes like:
                 # gate_up_proj = (num_experts, 2 * intermediate_size, hidden_size)
                 # down_proj = (num_experts, intermediate_size, hidden_size)
-                params = list(child_module.parameters())
+                # gpt-oss MXFP4 experts also have 2D biases, which `FusedMoE` loads
+                params = [
+                    p
+                    for n, p in child_module.named_parameters()
+                    if not (is_gpt_oss_mxfp4 and n.endswith("bias"))
+                ]
                 is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
                 if child_name == experts_name and (is_modulelist or is_3d):
                     # Alias for readability
