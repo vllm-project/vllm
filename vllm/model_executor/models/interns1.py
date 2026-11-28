@@ -599,7 +599,6 @@ class InternS1ForConditionalGeneration(
             )
 
         self.img_context_token_id: int | None = None
-        self.video_context_token_id: int | None = None
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -709,7 +708,6 @@ class InternS1ForConditionalGeneration(
             video_token_id = video_token_id.flatten().unique().item()
 
         assert isinstance(video_token_id, int)
-        self.video_context_token_id = video_token_id
 
         if pixel_values_flat_video is not None:
             h, w = self.config.vision_config.image_size

@@ -17,6 +17,14 @@ from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
+FIXED_SHRINK_SPLIT_K = 8
+
+
+def use_lora_kernel_reduction(split_k_reduction: str = "atomic") -> bool:
+    if load_lora_op_config("shrink", None):
+        return False
+    return is_batch_invariant or split_k_reduction == "kernel"
+
 
 _LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 _LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
@@ -161,8 +169,11 @@ def _get_lora_b_ptr(
 @functools.lru_cache
 def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    # Avoid optimizing for the batch invariant case. Use default config
-    if user_defined_config_folder is not None and not is_batch_invariant:
+    # Explicit shrink tuning takes precedence over both reduction switches.
+    # Other LoRA ops keep their existing batch-invariant tuning policy.
+    if user_defined_config_folder is not None and (
+        op_type == "shrink" or not is_batch_invariant
+    ):
         gpu_name = torch.cuda.get_device_name()
         gpu_name = gpu_name.replace(" ", "_")
         gpu_name = gpu_name.replace("-", "_")

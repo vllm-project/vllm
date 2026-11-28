@@ -41,6 +41,7 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
@@ -65,6 +66,7 @@ from vllm.renderers.chat_utils import (
     ConversationMessage,
     has_non_text_content,
 )
+from vllm.renderers.chat_utils.chat_template import has_request_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     parse_model_prompt,
@@ -728,19 +730,18 @@ class OnlineRenderer:
         chat_template_kwargs: dict[str, Any] | None,
         trust_request_chat_template: bool,
     ) -> ErrorResponse | None:
-        """Copied from GenerateBaseServing._validate_chat_template."""
-        if not trust_request_chat_template and (
-            request_chat_template is not None
-            or (
-                chat_template_kwargs
-                and chat_template_kwargs.get("chat_template") is not None
-            )
-        ):
+        if not has_request_chat_template(request_chat_template, chat_template_kwargs):
+            return None
+        if not trust_request_chat_template:
             return self.create_error_response(
                 "Chat template is passed with request, but "
                 "--trust-request-chat-template is not set. "
                 "Refused request with untrusted chat template."
             )
+        try:
+            self.renderer.validate_request_chat_template()
+        except VLLMValidationError as error:
+            return self.create_error_response(error)
         return None
 
     async def preprocess_completion(
@@ -795,7 +796,7 @@ class OnlineRenderer:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "media_io_kwargs", "cache_salt")
                 if (v := getattr(request, k, None)) is not None
             },
             skip_mm_cache=skip_mm_cache,
@@ -816,13 +817,14 @@ class OnlineRenderer:
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
+        renderer.validate_request_chat_template_kwargs(
+            getattr(request, "chat_template_kwargs", None)
+        )
         validate_request_mm_kwargs(
             mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
             media_io_kwargs=getattr(request, "media_io_kwargs", None),
             trust_request_mm_kwargs=self.trust_request_mm_kwargs,
         )
-        mm_config = self.model_config.multimodal_config
-
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
             dict(
@@ -837,13 +839,14 @@ class OnlineRenderer:
         if tok_params is None:
             tok_params = request.build_tok_params(self.model_config)
         build_kwargs: dict[str, Any] = {}
-        if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
+        if isinstance(
+            request, (ChatCompletionRequest, ResponsesRequest, TokenizeChatRequest)
+        ):
             build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
         chat_params = request.build_chat_params(
             default_template, default_template_content_format, **build_kwargs
         ).with_defaults(
             default_template_kwargs,
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 

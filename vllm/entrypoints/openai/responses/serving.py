@@ -923,7 +923,11 @@ class OpenAIServingResponses(GenerateBaseServing):
             and context.request_metrics_cover_all_generation_turns
         ):
             per_request_metrics = build_per_request_timing_metrics(
-                context.request_metrics, num_generated_tokens
+                context.request_metrics,
+                num_generated_tokens,
+                first_content_token_ts=(
+                    context.first_content_token_ts if request.stream else None
+                ),
             )
         response = ResponsesResponse.from_request(
             request,
@@ -1295,6 +1299,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 )
             else:
                 delta_message = DeltaMessage(content=output.text)
+
+            if delta_message is not None and delta_message.content:
+                ctx.record_first_content_token(ctx.last_output.metrics)
 
             if not delta_message:
                 continue

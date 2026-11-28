@@ -273,6 +273,7 @@ def test_completion_per_request_metrics_follow_server_flag():
     )
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.time_to_first_content_token_ms is None
 
 
 def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
@@ -1459,4 +1460,16 @@ def test_non_numeric_logprobs_rejected(field_name):
             prompt="Test prompt",
             max_tokens=10,
             **{field_name: "2"},
+        )
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
+@pytest.mark.parametrize("value", [1.5, -0.5, True, False])
+def test_non_integer_logprobs_rejected(field_name, value):
+    with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            **{field_name: value},
         )

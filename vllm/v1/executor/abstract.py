@@ -8,6 +8,7 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
@@ -194,23 +195,6 @@ class Executor(ABC):
     def determine_available_memory(self) -> list[int]:  # in bytes
         return self.collective_rpc("determine_available_memory")
 
-    def get_simple_cpu_offload_num_blocks(self) -> int | None:
-        values: list[int | None] = self.collective_rpc(
-            "get_simple_cpu_offload_num_cpu_blocks"
-        )
-        nums = [value for value in values if value is not None]
-        if not nums:
-            return None
-        aligned = min(nums)
-        if len(set(nums)) > 1:
-            logger.warning(
-                "SimpleCPUOffload workers reported mismatched num_cpu_blocks %s; "
-                "using min=%d",
-                nums,
-                aligned,
-            )
-        return aligned
-
     def get_kv_cache_layer_configs(self) -> list[dict[str, KVCacheLayerConfig]]:
         return self.collective_rpc("get_kv_cache_layer_configs")
 
@@ -335,6 +319,16 @@ class Executor(ABC):
     def execute_dummy_batch(self) -> list[SchedulerIterationDetails] | None:
         """Returns the iteration records the output worker has completed."""
         return self.collective_rpc("execute_dummy_batch")[0]
+
+    def probe_forward(self) -> None:
+        # Unlike execute_dummy_batch, wait for every rank: PP stages other
+        # than the output rank fail independently.
+        errors: list[str | None] = self.collective_rpc(
+            "probe_forward", timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+        )
+        for rank, error in enumerate(errors):
+            if error is not None:
+                raise RuntimeError(f"Forward probe failed on worker {rank}: {error}")
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")

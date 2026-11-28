@@ -89,6 +89,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.multimodal.utils import copy_mm_embedding_modality
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.math_utils import cdiv
@@ -133,6 +134,7 @@ from .qwen2_5_vl import (
 from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
@@ -179,13 +181,8 @@ _AUDIO_CUDAGRAPH_BACKENDS = {
 }
 
 
-def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
-    input_lengths_leave = input_lengths % 100
-    feat_lengths = (input_lengths_leave - 1) // 2 + 1
-    output_lengths = (
-        ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
-    )
-    return output_lengths
+def _get_feat_extract_output_lengths(input_lengths: torch.Tensor | np.ndarray | int):
+    return (input_lengths % 100 + 7) // 8 + (input_lengths // 100) * 13
 
 
 # ============= Audio Encoder Components =============
@@ -278,6 +275,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         seq_length, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(hidden_states)
@@ -292,6 +290,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         attn_output = attn_output.view(seq_length, -1)
@@ -337,6 +336,7 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Args:
         hidden_states: Input tensor of shape (seq_len, hidden_size)
@@ -350,6 +350,7 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
             hidden_states=hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         hidden_states = residual + hidden_states
 
@@ -513,25 +514,47 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         device = input_features.device
         # Chunk bookkeeping stays on the host so no step needs a device read.
         chunk_size = self.n_window * 2
-        chunk_num = torch.ceil(feature_lens / chunk_size).long()
-        chunk_lengths = torch.full((int(chunk_num.sum()),), chunk_size, device="cpu")
-        tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
-        chunk_lengths[tail_chunk_index] = feature_lens % chunk_size
-        chunk_lengths[chunk_lengths == 0] = chunk_size
+        lengths = []
+        for length in feature_lens.tolist():
+            full_chunks, remainder = divmod(length, chunk_size)
+            lengths.extend([chunk_size] * full_chunks)
+            if remainder:
+                lengths.append(remainder)
+        chunk_lengths = np.asarray(lengths, dtype=np.int64)
 
         # Split input features into chunks and pad
-        chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
-        padded_feature = nn.utils.rnn.pad_sequence(
-            chunk_list, batch_first=True
-        ).transpose(1, 2)
+        if all(length == lengths[0] for length in lengths):
+            padded_feature = (
+                input_features.T.reshape(len(lengths), lengths[0], -1)
+                .contiguous()
+                .transpose(1, 2)
+            )
+        elif device.type == "cuda" and len(lengths) >= 32:
+            # Avoid a separate padding copy launch for every chunk.
+            positions = np.arange(max(lengths))
+            padding_mask = positions >= chunk_lengths[:, None]
+            offsets = chunk_lengths.cumsum() - chunk_lengths
+            indices = offsets[:, None] + positions
+            indices[padding_mask] = input_features.shape[-1]
+            padded_feature = (
+                F.pad(input_features.T, (0, 0, 0, 1))
+                .index_select(0, async_tensor_h2d(indices.reshape(-1), device))
+                .reshape(len(lengths), max(lengths), -1)
+            )
+            padded_feature = padded_feature.transpose(1, 2)
+        else:
+            chunk_list = input_features.T.split(lengths, dim=0)
+            padded_feature = nn.utils.rnn.pad_sequence(
+                chunk_list, batch_first=True
+            ).transpose(1, 2)
 
-        feature_lens_after_cnn = self._get_cnn_output_lengths(chunk_lengths)
+        feature_lens_after_cnn = (chunk_lengths + 7) // 8
         max_len_after_cnn = int(feature_lens_after_cnn.max())
-        padded_mask_after_cnn = torch.arange(
-            max_len_after_cnn, device="cpu"
-        ) < feature_lens_after_cnn.unsqueeze(1)
+        padded_mask_after_cnn = (
+            np.arange(max_len_after_cnn) < feature_lens_after_cnn[:, None]
+        )
         valid_token_indices = async_tensor_h2d(
-            padded_mask_after_cnn.flatten().nonzero().squeeze(1), device
+            np.flatnonzero(padded_mask_after_cnn), device
         )
 
         # Add channel dimension for conv2d
@@ -638,6 +661,13 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         cu_seqlens = encoder_metadata["cu_seqlens"]
         assert cu_seqlens is not None
         max_seqlen = encoder_metadata.get("max_seqlen")
+        sequence_lengths = None
+        if (
+            self.attn_backend == AttentionBackendEnum.TRITON_ATTN
+            and hidden_states.is_cuda
+            and current_platform.is_cuda()
+        ):
+            sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
 
         # Apply transformer layers
         for encoder_layer in self.layers:
@@ -645,6 +675,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                 hidden_states,
                 cu_seqlens,
                 max_seqlen,
+                sequence_lengths,
             )
 
         # Apply output layers
@@ -657,10 +688,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
     def _get_cnn_output_lengths(self, input_lengths: torch.Tensor) -> torch.Tensor:
         """Compute output lengths after the three conv2d layers."""
-        lengths = input_lengths
-        for _ in range(3):
-            lengths = (lengths - 1) // 2 + 1
-        return lengths
+        return (input_lengths + 7) // 8
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -1232,11 +1260,14 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
         self.model = Qwen3MoeLLMModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size, config.hidden_size, quant_config=quant_config
-        )
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size, config.hidden_size, quant_config=quant_config
+            )
+            if self.config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -1696,6 +1727,7 @@ class Qwen3OmniMoeAudioEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             modalities=["audio"] if supported else [],
             buffer_keys=["hidden_states", "cu_seqlens", "max_seqlen"],
             out_hidden_size=self.config.audio_config.output_dim,
+            eager_fallback_fast_path=True,
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
@@ -1729,12 +1761,12 @@ class Qwen3OmniMoeAudioEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         mm_kwargs: dict[str, Any],
     ) -> list[EncoderItemSpec]:
         feature_lens = self._get_audio_feature_lengths(mm_kwargs)
-        output_lens = _get_feat_extract_output_lengths(feature_lens)
         return [
-            EncoderItemSpec(input_size=input_size, output_tokens=output_tokens)
-            for input_size, output_tokens in zip(
-                feature_lens.tolist(), output_lens.tolist()
+            EncoderItemSpec(
+                input_size=input_size,
+                output_tokens=_get_feat_extract_output_lengths(input_size),
             )
+            for input_size in feature_lens.tolist()
         ]
 
     def select_encoder_cudagraph_items(
@@ -1775,7 +1807,9 @@ class Qwen3OmniMoeAudioEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             audio_input["input_features"].to(self.audio_tower.dtype),
             feature_lens,
         )
-        return hidden_states, _get_feat_extract_output_lengths(feature_lens).tolist()
+        return hidden_states, _get_feat_extract_output_lengths(
+            feature_lens.numpy()
+        ).tolist()
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,

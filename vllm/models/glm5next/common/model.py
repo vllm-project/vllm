@@ -135,10 +135,6 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
     return round_up(topk + kpool - 1, 128)
 
 
-_MHC_TAU = 0.05
-"""mHC routing temperature. A GLM-5.3-Flash trained value that neither the
-checkpoint nor `Glm5NextTextConfig` carries."""
-
 _MHC_POST_MULT_VALUE = 2.0
 """mHC post-multiplier. A GLM-5.3-Flash trained value that neither the
 checkpoint nor `Glm5NextTextConfig` carries."""
@@ -580,8 +576,6 @@ class Glm5NextDecoderLayer(nn.Module):
         self.hc_ffn_fn_split: torch.Tensor | None = None
         if self.mhc and not is_mtp_layer:
             # mhc config
-            self.mhc_num_residual_streams = config.hc_mult
-            self.mhc_tau = _MHC_TAU
             self.hc_eps = config.hc_eps
             self.mhc_sinkhorn_iterations = config.hc_sinkhorn_iters
             self.mhc_post_mult_value = _MHC_POST_MULT_VALUE

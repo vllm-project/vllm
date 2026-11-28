@@ -128,7 +128,7 @@ def test_score_levels_with_the_same_label_keep_their_positions():
         ]
     ).questions[0]
     read = make_read_question(0, question)
-    assert read.labels == ("A", "B")
+    assert read.labels == ("0", "1")
     answer = make_answer(question, [0.1, 0.9], 0.8).model_dump()
     assert answer["score"] == pytest.approx(0.9)
     assert [p["value"] for p in answer["probabilities"]] == [0, 1]
@@ -247,3 +247,21 @@ def test_backend_rejects_more_choices_than_single_token_labels():
     ).questions[0]
     with pytest.raises(StructuredDecisionError, match="at most 26 choices"):
         make_read_question(0, question)
+
+
+def test_unlabeled_reads_take_more_choices_than_labels():
+    question = request(
+        questions=[
+            {
+                "type": "choice",
+                "instructions": "x",
+                "choices": [{"value": str(i)} for i in range(40)],
+            }
+        ]
+    ).questions[0]
+    read = make_read_question(0, question, 255, labeled=False)
+    assert len(read.options) == 40
+    with pytest.raises(StructuredDecisionError, match="at most 26 choices"):
+        make_read_question(0, question, 255)
+    with pytest.raises(StructuredDecisionError, match="at most 30 choices"):
+        make_read_question(0, question, 30, labeled=False)

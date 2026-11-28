@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
@@ -77,6 +77,9 @@ from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 logger = init_logger(__name__)
+
+# Max length of the SSD autotune warmup, in chunks.
+_SSD_WARMUP_MAX_CHUNKS = 32
 
 
 def _view_mtp_decode_tensor(
@@ -676,11 +679,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # so state_dtype must match what real inference uses.
         ssm_state_dtype = self.get_state_dtype()[1]
 
-        # SSD kernel autotune keys depend on dtype and head dimensions,
-        # not on sequence length or batch size, so a single shape suffices.
-        seqlen = chunk_size
+        # Prefill-sized warmup: the profile run has max_num_batched_tokens rows.
+        nchunks = max(
+            1, min(_SSD_WARMUP_MAX_CHUNKS, projected_states.shape[0] // chunk_size)
+        )
+        seqlen = nchunks * chunk_size
         batch = 1
-        nchunks = seqlen // chunk_size  # = 1
 
         x = torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
         dt = torch.randn(seqlen, nheads, device=device, dtype=dtype)
@@ -1200,7 +1204,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     is_blackwell=self.is_blackwell,
                 )
 
-    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+    def get_cache_checkpoint_alignment(self) -> int | None:
         # The block-boundary state can be exported from inside one forward
         # pass, so the scheduler need not split the prefill; every reader
         # acts on this only with prefix caching. The metadata builder puts a chunk

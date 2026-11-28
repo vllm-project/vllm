@@ -48,8 +48,11 @@ WORKDIR /workspace/
 ARG PYTHON_VERSION=3.14
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
 ARG INTEL_OMIX_VERSION=0.4.1
+ARG REFRESH=ubuntu:24.04+python${PYTHON_VERSION}+omix${INTEL_OMIX_VERSION}+2026-11-20
 
-RUN apt-get update -y && \
+# Bump REFRESH to rebuild the base with current upstream packages.
+RUN echo "XPU base refresh: ${REFRESH}" && \
+    apt-get update -y && \
     apt-get install -y --no-install-recommends \
     build-essential \
     curl \
@@ -100,8 +103,6 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/common.txt,target=/vllm-workspace/requirements/common.txt \
-    --mount=type=bind,src=requirements/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
     uv pip install --upgrade pip
 
 
@@ -216,9 +217,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/vllm-workspace/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/vllm-workspace/requirements/xpu.txt \
     --mount=type=bind,src=requirements/test/xpu.txt,target=/vllm-workspace/requirements/test/xpu.txt \
+    --mount=type=bind,src=requirements/test/kv_connectors_xpu.txt,target=/vllm-workspace/requirements/test/kv_connectors_xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
     uv pip install -r /vllm-workspace/requirements/xpu.txt && \
-    uv pip install --no-build-isolation -r /vllm-workspace/requirements/test/xpu.txt
+    uv pip install --no-build-isolation -r /vllm-workspace/requirements/test/xpu.txt && \
+    uv pip install --no-build-isolation --require-hashes --no-deps \
+        -r /vllm-workspace/requirements/test/kv_connectors_xpu.txt
 
 # Keep source-dependent layers near the end so frequent code-only changes
 # don't invalidate heavy dependency and UCX/NIXL layers.

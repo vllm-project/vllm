@@ -199,6 +199,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             generation_config: Default::default(),
             override_generation_config: Default::default(),
             renderer: config.renderer,
+            tool_call_parser: config.tool_call_parser.clone(),
+            reasoning_parser: config.reasoning_parser.clone(),
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
             trust_request_chat_template: config.trust_request_chat_template,
@@ -230,10 +232,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
     let chat = ChatRequestProcessor::new(loaded.chat_backend, model_dtype, config.max_model_len)
-        .with_parser_selections(
-            config.tool_call_parser.clone(),
-            config.reasoning_parser.clone(),
-        )
         .with_tool_strict_level(config.tool_strict_level)
         .with_reasoning_effort_map(
             config
@@ -402,42 +400,49 @@ mod tests {
         }
     }
 
+    fn render_config(model: &str) -> RenderConfig {
+        RenderConfig {
+            tool_strict_level: None,
+            model: model.to_string(),
+            revision: None,
+            tokenizer: None,
+            hf_config: None,
+            skip_tokenizer_init: false,
+            hf_token: None,
+            hf_overrides: Default::default(),
+            served_model_name: Vec::new(),
+            skip_model_name_validation: false,
+            host: "127.0.0.1".to_string(),
+            port: 8000,
+            grpc_port: None,
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            renderer: RendererSelection::Auto,
+            chat_template: None,
+            default_chat_template_kwargs: HashMap::new(),
+            reasoning_effort_map: HashMap::new(),
+            trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
+            chat_template_content_format: ChatTemplateContentFormatOption::Auto,
+            max_model_len: Some(128),
+            max_logprobs: None,
+            lora_modules: Vec::new(),
+            language_model_only: false,
+            dtype: None,
+            limit_mm_per_prompt: Default::default(),
+            mm_processor_kwargs: Default::default(),
+            tls: None,
+        }
+    }
+
     #[tokio::test]
     async fn serve_render_rejects_unknown_parser_before_startup() {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
         let error = serve_render(
             RenderConfig {
-                tool_strict_level: None,
-                model: "test-model".to_string(),
-                revision: None,
-                tokenizer: None,
-                hf_config: None,
-                skip_tokenizer_init: false,
-                hf_token: None,
-                hf_overrides: Default::default(),
-                served_model_name: Vec::new(),
-                skip_model_name_validation: false,
-                host: "127.0.0.1".to_string(),
-                port: 8000,
-                grpc_port: None,
-                tool_call_parser: ParserSelection::Auto,
                 reasoning_parser: ParserSelection::Explicit("typo".to_string()),
-                renderer: RendererSelection::Auto,
-                chat_template: None,
-                default_chat_template_kwargs: HashMap::new(),
-                reasoning_effort_map: HashMap::new(),
-                trust_request_chat_template: false,
-                exclude_tools_when_tool_choice_none: false,
-                chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-                max_model_len: Some(128),
-                max_logprobs: None,
-                lora_modules: Vec::new(),
-                language_model_only: false,
-                dtype: None,
-                limit_mm_per_prompt: Default::default(),
-                mm_processor_kwargs: Default::default(),
-                tls: None,
+                ..render_config("test-model")
             },
             shutdown,
         )
@@ -449,5 +454,43 @@ mod tests {
             report.contains("reasoning parser `typo` is not registered"),
             "{report}"
         );
+    }
+
+    #[tokio::test]
+    async fn build_state_rejects_parser_the_tokenizer_cannot_support() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            (
+                "config.json",
+                serde_json::json!({"model_type": "qwen2", "vocab_size": 2}),
+            ),
+            (
+                "tokenizer_config.json",
+                serde_json::json!({"chat_template": "{{ messages[0].content }}"}),
+            ),
+            (
+                "tokenizer.json",
+                serde_json::json!({
+                    "version": "1.0",
+                    "model": {"type": "WordLevel", "vocab": {"<unk>": 0, "hello": 1}, "unk_token": "<unk>"},
+                }),
+            ),
+        ];
+        for (name, contents) in files {
+            std::fs::write(dir.path().join(name), contents.to_string()).unwrap();
+        }
+        let model = dir.path().to_str().unwrap();
+
+        // `auto` builds no parser for this model.
+        build_state(&render_config(model)).await.unwrap();
+        let error = build_state(&RenderConfig {
+            reasoning_parser: ParserSelection::Explicit("qwen3".to_string()),
+            ..render_config(model)
+        })
+        .await
+        .err()
+        .unwrap();
+
+        expect_test::expect!["failed to load renderer/tokenizer backends: failed to initialize reasoning parser `qwen3`: tokenizer is missing reasoning delimiter token `<think>`"].assert_eq(&format!("{error:#}"));
     }
 }

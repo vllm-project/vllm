@@ -141,29 +141,66 @@ def test_tokenize_request_models_respect_max_total_tokens():
         apply_max_tokenize_tokens(replace(params_cmpl, max_total_tokens=50), 42)
 
 
-def test_tokenize_request_rejects_over_limit_requests():
+@pytest.fixture(scope="module")
+def tokenizer_server():
     args = [
         "--dtype",
         "bfloat16",
         "--max-model-len",
         "8192",
         "--max-tokenize-tokens",
-        "5",
+        "64",
         "--enforce-eager",
         "--max-num-seqs",
         "128",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        response = requests.post(
-            remote_server.url_for("tokenize"),
-            json={"model": MODEL_NAME, "prompt": "hello " * 10},
-        )
+        yield remote_server
+
+
+def test_tokenize_request_rejects_over_limit_requests(tokenizer_server):
+    response = requests.post(
+        tokenizer_server.url_for("tokenize"),
+        json={"model": MODEL_NAME, "prompt": "hello " * 80},
+    )
 
     assert response.status_code == 400, response.text
     error = response.json()["error"]
     assert error["param"] == "input_tokens"
     assert "maximum context length" in error["message"]
+
+
+@pytest.mark.parametrize("endpoint", ["tokenize", "v1/chat/completions"])
+def test_reject_request_tokenizer_options(tokenizer_server, endpoint):
+    request = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "hello"}],
+        "chat_template_kwargs": {"padding": False},
+    }
+    if endpoint == "v1/chat/completions":
+        request["max_completion_tokens"] = 1
+    response = requests.post(
+        tokenizer_server.url_for(endpoint),
+        json=request,
+        timeout=10,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "chat_template_kwargs"
+
+
+def test_tokenize_accepts_template_variables(tokenizer_server):
+    response = requests.post(
+        tokenizer_server.url_for("tokenize"),
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        timeout=10,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["tokens"]
 
 
 def _build_harmony_online_renderer() -> OnlineRenderer:

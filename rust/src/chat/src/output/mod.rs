@@ -22,7 +22,7 @@ mod harmony;
 mod structural_tag;
 mod structured;
 
-pub use default::DefaultChatOutputProcessor;
+pub use default::{DefaultChatOutputProcessor, ResolvedParsers};
 pub use harmony::HarmonyChatOutputProcessor;
 pub(crate) use harmony::validate_harmony_parser_overrides;
 pub(crate) use structural_tag::apply_output_grammar;
@@ -56,7 +56,8 @@ pub(crate) enum AssistantEvent {
     Done {
         usage: ChatTokenUsage,
         timestamps: RequestTimestamps,
-        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+        first_content_token_ts: Option<f64>,
+        spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<Box<serde_json::Value>>,
@@ -69,6 +70,18 @@ pub(crate) enum AssistantEvent {
         /// any.
         routed_experts: Option<Box<WireNdArray>>,
     },
+}
+
+impl AssistantEvent {
+    /// Record the first batch that produces text, excluding reasoning and tools.
+    fn record_first_content_token(&self, timestamp: f64, first: &mut Option<f64>) {
+        if first.is_none()
+            && timestamp > 0.0
+            && matches!(self, Self::TextDelta { kind: AssistantBlockKind::Text, delta, .. } if !delta.is_empty())
+        {
+            *first = Some(timestamp);
+        }
+    }
 }
 
 /// Boxed stream of decoded text events coming from [`vllm_text`].

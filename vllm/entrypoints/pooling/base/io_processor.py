@@ -14,6 +14,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.chat_utils.chat_template import has_request_chat_template
 from vllm.renderers.chat_utils.item_tracker import (
     MediaRequestBudgets,
     use_media_request_budgets,
@@ -66,7 +67,7 @@ class PoolingIOProcessor:
             chat_template_config.trust_request_chat_template
         )
 
-        self.template_kwargs = None
+        self.template_kwargs = chat_template_config.default_chat_template_kwargs
         self.tool_dicts = None
 
         # Shared thread pool executor for preprocessing
@@ -111,7 +112,6 @@ class PoolingIOProcessor:
                 ),
             )
 
-            mm_config = self.model_config.multimodal_config
             chat_tok_params = request.build_tok_params(
                 self.model_config, self.renderer.default_chat_tok_params
             )
@@ -119,9 +119,6 @@ class PoolingIOProcessor:
                 self.chat_template, self.chat_template_content_format
             ).with_defaults(
                 default_template_kwargs,
-                default_media_io_kwargs=(
-                    mm_config.media_io_kwargs if mm_config else None
-                ),
             )
 
             params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
@@ -304,19 +301,15 @@ class PoolingIOProcessor:
         chat_template_kwargs: dict[str, Any] | None,
         trust_request_chat_template: bool,
     ):
-        if not trust_request_chat_template and (
-            request_chat_template is not None
-            or (
-                chat_template_kwargs
-                and chat_template_kwargs.get("chat_template") is not None
-            )
-        ):
-            raise VLLMValidationError(
-                "Chat template is passed with request, but "
-                "--trust-request-chat-template is not set. "
-                "Refused request with untrusted chat template."
-            )
-        return None
+        if has_request_chat_template(request_chat_template, chat_template_kwargs):
+            if not trust_request_chat_template:
+                raise VLLMValidationError(
+                    "Chat template is passed with request, but "
+                    "--trust-request-chat-template is not set. "
+                    "Refused request with untrusted chat template."
+                )
+            self.renderer.validate_request_chat_template()
+        self.renderer.validate_request_chat_template_kwargs(chat_template_kwargs)
 
     def _params_to_seq(
         self,

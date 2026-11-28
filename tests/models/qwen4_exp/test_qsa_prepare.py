@@ -93,7 +93,8 @@ def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
 
 
 def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
-    """Compare with fused_qk_rmsnorm_rope_gate + reshape_and_cache_flash."""
+    """Compare with fused_qk_rmsnorm_rope_gate + reshape_and_cache_flash; with
+    an FP8 cache, Q is FP8 too, as in the layer."""
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.model_executor.layers.fused_qk_norm_rope import (
         fused_qk_rmsnorm_rope_gate,
@@ -131,11 +132,12 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         torch.tensor(main["main_k_scale"], device="cuda"),
         torch.tensor(main["main_v_scale"], device="cuda"),
     )
-    torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
     assert torch.equal(gate_out.flatten(1), gate)
     if fp8_cache:
+        assert_fp8_within_one_ulp(q_out.flatten(1), q.to(torch.float8_e4m3fn))
         assert_fp8_within_one_ulp(kv_cache, cache.view(torch.float8_e4m3fn))
     else:
+        torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
         torch.testing.assert_close(kv_cache, cache, rtol=RTOL, atol=ATOL)
 
 

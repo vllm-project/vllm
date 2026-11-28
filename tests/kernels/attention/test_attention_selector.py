@@ -652,11 +652,11 @@ def hopper_selection():
 
 @blackwell_only
 @pytest.mark.parametrize("use_hisparse", [False, True])
-def test_hopper_sparse_mla_skips_backends_without_hisparse(
+def test_hopper_sparse_mla_selects_flashinfer_with_hisparse(
     use_hisparse, hopper_selection
 ):
-    """Head-512 sparse MLA prefers FlashInfer on Hopper, which has no HiSparse
-    path; with HiSparse the selector must pass over it."""
+    """Head-512 sparse MLA prefers FlashInfer on Hopper, which supports
+    HiSparse, so HiSparse keeps it."""
     vllm_config = VllmConfig()
     if use_hisparse:
         vllm_config.attention_config.hisparse_config = HiSparseConfig()
@@ -664,7 +664,7 @@ def test_hopper_sparse_mla_skips_backends_without_hisparse(
         backend = get_attn_backend(
             512, torch.bfloat16, None, use_mla=True, use_sparse=True
         )
-    assert (backend.get_name() == "FLASHINFER_MLA_SPARSE_SM90") is not use_hisparse
+    assert backend.get_name() == "FLASHINFER_MLA_SPARSE_SM90"
 
 
 @pytest.fixture

@@ -10,8 +10,8 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_metrics::{
-    EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
-    U64Counter, WatermarkStatusLabels,
+    AdmissionRejectionLabels, EngineLabels, FinishedReasonLabels, HistogramMetric, METRICS,
+    PromptTokenSourceLabels, U64Counter, WatermarkStatusLabels,
 };
 
 use crate::FinishReason;
@@ -233,11 +233,39 @@ impl WatermarkRequestCounters {
     }
 }
 
+/// `vllm:admission_rejections` counters, one per queue limit.
+#[derive(Debug)]
+pub(crate) struct AdmissionRejectionCounters {
+    /// Rejections by `--max-num-queued-reqs`.
+    pub(crate) queued_reqs: U64Counter,
+    /// Rejections by `--max-num-queued-tokens`.
+    pub(crate) queued_tokens: U64Counter,
+}
+
+impl AdmissionRejectionCounters {
+    /// Create the series for both limits, whether or not they are set, like
+    /// Python's `PrometheusStatLogger`.
+    pub(crate) fn resolve(model_name: &str) -> Self {
+        let counter = |reason| {
+            METRICS
+                .request
+                .admission_rejections
+                .get_or_create_owned(&AdmissionRejectionLabels {
+                    model_name: model_name.to_string(),
+                    reason,
+                })
+        };
+        Self {
+            queued_reqs: counter("max_num_queued_reqs"),
+            queued_tokens: counter("max_num_queued_tokens"),
+        }
+    }
+}
+
 /// Cached handles for request metrics derived from engine-core lifecycle
 /// events (`QUEUED`, `SCHEDULED`, `PREEMPTED`), which engines only emit when
 /// they record stats.
 struct EventMetricHandles {
-    num_preemptions: U64Counter,
     request_num_preemptions: HistogramMetric,
     request_queue_time_seconds: HistogramMetric,
     request_prefill_time_seconds: HistogramMetric,
@@ -429,12 +457,9 @@ impl RequestMetricsTracker {
                         self.scheduled_ts = event.timestamp;
                     }
                 }
-                EngineCoreEventType::Preempted => {
-                    self.num_preemptions += 1;
-                    if let Some(events) = &self.handles.events {
-                        events.num_preemptions.inc();
-                    }
-                }
+                // `vllm:num_preemptions` counts from scheduler stats; the
+                // event only feeds this request's preemption histogram.
+                EngineCoreEventType::Preempted => self.num_preemptions += 1,
             }
         }
     }
@@ -499,7 +524,6 @@ pub(crate) fn resolve_request_metric_handles(
             .request_time_per_output_token_seconds
             .get_or_create_owned(&labels),
         events: engine_stats_enabled.then(|| EventMetricHandles {
-            num_preemptions: metrics.num_preemptions.get_or_create_owned(&labels),
             request_num_preemptions: metrics.request_num_preemptions.get_or_create_owned(&labels),
             request_queue_time_seconds: metrics
                 .request_queue_time_seconds

@@ -20,11 +20,11 @@ case "${test_suite}" in
     python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --quantization fp8_per_tensor
     python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --kv-cache-dtype fp8
     python3 examples/basic/offline_inference/generate.py --model nvidia/Llama-3.1-8B-Instruct-FP8 --block-size 64 --enforce-eager --quantization modelopt --kv-cache-dtype fp8 --attention-backend TRITON_ATTN --max-model-len 4096
-    python3 examples/basic/offline_inference/generate.py --model vllm-project/Qwen3-4B-Instruct-2507-GPTQ-Int4 --block-size 64 --enforce-eager --max-model-len 8192
-    python3 examples/basic/offline_inference/generate.py --model vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ --block-size 64 --enforce-eager 
+    python3 examples/basic/offline_inference/generate.py --model vllm/Qwen3-4B-Instruct-2507-GPTQ-Int4 --block-size 64 --enforce-eager --max-model-len 8192
+    python3 examples/basic/offline_inference/generate.py --model vllm/TinyLlama-1.1B-Chat-v0.3-AWQ --block-size 64 --enforce-eager 
     python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2
     python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel
-    python3 examples/basic/offline_inference/generate.py --model vllm-project/Qwen3-4B-Instruct-2507-GPTQ-Int4 --max-model-len 8192
+    python3 examples/basic/offline_inference/generate.py --model vllm/Qwen3-4B-Instruct-2507-GPTQ-Int4 --max-model-len 8192
     ;;
   w8a8-fp8-linear)
     python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8 --enforce-eager --max-model-len 4096
@@ -63,7 +63,8 @@ case "${test_suite}" in
       --ignore=v1/spec_decode/test_acceptance_length.py \
       --ignore=v1/spec_decode/test_speculators_correctness.py \
       --deselect=tests/v1/spec_decode/test_mtp.py::test_glm_mtp_defers_lm_head
-    pytest -v -s \
+    # cpu_test cases assume a CPU platform; upstream runs them on CPU agents.
+    pytest -v -s -m 'not cpu_test' \
       v1/kv_connector/unit \
       --ignore=v1/kv_connector/unit/test_multi_connector.py \
       --ignore=v1/kv_connector/unit/test_example_connector.py \
