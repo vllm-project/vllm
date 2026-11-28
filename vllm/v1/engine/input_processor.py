@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.reasoning import MAX_REQUEST_REASONING_END_TOKENS
 from vllm.config.utils import hash_factors
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
@@ -266,6 +267,84 @@ class InputProcessor:
             )
 
         return watermarking
+
+    def _tokenize_reasoning_end_str(self, sampling_params: SamplingParams) -> None:
+        """Tokenize a per-request `reasoning_end_str` on request-local params.
+
+        The forced sequence must end with the reasoning parser's natural end
+        marker and contain no other reasoning marker: the thinking-budget
+        samplers stop forcing once they see the end marker (and restart the
+        budget on a start marker), and the reasoning parser splits reasoning
+        from content on the end marker.
+        """
+        reasoning_end_str = sampling_params.reasoning_end_str
+        assert reasoning_end_str is not None
+        reasoning_config = self.vllm_config.reasoning_config
+        if reasoning_config is None or not reasoning_config.enabled:
+            raise VLLMValidationError(
+                "reasoning_end_str is set but reasoning_config is not "
+                "configured. Please set --reasoning-parser and/or "
+                "--reasoning-config to use reasoning_end_str.",
+                parameter="reasoning_end_str",
+            )
+        # An enabled reasoning config implies the tokenizer was initialized.
+        assert self.tokenizer is not None
+
+        def invalid(reason: str) -> VLLMValidationError:
+            return VLLMValidationError(
+                f"reasoning_end_str {reason}",
+                parameter="reasoning_end_str",
+                value=reasoning_end_str,
+            )
+
+        token_ids = self.tokenizer.encode(reasoning_end_str, add_special_tokens=False)
+        if len(token_ids) > MAX_REQUEST_REASONING_END_TOKENS:
+            raise invalid(
+                f"tokenizes to {len(token_ids)} tokens; the maximum is "
+                f"{MAX_REQUEST_REASONING_END_TOKENS}."
+            )
+        vocab_size = self.model_config.get_vocab_size()
+        if any(not 0 <= t < vocab_size for t in token_ids):
+            raise invalid(
+                f"contains token ids outside the model vocabulary (size {vocab_size})."
+            )
+
+        def find(marker: list[int]) -> int:
+            n = len(marker)
+            return next(
+                (
+                    i
+                    for i in range(len(token_ids) - n + 1)
+                    if token_ids[i : i + n] == marker
+                ),
+                -1,
+            )
+
+        natural_end = reasoning_config.natural_reasoning_end_token_ids or []
+        first_end = find(natural_end)
+        if first_end < 0 or first_end != len(token_ids) - len(natural_end):
+            raise invalid(
+                "must end with the reasoning end marker "
+                f"{self.tokenizer.decode(natural_end)!r} and contain it only "
+                "once, compared as tokens."
+            )
+        start_marker = reasoning_config.reasoning_start_token_ids or []
+        if start_marker and find(start_marker) >= 0:
+            raise invalid(
+                "must not contain the reasoning start marker "
+                f"{self.tokenizer.decode(start_marker)!r}."
+            )
+        # Forced tokens go through the usual stop checks: one that ends the
+        # request before the marker is complete would drop the answer.
+        stop_ids = set(sampling_params.stop_token_ids or ())
+        if sampling_params.eos_token_id is not None:
+            stop_ids.add(sampling_params.eos_token_id)
+        if stop_ids.intersection(token_ids[:-1]):
+            raise invalid(
+                "contains a token that ends the request (EOS or one of "
+                "stop_token_ids) before its last token."
+            )
+        sampling_params._reasoning_end_token_ids = token_ids
 
     def _normalize_trace_replay_params(
         self, sampling_params: SamplingParams, prompt_len: int
@@ -536,6 +615,8 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            if sampling_params.reasoning_end_str is not None:
+                self._tokenize_reasoning_end_str(sampling_params)
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:

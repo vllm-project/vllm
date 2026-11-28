@@ -273,6 +273,29 @@ def test_cpu_thinking_budget_clears_reused_slot() -> None:
     assert torch.count_nonzero(logits) == 0
 
 
+def test_cpu_thinking_budget_uses_per_request_end_sequence() -> None:
+    req_states = _make_req_states([1, START, 10, 11, 12])
+    req_idx = req_states.req_id_to_index["req"]
+    state = CPUThinkingBudgetState(req_states, ReasoningConfig())
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[END_A, END_B, END]
+    )
+    state.add_request(req_idx, params)
+
+    logits = torch.zeros((3, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [12, END_A, END_B]))
+    assert logits[0, END_A] == pytest.approx(1.0e9)
+    assert logits[1, END_B] == pytest.approx(1.0e9)
+    assert logits[2, END] == pytest.approx(1.0e9)
+
+    # A request reusing the slot without an override gets the default again.
+    state.add_request(req_idx, SamplingParams(thinking_token_budget=3))
+    logits = torch.zeros((1, VOCAB_SIZE))
+    state.apply(logits, _thinking_context(req_idx, [12]))
+    assert logits[0, END] == pytest.approx(1.0e9)
+    assert logits[0, END_A] == 0
+
+
 def test_cpu_greedy_sampling_applies_thinking_budget(monkeypatch, tmp_path) -> None:
     req_states = _make_req_states([1, START, 10, 11, 12])
     req_idx = req_states.req_id_to_index["req"]

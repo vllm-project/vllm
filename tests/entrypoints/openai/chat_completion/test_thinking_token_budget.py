@@ -253,6 +253,67 @@ async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default"], indirect=True)
+async def test_thinking_token_budget_per_request_reasoning_end_str(
+    client: openai.AsyncOpenAI,
+):
+    """Concurrent requests force their own end string: the override's phrase
+    ends the reasoning (streaming and not) and never leaks into the content,
+    while a request without it keeps the server default."""
+    phrase = "Time to answer."
+    override = {
+        "thinking_token_budget": THINK_BUDGET,
+        "reasoning_end_str": f"{phrase}{REASONING_END_STR}",
+    }
+
+    async def create(extra_body: dict):
+        return await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=MESSAGES,
+            max_tokens=100,
+            temperature=0.0,
+            extra_body=extra_body,
+        )
+
+    async def stream() -> tuple[str, str]:
+        reasoning, content = "", ""
+        chunks = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=MESSAGES,
+            max_tokens=100,
+            temperature=0.0,
+            stream=True,
+            extra_body=override,
+        )
+        async for chunk in chunks:
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                reasoning += getattr(delta, "reasoning", None) or ""
+                content += delta.content or ""
+        return reasoning, content
+
+    (
+        with_override,
+        default,
+        (streamed_reasoning, streamed_content),
+    ) = await asyncio.gather(
+        create(override),
+        create({"thinking_token_budget": THINK_BUDGET}),
+        stream(),
+    )
+
+    message = with_override.choices[0].message
+    assert message.reasoning.rstrip().endswith(phrase)
+    assert phrase not in (message.content or "")
+    assert streamed_reasoning.rstrip().endswith(phrase)
+    assert phrase not in streamed_content
+    assert phrase not in (default.choices[0].message.reasoning or "")
+
+    with pytest.raises(openai.BadRequestError, match="reasoning_end_str"):
+        await create({**override, "reasoning_end_str": phrase})
+
+
+@pytest.mark.asyncio
 @multi_gpu_only(num_gpus=2)
 @requires_fp8
 async def test_thinking_token_budget_qwen35_fp8_mtp_concurrent_mixed_budget_and_plain(

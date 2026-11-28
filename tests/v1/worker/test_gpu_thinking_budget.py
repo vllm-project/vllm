@@ -311,3 +311,117 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
 
     assert out[0, END_B] == pytest.approx(1.0e9)
     assert out[0, END_A] == 0
+
+
+def test_v2_thinking_budget_uses_per_request_end_sequence():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[END_A, END_B, END]
+    )
+    state.add_request(3, params)
+    state.apply_staged_writes()
+
+    logits = torch.zeros((3, VOCAB_SIZE), device=DEVICE)
+    out = _apply(
+        state,
+        logits,
+        input_ids=[12, END_A, END_B],
+        local_pos=[0, 1, 2],
+    )
+
+    assert out[0, END_A] == pytest.approx(1.0e9)
+    assert out[1, END_B] == pytest.approx(1.0e9)
+    assert out[2, END] == pytest.approx(1.0e9)
+
+
+def test_v2_thinking_budget_reused_slot_restores_default_end_sequence():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[END_A, END_B, END]
+    )
+    state.add_request(3, params)
+    state.apply_staged_writes()
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[12], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
+    assert out[0, END_A] == 0
+
+
+def test_v2_thinking_budget_mixed_end_sequences_in_one_batch():
+    """Rows with different end sequences (and lengths) force their own ids."""
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    req_states.add_request(
+        req_id="req2",
+        prompt_len=1,
+        all_token_ids=[1, START, 10, 11, 12, 13],
+        num_computed_tokens=6,
+        max_tokens=32,
+    )
+    req_states.apply_staged_writes()
+    idx1 = req_states.req_id_to_index["req"]
+    idx2 = req_states.req_id_to_index["req2"]
+    phrase = list(range(20, 60))
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[*phrase, END]
+    )
+    state.add_request(idx1, params)
+    state.add_request(idx2, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    # Row 0: req's last committed token; rows 1-2: req's drafts, the first
+    # two phrase tokens. Row 3: req2, which uses the default `END`.
+    input_ids = [12, phrase[0], phrase[1], 13]
+    idx_mapping = torch.tensor([idx1, idx2], dtype=torch.int32, device=DEVICE)
+    logits = torch.zeros((4, VOCAB_SIZE), device=DEVICE)
+    state.apply(
+        logits,
+        LogitsContext(
+            expanded_idx_mapping=torch.tensor(
+                [idx1, idx1, idx1, idx2], dtype=torch.int32, device=DEVICE
+            ),
+            idx_mapping=idx_mapping,
+            idx_mapping_np=idx_mapping.cpu().numpy(),
+            expanded_local_pos=torch.tensor(
+                [0, 1, 2, 0], dtype=torch.int32, device=DEVICE
+            ),
+            input_ids=torch.tensor(input_ids, dtype=torch.int32, device=DEVICE),
+            pos=torch.zeros(4, dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(2, 4, dtype=np.int64),
+        ),
+    )
+    out = logits.cpu()
+
+    assert out[0, phrase[0]] == pytest.approx(1.0e9)
+    assert out[1, phrase[1]] == pytest.approx(1.0e9)
+    assert out[2, phrase[2]] == pytest.approx(1.0e9)
+    assert out[3, END] == pytest.approx(1.0e9)
+    assert torch.count_nonzero(out) == 4
+
+
+def test_v2_thinking_budget_continues_longest_end_sequence_past_window_start():
+    """A max-length end sequence nearly complete after a long history: only the
+    longest prefix (127 tokens) continues, from the window's last lanes."""
+    phrase = [20 + i % 60 for i in range(127)]
+    tokens = [1, START, *([10] * 130), *phrase]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(
+        3,
+        SamplingParams(
+            thinking_token_budget=3, _reasoning_end_token_ids=[*phrase, END]
+        ),
+    )
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[phrase[-1]], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
+    assert torch.count_nonzero(out) == 1

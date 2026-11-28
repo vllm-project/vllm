@@ -86,6 +86,11 @@ class CPUThinkingBudgetState:
         self.reasoning_start_token_ids = tuple(start_ids)
         self.natural_reasoning_end_token_ids = tuple(natural_end_ids)
         self.reasoning_end_token_ids = tuple(end_ids)
+        # Forced end sequence per request: the server default above, or the
+        # request's `reasoning_end_str` override.
+        self.req_reasoning_end_token_ids: list[tuple[int, ...]] = [
+            self.reasoning_end_token_ids
+        ] * self.max_num_reqs
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         if not self.enabled:
@@ -100,6 +105,10 @@ class CPUThinkingBudgetState:
             self.cached_last_start[req_idx] = -1
             self.cached_last_end[req_idx] = -1
             self.cached_scan_pos[req_idx] = 0
+            req_end_ids = sampling_params.reasoning_end_token_ids
+            self.req_reasoning_end_token_ids[req_idx] = (
+                tuple(req_end_ids) if req_end_ids else self.reasoning_end_token_ids
+            )
         self.thinking_token_budget[req_idx] = budget
         return use_thinking_budget
 
@@ -163,11 +172,12 @@ class CPUThinkingBudgetState:
             total_len = total_lens[req_idx]
             local_pos = int(ctx.expanded_local_pos[row])
             first_row = row - local_pos
+            end_ids = self.req_reasoning_end_token_ids[req_idx]
             overlap = (
                 max(
                     len(self.reasoning_start_token_ids),
                     len(self.natural_reasoning_end_token_ids),
-                    len(self.reasoning_end_token_ids),
+                    len(end_ids),
                 )
                 - 1
             )
@@ -199,14 +209,10 @@ class CPUThinkingBudgetState:
                 continue
 
             end_prefix_len = 0
-            for prefix_len in range(
-                1, min(len(tokens), len(self.reasoning_end_token_ids) - 1) + 1
-            ):
-                if tokens[-prefix_len:] == list(
-                    self.reasoning_end_token_ids[:prefix_len]
-                ):
+            for prefix_len in range(1, min(len(tokens), len(end_ids) - 1) + 1):
+                if tokens[-prefix_len:] == list(end_ids[:prefix_len]):
                     end_prefix_len = prefix_len
-            logits[row, self.reasoning_end_token_ids[end_prefix_len]] = 1.0e9
+            logits[row, end_ids[end_prefix_len]] = 1.0e9
 
 
 class CPUTraceReplayState:

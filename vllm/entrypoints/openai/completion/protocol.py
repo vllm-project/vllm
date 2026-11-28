@@ -34,6 +34,7 @@ from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
+    ReasoningEndStr,
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
@@ -290,6 +291,7 @@ class CompletionRequest(OpenAIBaseModel):
             "-1 means unlimited (treated as unset)."
         ),
     )
+    reasoning_end_str: ReasoningEndStr = None
 
     stream_interval: Annotated[int, Field(ge=1)] | None = Field(
         default=None,
@@ -439,6 +441,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            reasoning_end_str=self.reasoning_end_str,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 
@@ -525,6 +528,16 @@ class CompletionRequest(OpenAIBaseModel):
             )
         validate_structured_outputs_structural_tag(structured_outputs_kwargs)
         return data
+
+    @model_validator(mode="after")
+    def check_reasoning_end_str(self) -> "CompletionRequest":
+        # After validation, so that `use_beam_search` is already a bool.
+        if self.reasoning_end_str is not None and self.use_beam_search:
+            raise VLLMValidationError(
+                "`reasoning_end_str` is not supported with beam search.",
+                parameter="reasoning_end_str",
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod

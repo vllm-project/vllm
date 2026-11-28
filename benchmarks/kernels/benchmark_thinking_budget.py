@@ -11,20 +11,27 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
 
 START_TOKEN_ID = 90
 END_TOKEN_ID = 91
 TOKEN_ID = 10
-VOCAB_SIZE = 128
+PHRASE_TOKEN_ID = 128
+VOCAB_SIZE = 512
 QUANTILES = [0.5, 0.2, 0.8]
 
 
 class ReasoningConfig:
-    reasoning_start_token_ids = [START_TOKEN_ID]
-    reasoning_end_token_ids = [END_TOKEN_ID]
-    natural_reasoning_end_token_ids = [END_TOKEN_ID]
+    """Forced end sequence of `end_len` tokens: a transition phrase followed by
+    the natural end marker, like `reasoning_end_str` in `--reasoning-config`."""
+
+    def __init__(self, end_len: int = 1) -> None:
+        phrase = range(PHRASE_TOKEN_ID, PHRASE_TOKEN_ID + end_len - 1)
+        self.reasoning_start_token_ids = [START_TOKEN_ID]
+        self.reasoning_end_token_ids = [*phrase, END_TOKEN_ID]
+        self.natural_reasoning_end_token_ids = [END_TOKEN_ID]
 
 
 @dataclasses.dataclass(slots=True)
@@ -41,6 +48,7 @@ def create_case(
     history_type: Literal["reasoning", "prefill"] = "reasoning",
     batch_size: int = 1,
     budget_type: Literal["active", "forced", "mixed"] = "active",
+    end_len: int = 1,
 ) -> BenchmarkCase:
     assert history_len >= 2
     if history_type == "prefill":
@@ -68,7 +76,8 @@ def create_case(
         req_indices.append(req_states.req_id_to_index[req_id])
     req_states.apply_staged_writes()
 
-    state = ThinkingBudgetState(req_states, ReasoningConfig())
+    reasoning_config = ReasoningConfig(end_len)
+    state = ThinkingBudgetState(req_states, reasoning_config)
     active_budget = history_len + extra_tokens + 1
     forced_budget = max(1, history_len - 2)
     for req_num, req_idx in enumerate(req_indices):
@@ -87,18 +96,18 @@ def create_case(
     idx_mapping = torch.tensor(req_indices, dtype=torch.int32, device=device)
     logits = torch.zeros((batch_size, VOCAB_SIZE), device=device)
     idx_mapping_np = idx_mapping.cpu().numpy()
-    input_ids = torch.full((batch_size,), TOKEN_ID, dtype=torch.int32, device=device)
-    local_pos = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    ctx = LogitsContext(
+        expanded_idx_mapping=idx_mapping,
+        idx_mapping=idx_mapping,
+        idx_mapping_np=idx_mapping_np,
+        expanded_local_pos=torch.zeros(batch_size, dtype=torch.int32, device=device),
+        input_ids=torch.full((batch_size,), TOKEN_ID, dtype=torch.int32, device=device),
+        pos=torch.zeros(batch_size, dtype=torch.int32, device=device),
+        seq_lens_upper_bound_np=np.full(batch_size, history_len, dtype=np.int64),
+    )
 
     def run() -> None:
-        state.apply(
-            logits,
-            idx_mapping,
-            idx_mapping,
-            idx_mapping_np,
-            input_ids,
-            local_pos,
-        )
+        state.apply(logits, ctx)
 
     run()
     torch.accelerator.synchronize(device)
@@ -109,7 +118,8 @@ def create_case(
     ]
     assert torch.all(state.cached_scan_pos[active_req_indices] == history_len).item()
     if budget_type == "forced":
-        assert torch.all(logits[:, END_TOKEN_ID] == 1.0e9).item()
+        first_forced = reasoning_config.reasoning_end_token_ids[0]
+        assert torch.all(logits[:, first_forced] == 1.0e9).item()
     return BenchmarkCase(req_states, state, run)
 
 
@@ -229,6 +239,15 @@ def main() -> None:
         default=[1, 8, 32],
         help="Batch sizes used by batched-budgeted and batched-mixed modes.",
     )
+    parser.add_argument(
+        "--end-len",
+        type=int,
+        default=1,
+        help=(
+            "Length of the forced end sequence (1 = just the end marker). "
+            "Longer sequences exercise the prefix match of forced-end modes."
+        ),
+    )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument(
         "--warmup-ms",
@@ -274,6 +293,8 @@ def main() -> None:
     batch_sizes = sorted(set(args.batch_sizes))
     if not batch_sizes or batch_sizes[0] <= 0:
         parser.error("batch sizes must be positive")
+    if not 1 <= args.end_len <= VOCAB_SIZE - PHRASE_TOKEN_ID:
+        parser.error(f"end length must be in [1, {VOCAB_SIZE - PHRASE_TOKEN_ID}]")
 
     device = torch.device(args.device)
     results: dict[str, dict[int, tuple[float, float, float]]] = {}
@@ -288,7 +309,7 @@ def main() -> None:
             mode_results: dict[int, tuple[float, float, float]] = {}
             for history_len in history_lengths:
                 if mode == "cached":
-                    case = create_case(history_len, device)
+                    case = create_case(history_len, device, end_len=args.end_len)
                     result = benchmark_cached(case, args.warmup_ms, args.rep_ms)
                 elif mode == "incremental-decode":
                     result = benchmark_incremental_decode(
@@ -326,6 +347,7 @@ def main() -> None:
                         device,
                         batch_size=batch_size,
                         budget_type=budget_type,
+                        end_len=args.end_len,
                     )
                     result = benchmark_cached(case, args.warmup_ms, args.rep_ms)
                 mode_results[history_len] = result
