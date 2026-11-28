@@ -339,16 +339,25 @@ class KVCacheCoordinator(ABC):
             )
 
     def emit_cached_block_events(
-        self, request: Request, computed_blocks: tuple[list[KVCacheBlock], ...]
+        self,
+        request: Request,
+        computed_blocks: tuple[list[KVCacheBlock], ...],
+        num_cached_tokens: int,
     ) -> None:
         for group_idx, group_blocks in enumerate(computed_blocks):
             if group_blocks:
                 manager = self.single_type_managers[group_idx]
+                # HiSparse can retain host blocks beyond the reusable prefix.
+                group_blocks = group_blocks[
+                    : cdiv(num_cached_tokens, manager.block_size)
+                ]
                 manager.block_pool.emit_cached_block_events(
                     request,
                     len(group_blocks),
                     manager.block_size,
                     group_idx,
+                    cached_blocks=group_blocks,
+                    num_cached_tokens=num_cached_tokens,
                 )
 
     def reset_prefix_cache(self) -> bool:

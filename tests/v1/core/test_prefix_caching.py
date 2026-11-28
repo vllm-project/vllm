@@ -296,6 +296,7 @@ def make_hisparse_kv_cache_manager(
     max_model_len: int = 128,
     max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
+    enable_kv_cache_events: bool = False,
     num_reprefillable_tokens: int = 0,
     num_hash_lookahead_tokens: int = 0,
     vllm_config: VllmConfig | None = None,
@@ -308,6 +309,7 @@ def make_hisparse_kv_cache_manager(
         max_model_len=max_model_len,
         max_in_flight_tokens=max_in_flight_tokens,
         enable_caching=enable_caching,
+        enable_kv_cache_events=enable_kv_cache_events,
         hash_block_size=HISPARSE_BLOCK_SIZE,
         num_reprefillable_tokens=num_reprefillable_tokens,
         num_hash_lookahead_tokens=num_hash_lookahead_tokens,
@@ -548,12 +550,14 @@ def test_hisparse_readmitted_request_resends_its_full_residency():
     )
 
 
-def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
+@pytest.mark.parametrize("full_report", [False, True])
+def test_hisparse_host_prefix_can_be_completed_by_indexer_offload(full_report: bool):
     """Restore the final host page when completing an indexer-only import."""
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
         enable_caching=True,
+        enable_kv_cache_events=full_report,
     )
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
@@ -567,12 +571,31 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     evicted_indexer_id = indexer_blocks[2].block_id
     manager.free(original)
     manager.block_pool.evict_blocks({evicted_indexer_id})
+    manager.take_events()
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    if full_report:
+        resumed.kv_cache_report_mode = "full"
     blocks, num_local, _ = manager.get_computed_blocks(resumed)
     max_completion = HISPARSE_BLOCK_SIZE
     assert num_local == 2 * HISPARSE_BLOCK_SIZE
     assert [len(group_blocks) for group_blocks in blocks.blocks] == [3, 2, 0, 0]
+    events = manager.take_events()
+    if full_report:
+        assert len(events) == 2
+        hashes = [
+            kv_cache_utils.maybe_convert_block_hash(h) for h in resumed.block_hashes[:2]
+        ]
+        assert {event.group_idx for event in events} == {0, 1}
+        for event in events:
+            assert isinstance(event, BlockStored)
+            assert event.block_hashes == hashes
+            assert event.token_ids == tokens[:num_local]
+            assert event.block_size == HISPARSE_BLOCK_SIZE
+            assert event.parent_block_hash is None
+            assert event.medium == (MEDIUM_CPU if event.group_idx == 0 else MEDIUM_GPU)
+    else:
+        assert events == []
 
     allocated = _allocate_scheduled(
         manager,
@@ -4818,6 +4841,100 @@ def test_hash_lookahead_identical_prompt_hit(
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(resend)
     assert len(computed_blocks.blocks[0]) == expected_blocks
     assert num_tokens == expected_blocks * block_size
+
+
+@pytest.mark.parametrize(
+    "num_hit_tokens,dcp_world_size",
+    [(n, d) for n in (80, 96, 112, 128) for d in (1, 2)],
+)
+def test_emit_cached_block_events_for_sparse_mamba_hit(
+    num_hit_tokens: int, dcp_world_size: int
+):
+    """Report registered residency without changing the shorter reusable hit."""
+    hash_block_size = 16
+    block_size = 64
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(
+            block_size, num_blocks=64, spec_types=["full", "mamba"]
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=block_size * dcp_world_size,
+    )
+    token_ids = list(range(num_hit_tokens + 1))
+    producer = make_request("producer", token_ids, hash_block_size, sha256)
+    assert manager.allocate_slots(producer, num_hit_tokens) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+    manager.take_events()
+
+    consumer = make_request("consumer", token_ids, hash_block_size, sha256)
+    consumer.kv_cache_report_mode = "full"
+    blocks, num_computed, _ = manager.get_computed_blocks(consumer)
+
+    assert num_computed == num_hit_tokens
+    assert blocks.blocks[1][0].is_null
+    events = [
+        event for event in manager.take_events() if isinstance(event, BlockStored)
+    ]
+    attention_events = [event for event in events if event.group_idx == 0]
+    attention_block_size = block_size * dcp_world_size
+    attention_ends = list(
+        range(attention_block_size, num_hit_tokens + 1, attention_block_size)
+    )
+    if num_hit_tokens % attention_block_size:
+        attention_ends.append(num_hit_tokens)
+    hashes = [kv_cache_utils.maybe_convert_block_hash(h) for h in consumer.block_hashes]
+    assert [h for event in attention_events for h in event.block_hashes] == [
+        hashes[end // hash_block_size - 1] for end in attention_ends
+    ]
+    assert attention_events[-1].block_size == (
+        hash_block_size
+        if attention_ends[-1] % attention_block_size
+        else attention_block_size
+    )
+    (event,) = [event for event in events if event.group_idx == 1]
+    event_block_size = hash_block_size if num_hit_tokens % block_size else block_size
+    event_start = num_hit_tokens - event_block_size
+    assert event.block_hashes == [hashes[num_hit_tokens // hash_block_size - 1]]
+    assert event.parent_block_hash == hashes[event_start // hash_block_size - 1]
+    assert event.token_ids == token_ids[event_start:num_hit_tokens]
+    assert event.block_size == event_block_size
+
+
+@pytest.mark.parametrize("lookahead", [0, 1])
+def test_emit_cached_block_events_for_shortened_registered_entry(lookahead: int):
+    """Re-report H112's store metadata when only 96 tokens are reused."""
+    hash_block_size, block_size = 16, 64
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    request = make_request(
+        "request",
+        list(range(113)),
+        hash_block_size,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(request, blocks, 0, 1, block_size, 0)
+    pool.cache_partial_block(request, blocks[1], 112, 0, block_size)
+    full_event, partial_event = pool.take_events()
+    assert pool.get_cached_block(request.block_hashes[5], [0]) is None
+
+    pool.emit_cached_block_events(
+        request, 2, block_size, 0, cached_blocks=blocks, num_cached_tokens=96
+    )
+
+    assert pool.take_events() == [full_event, partial_event]
+    assert pool.get_cached_block(request.block_hashes[5], [0]) is None
 
 
 @pytest.mark.parametrize("lookahead", [1, 3])
