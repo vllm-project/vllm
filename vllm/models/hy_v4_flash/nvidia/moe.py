@@ -61,14 +61,17 @@ class HYV4FlashFeedForward(HYV4FeedForward):
         config: HYV4FlashConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
+        defer_reduction: bool = False,
     ) -> None:
+        self.defer_reduction = defer_reduction
         self.defer_allreduce = _defers_allreduce(config)
+        self.fuse_post_reduce_norm = self.defer_allreduce
         super().__init__(
             config.hidden_size,
             config.intermediate_size,
             config.hidden_act,
             quant_config=quant_config,
-            reduce_results=not self.defer_allreduce,
+            reduce_results=not (self.defer_allreduce or defer_reduction),
             prefix=prefix,
         )
         self.post_fc2_norm = (
@@ -77,8 +80,15 @@ class HYV4FlashFeedForward(HYV4FeedForward):
             else None
         )
 
+    @property
+    def post_reduce_norm(self) -> RMSNorm | None:
+        return self.post_fc2_norm
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return _post_norm(self.post_fc2_norm, super().forward(x), self.defer_allreduce)
+        result = super().forward(x)
+        if self.defer_reduction:
+            return result
+        return _post_norm(self.post_fc2_norm, result, self.defer_allreduce)
 
 
 class HYV4FlashMoE(HYV4MoEFused):
@@ -87,6 +97,7 @@ class HYV4FlashMoE(HYV4MoEFused):
         config: HYV4FlashConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
+        defer_reduction: bool = False,
     ) -> None:
         latent = config.routed_expert_hidden_size
         down: nn.Module | None = None
@@ -106,6 +117,7 @@ class HYV4FlashMoE(HYV4MoEFused):
                 quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_up_proj",
             )
+        self.defer_reduction = defer_reduction
         defer_allreduce = _defers_allreduce(config)
         super().__init__(
             config,
@@ -114,18 +126,22 @@ class HYV4FlashMoE(HYV4MoEFused):
             routed_hidden_size=latent,
             routed_input_transform=down,
             routed_output_transform=up,
-            reduce_results=not defer_allreduce,
+            reduce_results=not (defer_allreduce or defer_reduction),
         )
         self.defer_allreduce = defer_allreduce
+        self.fuse_post_reduce_norm = defer_allreduce
         self.combine_output_norm = (
             RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             if config.sandwich_norm
             else None
         )
 
+    @property
+    def post_reduce_norm(self) -> RMSNorm | None:
+        return self.combine_output_norm
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return _post_norm(
-            self.combine_output_norm,
-            super().forward(hidden_states),
-            self.defer_allreduce,
-        )
+        result = super().forward(hidden_states)
+        if self.defer_reduction:
+            return result
+        return _post_norm(self.combine_output_norm, result, self.defer_allreduce)

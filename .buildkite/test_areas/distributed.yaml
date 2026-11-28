@@ -579,6 +579,8 @@ steps:
   - vllm/models/hy_v4/common/mrope.py
   - vllm/models/hy_v4/common/sequence_parallel.py
   - vllm/models/hy_v4/weight_utils.py
+  - vllm/models/hy_v4_flash/nvidia/
+  - vllm/models/hy_v4_flash/common/
   - vllm/models/common/ops/sequence_parallel.py
   - vllm/model_executor/layers/attention/
   - vllm/model_executor/models/deepseek_v2.py
@@ -591,12 +593,14 @@ steps:
   - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
   - tests/models/hy_v4/test_shardq_sinks.py
   - tests/models/hy_v4/test_sequence_parallel.py
+  - tests/models/hy_v4/test_flash_sequence_parallel.py
   commands:
   - >-
     pytest -v -s
     tests/models/deepseek_v32/test_shardq_sequence_parallel.py
     tests/models/hy_v4/test_shardq_sinks.py
     tests/models/hy_v4/test_sequence_parallel.py
+    tests/models/hy_v4/test_flash_sequence_parallel.py
   mirror:
     amd:
       label: ":amd: (MI355) HY4 Distributed"
