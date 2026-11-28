@@ -46,16 +46,17 @@ def test_checkpoints_are_states_at_their_offsets(
 ) -> None:
     """Row n of the buffer is sequence n's final state cut at its offset.
 
-    Only offsets on the 64-token chunk grid strictly inside a sequence are
-    stored: 0 means none, 128 is the whole 128-token sequence and 100 is off
-    the grid, and their rows are left untouched. Storing checkpoints leaves the
-    outputs and final states unchanged.
+    Offsets strictly inside a sequence are stored, whether they fall on the
+    64-token chunk grid (128, 256, 64) or inside a chunk (100, 3, 65, 191).
+    0 means none and 128 is the whole 128-token sequence, and their rows are
+    left untouched. Storing checkpoints leaves the outputs and final states
+    unchanged.
     """
     torch.set_default_device(current_platform.device_type)
     set_random_seed(0)
-    seq_lens = [300, 50, 257, 128, 200, 192]
-    offsets = [128, 0, 256, 128, 100, 64]
-    stored = [0, 2, 5]
+    seq_lens = [300, 50, 257, 128, 200, 192, 70, 200, 192]
+    offsets = [128, 0, 256, 128, 100, 64, 3, 65, 191]
+    stored = [0, 2, 4, 5, 6, 7, 8]
     num_tokens = sum(seq_lens)
     q, k = (
         F.normalize(

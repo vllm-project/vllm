@@ -906,6 +906,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 and current_platform.is_cuda_alike()
             ):
                 self._checkpoint_alignment = FLA_CHUNK_SIZE
+                # The chunk kernel also stores states inside a chunk, so an
+                # offset only has to cover the conv window.
+                self.min_unaligned_checkpoint_offset = self.conv_kernel_size - 1
         if self._checkpoint_alignment is not None:
             self._max_num_batched_tokens = (
                 vllm_config.scheduler_config.max_num_batched_tokens

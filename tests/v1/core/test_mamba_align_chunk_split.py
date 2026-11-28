@@ -61,6 +61,9 @@ MAMBA_GROUP_ID = 1
         (15360, 16960, 16896, 128, 1536, 16, True),
         (15360, 16960, 16768, 128, 1536, 16, True),
         (16064, 18433, 18432, 128, 1536, 16, False),
+        # A hit and a checkpoint off the 64-token grid.
+        (784, 1252, 1248, 16, 576, 64, False),
+        (784, 1252, 1248, 16, 576, 1, True),
     ],
 )
 def test_mamba_prefill_checkpoint_valid(
@@ -137,6 +140,7 @@ def _split(
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
     num_hash_lookahead_tokens: int = 0,
+    checkpoint_alignment: int = 16,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     stub = SimpleNamespace(
@@ -151,7 +155,7 @@ def _split(
         hash_block_size=ATTN_BLOCK_SIZE,
         mamba_has_prefill_checkpoint_blocks=(num_prefill_checkpoint_blocks > 0),
         mamba_prefill_checkpoint_alignment=(
-            16 if num_prefill_checkpoint_blocks > 0 else None
+            checkpoint_alignment if num_prefill_checkpoint_blocks > 0 else None
         ),
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
@@ -209,6 +213,30 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
             num_prefill_checkpoint_blocks=1,
         )
         == prompt_len - resume_at
+    )
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_alignment", "expected"),
+    # On a 64-token grid the chunk stops at the block boundary; a backend that
+    # exports at any offset runs the rest of the prompt at once.
+    [(64, 2 * MAMBA_BLOCK_SIZE - 1632), (1, 3602 - 1632)],
+)
+def test_off_grid_hit_with_internal_checkpoint(
+    checkpoint_alignment: int, expected: int
+) -> None:
+    (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = 1632
+
+    assert (
+        _split(
+            request,
+            3602 - 1632,
+            partial_hit=True,
+            num_prefill_checkpoint_blocks=1,
+            checkpoint_alignment=checkpoint_alignment,
+        )
+        == expected
     )
 
 

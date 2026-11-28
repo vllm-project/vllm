@@ -44,7 +44,11 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
 )
 @triton.jit(
     do_not_specialize=["T"],
-    do_not_specialize_on_alignment=["cu_seqlens", "chunk_offsets", "checkpoint_offsets"],
+    do_not_specialize_on_alignment=[
+        "cu_seqlens",
+        "chunk_offsets",
+        "checkpoint_offsets",
+    ],
 )
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     k,
@@ -117,10 +121,16 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     if STORE_FINAL_STATE:
         ht = ht + i_nh.to(tl.int64) * V * K
     if STORE_CHECKPOINT:
-        # The state after o_c tokens is the one entering chunk o_c / BT. Only
-        # offsets on a chunk boundary strictly inside the sequence are stored.
+        # The checkpoint falls r_c tokens into chunk i_c. Only offsets strictly
+        # inside the sequence are stored. On a chunk boundary (r_c == 0) it is
+        # the state entering the chunk. Inside a chunk it also needs the chunk's
+        # first r_c tokens, which is supported without gk only.
         o_c = tl.load(checkpoint_offsets + i_n).to(tl.int32)
-        i_c = tl.where((o_c > 0) & (o_c % BT == 0) & (o_c < T), o_c // BT, -1)
+        r_c = o_c % BT
+        is_stored = (o_c > 0) & (o_c < T)
+        if USE_GK:
+            is_stored = is_stored & (r_c == 0)
+        i_c = tl.where(is_stored, o_c // BT, -1)
         checkpoint_state = checkpoint_state + i_nh.to(tl.int64) * V * K
 
     # load initial state
@@ -171,7 +181,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             m_h4 = m_v[:, None] & m_k4[None, :]
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_h4)
         if STORE_CHECKPOINT:
-            if i_t == i_c:
+            if (i_t == i_c) & (r_c == 0):
                 # From the fp32 accumulator, unlike h.
                 p_c = checkpoint_state + o_v[:, None] * K + o_k1[None, :]
                 tl.store(p_c, b_h1.to(p_c.dtype.element_ty), mask=m_h1)
@@ -208,6 +218,55 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             tl.store(
                 p_v, b_v.to(p_v.dtype.element_ty), mask=m_t[:, None] & m_v[None, :]
             )
+
+        if STORE_CHECKPOINT and not USE_GK:
+            if (i_t == i_c) & (r_c != 0):
+                # The chunk update below, cut after r_c tokens. v_new of a token
+                # depends only on the tokens before it, so this is the final
+                # state of a prefill that ends at the checkpoint.
+                m_c = o_t < o_c
+                b_v_c = b_v
+                b_g_c = 1.0
+                if USE_G:
+                    b_g_c_last = tl.load(g + (bos + o_c - 1).to(tl.int64) * H + i_h)
+                    b_g = tl.load(g + bos * H + i_h + o_t * H, mask=m_c, other=0.0)
+                    if USE_EXP2:
+                        b_v_c = b_v * tl.where(m_c, exp2(b_g_c_last - b_g), 0)[:, None]
+                        b_g_c = exp2(b_g_c_last)
+                    else:
+                        b_v_c = b_v * tl.where(m_c, exp(b_g_c_last - b_g), 0)[:, None]
+                        b_g_c = exp(b_g_c_last)
+                else:
+                    b_v_c = b_v * tl.where(m_c, 1.0, 0.0)[:, None]
+                b_v_c = b_v_c.to(k.dtype.element_ty)
+
+                p_k = k + o_k1[:, None] + o_t[None, :] * stride_k
+                b_k = tl.load(p_k, mask=m_k1[:, None] & m_c[None, :], other=0.0)
+                b_c = b_h1 * b_g_c + tl.trans(tl.dot(b_k, b_v_c))
+                p_c = checkpoint_state + o_v[:, None] * K + o_k1[None, :]
+                m_c1 = m_v[:, None] & m_k1[None, :]
+                tl.store(p_c, b_c.to(p_c.dtype.element_ty), mask=m_c1)
+                if K > 64:
+                    p_k = k + o_k2[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k2[:, None] & m_c[None, :], other=0.0)
+                    b_c = b_h2 * b_g_c + tl.trans(tl.dot(b_k, b_v_c))
+                    p_c = checkpoint_state + o_v[:, None] * K + o_k2[None, :]
+                    m_c2 = m_v[:, None] & m_k2[None, :]
+                    tl.store(p_c, b_c.to(p_c.dtype.element_ty), mask=m_c2)
+                if K > 128:
+                    p_k = k + o_k3[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k3[:, None] & m_c[None, :], other=0.0)
+                    b_c = b_h3 * b_g_c + tl.trans(tl.dot(b_k, b_v_c))
+                    p_c = checkpoint_state + o_v[:, None] * K + o_k3[None, :]
+                    m_c3 = m_v[:, None] & m_k3[None, :]
+                    tl.store(p_c, b_c.to(p_c.dtype.element_ty), mask=m_c3)
+                if K > 192:
+                    p_k = k + o_k4[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k4[:, None] & m_c[None, :], other=0.0)
+                    b_c = b_h4 * b_g_c + tl.trans(tl.dot(b_k, b_v_c))
+                    p_c = checkpoint_state + o_v[:, None] * K + o_k4[None, :]
+                    m_c4 = m_v[:, None] & m_k4[None, :]
+                    tl.store(p_c, b_c.to(p_c.dtype.element_ty), mask=m_c4)
 
         last_idx = min((i_t.to(tl.int64) + 1) * BT, T) - 1
         if USE_G:
@@ -328,8 +387,8 @@ def chunk_gated_delta_rule_fwd_h(
         checkpoint_state: Contiguous `[N, H, V, K]` buffer; row `n` receives
             sequence `n`'s state after `checkpoint_offsets[n]` tokens.
         checkpoint_offsets: `[N]` token offset into each sequence; `0` for
-            none. Only multiples of `chunk_size` below the sequence length are
-            stored, and other rows are left untouched.
+            none. Offsets below the sequence length are stored, and with `gk`
+            only multiples of `chunk_size`. Other rows are left untouched.
 
     Returns:
         The per-chunk states, the new values if `save_new_value`, and the final

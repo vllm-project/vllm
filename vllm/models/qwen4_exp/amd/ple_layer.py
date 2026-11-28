@@ -446,6 +446,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self.conv_kernel_size = int(config.ple_conv_kernel_size)
         self.short_conv_dilation = int(config.ngram_size)
         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
+        self.min_unaligned_checkpoint_offset = self.conv_state_len
         # The conv window ending at a checkpoint is a copy of its last inputs.
         self._checkpoint_exporter = MambaPrefillCheckpointExporter(
             state_len=self.conv_state_len
