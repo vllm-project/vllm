@@ -2841,6 +2841,11 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
     @classmethod
+    def prefix_cacheable(cls, config: ManagerConfig) -> bool:
+        # Encoder states are request-specific, so no block is shared.
+        return False
+
+    @classmethod
     def max_allocated_blocks_per_request(
         cls,
         config: ManagerConfig,
@@ -2873,18 +2878,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     ) -> None:
         # Cross-attention does not use prefix caching / external KV loads.
         return
-
-    def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-        *,
-        replay_boundaries: Sequence[int],
-    ) -> None:
-        # We do not cache blocks for cross-attention to be shared between
-        # requests, so this method is not relevant.
-        raise ValueError("Should not be called as prefix caching is disabled.")
 
     @classmethod
     def find_longest_cache_hit(

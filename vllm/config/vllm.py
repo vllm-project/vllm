@@ -1650,6 +1650,19 @@ class VllmConfig:
             )
             self.cache_config.enable_prefix_caching = False
 
+        if (
+            self.model_config is not None
+            and self.model_config.is_encoder_decoder
+            and self.cache_config.enable_prefix_caching
+        ):
+            # The scheduler takes any computed decoder token as proof that the
+            # encoder already ran, so a prefix hit would skip the encoder and
+            # leave cross-attention without KV.
+            logger.warning(
+                "Encoder-decoder models do not support prefix caching; disabling it."
+            )
+            self.cache_config.enable_prefix_caching = False
+
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 

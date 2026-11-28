@@ -4583,6 +4583,24 @@ def test_is_prefix_caching_supported(
     assert reason in caplog_vllm.text
 
 
+@pytest.mark.parametrize(
+    ("runner", "enable_prefix_caching"), [("generate", True), ("pooling", None)]
+)
+def test_encoder_decoder_disables_prefix_caching(runner, enable_prefix_caching):
+    """Encoder-decoder models run without prefix caching, whether it is
+    requested or is the runner's default: a prefix hit would make the
+    scheduler skip the encoder."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="openai/whisper-tiny",
+        runner=runner,
+        enable_prefix_caching=enable_prefix_caching,
+    ).create_engine_config()
+
+    assert not config.cache_config.enable_prefix_caching
+
+
 def test_replace_keeps_compile_factors_with_blocked_fp8_weights(tmp_path):
     """Caches keyed by the compile factors (the FlashInfer autotune cache,
     compiled graphs) must resolve to the same entry before and after replace()."""
