@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupChoices,
     WarmupIntRange,
@@ -886,7 +887,7 @@ def _max_sampler_batch_size(vllm_config: Any) -> int:
 
 def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
-    split_enabled = current_platform.is_cuda_alike()
+    split_enabled = current_platform.is_cuda_alike() and not envs.VLLM_BATCH_INVARIANT
     mode: Any = WarmupChoices((True, False), (True, True), (False, True))
     logits_stride: Any = WarmupChoices(16, 2)
     batch_size: Any = WarmupIntRange(1, _max_sampler_batch_size(vllm_config) + 1)
@@ -947,6 +948,7 @@ def _topk_topp(
         current_platform.is_cuda_alike()
         and topp_enabled
         and batch_size <= _SPLIT_MAX_BATCH
+        and not envs.VLLM_BATCH_INVARIANT
     )
     return (num_programs,), dict(
         K=k_ptr,
@@ -1679,7 +1681,10 @@ def apply_top_k_top_p_triton(
     # covers only rows whose top-k is a no-op (k < vocab but <= k finite
     # logits, e.g. grammar masks), which the split pipeline skips.
     use_split = (
-        topp_enabled and batch_size <= _SPLIT_MAX_BATCH and logits.device.type == "cuda"
+        topp_enabled
+        and batch_size <= _SPLIT_MAX_BATCH
+        and logits.device.type == "cuda"
+        and not envs.VLLM_BATCH_INVARIANT
     )
     if use_split and not topk_enabled:
         _apply_topp_split(logits, None, p_ptr, mask_value, num_sm)
