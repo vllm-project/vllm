@@ -133,7 +133,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.utils import RankLocalTransform, WeightsMapper
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -821,7 +821,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         encoding = self.weight_scale_encoding
         if encoding is None:
             return mapper
-        transform = csf_weights_transform((encoding,))
+        transform = RankLocalTransform(csf_weights_transform((encoding,)))
         return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
@@ -2169,7 +2169,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         }
         if not encodings:
             return mapper
-        transform = csf_weights_transform(encodings)
+        transform = RankLocalTransform(csf_weights_transform(encodings))
         return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
