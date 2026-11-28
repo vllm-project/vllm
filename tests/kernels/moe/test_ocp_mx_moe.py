@@ -13,7 +13,8 @@ from tests.kernels.moe.utils import (
     check_deferred_moe_finalize,
     make_dummy_moe_config,
 )
-from tests.kernels.utils import torch_moe
+from tests.kernels.utils import torch_experts, torch_moe
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import (
     is_aiter_found,
     is_aiter_found_and_supported,
@@ -21,6 +22,7 @@ from vllm._aiter_ops import (
 )
 from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
     activation_quant_dtype,
+    has_quark,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
@@ -3079,6 +3081,152 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
         "w_mxfp4_a_mxfp6_e3m2 output is bit-identical to weight-only w_mxfp4:"
         " the emulation never fake-quantized the activations"
     )
+
+
+@pytest.mark.skipif(
+    not (has_quark() and current_platform.supports_fp8()),
+    reason="Requires amd-quark and FP8 support",
+)
+@override_parallel_groups(SingleRankGroup())
+@torch.inference_mode()
+def test_mxfp4_emulation_a_fp8_routed_experts_forward(
+    tmp_path, workspace_init, caplog, disable_log_dedup
+):
+    """Non-gpt-oss QuarkOCP_MX_MoEMethod w_mxfp4_a_fp8 layers reduce 1-D
+    per-expert input scales to 0-D float32 max scalars on EMULATION so
+    static_scaled_fp8_quant executes cleanly and matches reference accuracy."""
+    from transformers import Qwen3MoeConfig
+
+    from vllm.config import (
+        KernelConfig,
+        ModelConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    num_experts, topk, hidden_size, inter_size = 8, 2, 256, 256
+    Qwen3MoeConfig(
+        num_hidden_layers=1,
+        hidden_size=hidden_size,
+        intermediate_size=inter_size,
+        moe_intermediate_size=inter_size,
+        num_experts=num_experts,
+        num_experts_per_tok=topk,
+        norm_topk_prob=False,
+    ).save_pretrained(tmp_path)
+    quant_config = QuarkConfig(
+        {
+            "global_quant_config": {
+                "weight": {
+                    "dtype": "fp4",
+                    "qscheme": "per_group",
+                    "group_size": 32,
+                    "scale_format": "e8m0",
+                    "is_dynamic": False,
+                },
+                "input_tensors": {
+                    "dtype": "fp8_e4m3",
+                    "qscheme": "per_tensor",
+                    "is_dynamic": False,
+                    "symmetric": True,
+                },
+            },
+            "layer_type_quant_config": {},
+            "exclude": ["model.layers.0.mlp.gate"],
+        }
+    )
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            max_model_len=32,
+            dtype="bfloat16",
+            enforce_eager=True,
+        ),
+        quant_config=quant_config,
+        kernel_config=KernelConfig(moe_backend="emulation"),
+    )
+
+    torch.manual_seed(0)
+    w13, w13_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts,
+            2 * inter_size,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        / 512
+    )
+    w2, w2_scale = mxfp4_quantize(
+        torch.randn(
+            num_experts, hidden_size, inter_size, dtype=torch.bfloat16, device="cuda"
+        )
+        / 64
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        block = Qwen3MoeSparseMoeBlock(vllm_config, prefix="model.layers.0.mlp")
+        layer = block.experts.routed_experts
+        layer.w13_weight.data.copy_(w13)
+        layer.w13_weight_scale.data.copy_(w13_scale)
+        layer.w2_weight.data.copy_(w2)
+        layer.w2_weight_scale.data.copy_(w2_scale)
+        layer.w13_input_scale.data.copy_(
+            torch.linspace(0.5, 1.5, num_experts, device="cuda")
+        )
+        layer.w2_input_scale.data.copy_(
+            torch.linspace(0.25, 1.25, num_experts, device="cuda")
+        )
+        caplog.clear()
+        process_weights_after_loading(
+            block, vllm_config.model_config, torch.device("cuda")
+        )
+
+        # Both stages peak inside (min_scale * qmax, max_scale * qmax) across
+        # e4m3fnuz (qmax=240) and e4m3fn (qmax=448), pinning max() reduction.
+        x = (
+            torch.linspace(-320.0, 320.0, 4 * hidden_size, device="cuda")
+            .reshape(4, hidden_size)
+            .to(torch.bfloat16)
+        )
+        with set_forward_context(None, vllm_config):
+            out = block(x)
+        gate_logits, _ = block.gate(x)
+        topk_weight, topk_ids = torch.topk(
+            torch.softmax(gate_logits.float(), dim=-1), topk
+        )
+        ones = torch.ones(num_experts, device="cuda")
+        ref = torch_experts(
+            x,
+            mxfp4_dequantize(w13, w13_scale).to(torch.bfloat16),
+            mxfp4_dequantize(w2, w2_scale).to(torch.bfloat16),
+            topk_weight,
+            topk_ids,
+            quant_dtype=current_platform.fp8_dtype(),
+            per_act_token_quant=False,
+            w1_scale=ones,
+            w2_scale=ones,
+            a1_scale=torch.tensor(1.5, dtype=torch.float32, device="cuda"),
+            a2_scale=torch.tensor(1.25, dtype=torch.float32, device="cuda"),
+        )
+
+    assert layer.w13_input_scale.ndim == 0
+    assert layer.w13_input_scale.dtype == torch.float32
+    assert layer.w13_input_scale.item() == pytest.approx(1.5)
+    assert layer.w2_input_scale.item() == pytest.approx(1.25)
+    assert "not equal for OCP MX MoE" in caplog.text
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
 
 
 # The emulation dequantizes only the batch's distinct experts, one per slot:

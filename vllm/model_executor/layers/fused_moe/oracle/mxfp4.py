@@ -648,7 +648,6 @@ def _filter_by_activation(
             b
             for b in backends
             if _backend_activation_key(b) == requested_activation_key
-            or b == Mxfp4MoeBackend.EMULATION
         ]
         if envs.VLLM_STRICT_QUANT_SCHEME:
             bf16 = [
@@ -656,7 +655,7 @@ def _filter_by_activation(
                 for b in bf16
                 if _applies_requested_activation(b, requested_activation_key)
             ]
-        return matching + [b for b in bf16 if b not in matching]
+        return matching + bf16
     return bf16 if bf16 else backends
 
 
@@ -957,6 +956,28 @@ def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
         .contiguous()
         .view(num_experts, two_n, inner)
     )
+
+
+def _reduce_emulation_input_scales(
+    layer: torch.nn.Module,
+    w13_input_scale: torch.Tensor | None = None,
+    w2_input_scale: torch.Tensor | None = None,
+) -> None:
+    scales = [
+        (name, scale if scale is not None else getattr(layer, name, None))
+        for name, scale in (
+            ("w13_input_scale", w13_input_scale),
+            ("w2_input_scale", w2_input_scale),
+        )
+    ]
+    if any(s is not None and s.ndim == 1 and not all_close_1d(s) for _, s in scales):
+        logger.warning_once(
+            "Found input_scales that are not equal for OCP MX MoE "
+            "emulation. Using the maximum across experts for each layer."
+        )
+    for name, scale in scales:
+        if scale is not None:
+            replace_parameter(layer, name, scale.max().to(torch.float32))
 
 
 def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
@@ -1549,29 +1570,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
-        w13_has_per_expert_scale = (
-            w13_input_scale is not None
-            and w13_input_scale.ndim == 1
-            and not all_close_1d(w13_input_scale)
-        )
-        w2_has_per_expert_scale = (
-            w2_input_scale is not None
-            and w2_input_scale.ndim == 1
-            and not all_close_1d(w2_input_scale)
-        )
-        if w13_has_per_expert_scale or w2_has_per_expert_scale:
-            logger.warning_once(
-                "Found input_scales that are not equal for OCP MX MoE "
-                "emulation. Using the maximum across experts for each layer."
-            )
-        if w13_input_scale is not None:
-            replace_parameter(
-                layer, "w13_input_scale", w13_input_scale.max().to(torch.float32)
-            )
-        if w2_input_scale is not None:
-            replace_parameter(
-                layer, "w2_input_scale", w2_input_scale.max().to(torch.float32)
-            )
+        _reduce_emulation_input_scales(layer, w13_input_scale, w2_input_scale)
         return (
             w13_weight,
             w2_weight,
@@ -2040,6 +2039,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     ):
         # No additional transformation is needed: XPU consumes the checkpoint
         # layout directly, while emulation dequantizes that layout at runtime.
+        if mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+            _reduce_emulation_input_scales(layer)
         return (
             w13_weight,
             w2_weight,

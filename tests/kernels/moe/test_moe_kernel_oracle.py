@@ -20,8 +20,13 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import KernelConfig, VllmConfig
-from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.config.quantization import (
+    QuantizationConfigArgs,
+    QuantSpec,
+    layer_target_spec_scope,
+)
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.fused_moe.experts import ocp_mx_emulation_moe
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsW4A8Fp8,
 )
@@ -34,6 +39,9 @@ from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
 from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
     Nvfp4QuantizationEmulationTritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+    OCP_MXQuantizationEmulationTritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.rdna3_int4_int8_moe import (
     Rdna3Int4Int8Experts,
@@ -908,6 +916,116 @@ def test_mxfp4_marlin_moe_runs_w4a4_as_w4a16_unless_strict(monkeypatch, strict):
             Mxfp4MoeBackend.MARLIN,
             MarlinExperts,
         )
+
+
+@pytest.mark.parametrize(
+    ("act_key", "override", "strict", "enabled", "expected", "warn_bf16"),
+    [
+        (
+            kFp8StaticTensorSym,
+            None,
+            False,
+            {"MARLIN", "EMULATION"},
+            Mxfp4MoeBackend.MARLIN,
+            True,
+        ),
+        (
+            kMxfp4Dynamic,
+            None,
+            True,
+            {"MARLIN", "HUMMING", "EMULATION"},
+            Mxfp4MoeBackend.EMULATION,
+            False,
+        ),
+        (
+            kMxfp4Dynamic,
+            "fp8_per_token",
+            True,
+            {"MARLIN", "HUMMING", "EMULATION"},
+            Mxfp4MoeBackend.HUMMING,
+            False,
+        ),
+    ],
+    ids=["bf16-before-emulation", "strict-skips-bf16", "strict-humming-override"],
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_mxfp4_emulation_follows_bf16_fallbacks_unless_strict(
+    monkeypatch,
+    caplog,
+    disable_log_dedup,
+    act_key,
+    override,
+    strict,
+    enabled,
+    expected,
+    warn_bf16,
+):
+    """Hardware W4A16 backends outrank EMULATION unless VLLM_STRICT_QUANT_SCHEME=1,
+    while explicit user activation overrides still try HUMMING before EMULATION."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    monkeypatch.setattr(ocp_mx_emulation_moe, "has_quark", lambda: True)
+    kernels = {
+        Mxfp4MoeBackend.HUMMING: HummingGroupedExperts,
+        Mxfp4MoeBackend.MARLIN: MarlinExperts,
+        Mxfp4MoeBackend.EMULATION: OCP_MXQuantizationEmulationTritonExperts,
+    }
+    monkeypatch.setattr(
+        HummingGroupedExperts,
+        "is_supported_config",
+        staticmethod(mk.FusedMoEExpertsModular.is_supported_config),
+    )
+    for k_cls in kernels.values():
+        monkeypatch.setattr(
+            k_cls, "_supports_current_device", staticmethod(lambda: True)
+        )
+    monkeypatch.setattr(
+        mxfp4_oracle,
+        "backend_to_kernel_cls",
+        lambda b: [kernels[b]] if b.name in enabled else [],
+    )
+
+    spec = None if override is None else QuantSpec(activation=override)
+    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=256)
+    caplog.clear()
+    with layer_target_spec_scope(spec):
+        selected = mxfp4_oracle.select_mxfp4_moe_backend(config, activation_key=act_key)
+    assert selected == (expected, kernels[expected])
+    assert ("with BF16 activations." in caplog.text) is warn_bf16
+
+
+@pytest.mark.parametrize("backend", [Mxfp4MoeBackend.EMULATION, Mxfp4MoeBackend.XPU])
+def test_convert_weight_mxfp4_emulation_reduces_input_scales(
+    caplog, disable_log_dedup, backend
+):
+    """EMULATION reduces 1-D per-expert input scales to 0-D float32 max scalars
+    on non-gpt-oss layers while leaving XPU's 1-D scales untouched."""
+    layer = torch.nn.Module()
+    for name, vals in (
+        ("w13_input_scale", [0.25, 0.75, 0.5]),
+        ("w2_input_scale", [0.125, 0.5, 0.25]),
+    ):
+        t = torch.tensor(vals, dtype=torch.float16)
+        layer.register_parameter(name, torch.nn.Parameter(t, requires_grad=False))
+
+    w13 = torch.zeros(3, 8, 16, dtype=torch.uint8)
+    w2 = torch.zeros(3, 16, 4, dtype=torch.uint8)
+    w13_scale = torch.ones(3, 8, 1, dtype=torch.uint8)
+    w2_scale = torch.ones(3, 16, 1, dtype=torch.uint8)
+    caplog.clear()
+    mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format(
+        backend, layer, w13, w2, w13_scale, w2_scale
+    )
+
+    if backend is Mxfp4MoeBackend.EMULATION:
+        assert layer.w13_input_scale.ndim == 0
+        assert layer.w13_input_scale.dtype == torch.float32
+        assert layer.w13_input_scale.item() == pytest.approx(0.75)
+        assert layer.w2_input_scale.item() == pytest.approx(0.5)
+        assert "not equal for OCP MX MoE" in caplog.text
+    else:
+        assert layer.w13_input_scale.shape == (3,)
+        assert layer.w2_input_scale.shape == (3,)
+        assert "not equal for OCP MX MoE" not in caplog.text
 
 
 def test_rdna3_int4_int8_experts_check_the_activation_key():
