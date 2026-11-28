@@ -21,6 +21,9 @@ class PublisherConfig:
 
     endpoint: str = "tcp://*:5557"
     """The zmq endpoint to use for publishing cache events.
+
+    Use brackets around IPv6 literals. A concrete address such as
+    `tcp://[::1]:5557` connects the publisher to a listening subscriber.
     """
 
     replay_endpoint: str | None = None
