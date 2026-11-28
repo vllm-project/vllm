@@ -171,3 +171,55 @@ def test_execute_worker_rpc_feeds_watchdog():
         worker_proc._execute_worker_rpc(("ok", (), {}, None))
 
     assert calls == ["feed", "rpc", "feed"]
+
+
+def test_failed_rpc_does_not_leak_responses_into_next_rpc():
+    """A failed RPC must consume every worker's reply. Otherwise the replies
+    left on the other workers' queues are returned to the following RPCs,
+    e.g. a rejected LoRA load makes the next, successful load report the
+    previous error."""
+    num_workers = 4
+    response_queues: list[deque] = [deque() for _ in range(num_workers)]
+
+    def load_lora(lora_id):
+        if lora_id == 2:
+            raise NotImplementedError(f"Adapter {lora_id} contains MoE expert modules")
+        return f"loaded {lora_id}"
+
+    worker_procs: list[Any] = []
+    for rank, queue in enumerate(response_queues):
+        worker_proc: Any = WorkerProc.__new__(WorkerProc)
+        worker_proc.rank = rank
+        worker_proc.worker = SimpleNamespace(load_lora=load_lora)
+        worker_proc.use_async_scheduling = False
+        worker_proc.worker_response_mq = SimpleNamespace(enqueue=queue.append)
+        worker_procs.append(worker_proc)
+
+    def broadcast(rpc_request):
+        for worker_proc in worker_procs:
+            worker_proc._execute_worker_rpc(rpc_request)
+
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_fault_tolerance=False)
+    )
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=broadcast)
+    executor.response_mqs = [
+        SimpleNamespace(dequeue=lambda timeout=None, queue=queue: queue.popleft())
+        for queue in response_queues
+    ]
+
+    with (
+        patch("vllm.v1.executor.multiproc_executor.get_watch_dog"),
+        patch("vllm.v1.executor.multiproc_executor.logger"),
+    ):
+        with pytest.raises(RuntimeError, match="Adapter 2 contains MoE"):
+            executor.collective_rpc("load_lora", args=(2,))
+        assert not any(response_queues)
+
+        assert executor.collective_rpc("load_lora", args=(3,)) == ["loaded 3"] * 4
+        assert executor.collective_rpc("load_lora", args=(3,), unique_reply_rank=1) == (
+            "loaded 3"
+        )
