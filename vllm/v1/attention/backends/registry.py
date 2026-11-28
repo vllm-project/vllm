@@ -151,6 +151,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     NEMOTRON_SHORTCUT_SDSA = (
         "vllm.models.nemotron_shortcut.nvidia.sdsa.backend.SdsaAttentionBackend"
     )
+    BEAM_DFLASH2_SPLIT_KV = (
+        "vllm.models.beam.amd.dflash2_attention.BeamDFlash2AttentionBackend"
+    )
     KIMI_K3_KV_BALANCED_MLA = (
         "vllm.models.kimi_k3.nvidia.kv_balanced_mla.backend.KimiK3KvBalancedMLABackend"
     )
