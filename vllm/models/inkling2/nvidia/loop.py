@@ -17,7 +17,10 @@ from collections.abc import Sequence
 import torch
 from torch import nn
 
-from vllm.distributed import tensor_model_parallel_all_reduce
+import vllm.envs as envs
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_reduce
+from vllm.distributed.utils import get_pp_indices
+from vllm.sequence import IntermediateTensors
 
 from ..configs import Inkling2ModelConfig
 from ..quant_config import Inkling2QuantConfig
@@ -25,6 +28,7 @@ from .model import (
     Inkling2DecoderLayer,
     Inkling2ForConditionalGeneration,
     Inkling2Model,
+    Inkling2RMSNorm,
 )
 from .ops.attn_res import attn_res
 from .ops.linear import linear_k_groups
@@ -33,6 +37,72 @@ from .ops.loop import blend_rms_norm, pair_rms_norm
 from .sconv import conv_metadata
 
 LOOP_STREAMS = ("attn", "k", "v", "mlp")
+
+
+def _split_range(start: int, stop: int, num_stages: int) -> list[tuple[int, int]]:
+    total = stop - start
+    base, rem = divmod(total, num_stages)
+    ranges: list[tuple[int, int]] = []
+    cur = start
+    for idx in range(num_stages):
+        nxt = cur + base + (1 if idx < rem else 0)
+        ranges.append((cur, nxt))
+        cur = nxt
+    return ranges
+
+
+def _get_loop_pp_indices(
+    num_hidden_layers: int, core: range, pp_rank: int, pp_size: int
+) -> tuple[int, int]:
+    """Partition a looped Inkling2 model into `pp_size` contiguous stages
+    without splitting the recurrent `core` across stages."""
+    if pp_size == 1:
+        return 0, num_hidden_layers
+
+    if envs.VLLM_PP_LAYER_PARTITION is not None:
+        ranges = [get_pp_indices(num_hidden_layers, r, pp_size) for r in range(pp_size)]
+        if not any(s <= core.start and core.stop <= e for s, e in ranges):
+            raise ValueError(
+                f"VLLM_PP_LAYER_PARTITION={envs.VLLM_PP_LAYER_PARTITION!r} splits "
+                f"the Inkling2 loop core layers [{core.start}, {core.stop}) across "
+                "pipeline stages; the recurrent core must stay on a single stage."
+            )
+        return ranges[pp_rank]
+
+    prelude = core.start
+    coda = num_hidden_layers - core.stop
+    max_stages = prelude + 1 + coda
+    if pp_size > max_stages:
+        raise ValueError(
+            f"pipeline_parallel_size={pp_size} exceeds the maximum {max_stages} "
+            f"stages for Inkling2 loop core [{core.start}, {core.stop}) "
+            f"(prelude={prelude}, coda={coda}); the recurrent core must stay on "
+            "a single stage."
+        )
+
+    if pp_size == 2:
+        cut = core.stop if coda > prelude else core.start
+        ranges = [(0, cut), (cut, num_hidden_layers)]
+        return ranges[pp_rank]
+
+    rem_stages = pp_size - 1
+    p_stages = 1 if prelude > 0 else 0
+    c_stages = 1 if coda > 0 else 0
+    while p_stages + c_stages < rem_stages:
+        p_load = prelude / p_stages if 0 < p_stages < prelude else -1.0
+        c_load = coda / c_stages if 0 < c_stages < coda else -1.0
+        if p_load >= c_load:
+            p_stages += 1
+        else:
+            c_stages += 1
+
+    ranges = []
+    if p_stages > 0:
+        ranges.extend(_split_range(0, core.start, p_stages))
+    ranges.append((core.start, core.stop))
+    if c_stages > 0:
+        ranges.extend(_split_range(core.stop, num_hidden_layers, c_stages))
+    return ranges[pp_rank]
 
 
 class Inkling2MessageController(nn.Module):
@@ -147,27 +217,43 @@ class Inkling2LoopModel(Inkling2Model):
         super().__init__(config, quant_config, prefix)
         self.loop_core = config.loop_core_layers
         self.hidden_size = config.hidden_size
-        # Message pseudo-queries (raw), two per core layer: attn/mlp and k/v.
-        shape = (2 * len(self.loop_core), config.hidden_size)
-        self.middle_cycle_cross_pass_queries = nn.Parameter(
-            torch.zeros(shape, dtype=torch.float32), requires_grad=False
+        self.has_loop_core = (
+            self.start_layer <= self.loop_core.start
+            and self.loop_core.stop <= self.end_layer
         )
-        self.middle_cycle_cross_pass_kv_queries = nn.Parameter(
-            torch.zeros(shape, dtype=torch.float32), requires_grad=False
-        )
-        # Per core layer, the `LOOP_STREAMS` queries scaled by D**-0.5.
-        self.register_buffer(
-            "message_queries",
-            torch.zeros(
-                len(self.loop_core),
-                len(LOOP_STREAMS),
-                config.hidden_size,
-                dtype=torch.float32,
-            ),
-            persistent=False,
+        if self.has_loop_core:
+            # Message pseudo-queries (raw), two per core layer: attn/mlp and k/v.
+            shape = (2 * len(self.loop_core), config.hidden_size)
+            self.middle_cycle_cross_pass_queries = nn.Parameter(
+                torch.zeros(shape, dtype=torch.float32), requires_grad=False
+            )
+            self.middle_cycle_cross_pass_kv_queries = nn.Parameter(
+                torch.zeros(shape, dtype=torch.float32), requires_grad=False
+            )
+            # Per core layer, the `LOOP_STREAMS` queries scaled by D**-0.5.
+            self.register_buffer(
+                "message_queries",
+                torch.zeros(
+                    len(self.loop_core),
+                    len(LOOP_STREAMS),
+                    config.hidden_size,
+                    dtype=torch.float32,
+                ),
+                persistent=False,
+            )
+
+    def _pp_indices(self, config: Inkling2ModelConfig) -> tuple[int, int]:
+        pp_group = get_pp_group()
+        return _get_loop_pp_indices(
+            config.num_hidden_layers,
+            config.loop_core_layers,
+            pp_group.rank_in_group,
+            pp_group.world_size,
         )
 
     def process_weights_after_loading(self) -> None:
+        if not self.has_loop_core:
+            return
         queries = self.middle_cycle_cross_pass_queries.view(-1, 2, self.hidden_size)
         kv_queries = self.middle_cycle_cross_pass_kv_queries.view(
             -1, 2, self.hidden_size
@@ -190,14 +276,9 @@ class Inkling2LoopModel(Inkling2Model):
         return super()._make_layer(config, layer_id, quant_config, prefix)
 
     def _max_loop_blocks(self) -> int:
-        """Completed AttnRes blocks a loop forward holds at most: each pass
-        restarts from the prelude's, and the coda continues the last pass."""
-        num_blocks = max_blocks = 0
-        core = self.loop_core
-        for i in [*range(core.start), *core, *range(core.stop, len(self.layers))]:
-            num_blocks += i % self.block_size == 0
-            max_blocks = max(max_blocks, num_blocks)
-        return max_blocks
+        """Completed AttnRes blocks this stage holds at most: each pass restarts
+        from the prelude's, and the coda continues the last pass."""
+        return -(-self.end_layer // self.block_size)
 
     def _run_layer(
         self,
@@ -207,18 +288,19 @@ class Inkling2LoopModel(Inkling2Model):
         num_blocks: int,
         inputs: torch.Tensor | None,
         bank: torch.Tensor | None,
-        next_query: torch.Tensor,
+        next_query: torch.Tensor | None,
         next_norm: nn.Module | None,
         positions: torch.Tensor,
         tau: torch.Tensor | None,
         plan: list[tuple[bool, bool]],
-    ) -> tuple[int, torch.Tensor]:
+    ) -> tuple[int, torch.Tensor | None]:
         """Run decoder layer `i` in loop pass `pass_idx` on its `inputs`
         (the attention inputs; for a visit with messages from `bank`, the
         fp32 mixes they blend into). Returns the number of completed AttnRes
         blocks after it and the mixes of its output with `next_query` through
-        `next_norm` (fp32 without it), the next visit's inputs."""
+        `next_norm` (fp32 without it), or None at a non-last PP stage boundary."""
         layer = self.layers[i]
+        assert isinstance(layer, Inkling2DecoderLayer)
         partial = stack[num_blocks]
         owner = layer.conv_states[pass_idx]
         workspace = self.allreduce_workspace
@@ -245,11 +327,13 @@ class Inkling2LoopModel(Inkling2Model):
             attn_inputs = layer.blend(
                 slice(0, 3), dests, messages[:3], norm_weight, norm.eps
             )
-        elif inputs is None:
-            assert num_blocks == 0
+        elif inputs is None and num_blocks == 0:
             attn_inputs = [
                 layer.attn_norm(partial, j) for j in range(layer.num_attn_inputs)
             ]
+        elif inputs is None:
+            query = self.attn_res.attn_queries[i - 1]
+            attn_inputs = self._mix(stack[:num_blocks], partial, query, layer.attn_norm)
         else:
             attn_inputs = inputs
         attn_partial = layer.attention(positions, attn_inputs, tau, pass_idx=pass_idx)
@@ -288,6 +372,16 @@ class Inkling2LoopModel(Inkling2Model):
         residual = None if first else partial
         if residual is None:
             num_blocks += 1
+        if next_query is None:
+            layer.mlp_sconv(
+                layer.mlp(mlp_in[0], pass_idx=pass_idx),
+                positions,
+                addend=attn_out,
+                residual=residual,
+                out=stack[num_blocks],
+                owner=owner,
+            )
+            return num_blocks, None
         mix_args = (
             positions,
             stack[num_blocks],
@@ -319,35 +413,65 @@ class Inkling2LoopModel(Inkling2Model):
         return num_blocks, outputs
 
     def forward(
-        self, positions: torch.Tensor, inputs_embeds: torch.Tensor
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        self,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         """Prelude, `num_passes` core passes, then the coda. Each sublayer's
         short conv runs fused with the next AttnRes mix (and small batches
         with its all-reduce)."""
-        num_tokens, hidden = inputs_embeds.shape
+        pp_group = get_pp_group()
+        is_first_rank = pp_group.is_first_rank
+        is_last_rank = pp_group.is_last_rank
+        if is_first_rank:
+            assert inputs_embeds is not None
+            num_tokens, hidden = inputs_embeds.shape
+            ref_tensor = inputs_embeds
+        else:
+            assert intermediate_tensors is not None
+            received = intermediate_tensors["attn_res_stack"]
+            num_tokens, received_blocks, hidden = received.shape
+            assert received_blocks == self.init_blocks + 1
+            ref_tensor = received
         core = self.loop_core
         num_passes = self.config.num_loop_passes
-        stack = inputs_embeds.new_empty(
-            (self._max_loop_blocks() + 1, num_tokens, hidden)
-        )
-        stack[0].copy_(inputs_embeds)
+        stack = ref_tensor.new_empty((self._max_loop_blocks() + 1, num_tokens, hidden))
+        if is_first_rank:
+            assert inputs_embeds is not None
+            stack[0].copy_(inputs_embeds)
+            num_blocks = 0
+        else:
+            stack[: self.init_blocks + 1].copy_(received.transpose(0, 1))
+            num_blocks = self.init_blocks
         tau = self._log_scaling_tau(positions)
         workspace = self.allreduce_workspace
         plan = [(False, False)] * 2
-        if (
-            workspace is not None
-            and conv_metadata(self.layers[0].conv_state) is not None
-        ):
-            plan = workspace.plan(num_tokens)
-        # (layer, pass) visits; the prelude and coda run as pass 0.
-        visits = [(i, 0) for i in range(core.start)]
-        visits += [(i, p) for p in range(num_passes) for i in core]
-        visits += [(i, 0) for i in range(core.stop, len(self.layers))]
+        if self.start_layer < self.end_layer:
+            first_layer = self.layers[self.start_layer]
+            assert isinstance(first_layer, Inkling2DecoderLayer)
+            if (
+                workspace is not None
+                and conv_metadata(first_layer.conv_state) is not None
+            ):
+                plan = workspace.plan(num_tokens)
+        # (layer, pass, global_visit) for this stage; prelude and coda run as pass 0.
+        visits: list[tuple[int, int, int]] = []
+        for i in range(self.start_layer, min(self.end_layer, core.start)):
+            visits.append((i, 0, i))
+        if self.has_loop_core:
+            for p in range(num_passes):
+                for i in core:
+                    visits.append((i, p, i + p * len(core)))
+        coda_offset = (num_passes - 1) * len(core)
+        for i in range(max(self.start_layer, core.stop), self.end_layer):
+            visits.append((i, 0, i + coda_offset))
         aux_hidden_states = []
+        next_query: torch.Tensor | None
         next_norm: nn.Module | None
-        num_blocks = 0
-        inputs = bank = prelude_blocks = prelude_partial = prelude_dests = None
-        for visit, (i, pass_idx) in enumerate(visits):
+        inputs: torch.Tensor | None = None
+        bank = prelude_blocks = prelude_partial = prelude_dests = None
+        for idx, (i, pass_idx, global_visit) in enumerate(visits):
             looped = pass_idx > 0
             if i == core.start and not looped:
                 prelude_blocks = num_blocks
@@ -372,15 +496,23 @@ class Inkling2LoopModel(Inkling2Model):
                         True,
                     )
                 inputs = prelude_dests
-            if visit in self.aux_hidden_state_layers:
+            if global_visit in self.aux_hidden_state_layers:
                 aux_hidden_states.append(stack[num_blocks].clone())
-            if visit + 1 == len(visits):
-                next_query, next_norm = self.attn_res.output_query, self.norm
+            if idx + 1 == len(visits):
+                if is_last_rank:
+                    next_query, next_norm = self.attn_res.output_query, self.norm
+                else:
+                    next_query, next_norm = None, None
             else:
-                next_i, next_pass = visits[visit + 1]
+                next_i, next_pass, _ = visits[idx + 1]
                 next_query = self.attn_res.attn_queries[next_i - 1]
                 # Messages blend into fp32 mixes; a pass restart discards it.
-                next_norm = None if next_pass else self.layers[next_i].attn_norm
+                if next_pass:
+                    next_norm = None
+                else:
+                    next_layer = self.layers[next_i]
+                    assert isinstance(next_layer, Inkling2DecoderLayer)
+                    next_norm = next_layer.attn_norm
             num_blocks, inputs = self._run_layer(
                 i,
                 pass_idx,
@@ -394,8 +526,20 @@ class Inkling2LoopModel(Inkling2Model):
                 tau,
                 plan,
             )
-        assert inputs is not None
-        out = inputs[0]
+        if not is_last_rank:
+            return IntermediateTensors(
+                {"attn_res_stack": stack[: num_blocks + 1].transpose(0, 1).contiguous()}
+            )
+        if inputs is not None:
+            out = inputs[0]
+        else:
+            assert isinstance(self.norm, Inkling2RMSNorm)
+            out = self._mix(
+                stack[:num_blocks],
+                stack[num_blocks],
+                self.attn_res.output_query,
+                self.norm,
+            )[0]
         if self.aux_hidden_state_layers:
             return out, [*aux_hidden_states, out]
         return out
