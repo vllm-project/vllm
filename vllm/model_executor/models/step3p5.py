@@ -18,6 +18,8 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
@@ -57,6 +59,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 
 logger = init_logger(__name__)
@@ -130,6 +133,7 @@ class Step3p5MLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
+        is_sequence_parallel: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -138,6 +142,7 @@ class Step3p5MLP(nn.Module):
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -146,6 +151,7 @@ class Step3p5MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.down_proj",
         )
 
@@ -184,6 +190,7 @@ class Step3p5Attention(nn.Module):
         rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         # Step3p5 specific args
@@ -234,6 +241,7 @@ class Step3p5Attention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -321,6 +329,7 @@ class FusedMoEBlock(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         self.enable_eplb = parallel_config.enable_eplb
         self.n_routed_experts = config.moe_num_experts
         self.n_logical_experts = self.n_routed_experts
@@ -381,6 +390,7 @@ class FusedMoEBlock(nn.Module):
             intermediate_size=config.share_expert_dim,
             hidden_act="silu",
             reduce_results=False,
+            is_sequence_parallel=self.is_sequence_parallel,
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
@@ -400,16 +410,29 @@ class FusedMoEBlock(nn.Module):
             routed_scaling_factor=config.moe_router_scaling_factor,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
             router_logits_dtype=torch.float32,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        already_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if self.is_sequence_parallel and not already_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=hidden_states
         )
+
+        if self.is_sequence_parallel and not already_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -427,6 +450,7 @@ class Step3p5DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
         if cache_config is not None:
             cache_config.sliding_window = None
         att_impl_type = getattr(config, "att_impl_type", "GQA")
@@ -435,6 +459,11 @@ class Step3p5DecoderLayer(nn.Module):
         layer_type = _get_layer_type(config, layer_idx)
         use_rope_layers = getattr(config, "use_rope_layers", None)
         assert config.max_position_embeddings is not None
+        is_moe_layer = _is_moe_layer(config, layer_idx)
+        self.use_moe = is_moe_layer
+        self.use_sequence_parallel_moe = (
+            parallel_config.use_sequence_parallel_moe and is_moe_layer
+        )
         self.self_attn = Step3p5Attention(
             hidden_size=self.hidden_size,
             num_heads=_get_num_attention_heads(config, layer_idx, layer_type),
@@ -446,6 +475,7 @@ class Step3p5DecoderLayer(nn.Module):
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
+            reduce_results=not self.use_sequence_parallel_moe,
             sliding_window=getattr(config, "sliding_window", None)
             if layer_type == "sliding_attention"
             else None,
@@ -453,7 +483,6 @@ class Step3p5DecoderLayer(nn.Module):
             use_rope=use_rope_layers[layer_idx] if use_rope_layers else True,
             prefix=f"{prefix}.self_attn",
         )
-        self.use_moe = False
         self.use_fused_all_reduce = (
             get_tensor_model_parallel_world_size() > 1
             and get_dp_group().world_size == 1
@@ -463,12 +492,11 @@ class Step3p5DecoderLayer(nn.Module):
         else:
             logger.warning_once("Disable custom fused all reduce...")
 
-        if _is_moe_layer(config, layer_idx):
+        if is_moe_layer:
             self.moe = FusedMoEBlock(
                 vllm_config,
                 prefix=f"{prefix}.moe",
             )
-            self.use_moe = True
         else:
             self.mlp = Step3p5MLP(
                 config=config,
@@ -488,19 +516,43 @@ class Step3p5DecoderLayer(nn.Module):
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
+        full_num_tokens = positions.shape[0]
+        input_is_sequence_parallel = (
+            self.use_sequence_parallel_moe and hidden_states.shape[0] != full_num_tokens
+        )
+        if hidden_states.shape[0] != full_num_tokens and not self.use_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
+
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+
+        if input_is_sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+
+        if self.use_sequence_parallel_moe:
+            tp_world_size = get_tensor_model_parallel_world_size()
+            sp_pad = (-hidden_states.shape[0]) % tp_world_size
+            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
+            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+            if not input_is_sequence_parallel:
+                residual = sequence_parallel_chunk(residual)
+
         hidden_states += residual
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
 
         if self.use_moe:
-            ffn_output = self.moe(hidden_states)
+            ffn_output = self.moe(
+                hidden_states,
+                already_sequence_parallel=self.use_sequence_parallel_moe,
+            )
         else:
             ffn_output = self.mlp(hidden_states)
         hidden_states = ffn_output + residual
@@ -555,7 +607,7 @@ class Step3p5Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -567,6 +619,10 @@ class Step3p5Model(nn.Module):
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states = layer(positions, hidden_states)
+
+        if hidden_states.shape[0] != positions.shape[0]:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[0]]
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

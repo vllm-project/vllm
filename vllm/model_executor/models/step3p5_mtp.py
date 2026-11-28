@@ -7,6 +7,7 @@ import torch.nn as nn
 from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -88,6 +89,9 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         )
 
         hidden_states = self.mtp_block(positions=positions, hidden_states=hidden_states)
+        if self.mtp_block.use_sequence_parallel_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[0]]
         return hidden_states
 
 
