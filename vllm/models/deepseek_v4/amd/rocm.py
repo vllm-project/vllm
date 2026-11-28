@@ -31,6 +31,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_kernel_dispatcher_with_warmup,
 )
+from vllm.models.deepseek_v4.amd.ops.fused_indexer_k import rocm_fused_indexer_k
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -69,7 +70,6 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
-    rocm_mxfp4_indexer_k_store,
     rocm_mxfp4_indexer_q_quant,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -1960,41 +1960,26 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
 
 class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
-    """The indexer's compressor writing aiter's preshuffled MXFP4 pages: a
-    pooling kernel, then aiter's norm + RoPE + MXFP4 cache op, which owns the
-    page layout its MQA-logits kernel reads."""
+    """The indexer's compressor writing aiter's preshuffled MXFP4 pages in one
+    fused pool + norm + RoPE + MXFP4 kernel, in the byte order and rounding of
+    aiter's cache op, which owns the page layout its MQA-logits kernel reads."""
 
     def __init__(self, vllm_config: VllmConfig, **kwargs: Any) -> None:
         super().__init__(vllm_config, **kwargs)
         assert self.head_dim == 128 and self.use_fp4_cache
         self.num_index_heads = vllm_config.model_config.hf_config.index_n_heads
         if vllm_config.kernel_config.enable_jit_warmup:
-            # Compile at startup instead of on the first boundary token.
-            compress_pool.register_warmup(
+            rocm_fused_indexer_k.register_warmup(
+                vllm_config=vllm_config,
+                k_cache_prefix=self.k_cache_prefix,
+                dtype=self.norm.weight.dtype,
                 head_dim=self.head_dim,
+                rope_head_dim=self.rope_head_dim,
                 state_width=self.coff * self.head_dim,
                 compress_ratio=self.compress_ratio,
                 overlap=self.overlap,
+                num_index_heads=self.num_index_heads,
             )
-
-    def _pooled_k(self, num_tokens: int) -> torch.Tensor:
-        # A persistent buffer rather than the shared scratch: in the CSA fork
-        # this runs on an aux stream next to other branches. The indexer
-        # layers run one after another, so they can all share it.
-        scratch = current_workspace_manager().get_persistent(
-            "dsv4_rocm_mxfp4_pooled_k",
-            (self.max_num_batched_tokens, self.head_dim),
-            torch.bfloat16,
-        )
-        assert num_tokens <= scratch.shape[0]
-        return scratch[:num_tokens]
-
-    def forward(
-        self, kv_score: torch.Tensor, positions: torch.Tensor, rotary_emb
-    ) -> None:
-        # Claim the scratch on the profiling run, before the workspace locks.
-        self._pooled_k(0)
-        super().forward(kv_score, positions, rotary_emb)
 
     def _compress_norm_rope_store(
         self,
@@ -2009,33 +1994,25 @@ class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
         num_tokens = state_metadata.slot_mapping.shape[0]
         if num_tokens == 0:
             return
-        k_cache_metadata = attn_metadata[self.k_cache_prefix]
-        kv_slot_mapping = k_cache_metadata.slot_mapping[:num_tokens]
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
-        pooled_k = self._pooled_k(num_tokens)
-        compress_pool(
-            state_cache,
-            state_metadata.token_to_req_indices,
-            positions,
-            kv_slot_mapping,
-            state_metadata.block_table,
-            state_metadata.block_size,
-            pooled_k,
-            state_width,
-            self.compress_ratio,
-            self.overlap,
-        )
-        rocm_mxfp4_indexer_k_store(
-            pooled_k,
-            positions[:num_tokens],
-            rotary_emb.cos_sin_cache,
-            self.norm.weight,
-            self.rms_norm_eps,
-            kv_cache,
-            kv_slot_mapping,
-            self.compress_ratio,
-            self.use_fp4_cache,
-            num_heads=self.num_index_heads,
+        rocm_fused_indexer_k(
+            state_cache=state_cache,
+            token_to_req_indices=state_metadata.token_to_req_indices,
+            positions=positions,
+            slot_mapping=state_metadata.slot_mapping,
+            block_table=state_metadata.block_table,
+            block_size=state_metadata.block_size,
+            state_width=state_width,
+            cos_sin_cache=rotary_emb.cos_sin_cache,
+            kv_cache=kv_cache,
+            kv_slot_mapping=attn_metadata[self.k_cache_prefix].slot_mapping,
+            head_dim=self.head_dim,
+            rope_head_dim=self.rope_head_dim,
+            compress_ratio=self.compress_ratio,
+            overlap=self.overlap,
+            rms_norm_weight=self.norm.weight,
+            rms_norm_eps=self.rms_norm_eps,
+            num_index_heads=self.num_index_heads,
         )
 
 

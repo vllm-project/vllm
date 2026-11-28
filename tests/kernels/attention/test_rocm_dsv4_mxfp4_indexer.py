@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4's ROCm MXFP4 indexer K writer: the pooling kernel plus aiter's
-norm + RoPE + MXFP4 cache op, against the same op fed by torch's pooling.
+"""DeepSeek-V4's ROCm MXFP4 indexer K writer: the fused pool + norm + RoPE +
+MXFP4 kernel, against aiter's norm + RoPE + MXFP4 cache op fed by torch's
+pooling.
 
 The dense scoring path it feeds is covered by test_rocm_paged_mxfp4_indexer.py.
 """
 
 import itertools
 import types
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -23,29 +25,25 @@ from vllm.platforms.rocm import get_cdna_version
 if get_cdna_version() != 4:
     pytest.skip("CDNA4-only", allow_module_level=True)
 
+from vllm.models.deepseek_v4.amd.ops.fused_indexer_k import rocm_fused_indexer_k
 from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4RocmMxfp4Compressor,
+    DeepseekV4RocmMxfp4IndexerCache,
+    compress_pool,
 )
+from vllm.models.deepseek_v4.compressor import DeepseekCompressor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     rocm_mxfp4_indexer_k_store,
 )
-from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 # DeepSeek-V4-Pro's indexer: 64 heads of 128, ratio 4 with overlap, 256-token
 # blocks, so 64-entry K pages.
 HEADS, HEAD_DIM, RATIO, PAGE = 64, 128, 4, 64
 WIDTH = HEAD_DIM // 2 + HEAD_DIM // 32
-STATE_BLOCK, MAX_POS, MAX_TOKENS = 16, 4096, 1024
+STATE_BLOCK, MAX_POS = 16, 4096
 DEVICE = "cuda"
-
-
-@pytest.fixture(autouse=True)
-def _workspace():
-    init_workspace_manager(torch.device(DEVICE))
-    yield
-    reset_workspace_manager()
 
 
 class _Case:
@@ -108,23 +106,25 @@ class _Case:
             out[t] = (torch.stack(kv) * torch.stack(score).softmax(0)).sum(0)
         return out
 
-    def run_compressor(self):
-        """The ROCm compressor's store step on this case; returns its pooled
-        rows and K cache."""
+    def run_compressor(self, kv_cache=None):
+        """The ROCm compressor's store step on this case; returns its K cache."""
         comp = DeepseekV4RocmMxfp4Compressor.__new__(DeepseekV4RocmMxfp4Compressor)
         nn.Module.__init__(comp)
-        kv_cache = torch.zeros(
-            self.num_pages, PAGE, WIDTH, dtype=torch.uint8, device=DEVICE
-        )
+        if kv_cache is None:
+            kv_cache = torch.zeros(
+                self.num_pages, PAGE, WIDTH, dtype=torch.uint8, device=DEVICE
+            )
         comp.head_dim, comp.compress_ratio, comp.overlap = HEAD_DIM, RATIO, True
+        comp.rope_head_dim = 64
         comp.use_fp4_cache, comp.num_index_heads = True, HEADS
+        comp._quant_block, comp._token_stride = 32, HEAD_DIM // 2
+        comp._scale_dim = HEAD_DIM // 32
         comp.rms_norm_eps = 1e-6
         comp.norm = types.SimpleNamespace(weight=self.norm)
         comp.k_cache_prefix = "indexer.k_cache"
         comp._static_forward_context = {
             comp.k_cache_prefix: types.SimpleNamespace(kv_cache=kv_cache)
         }
-        comp.max_num_batched_tokens = MAX_TOKENS
         state_metadata = types.SimpleNamespace(
             slot_mapping=torch.zeros_like(self.positions),
             token_to_req_indices=self.req,
@@ -140,24 +140,10 @@ class _Case:
             {comp.k_cache_prefix: types.SimpleNamespace(slot_mapping=self.kv_slot)},
             {},
         )
-        return comp._pooled_k(len(self.positions)), kv_cache
+        return kv_cache
 
 
 SEQ_LENS = pytest.mark.parametrize("seq_lens", [[37, 300, 5], [1, 260]])
-
-
-@SEQ_LENS
-def test_pooled_rows_match_torch(seq_lens):
-    set_random_seed(0)
-    case = _Case(seq_lens)
-    pooled, _ = case.run_compressor()
-    boundary = case.kv_slot >= 0
-    torch.testing.assert_close(
-        pooled[boundary].float(),
-        case.torch_pooled()[boundary],
-        atol=1e-2,
-        rtol=1e-2,
-    )
 
 
 @SEQ_LENS
@@ -166,7 +152,7 @@ def test_k_pages_match_aiter_fed_by_torch(seq_lens):
     and the same MXFP4 codes up to bf16 rounding of the pooled rows."""
     set_random_seed(0)
     case = _Case(seq_lens)
-    _, kv_cache = case.run_compressor()
+    kv_cache = case.run_compressor()
     ref = torch.zeros_like(kv_cache)
     rocm_mxfp4_indexer_k_store(
         case.torch_pooled().bfloat16(),
@@ -182,3 +168,100 @@ def test_k_pages_match_aiter_fed_by_torch(seq_lens):
     )
     assert bool(ref.any())
     assert (kv_cache != ref).float().mean().item() < 5e-3
+
+
+def test_k_pages_match_two_stage_writer_exactly():
+    set_random_seed(42)
+    case = _Case([7, 257])
+    case.norm = case.norm.bfloat16()
+    case.kv_slot[3::37] = -1
+    pitch = PAGE * WIDTH + 128
+    actual = torch.full((case.num_pages, pitch), 173, dtype=torch.uint8, device=DEVICE)
+    expected = actual.clone()
+    shape = (case.num_pages, PAGE, WIDTH)
+    strides = (pitch, WIDTH, 1)
+    pooled = torch.empty(
+        len(case.positions), HEAD_DIM, dtype=torch.bfloat16, device=DEVICE
+    )
+    compress_pool(
+        case.state_cache,
+        case.req,
+        case.positions,
+        case.kv_slot,
+        case.block_table,
+        STATE_BLOCK,
+        pooled,
+        case.state_width,
+        RATIO,
+        True,
+    )
+    rocm_mxfp4_indexer_k_store(
+        pooled,
+        case.positions,
+        case.cos_sin,
+        case.norm,
+        1e-6,
+        expected.as_strided(shape, strides),
+        case.kv_slot,
+        RATIO,
+        True,
+        num_heads=HEADS,
+    )
+    case.run_compressor(actual.as_strided(shape, strides))
+    assert (expected[:, : PAGE * WIDTH] != 173).any()
+    assert (expected[:, PAGE * WIDTH :] == 173).all()
+    assert torch.equal(actual, expected)
+
+
+def test_warmup_compiles_the_bound_cache_layout(monkeypatch):
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+    prefix = "indexer.k_cache"
+    cache = DeepseekV4RocmMxfp4IndexerCache.__new__(DeepseekV4RocmMxfp4IndexerCache)
+    nn.Module.__init__(cache)
+    config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(index_n_heads=HEADS)
+        ),
+        kernel_config=types.SimpleNamespace(enable_jit_warmup=True),
+        compilation_config=types.SimpleNamespace(
+            static_forward_context={prefix: cache}
+        ),
+    )
+
+    def init_base(compressor, vllm_config):
+        nn.Module.__init__(compressor)
+        compressor.k_cache_prefix = prefix
+        compressor.use_fp4_cache, compressor.overlap = True, True
+        compressor.coff, compressor.compress_ratio = 2, RATIO
+        compressor.head_dim, compressor.rope_head_dim = HEAD_DIM, 64
+        compressor.norm = types.SimpleNamespace(
+            weight=torch.empty(0, dtype=torch.bfloat16)
+        )
+
+    monkeypatch.setattr(DeepseekCompressor, "__init__", init_base)
+    registry = JitWarmupRegistry(config)
+    with registry.activate():
+        DeepseekV4RocmMxfp4Compressor(config)
+    assert len(registry) == 1
+    pitch = PAGE * WIDTH + 128
+    cache.bind_kv_cache(
+        torch.empty_strided(
+            (2, 1, PAGE, WIDTH),
+            (pitch, PAGE * WIDTH, WIDTH, 1),
+            dtype=torch.uint8,
+            device=DEVICE,
+        )
+    )
+    with patch.object(
+        rocm_fused_indexer_k, "compile_many", wraps=rocm_fused_indexer_k.compile_many
+    ) as compile_many:
+        registry.warmup()
+    (keys,) = compile_many.call_args.args
+    ranges = set()
+    for key in keys:
+        inputs = dict(key.inputs)
+        pages = inputs["kv_cache"]
+        assert pages.shape == (1, PAGE, WIDTH) and pages.strides == (pitch, WIDTH, 1)
+        ranges.add((inputs["state_cache"].ptr_range_bytes, pages.ptr_range_bytes))
+    assert ranges == set(itertools.product((0, 1 << 32), repeat=2))
