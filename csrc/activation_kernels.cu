@@ -236,6 +236,13 @@ packed_gelu_tanh_kernel(const packed_t& val, const float /*alpha*/) {
 
 }  // namespace vllm
 
+// The vectorized paths load and store whole vectors from each row start, so
+// the data pointers must be vector-aligned as well, not just d.
+static inline bool is_vec_aligned(const torch::stable::Tensor& t,
+                                  int vec_bytes) {
+  return reinterpret_cast<uintptr_t>(t.data_ptr()) % vec_bytes == 0;
+}
+
 // Launch activation and gating kernel.
 // Use ACT_FIRST (bool) indicating whether to apply the activation function
 // first. HAS_CLAMP (bool) enables pre-activation clamping: gate input is
@@ -256,7 +263,9 @@ packed_gelu_tanh_kernel(const packed_t& val, const float /*alpha*/) {
           ? vllm::VecTraits<true>::ARCH_MAX_VEC_SIZE                           \
           : vllm::VecTraits<false>::ARCH_MAX_VEC_SIZE;                         \
   int vec_size = support_vec / input.element_size();                           \
-  const bool use_vec = (d % vec_size == 0);                                    \
+  const bool use_vec = d % vec_size == 0 &&                                    \
+                       is_vec_aligned(input, support_vec) &&                   \
+                       is_vec_aligned(out, support_vec);                       \
   const torch::stable::accelerator::DeviceGuard device_guard(                  \
       input.get_device_index());                                               \
   const cudaStream_t stream = get_current_cuda_stream();                       \
@@ -962,7 +971,9 @@ __global__ void masked_activation_kernel(
           ? vllm::VecTraits<true>::ARCH_MAX_VEC_SIZE                           \
           : vllm::VecTraits<false>::ARCH_MAX_VEC_SIZE;                         \
   int vec_size = support_vec / input.element_size();                           \
-  const bool use_vec = (d % vec_size == 0);                                    \
+  const bool use_vec = d % vec_size == 0 &&                                    \
+                       is_vec_aligned(input, support_vec) &&                   \
+                       is_vec_aligned(out, support_vec);                       \
   const torch::stable::accelerator::DeviceGuard device_guard(                  \
       input.get_device_index());                                               \
   const cudaStream_t stream = get_current_cuda_stream();                       \
@@ -1338,7 +1349,9 @@ __global__ void activation_kernel(
           ? vllm::VecTraits<true>::ARCH_MAX_VEC_SIZE                           \
           : vllm::VecTraits<false>::ARCH_MAX_VEC_SIZE;                         \
   int vec_size = support_vec / input.element_size();                           \
-  const bool use_vec = (d % vec_size == 0);                                    \
+  const bool use_vec = d % vec_size == 0 &&                                    \
+                       is_vec_aligned(input, support_vec) &&                   \
+                       is_vec_aligned(out, support_vec);                       \
   const torch::stable::accelerator::DeviceGuard device_guard(                  \
       input.get_device_index());                                               \
   const cudaStream_t stream = get_current_cuda_stream();                       \
