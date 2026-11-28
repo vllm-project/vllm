@@ -31,6 +31,13 @@ To choose the kernel backend of quantized linear layers, for all of them with
 `--linear-backend` or per quantization type with `linear_backend_per_quant`,
 see [Kernel Backends](kernels.md#selecting-a-backend).
 
+## Automatic MoE Backend Selection on SM120
+
+On SM120 GPUs such as the RTX PRO 6000, DeepSeek-V4 MXFP4 MoE layers use
+Humming instead of DeepGEMM with tensor parallelism, or expert parallelism over
+the tensor-parallel ranks. With data or prefill context parallelism they keep
+DeepGEMM. Pass `--moe-backend deep_gemm` to keep DeepGEMM.
+
 ## Hadamard Input Transforms (QuIP)
 
 Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform (`transform_config` with `type: hadamard` and `head_dim` of 16, 32, 64, or 128) run on the Humming backend by default on compute capability 10.0 and newer. The Hadamard is fused with input quantization, and the activation dtype declared by the checkpoint is used, with no fallback to 16-bit activations.
