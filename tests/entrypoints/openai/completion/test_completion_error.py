@@ -1461,3 +1461,15 @@ def test_non_numeric_logprobs_rejected(field_name):
             max_tokens=10,
             **{field_name: "2"},
         )
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
+@pytest.mark.parametrize("value", [1.5, -0.5, True, False])
+def test_non_integer_logprobs_rejected(field_name, value):
+    with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            **{field_name: value},
+        )
