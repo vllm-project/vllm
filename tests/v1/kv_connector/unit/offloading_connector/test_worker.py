@@ -637,6 +637,54 @@ def test_register_kv_caches(backend):
             assert actual.mapping is not None
 
 
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
+@pytest.mark.parametrize("padding", [0, 8])
+def test_register_mamba_block_bytes(layout: KVCacheLayout, padding: int):
+    """Packed blocks transfer whole rows. Compact layers transfer their payload."""
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    layers = ["mamba.0", "mamba.1"]
+    num_blocks = 3
+    mamba = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((2,), (1,)),
+        dtypes=(torch.float16, torch.float32),
+        page_size_padded=8 + padding,
+    )
+    page = mamba.page_size_bytes
+    row = len(layers) * page
+    packed = layout.is_block_outermost
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_groups=[make_kv_cache_group(layers, mamba)],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * row,
+                layers=layers,
+                layer_stride=page if packed else num_blocks * page,
+                block_stride=row if packed else page,
+            )
+        ],
+    )
+    # Give every block, layer and padding byte a distinct value.
+    pages = torch.arange(num_blocks * row, dtype=torch.int8, device=DEVICE_TYPE).view(
+        num_blocks, len(layers), page
+    )
+    backing = pages if packed else pages.transpose(0, 1)
+    caches = allocate_kv_cache(
+        config, pages.device, layout, allocate=lambda _: backing.flatten()
+    )
+    worker, spec = _make_worker(config)
+    worker.register_kv_caches(caches)
+    canonical = spec.get_worker.call_args.args[0]
+    (refs,) = canonical.group_data_refs
+    regions = [
+        canonical.tensors[r.tensor_idx].tensor[:, : r.page_size_bytes] for r in refs
+    ]
+    expected = pages if packed else pages[:, :, : mamba.real_page_size_bytes]
+    torch.testing.assert_close(torch.cat(regions, dim=1), expected.flatten(1))
+
+
 def test_register_packed_kv_caches_skips_scratch_group():
     attn_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
