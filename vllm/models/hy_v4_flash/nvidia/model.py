@@ -163,11 +163,11 @@ class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM):
         orig_to_new_stacked={
             ".self_attn.q_a_proj.": (".self_attn.fused_qkv_a_proj.", 0),
             ".self_attn.kv_a_proj_with_mqa.": (".self_attn.fused_qkv_a_proj.", 1),
-            ".indexer.token_key_projection.": (
+            ".self_attn.indexer.token_key_projection.": (
                 ".self_attn.fused_qkv_a_proj.",
                 2,
             ),
-            ".indexer.head_weight_projection.": (
+            ".self_attn.indexer.head_weight_projection.": (
                 ".self_attn.fused_qkv_a_proj.",
                 3,
             ),

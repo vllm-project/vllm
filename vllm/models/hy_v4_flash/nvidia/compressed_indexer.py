@@ -57,20 +57,6 @@ class FlashCompressedIndexer(nn.Module):
             quant_config=vllm_config.quant_config,
             prefix=f"{prefix}.query_projection",
         )
-        self.token_key_projection: ReplicatedLinear | None = ReplicatedLinear(
-            config.hidden_size,
-            config.compressed_indexer_head_dim,
-            bias=False,
-            quant_config=vllm_config.quant_config,
-            prefix=f"{prefix}.token_key_projection",
-        )
-        self.head_weight_projection: ReplicatedLinear | None = ReplicatedLinear(
-            config.hidden_size,
-            self.num_heads,
-            bias=False,
-            quant_config=vllm_config.quant_config,
-            prefix=f"{prefix}.head_weight_projection",
-        )
         self.token_key_norm = RMSNorm(128, eps=self.eps)
         # Value then gate projection, replicated, so one GEMM produces both.
         self.key_projection = MergedColumnParallelLinear(

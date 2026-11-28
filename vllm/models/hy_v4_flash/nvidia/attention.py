@@ -17,9 +17,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
-    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
@@ -171,66 +169,17 @@ class HYV4FlashAttention(HYV4MLAAttention):
             )
         )
         if self.is_window_layer:
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                config.hidden_size,
-                self.qkv_a_split_sizes,
-                bias=False,
-                quant_config=quant,
-                prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True,
-            )
+            split_sizes = self.qkv_a_split_sizes
         else:
-            assert isinstance(self.indexer, FlashCompressedIndexer)
-            q_a_proj = ReplicatedLinear(
-                config.hidden_size,
-                self.q_lora_rank,
-                bias=False,
-                quant_config=quant,
-                prefix=f"{prefix}.q_a_proj",
-            )
-            kv_a_proj = ReplicatedLinear(
-                config.hidden_size,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                bias=False,
-                quant_config=quant,
-                prefix=f"{prefix}.kv_a_proj_with_mqa",
-            )
-            token_key_projection = self.indexer.token_key_projection
-            head_weight_projection = self.indexer.head_weight_projection
-            assert token_key_projection is not None
-            assert head_weight_projection is not None
-            projections = (
-                ("q_a_proj", q_a_proj),
-                ("kv_a_proj_with_mqa", kv_a_proj),
-                ("token_key_projection", token_key_projection),
-                ("head_weight_projection", head_weight_projection),
-            )
-            quantized = [
-                name
-                for name, layer in projections
-                if type(layer.quant_method) is not UnquantizedLinearMethod
-            ]
-            if quantized:
-                raise ValueError(
-                    "HYV4 Flash DSA fused qkv_a/indexer projections must be "
-                    f"unquantized; quantized projections: {', '.join(quantized)}"
-                )
-            if len({layer.params_dtype for _, layer in projections}) != 1:
-                raise ValueError(
-                    "HYV4 Flash DSA fused qkv_a/indexer projections must use "
-                    "the same parameter dtype"
-                )
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                config.hidden_size,
-                self.fused_qkv_a_split_sizes,
-                bias=False,
-                params_dtype=q_a_proj.params_dtype,
-                quant_config=None,
-                prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True,
-            )
-            self.indexer.token_key_projection = None
-            self.indexer.head_weight_projection = None
+            split_sizes = self.fused_qkv_a_split_sizes
+        self.fused_qkv_a_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            split_sizes,
+            bias=False,
+            quant_config=quant,
+            prefix=f"{prefix}.fused_qkv_a_proj",
+            disable_tp=True,
+        )
         self.learnable_sink_param = make_attention_sink(
             self.num_local_heads, torch.float32
         )
