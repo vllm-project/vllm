@@ -8,6 +8,7 @@ to fail.
 """
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
@@ -16,7 +17,13 @@ import lm_eval
 import pytest
 import torch
 
-from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
+from tests.models.utils import check_logprobs_close
+from tests.utils import (
+    RemoteOpenAIServer,
+    create_new_process_for_each_test,
+    multi_gpu_test,
+)
+from vllm import SamplingParams, TokensPrompt
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -315,4 +322,88 @@ def test_cp_generation(
         num_gpus_available,
         method="generate",
         is_multimodal=False,
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not (
+        current_platform.is_device_capability_family(90)
+        or current_platform.is_device_capability_family(100)
+    ),
+    reason="This test uses FA3 on SM90 or FA4 on SM100-family GPUs",
+)
+@multi_gpu_test(num_gpus=2)
+def test_flash_attention_diffkv_dcp(vllm_runner, tmp_path):
+    """DCP matches TP for unequal Q/K and V dimensions in prefill and decode."""
+    from transformers import MiMoV2FlashConfig, MiMoV2FlashForCausalLM
+
+    config = MiMoV2FlashConfig(
+        vocab_size=256,
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=1,
+        head_dim=192,
+        v_head_dim=128,
+        max_position_embeddings=128,
+        layer_types=["full_attention"],
+        mlp_layer_types=["dense"],
+        hybrid_layer_pattern=[0],
+        moe_layer_freq=[0],
+        layernorm_epsilon=1e-5,
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        MiMoV2FlashForCausalLM(config).save_pretrained(tmp_path)
+
+    prompts = [
+        TokensPrompt(prompt_token_ids=list(range(3, 3 + length))) for length in (8, 80)
+    ]
+    sampling_params = SamplingParams(
+        temperature=0, max_tokens=4, ignore_eos=True, logprobs=5
+    )
+    results = []
+    for dcp_size in (1, 2):
+        with vllm_runner(
+            str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            tensor_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+            distributed_executor_backend="mp",
+            attention_config={"backend": "FLASH_ATTN_DIFFKV"},
+            max_model_len=128,
+            max_num_seqs=2,
+            max_num_batched_tokens=32,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            kv_cache_memory_bytes=64 * 1024 * 1024,
+        ) as runner:
+            outputs = runner.llm.generate(prompts, sampling_params, use_tqdm=False)
+
+        completions = [output.outputs[0] for output in outputs]
+        assert len(completions) == len(prompts)
+        for completion in completions:
+            assert len(completion.token_ids) == sampling_params.max_tokens
+            assert completion.logprobs is not None
+            assert all(
+                math.isfinite(logprob.logprob)
+                for step in completion.logprobs
+                for logprob in step.values()
+            )
+        results.append(
+            [
+                (list(output.token_ids), output.text, output.logprobs)
+                for output in completions
+            ]
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=results[0],
+        outputs_1_lst=results[1],
+        name_0="TP",
+        name_1="TP+DCP",
     )
