@@ -11,7 +11,7 @@ repos:
   hooks:
   - id: runner-snapshot
     name: runner snapshot
-    entry: python3 tools/pre_commit/check_spdx_header.py
+    entry: bash tools/pre_commit/runner_snapshot.sh
     language: system
     types: [python]
     pass_filenames: false
