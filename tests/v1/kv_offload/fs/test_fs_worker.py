@@ -40,6 +40,7 @@ class RecordingFSWorker(FSOffloadingWorker):
             dcp_size=1,
             rank=0,
             dtype="float16",
+            kv_cache_layout="LBNHC",
         )
         super().__init__(file_mapper=mapper, blocks_per_file=blocks_per_file)
         self.recorded: list[tuple[str, list[FileOp]]] = []
