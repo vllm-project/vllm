@@ -95,6 +95,8 @@ For this we can use the `json` parameter in two different ways:
 - Using directly a [JSON Schema](https://json-schema.org/)
 - Defining a [Pydantic model](https://docs.pydantic.dev/latest/) and then extracting the JSON Schema from it (which is normally an easier option).
 
+Pass the schema to `structured_outputs.json` as a JSON object or a JSON-encoded string.
+
 The next example shows how to use the `response_format` parameter with a Pydantic model:
 
 ??? code

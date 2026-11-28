@@ -205,4 +205,26 @@ mod tests {
              specified."
         );
     }
+
+    #[test]
+    fn invalid_schema_types_return_bad_request() {
+        let format = Some(json!({
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": null}
+        }));
+        let explicit_constraint = Some(json!({"json": []}));
+
+        for (response_format, structured_outputs) in [(format, None), (None, explicit_constraint)] {
+            let error = convert_from_response_format_value(&response_format, &structured_outputs)
+                .unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+            assert!(
+                error
+                    .to_error_response()
+                    .error
+                    .message
+                    .contains("JSON schema must be an object or a JSON-encoded string")
+            );
+        }
+    }
 }
