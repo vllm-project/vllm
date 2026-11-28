@@ -88,7 +88,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
+    KVConnectorOutput,
     ModelRunnerOutput,
+    RepairResultReport,
 )
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
@@ -157,6 +159,12 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
+from vllm.v1.worker.gpu.repair_executor import (
+    RepairViewBinding,
+    core_logical_repair_binding,
+    execute_repair_only,
+    repair_capability,
+)
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_vocab_shards,
@@ -606,6 +614,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         get_offloader().post_init()
 
+        if (
+            getattr(self.vllm_config.kv_transfer_config, "kv_load_failure_policy", None)
+            == "repair"
+            and not self.model_config.is_hybrid
+        ):
+            # Hybrid repair uses an internal ordinary request with private
+            # recurrent state, rather than this direct layer-replay executor.
+            # Fail fast on architectures the replay cannot reproduce
+            # faithfully (post-embed transforms, per-layer loop inputs):
+            # a silently-diverging replay would write wrong KV under a
+            # green verdict. The structured verdict also carries stable
+            # reason codes for the distributed TP preflight consensus.
+            # The capability probe deliberately stops at layer zero. Keep its
+            # temporary hook out of Dynamo and the compiled model cache.
+            with set_forward_context(None, self.vllm_config, skip_compiled=True):
+                capability = repair_capability(self.model)
+            if not capability["compatible"]:
+                raise RuntimeError(capability["detail"])
+            logger.info(
+                "Repair replay capability ok for %s",
+                type(self.model).__name__,
+            )
+
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             compile_model_with_stock_torch(self.model, self.vllm_config)
 
@@ -898,6 +929,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.model, self.vllm_config
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
+
+    def _repair_view_binding(self) -> RepairViewBinding | None:
+        """The binding contract of the KV views this runner binds.
+
+        The views `initialize_kv_cache` allocates and binds
+        (`allocate_kv_cache` -> `create_kv_cache_views`) are logical
+        `[B, H, N, C]` per layer under EVERY physical layout, shared by
+        K and V (split along the channel dim). A backend whose runner
+        binds a different view convention overrides this to declare its
+        own contract; the repair executor validates every replayed
+        layer's actual views against the binding (shape and strides)
+        before the first write and refuses on any disagreement (a
+        missing binding refuses the repair).
+        """
+        spec_block_size = (
+            self.kv_cache_config.kv_cache_groups[0].block_size
+            if self.kv_cache_config is not None and self.kv_cache_config.kv_cache_groups
+            else None
+        )
+        if spec_block_size is None:
+            return None
+        return core_logical_repair_binding(
+            spec_block_size, self.cache_config.kv_cache_layout
+        )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1381,11 +1436,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
         ):
             req_index = self.req_states.req_id_to_index[req_id]
+            if req_id in scheduler_output.rewound_req_ids:
+                # The scheduler moved this request's count other than by
+                # the ordinary step advance (a load-failure rollback, a
+                # repair commit restoration): stage the authoritative
+                # value over the GPU-side count. The ordinary advance is
+                # deliberately NOT staged -- under async scheduling with
+                # speculative decoding the echoed count is an optimistic
+                # upper bound and the on-device post_update rejection
+                # correction is the truth.
+                self.req_states.num_computed_tokens.stage_write_elem(
+                    req_index, num_computed_tokens
+                )
             num_computed_tokens_np[req_index] = num_computed_tokens
             if req_new_block_ids is not None:
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
+        self.req_states.num_computed_tokens.apply_write()
 
         # Update CPU num_computed_prefill_tokens.
         np.minimum(
@@ -1929,6 +1997,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # when encoder inputs are scheduled, because this step updates
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
+        if (
+            scheduler_output.repair_works is not None
+            and not scheduler_output.repair_full_forward
+        ):
+            # Partial-depth replay calls individual layers. Full-depth repair
+            # uses the ordinary compiled forward inside the repair envelope.
+            skip_compiled = True
 
         batch_desc, dp_sync_state = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
@@ -1942,7 +2017,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_active_loras=num_active_loras,
             parallel_config=self.parallel_config,
             allow_ubatching=(
-                self.ubatch_runner is not None and not skip_attn_for_dummy_run
+                self.ubatch_runner is not None
+                and not skip_attn_for_dummy_run
+                # A repair-only step must never be split into microbatches:
+                # the dp_size == 1 fast path re-checks the all-reduce-overlap
+                # split AFTER the eager descriptor and would otherwise route
+                # the repair batch through the ordinary full-depth ubatch
+                # forward (clobbering the healthy above-failure KV) before
+                # the repair branch is ever evaluated.
+                and scheduler_output.repair_works is None
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,
@@ -2169,6 +2252,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.step_timing.forward_start()
 
         # Run model.
+        repair_results = None
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
@@ -2206,10 +2290,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     model_output = self.ubatch_runner.run(
                         self.model, model_inputs, ubatch_state
                     )
+                elif scheduler_output.repair_works is not None:
+                    # Full-depth repairs share the ordinary model forward
+                    # with healthy requests. Partial-depth replay remains
+                    # exclusive. Both paths validate writes before execution.
+                    # The write geometry comes from this runner's view
+                    # binding: the binding contract of the KV views it
+                    # allocated and bound (see _repair_view_binding).
+                    model_output = None
+
+                    def full_forward():
+                        nonlocal model_output
+                        if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                            assert self.cudagraph_manager is not None
+                            model_output = self.cudagraph_manager.run_pw_graph(
+                                self.model, model_inputs
+                            )
+                        else:
+                            model_output = self.model(**model_inputs)
+
+                    repair_results = execute_repair_only(
+                        self.model,
+                        scheduler_output,
+                        model_inputs["input_ids"],
+                        model_inputs["positions"],
+                        list(input_batch.req_ids),
+                        view_binding=self._repair_view_binding(),
+                        full_forward=(
+                            full_forward
+                            if scheduler_output.repair_full_forward
+                            else None
+                        ),
+                    )
+                    if scheduler_output.repair_full_forward and model_output is None:
+                        # A refused forward must not advance ordinary rows.
+                        raise RuntimeError("Mixed repair preflight refused the batch")
                 elif batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                    # Run the PIECEWISE graph (compiled PW cudagraph or breakable
-                    # cudagraph, chosen inside run_pw_graph). cg_mode is only
-                    # PIECEWISE after the cudagraph manager exists.
                     assert self.cudagraph_manager is not None
                     model_output = self.cudagraph_manager.run_pw_graph(
                         self.model, model_inputs
@@ -2219,6 +2335,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     model_output = self.model(**model_inputs)
 
         self.kv_connector.finish_forward()
+
+        if (
+            scheduler_output.repair_works is not None
+            and not scheduler_output.repair_full_forward
+        ):
+            # No logits, no sampling, no output publication for the repair
+            # step: the connector output (with the repair verdicts) is the
+            # step's whole product. The scheduled requests are named so
+            # update_from_output can settle their in-flight accounting
+            # without consuming any tokens.
+            if repair_results is None:
+                raise RuntimeError(
+                    "A repair step ran without the repair execution path "
+                    "(cudagraph modes do not support repair yet)."
+                )
+            kv_connector_output = self.kv_connector.post_forward(
+                scheduler_output.finished_req_ids
+            )
+            if kv_connector_output is None:
+                kv_connector_output = KVConnectorOutput()
+            kv_connector_output.repair_results = repair_results
+            model_runner_output = ModelRunnerOutput(
+                req_ids=list(scheduler_output.repair_works.keys()),
+                sampled_token_ids=None,  # type: ignore[arg-type]
+                logprobs=None,
+                prompt_logprobs_dict={},  # type: ignore[arg-type]
+                prompt_token_id_logprobs_dict={},  # type: ignore[arg-type]
+            )
+            model_runner_output.kv_connector_output = kv_connector_output
+            return model_runner_output
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
@@ -2259,6 +2405,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_spec_tokens_to_schedule=(
                 0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
             ),
+            repair_results=repair_results,
         )
 
         if not self.is_last_pp_rank:
@@ -2293,6 +2440,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        repair_results = self.execute_model_state.repair_results
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2391,6 +2539,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.kv_connector_output = self.kv_connector.post_forward(
             finished_req_ids, defer_finalize=defer_kv_finalize
         )
+        if repair_results is not None:
+            if model_runner_output.kv_connector_output is None:
+                model_runner_output.kv_connector_output = KVConnectorOutput()
+            model_runner_output.kv_connector_output.repair_results = repair_results
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         # The encoder runner exists only on the first PP rank, so later ranks
@@ -2647,6 +2799,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    repair_results: list[RepairResultReport] | None = None
 
 
 class BatchReqState(NamedTuple):

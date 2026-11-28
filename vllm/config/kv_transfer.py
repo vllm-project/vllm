@@ -114,10 +114,14 @@ class KVTransferConfig:
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
-    kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
+    kv_load_failure_policy: Literal["recompute", "fail", "repair"] = "fail"
     """Policy for handling KV cache load failures.
     'recompute': reschedule the request to recompute failed blocks
-    'fail': immediately fail the request with an error finish reason (default)"""
+    'fail': immediately fail the request with an error finish reason (default)
+    'repair': schedule the failed region and reuse the certified suffix.
+    Full-depth attention-only repairs share the normal forward with healthy
+    requests; partial-depth replay remains exclusive. The connector must
+    report through get_load_failure_reports."""
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.

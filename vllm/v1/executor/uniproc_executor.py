@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, InvalidStateError
+from contextlib import suppress
 from multiprocessing import Lock
 from typing import Any
 
@@ -46,6 +47,89 @@ class AsyncOutputFuture(Future):
             except Exception as e:
                 self.set_exception(e)
         return super().result()
+
+
+class _SourceRankStampedFuture(Future):
+    """A Future whose resolved ModelRunnerOutput carries the authoritative
+    TP=1 source-rank stamp on its transfer evidence.
+
+    UniProcExecutor runs no output aggregator (TP=1: the single worker's
+    output IS the gathered output), so the executor itself is the
+    authoritative rank-stamping point -- the equivalent of the stamp the
+    KVOutputAggregator applies on gathered paths. In non-blocking mode the
+    result may resolve only after execute_model() has returned, so the
+    stamp cannot be applied eagerly: it is applied at the point the value
+    is resolved, in result() -- the same point at which the
+    MultiprocExecutor's FutureWrapper performs its aggregation. There is
+    no completion/mutation race by construction: the stamped value is
+    what set_result stores, so every reader (result(), done-callbacks,
+    exception paths) observes the stamped output or the propagated
+    exception.
+
+    The wrapper never blocks earlier than the inner future would: an
+    already-complete inner future is adopted eagerly at construction, and
+    a pending AsyncOutputFuture is driven by result() exactly as the
+    engine core would have driven it. Exceptions propagate unchanged;
+    None results are supported (nothing to stamp).
+
+    Known limitations (no current caller exercises either): result()
+    ignores its timeout while driving the inner future (AsyncOutputFuture
+    rejects timeouts entirely, matching the MultiprocExecutor's
+    FutureWrapper), and cancel() does not propagate to the inner future.
+    """
+
+    def __init__(self, inner: Future):
+        super().__init__()
+        self._inner = inner
+        if inner.done():
+            self._adopt_inner()
+        else:
+            # Mirror the inner future's completion eagerly (in whoever
+            # resolves it) so done(), exception() and done-callbacks
+            # observe the same transition without waiting for a
+            # result() call. The stamp happens here, BEFORE set_result
+            # stores the value -- every reader observes stamped evidence.
+            inner.add_done_callback(lambda _: self._adopt_inner())
+
+    def _adopt_inner(self) -> None:
+        """Mirror the inner future's outcome into this one, stamping the
+        evidence on success. Called only when the inner future is done;
+        idempotent when result() already adopted it."""
+        exception = self._inner.exception()
+        with suppress(InvalidStateError):
+            if exception is not None:
+                self.set_exception(exception)
+            else:
+                self.set_result(_stamp_tp1_source_rank(self._inner.result()))
+
+    def result(self, timeout=None):
+        if not self.done():
+            # Drives an AsyncOutputFuture to completion (its result() pulls
+            # the async output) or waits for a plain future; the outcome is
+            # then mirrored with the stamp applied.
+            try:
+                output = self._inner.result()
+            except Exception as e:
+                with suppress(InvalidStateError):
+                    self.set_exception(e)
+            else:
+                with suppress(InvalidStateError):
+                    self.set_result(_stamp_tp1_source_rank(output))
+        return super().result(timeout)
+
+
+def _stamp_tp1_source_rank(output: Any) -> Any:
+    """Apply the authoritative source_rank=0 stamp to a ModelRunnerOutput's
+    transfer evidence (reports and attestations). A no-op for None and for
+    outputs without connector evidence."""
+    if isinstance(output, ModelRunnerOutput):
+        kv_output = output.kv_connector_output
+        if kv_output is not None:
+            for report in kv_output.load_failure_reports or []:
+                report.source_rank = 0
+            for attestation in kv_output.load_attestations or []:
+                attestation.source_rank = 0
+    return output
 
 
 class UniProcExecutor(Executor):
@@ -125,21 +209,47 @@ class UniProcExecutor(Executor):
             non_block=non_block,
             single_value=True,
         )
-        # In non-blocking mode, surface any exception as early as possible.
-        if non_block and output.done():
-            # Raise the exception in-line if the task failed.
-            output.result()
+        if isinstance(output, Future):
+            # Non-blocking mode -- the result may resolve only
+            # after this method returns, so the authoritative TP=1
+            # source-rank stamp (which no aggregator applies on this path)
+            # is applied by the wrapper at resolution time. The wrapper
+            # stays non-blocking and propagates exceptions unchanged.
+            stamped = _SourceRankStampedFuture(output)
+            if stamped.done() and stamped.exception() is not None:
+                # Surface an already-failed execution in-line (the
+                # original non-blocking contract) rather than deferring
+                # the raise to the first result() reader.
+                stamped.result()
+            return stamped
+        # Blocking mode: the result is already resolved; stamp it directly.
+        _stamp_tp1_source_rank(output)
         return output
 
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        return self.collective_rpc(
+        output = self.collective_rpc(
             "sample_tokens",
             args=(grammar_output,),
             non_block=non_block,
             single_value=True,
         )
+        if isinstance(output, Future):
+            # the sample path carries the
+            # same transfer evidence as execute_model (the worker attaches
+            # it post-forward), and on the batch-queue / None-fallback
+            # paths the engine core consumes THIS future as the step's
+            # output -- it must be stamped identically or every
+            # unstamped attestation fails the completeness gate and the
+            # repair policy silently degrades to permanent recompute on
+            # this path.
+            stamped = _SourceRankStampedFuture(output)
+            if stamped.done() and stamped.exception() is not None:
+                stamped.result()
+            return stamped
+        _stamp_tp1_source_rank(output)
+        return output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.collective_rpc("take_draft_token_ids", single_value=True)
