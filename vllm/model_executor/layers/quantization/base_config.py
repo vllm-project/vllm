@@ -319,6 +319,7 @@ def resolve_quant_method(
     )
     from vllm.model_executor.layers.linear import (
         LinearBase,
+        StackedColumnParallelLinear,
         UnquantizedLinearMethod,
     )
     from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -334,6 +335,11 @@ def resolve_quant_method(
         UnquantizedEmbeddingMethod,
     )
     from vllm.platforms import current_platform
+
+    if isinstance(layer, StackedColumnParallelLinear):
+        # Lets the loader flag a stacked layer resolved without its shard names
+        leaf = prefix.rsplit(".", 1)[-1]
+        layer.resolved_shard_names = quant_config.packed_modules_mapping.get(leaf)
 
     online_config = quant_config.online_quantization_config
     # Online quantization supports LinearBase, RoutedExperts, and a

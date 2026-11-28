@@ -189,6 +189,19 @@ class WeightsMapper:
             if (out_name := self._map_name(name)) is not None
         }
 
+    def get_packed_modules_mapping(self) -> dict[str, list[str]]:
+        """The `packed_modules_mapping` the stacked rules imply: each stacked vLLM
+        module name mapped to the checkpoint module names loaded into it."""
+        mapping: dict[str, list[str]] = {}
+        for orig, (new, _) in self.orig_to_new_stacked.items():
+            stacked = new.rsplit(".", 1)[-1]
+            shard = orig.rsplit(".", 1)[-1]
+            if stacked and shard and shard != stacked:
+                names = mapping.setdefault(stacked, [])
+                if shard not in names:
+                    names.append(shard)
+        return mapping
+
     def get_rename_mapper(self) -> "WeightsMapper":
         """Mapper variant keeping only the renames.
 

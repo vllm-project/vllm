@@ -706,6 +706,12 @@ class StackedColumnParallelLinear(ColumnParallelLinear):
     shard_ids: tuple[str | int, ...]
     """Every shard this layer can receive."""
 
+    resolved_shard_names: list[str] | None = None
+    """The checkpoint shard names the quant config resolved this layer from."""
+
+    loaded_split: bool = False
+    """Whether the checkpoint stores this layer as separate shards."""
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
@@ -724,6 +730,8 @@ class StackedColumnParallelLinear(ColumnParallelLinear):
             shards = shard_id
         else:
             shards = (shard_id,)
+        if shard_id is not None:
+            self.loaded_split = True
         if any(shard not in self.shard_ids for shard in shards):
             raise ValueError(
                 f"Shard id for {type(self).__name__} should be one of "

@@ -967,7 +967,7 @@ def test_fp8_reloading(
     for name, shape, _ in original_metadata:
         param = getattr(layer, name)
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, torch.zeros(shape))  # cannot use empty
+        weight_loader(param, torch.zeros(shape, dtype=param.dtype))
 
     method.process_weights_after_loading(layer)
 
@@ -975,7 +975,7 @@ def test_fp8_reloading(
     for name, shape, _ in original_metadata:
         param = getattr(layer, name)
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, torch.zeros(shape))  # cannot use empty
+        weight_loader(param, torch.zeros(shape, dtype=param.dtype))
 
     method.process_weights_after_loading(layer)
 

@@ -496,6 +496,16 @@ def test_copy_weight_converts_float8_values(src_dtype, dst_dtype) -> None:
     assert torch.equal(dst.float(), src.float())
 
 
+@pytest.mark.parametrize("src_dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_copy_weight_rejects_unquantized_into_float8(src_dtype) -> None:
+    """An unquantized checkpoint tensor must not be silently cast into a float8
+    parameter, which happens when a layer the checkpoint excludes from
+    quantization was built quantized."""
+    dst = torch.empty(4, dtype=E4M3)
+    with pytest.raises(ValueError, match="checkpoint tensor into a"):
+        copy_weight_(dst, torch.ones(4, dtype=src_dtype))
+
+
 def test_copy_weight_prefault_maps_the_mmap_view(
     prefault_on: None, tmp_path: Path
 ) -> None:
