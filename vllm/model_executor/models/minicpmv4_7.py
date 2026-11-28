@@ -293,36 +293,47 @@ def compute_llm_grid(
 def build_image_bounds(
     input_ids: torch.LongTensor, special_token_ids: dict
 ) -> torch.LongTensor:
-    start_ids = [
-        x
-        for x in (
-            special_token_ids.get("im_start_id"),
-            special_token_ids.get("slice_start_id"),
-        )
-        if x is not None
-    ]
-    end_ids = [
-        x
-        for x in (
-            special_token_ids.get("im_end_id"),
-            special_token_ids.get("slice_end_id"),
-        )
-        if x is not None
-    ]
-    if not start_ids or not end_ids:
-        return torch.zeros(0, 2, dtype=torch.long, device=input_ids.device)
-    start_cond = torch.zeros_like(input_ids, dtype=torch.bool)
-    end_cond = torch.zeros_like(input_ids, dtype=torch.bool)
-    for sid in start_ids:
-        start_cond |= input_ids == sid
-    for eid in end_ids:
-        end_cond |= input_ids == eid
-    starts = torch.where(start_cond)[0] + 1
-    ends = torch.where(end_cond)[0]
-    n = min(len(starts), len(ends))
-    if n == 0:
-        return torch.zeros(0, 2, dtype=torch.long, device=input_ids.device)
-    return torch.stack([starts[:n], ends[:n]], dim=-1)
+    """Return the `[start, end)` spans between matched span markers.
+
+    Markers are paired by position: an end marker closes the most recent open
+    start marker of the same kind (`</image>` closes `<image>`, `</slice>`
+    closes `<slice>`). Unmatched markers are dropped. Message text can contain
+    these strings, and the tokenizer turns them into the same special ids. With
+    index-based pairing, one stray `</image>` before an image shifted every later
+    pair, so a span ended before it started and the canvas positions fell back.
+    """
+    empty = torch.zeros(0, 2, dtype=torch.long, device=input_ids.device)
+    end_to_start = {}
+    for start_key, end_key in (
+        ("im_start_id", "im_end_id"),
+        ("slice_start_id", "slice_end_id"),
+    ):
+        start_id = special_token_ids.get(start_key)
+        end_id = special_token_ids.get(end_key)
+        if start_id is not None and end_id is not None:
+            end_to_start[end_id] = start_id
+    if not end_to_start:
+        return empty
+
+    marker_ids = torch.tensor(
+        sorted(set(end_to_start) | set(end_to_start.values())),
+        dtype=input_ids.dtype,
+        device=input_ids.device,
+    )
+    positions = torch.where(torch.isin(input_ids, marker_ids))[0]
+    open_starts: list[tuple[int, int]] = []  # (start marker id, first span index)
+    spans: list[tuple[int, int]] = []
+    for pos, token in zip(positions.tolist(), input_ids[positions].tolist()):
+        start_id = end_to_start.get(token)
+        if start_id is None:
+            open_starts.append((token, pos + 1))
+        elif open_starts and open_starts[-1][0] == start_id:
+            spans.append((open_starts.pop()[1], pos))
+        # Otherwise an end marker with no open start of its kind: dropped.
+    if not spans:
+        return empty
+    spans.sort()
+    return torch.tensor(spans, dtype=torch.long, device=input_ids.device)
 
 
 def _compute_canvas_single(
