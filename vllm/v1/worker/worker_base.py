@@ -111,6 +111,10 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Assign the Mamba block size resolved by the core."""
+        self.vllm_config.cache_config.mamba_block_size = mamba_block_size
+
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
         backends = get_current_attn_backends(self.vllm_config)
@@ -151,6 +155,18 @@ class WorkerBase:
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
         return
+
+    def probe_forward(self) -> str | None:
+        """Readiness probe for `/health_generate`: run a dummy forward pass and
+        wait for it to complete on the device.
+
+        Returns:
+            None if the probe passed, else the error. Errors are returned, not
+            raised, so the executor reads every worker's reply and its reply
+            queues stay in step.
+
+        """
+        return f"{type(self).__name__} does not implement probe_forward"
 
     def notify_kv_cache_ready(self) -> None:
         """Finish startup device work before notifying the worker connector."""

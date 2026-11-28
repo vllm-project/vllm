@@ -215,9 +215,6 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        mm_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
-        crop_mode = mm_kwargs.get("crop_mode", CROP_MODE)
-
         image_token_id = hf_processor.image_token_id
         assert isinstance(image_token_id, int)
 
@@ -229,23 +226,9 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
-                assert isinstance(images, ImageProcessorItems)
-                size = images.get_image_size(item_idx)
-
-                # Only v1 disables cropping for multi-image input. Match the
-                # selected HF processor when expanding image placeholders.
-                effective_cropping = bool(crop_mode) and (
-                    len(images) == 1
-                    or getattr(
-                        self.info.get_hf_config().text_config, "unlimited_ocr2", False
-                    )
-                )
-
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=size.width,
-                    image_height=size.height,
-                    cropping=effective_cropping,
-                )
+                token_count = out_mm_kwargs["image"][item_idx]["num_image_tokens"].data
+                assert isinstance(token_count, torch.Tensor)
+                num_image_tokens = int(token_count.item())
             return [image_token_id] * num_image_tokens
 
         return [

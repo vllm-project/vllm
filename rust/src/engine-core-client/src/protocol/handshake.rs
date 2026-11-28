@@ -149,6 +149,31 @@ pub struct EngineCoreReadyResponse {
     /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
     #[serde(default = "supports_prompt_logprobs_default")]
     pub supports_prompt_logprobs: bool,
+    /// Whether the engine accepts placeholder metadata without embedding tensors.
+    #[serde(default)]
+    pub allow_missing_mm_embeddings: bool,
+    /// Encoder cache tokens a request's distinct multimodal items may need in
+    /// total. Set without chunked prefill, when they are all encoded in one
+    /// step, so a request needing more could never be scheduled.
+    #[serde(default)]
+    pub max_mm_embeds_per_request: Option<u64>,
+    /// `DeviceConfig.device_type` of this engine, e.g. `cuda` or `cpu`;
+    /// `None` from engines that predate the field.
+    #[serde(default)]
+    pub device_type: Option<String>,
+}
+
+impl EngineCoreReadyResponse {
+    /// The device name the stat log lines print before `KV cache usage`, as
+    /// Python's `LoggingStatLogger` derives it from the device type: `GPU` for
+    /// CUDA (and for engines that do not report a device), otherwise the device
+    /// type in upper case.
+    pub fn kv_cache_device(&self) -> String {
+        match self.device_type.as_deref() {
+            None | Some("cuda") => "GPU".to_string(),
+            Some(device_type) => device_type.to_uppercase(),
+        }
+    }
 }
 
 fn supports_prompt_logprobs_default() -> bool {

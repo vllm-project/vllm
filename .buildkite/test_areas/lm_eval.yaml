@@ -16,9 +16,9 @@ steps:
   mirror:
     amd:
       automatic_shard: true
-      label: ":amd: (MI300) LM Eval Small Models"
+      label: ":amd: (MI300 DPX) LM Eval Small Models"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -32,11 +32,11 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":amd: (MI300) LM Eval Small Models Harness"
+- label: ":amd: (MI300 DPX) LM Eval Small Models Harness"
   key: amd-lm-eval-small-models-harness
   automatic_shard: true
   dind: false
-  device: mi300_1
+  device: mi300_dpx
   timeout_in_minutes: 35
   depends_on:
   - image-build-amd
@@ -206,6 +206,7 @@ steps:
       - vllm/v1/core/
       - vllm/config/
       - tests/evals/gsm8k/configs/models-mi3xx-fp8-and-mixed.txt
+      - vllm/model_executor/layers/fused_moe/experts/aiter_mxfp4_w4a16_moe.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/evals/gsm8k/
@@ -248,6 +249,7 @@ steps:
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-DCP4-EP.yaml
   - tests/evals/gsm8k/configs/models-pcp.txt
+  - tests/distributed/test_deepseek_v41_multimodal_pcp.py
   - vllm/model_executor/layers/quantization
   - vllm/config/parallel.py
   - vllm/distributed/parallel_state.py
@@ -259,9 +261,13 @@ steps:
   - vllm/v1/attention/backends/mla/indexer.py
   - vllm/v1/worker/gpu/model_runner.py
   - vllm/v1/worker/gpu/pcp_manager.py
+  - vllm/v1/worker/gpu/mm/
+  - vllm/v1/worker/gpu/model_states/default.py
+  - vllm/models/deepseek_v41/
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
+  - pytest -v -s distributed/test_deepseek_v41_multimodal_pcp.py
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval PCP"
@@ -431,6 +437,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval ReplaySSM"
   key: lm-eval-replayssm-2xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   optional: true
@@ -456,6 +463,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-replayssm.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) LM Eval ReplaySSM"
       dind: false
       device: mi355_2
@@ -941,9 +949,10 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt -k "Qwen3-30B-A3B-BF16-triton"
 
-- label: ":nvidia: (B200) MoE Refactor DP Integration (DeepEP v2)"
+- label: ":nvidia: (B200) [Nightly] MoE Refactor DP Integration (DeepEP v2)"
   key: moe-refactor-dp-ep-test-b200-deepep-v2
   automatic_shard: true
+  optional: true
   device: b200-k8s
   # DeepEP v2 needs every rank on one NVLink node, and EP_DISABLE_GIN drops its
   # NCCL GIN/RDMA requirement at num_ranks > 1.
@@ -1241,11 +1250,11 @@ steps:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt
 
 # Octave kernels are built only for gfx942 and gfx1100, so this runs on MI300.
-- label: ":amd: (MI300) LM Eval Octave KV Cache"
+- label: ":amd: (MI300 DPX) LM Eval Octave KV Cache"
   key: amd-lm-eval-octave-mi300
   automatic_shard: true
   dind: false
-  device: mi300_1
+  device: mi300_dpx
   num_devices: 1
   timeout_in_minutes: 45
   working_dir: /vllm-workspace/tests

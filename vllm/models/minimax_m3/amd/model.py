@@ -120,7 +120,6 @@ from vllm.models.minimax_m3.amd.indexer_nvfp4 import (
     MiniMaxM3IndexerRocmNvfp4Impl,
     init_rocm_nvfp4_indexer_decode_cp,
 )
-from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
@@ -139,6 +138,7 @@ from vllm.models.minimax_m3.amd.sparse_attention_msa import (
     MiniMaxM3SparseAiterPAPrefillMetadata,
 )
 from vllm.models.minimax_m3.amd.specialized_decode.runtime import (
+    DecodeConfig,
     specialized_decode_config,
 )
 from vllm.models.minimax_m3.common.encoder_cudagraph import (
@@ -160,12 +160,8 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.platforms.rocm import on_gfx942
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash,
-)
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -175,12 +171,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if TYPE_CHECKING:
+    from .mono.dispatch import MonoDecode
     from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
-
-# The fused QK-norm/RoPE/KV-insert HIP op segfaults on gfx942.
-_USE_GFX942_NATIVE_QKNORM_ROPE = on_gfx942()
 
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
@@ -677,19 +671,6 @@ class MiniMaxM3Attention(nn.Module):
         hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        if _USE_GFX942_NATIVE_QKNORM_ROPE:
-            num_tokens = qkv.shape[0]
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
-            k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
-            q, k = self.rotary_emb.forward_native(positions, q, k)
-            assert k is not None
-            q = q.reshape(num_tokens, self.q_size)
-            k = k.reshape(num_tokens, self.kv_size)
-            attn_output = self.attn(q, k, v)
-            output, _ = self.o_proj(attn_output)
-            return output
-
         # Fused per-head Gemma QK-norm + partial NeoX RoPE on q/k, in place (dense
         # mode: no index branch, no KV-cache insert). Matches nvidia/model.py and
         # replaces the unfused split -> q_norm/k_norm -> rotary_emb chain; verified
@@ -1108,78 +1089,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             return
         minimax_m3_insert_index_cache(index_k, index_cache, index_slot_mapping)
 
-    def _native_gfx942_qknorm_rope_cache(
-        self,
-        qkv: torch.Tensor,
-        positions: torch.Tensor,
-        fwd_slot_mapping: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Run QK norm, RoPE, and cache insertion without the fused HIP op."""
-        from vllm.models.minimax_m3.amd.ops.sparse_pa import (
-            minimax_m3_insert_index_cache,
-        )
-
-        num_tokens = qkv.shape[0]
-        q, k, v, index_q_raw, index_k_raw = qkv.split(
-            [
-                self.q_size,
-                self.kv_size,
-                self.kv_size,
-                self.index_q_size,
-                self.idx_head_dim,
-            ],
-            dim=-1,
-        )
-
-        q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
-        k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
-        q, k = self.rotary_emb.forward_native(positions, q, k)
-        assert k is not None
-        q = q.reshape(num_tokens, self.q_size)
-
-        main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        if self.kv_cache.numel() != 0:
-            # [block, head, token, 2 * dim] -> [block, token, head, dim].
-            key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
-                self.head_dim, dim=-1
-            )
-            triton_reshape_and_cache_flash(
-                k,
-                v.view(num_tokens, self.num_kv_heads, self.head_dim),
-                key_cache,
-                value_cache,
-                main_slot_mapping,
-                self.kv_cache_dtype,
-                self._k_scale,
-                self._v_scale,
-            )
-
-        if self.skip_index_topk:
-            return q, None
-
-        assert self.indexer is not None
-        index_q = self.index_q_norm(
-            index_q_raw.view(num_tokens, self.num_idx_heads, self.idx_head_dim)
-        )
-        index_k = self.index_k_norm(index_k_raw.view(num_tokens, self.idx_head_dim))
-        index_q, index_k = self.index_rotary_emb.forward_native(
-            positions, index_q, index_k
-        )
-        assert index_k is not None
-        index_q = index_q.reshape(num_tokens, self.index_q_size).to(
-            self.indexer.index_cache.dtype
-        )
-
-        index_cache = self.indexer.index_cache.kv_cache
-        if index_cache.numel() != 0:
-            index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
-            minimax_m3_insert_index_cache(
-                index_k.reshape(num_tokens, self.idx_head_dim),
-                index_cache,
-                index_slot_mapping,
-            )
-        return q, index_q
-
     def _norm_rope_nvfp4_insert(
         self,
         qkv: torch.Tensor,
@@ -1250,15 +1159,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         ):
             # Memory-profiling run: caches not yet bound, slot_mapping is empty.
             return qkv.new_zeros((num_tokens, self.hidden_size))
-
-        if _USE_GFX942_NATIVE_QKNORM_ROPE:
-            q, index_q = self._native_gfx942_qknorm_rope_cache(
-                qkv, positions, fwd_slot_mapping
-            )
-            output = torch.empty_like(q)
-            gfx942_attn = self._run_attention(q, index_q, output)
-            output, _ = self.o_proj(gfx942_attn)
-            return output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         if self.use_nvfp4_kv:
@@ -1802,7 +1702,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode_config: DecodeConfig | None = None
         self.specialized_decode: SpecializedDecode | None = None
 
         self.vocab_size = config.vocab_size
@@ -1940,15 +1840,74 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        # VLLM_ROCM_MINIMAX_M3_MONO=1: supported decode steps run one FlyDSL
-        # launch per layer (mono kernels)
-        self._mono = None
-        if mono_envs.MONO_ENABLE:
-            from vllm.models.minimax_m3.amd.mono.dispatch import MonoDecode
+        self._mono: MonoDecode | None = None
+        if vllm_config.kernel_config.monokernel:
+            self._init_monokernel(vllm_config)
 
-            self._mono = MonoDecode(self, vllm_config)
         # MiniMax-M3.1 TP4 glue paths (glue/): None where they do not apply
         self.m3_glue = M3Glue.create(self, vllm_config)
+
+    def _init_monokernel(self, vllm_config: VllmConfig) -> None:
+        """Run the selected MiniMax-M3 monokernels (`mono/selection.py`) that fit:
+        the decode kernels here, the DSpark drafter kernels in `common/dspark.py`.
+        A deployment that fits none of them is refused."""
+        from vllm.models.minimax_m3.amd.mono.selection import (
+            DECODE,
+            DRAFTER,
+            enabled_monokernels,
+        )
+
+        kernels = enabled_monokernels(vllm_config)
+        reasons: list[str] = []
+        if DECODE in kernels:
+            why = self._init_mono_decode(vllm_config)
+            if why is None:
+                return
+            reasons.append(why)
+        if DRAFTER in kernels:
+            from vllm.models.minimax_m3.amd.mono.drafter.dispatch import (
+                config_refusal as drafter_refusal,
+            )
+
+            drafter_why = drafter_refusal(vllm_config)
+            if drafter_why is None:
+                logger.info(
+                    "MiniMax-M3 --monokernel: DSpark drafter kernels only (%s)",
+                    "; ".join(reasons) or "decode kernels not selected",
+                )
+                return
+            reasons.append(
+                f"MiniMax-M3 DSpark drafter kernels unsupported: {drafter_why}"
+            )
+        raise ValueError("--monokernel: " + "; ".join(reasons))
+
+    def _init_mono_decode(self, vllm_config: VllmConfig) -> str | None:
+        """Set up the whole-layer mono decode if the deployment fits it, else the
+        FFN-only specialized decode. Returns why neither fits, or None."""
+        why: str | None
+        try:
+            from vllm.models.minimax_m3.amd.mono.dispatch import (
+                MonoDecode,
+                config_refusal,
+            )
+        except ImportError as err:
+            why = f"needs FlyDSL and AITER ({err})"
+        else:
+            why = config_refusal(vllm_config, self)
+            if why is None:
+                logger.info("MiniMax-M3 --monokernel: whole-layer mono decode")
+                self._mono = MonoDecode(self, vllm_config)
+                return None
+        try:
+            self.specialized_decode_config = specialized_decode_config(vllm_config)
+        except ValueError as err:
+            return f"MiniMax-M3 whole-layer mono decode unsupported: {why}; {err}"
+        logger.info(
+            "MiniMax-M3 --monokernel: FFN-only specialized decode (whole-layer "
+            "mono decode unsupported: %s)",
+            why,
+        )
+        return None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

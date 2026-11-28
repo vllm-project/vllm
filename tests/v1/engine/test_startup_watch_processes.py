@@ -4,6 +4,7 @@
 import os
 from contextlib import nullcontext
 from multiprocessing import connection, get_context
+from multiprocessing.process import BaseProcess
 from threading import Event
 from types import SimpleNamespace
 
@@ -100,7 +101,10 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
         monkeypatch.setenv("OMP_NUM_THREADS", user_threads)
     monkeypatch.setattr(torch_utils, "available_cpu_count", lambda: 12)
     platform = SimpleNamespace(
-        is_cpu=lambda: False, is_cuda_alike=lambda: True, is_xpu=lambda: False
+        is_cpu=lambda: False,
+        is_cuda_alike=lambda: True,
+        is_rocm=lambda: False,
+        is_xpu=lambda: False,
     )
     monkeypatch.setattr(engine_utils, "current_platform", platform)
     threads = SimpleNamespace(count=initial_threads)
@@ -163,7 +167,7 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
             local_client=True,
             handshake_address="unused",
             executor_class=executor_class,
-            log_stats=False,
+            collect_stats=False,
         )
         manager._finalizer.detach()
     assert start_states == [expected] * (1 if fail_start else local_engine_count)
@@ -186,11 +190,14 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
     [
         (True, None, 0, 0, 15.0),
         (True, None, 0, 7, 7),
-        (True, None, 0, None, None),
+        (True, None, 0, None, 15.0),
+        (False, None, 0, None, None),
+        (True, None, 7, None, None),
         (False, None, 0, 0, 0),
         (True, None, 7, 0, 0),
         (False, "30", 0, 0, 30.0),
         (False, "30", 7, 0, 0),
+        (False, "30", 0, None, 30.0),
     ],
 )
 def test_engine_core_process_shutdown_timeout(
@@ -208,7 +215,7 @@ def test_engine_core_process_shutdown_timeout(
     manager = object.__new__(CoreEngineProcManager)
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
-    manager.processes = [object()]
+    manager.processes = [BaseProcess()]
     detach_results = iter((object(), None))
     manager._finalizer = SimpleNamespace(detach=lambda: next(detach_results))
 
@@ -319,14 +326,19 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
     assert calls == expected_calls
 
 
-class _FinishedProcess:
+class _FinishedProcess(BaseProcess):
     name = "RustFrontend"
 
-    def __init__(self, sentinel):
-        self.sentinel = sentinel
+    def __init__(self, sentinel: int):
+        super().__init__()
+        self._sentinel_fd = sentinel
 
     @property
-    def exitcode(self):
+    def sentinel(self) -> int:
+        return self._sentinel_fd
+
+    @property
+    def exitcode(self) -> int | None:
         return 1
 
 
@@ -350,7 +362,7 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
             addresses=EngineZmqAddresses(inputs=[], outputs=[]),
             tensor_queue=None,
         )
-        launch.watched_frontend_processes = [_FinishedProcess(recv)]
+        launch.watched_frontend_processes = [_FinishedProcess(recv.fileno())]
         with pytest.raises(RuntimeError) as exc_info:
             wait_for_engine_startup(
                 handshake_socket,

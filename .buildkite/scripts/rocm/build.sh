@@ -14,7 +14,9 @@
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
 #   promote  Copy the stack, runtime and test-deps images a PR's CI built into the trusted repo
-#            (/ci rocm cache), so main reuses them after the merge instead of rebuilding them.
+#            (after a trusted /ci run or approval), so main reuses them instead of rebuilding them.
+#   check    Fail a PR to main whose new stack is not in the trusted repo yet (exit 3), or
+#            whose merge base is behind a stack change on main (exit 4: merge main).
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
@@ -22,7 +24,7 @@
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
 #   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it,
-#                                          except promote: images a maintainer vouched for)
+#                                          except promote: images a trusted user vouched for)
 #   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags: nightlies, branch builds; they
 #                                          push these but never read them back, reuse only
 #                                          rocm/vllm-ci images and cache, and write no cache)
@@ -44,10 +46,20 @@ MODE=$2
 REPO=${ROCM_CI_REPO:?ROCM_CI_REPO must be set (by ci-infra or release-pipeline.yaml)}
 TRUSTED=${ROCM_CI_TRUSTED_REPO:-rocm/vllm-ci}
 
-# promote (/ci rocm cache) runs in every nightly, as an optional step: without a request, leave
-# before the builder, the build context and the tag fetch.
+# promote and check run in every nightly, as optional steps: without a request (promote) or a PR
+# to main (check), leave before the builder, the build context and the tag fetch.
+MAIN=${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}
+if [[ $MODE == check && ( ${BUILDKITE_PULL_REQUEST:-false} == false
+      || ${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-$MAIN} != "$MAIN" ) ]]; then
+  echo "Not a PR to $MAIN: nothing to check" >&2; exit 0
+fi
 if [[ $MODE == promote ]]; then
-  [[ -n ${ROCM_PROMOTE_PR:-} ]] || { echo "No /ci rocm cache request: nothing to promote" >&2; exit 0; }
+  [[ -n ${ROCM_PROMOTE_PR:-} ]] || { echo "No ROCm image cache request: nothing to promote" >&2; exit 0; }
+  # Only a build created through the API (the cache workflow), not one a trigger step started:
+  # Buildkite sets both, and a build's env cannot override them. This guards builds of main
+  # commits only: a build of another commit runs its own build.sh.
+  [[ ${BUILDKITE_SOURCE:-} == api && -z ${BUILDKITE_TRIGGERED_FROM_BUILD_ID:-} ]] \
+    || { echo "promote runs only in a build created through the API" >&2; exit 2; }
   [[ $ROCM_PROMOTE_PR =~ ^[0-9]+$ && ${ROCM_PROMOTE_SHA:-} =~ ^[0-9a-f]{40}$ ]] \
     || { echo "ROCM_PROMOTE_PR or ROCM_PROMOTE_SHA is malformed" >&2; exit 2; }
   [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
@@ -90,6 +102,7 @@ esac
 # for sccache's S3 credentials: their fallback builder uses the host network, under its own name.
 B=vllm-rocm net=()
 [[ $MODE == release* ]] && B=vllm-rocm-release net=(--driver-opt network=host)
+if [[ $MODE != check ]]; then   # check only reads the registry
 if ! docker buildx inspect "$B" >/dev/null 2>&1; then
   if [[ -S /run/buildkit/buildkitd.sock ]]; then
     drv=(--driver remote unix:///run/buildkit/buildkitd.sock)
@@ -103,6 +116,7 @@ if ! docker buildx inspect "$B" >/dev/null 2>&1; then
 fi
 export BUILDX_BUILDER=$B
 docker buildx version
+fi
 
 # ---------------------------------------------------------------------------
 # Build context — an export of HEAD
@@ -111,7 +125,7 @@ docker buildx version
 # COPY on file modes, which drift on shared agents. umask 022 gives every agent git's modes.
 [[ $(git rev-parse HEAD) == $(git rev-parse "${BUILDKITE_COMMIT:-HEAD}^{commit}") ]] \
   || { echo "HEAD is not BUILDKITE_COMMIT ($BUILDKITE_COMMIT)" >&2; exit 1; }
-if [[ $MODE != promote ]]; then   # promote copies images: no context, no version
+if [[ $MODE != promote && $MODE != check ]]; then   # no context, no version
 umask 022
 rm -rf .rocm-src && mkdir .rocm-src
 git archive HEAD | tar -x --no-same-permissions -C .rocm-src -f -
@@ -165,6 +179,12 @@ label() { docker buildx imagetools inspect "$1" \
 # bake <targets...>  — invoke docker buildx bake with the project HCL
 bake()   { docker buildx bake -f docker/docker-bake-rocm.hcl "$@"; }
 
+# infra_failure <bake-log>  — whether a failed bake hit a fault outside the recipe, which a
+# retried step can get past: a package mirror still failing after apt's own retries.
+infra_failure() {
+  grep -aqE 'E: Failed to fetch [^ ]+ +(408|429|50[0-4]) ' "$1"
+}
+
 # meta <get|set> <key> [value]  — Buildkite build metadata
 meta()   { buildkite-agent meta-data "$@"; }
 
@@ -178,7 +198,7 @@ pushed() {
 # ---------------------------------------------------------------------------
 # Content keys
 # ---------------------------------------------------------------------------
-# Ks (stack key): hash of the stack Dockerfile + therock_wheels.py.
+# Ks (stack key): hash of the stack Dockerfile + tools/vllm-rocm/amdsmi + therock_wheels.py.
 #   A Ks cache miss triggers a full stack rebuild (hours).
 # Kr (runtime key): Ks + the portion of Dockerfile.rocm above the per-commit
 #   marker + all pip requirement files.
@@ -190,7 +210,7 @@ keys_at() {
   local rev=$1 Ks Kr
   # The layer format (compression, and mtimes as built: see the bake file) is part of every image's
   # identity: an image left in an older format would hand later builds a second copy of the same layers.
-  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
+  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" tools/vllm-rocm/amdsmi/amdsmi_wrapper.patch tools/vllm-rocm/amdsmi/pyproject.toml ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
     || return 1
   Kr=$(
     {
@@ -216,7 +236,7 @@ read -r Ks Kr <<<"$keys"
 # in parallel. MAIN_TAGS lists those tags; it stays empty when main cannot be read.
 MAIN_TAGS=""
 if [[ $MODE == base && $REPO != "$TRUSTED" ]] \
-    && git fetch -q --filter=tree:0 origin "${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}" \
+    && git fetch -q --filter=tree:0 origin "$MAIN" \
     && mb=$(git merge-base HEAD FETCH_HEAD) && [[ -n $mb ]] \
     && keys=$(keys_at "$mb") && read -r mKs mKr <<<"$keys"; then
   MAIN_TAGS="stack-$STACK-$mKs runtime-$STACK-$mKr test-deps-$STACK-$mKr"
@@ -238,7 +258,7 @@ echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 # tag also exists (used by stack: must have both the image and -wheels); then
 # both pinned refs are printed, space-separated.
 ensure() {
-  local target=$1 tag=$2 sibling=${3:-} ref d ds refs rc mf hb=""
+  local target=$1 tag=$2 sibling=${3:-} ref d ds refs rc mf log hb=""
   refs=()
   [[ $MODE == release* || $REPO == "$TRUSTED" ]] || refs=("$TRUSTED:$tag")
   [[ $OWN == false ]] || refs+=("$REPO:$PFX$tag")
@@ -277,10 +297,18 @@ ensure() {
   fi
   # Explicit checks: $(ensure ...) runs in a subshell, where set -e does not apply.
   mf=$(mktemp)
+  log=$(mktemp)
   rc=0
-  TAG=$ref bake --metadata-file "$mf" "$target" >&2 || rc=$?
+  TAG=$ref bake --metadata-file "$mf" "$target" 2>&1 | tee "$log" >&2 || rc=$?
   [[ -z $hb ]] || kill "$hb" 2>/dev/null || true
-  ((rc == 0)) || { rm -f "$mf"; echo "building $ref failed" >&2; return 1; }
+  if ((rc != 0)); then
+    rm -f "$mf"
+    if infra_failure "$log"; then
+      rm -f "$log"; echo "building $ref hit an infrastructure fault; retry the step" >&2; return 75
+    fi
+    rm -f "$log"; echo "building $ref failed" >&2; return 1
+  fi
+  rm -f "$log"
   # The digests this bake pushed (base: stack-<stack>, stack-wheels), not the tags', which by now
   # may hold a concurrent build's push of the same key.
   if ! d=$(pushed "$mf" "${target/#base/stack-$STACK}") \
@@ -288,7 +316,7 @@ ensure() {
     rm -f "$mf"; echo "bake recorded no digest for $ref" >&2; return 1
   fi
   rm -f "$mf"
-  # /ci rocm cache copies only images this job pushed, and a runtime or test-deps only if this job
+  # promote copies only images this job pushed, and a runtime or test-deps only if this job
   # also pushed the image it was built on: other PRs' CI can push to this PR's tags first, and
   # metadata outlives a retried job. A new stack voids what an earlier attempt recorded on another.
   local parent=none
@@ -421,16 +449,70 @@ case $MODE in
     fi
     ;;
 
+  check)
+    # The "ROCm image cache" step: a PR that changes the stack waits for promote to copy its
+    # stack into $TRUSTED, so main need not rebuild it after the merge. A convenience gate, not a
+    # security boundary.
+    git fetch -q --filter=tree:0 origin "$MAIN" \
+      && main=$(git rev-parse FETCH_HEAD) && mb=$(git merge-base HEAD "$main") && [[ -n $mb ]] \
+      || { echo "cannot read main's merge base" >&2; exit 1; }
+    keys=$(keys_at "$mb") || { echo "cannot compute the keys of $mb" >&2; exit 1; }
+    read -r mKs _ <<<"$keys"
+    note() {
+      if [[ -n ${1:-} ]]; then
+        echo "$2" >&2
+        buildkite-agent annotate --style "$1" --context rocm-image-cache "$2" || true
+      else
+        buildkite-agent annotation remove --context rocm-image-cache >/dev/null 2>&1 || true
+      fi
+    }
+    if [[ $Ks == "$mKs" ]]; then
+      echo "This PR does not change the ROCm stack" >&2; note; exit 0
+    fi
+    # The lines that make Ks (rocm_key_format in run_ci_command.py reads the same ones).
+    keyfmt() {
+      # shellcheck disable=SC2016  # sed matches a literal $STACK
+      git show "$1:.buildkite/scripts/rocm/build.sh" \
+        | sed -n '/^case \$STACK in/,/^esac/p;/^_trw=/,/^  Kr=/p' | grep -v '^[[:space:]]*#'
+    }
+    if ! bf=$(keyfmt "$mb") || ! hf=$(keyfmt HEAD) || ! tf=$(keyfmt "$main"); then
+      echo "cannot read build.sh's stack key lines" >&2; exit 1
+    fi
+    # promote keys the stack with main's build.sh, so a PR that changes them is never cached.
+    if [[ $hf != "$bf" ]]; then
+      note info "ROCm image cache: this PR changes how images are keyed: $MAIN rebuilds the stack after merge"
+      exit 0
+    fi
+    keys=$(keys_at "$main") || { echo "cannot compute the keys of $main" >&2; exit 1; }
+    read -r tKs _ <<<"$keys"
+    if [[ $tKs == "$Ks" && $tf == "$bf" ]]; then
+      echo "$MAIN already has this PR's stack" >&2; note; exit 0
+    fi
+    # Main changed the stack or its key too: the merge gets a stack that no build of this PR made.
+    if [[ $tKs != "$mKs" || $tf != "$bf" ]]; then
+      note error "ROCm image cache: $MAIN changed the ROCm stack since this branch did. Merge $MAIN into this branch (a maintainer's /ci run does it), so CI builds and caches the combined stack."
+      exit 4
+    fi
+    if d=$(digest "$TRUSTED:stack-$STACK-$Ks") && d=$(digest "$TRUSTED:stack-$STACK-$Ks-wheels"); then
+      echo "$TRUSTED has this PR's stack" >&2; note
+      meta set rocm-stack-cached true || exit 75   # run_ci_command.py rechecks it when main moves
+      exit 0
+    else
+      rc=$?; ((rc == 1)) || exit $rc   # a registry error is not a miss
+    fi
+    note warning "ROCm image not cached yet: a maintainer must comment /ci run, or a trusted reviewer must approve this commit and comment /ci run. If an untrusted build pushed this stack first, bump ARG REFRESH."
+    exit 3
+    ;;
+
   promote)
-    # /ci rocm cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
-    # ROCM_PROMOTE_SHA pushed. Copy them here under the keys main's keys_at gives that commit, if
-    # it was built with main's recipe; main reuses each once it gets that key. The runtime and
-    # test-deps are copied only over a parent of #ROCM_PROMOTE_PR's, never over one main built: an
-    # existing tag holding the recorded digest is an earlier attempt's copy, so a retry finishes the
-    # chain instead of stopping at it.
+    # ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
+    # ROCM_PROMOTE_SHA pushed. Copy them here under the keys main's keys_at gives that commit;
+    # main reuses each once it gets that key. Like main's own images, they are keyed on their
+    # inputs, not on build.sh or the bake file: a recipe change that must rebuild the stack bumps
+    # ARG REFRESH. The runtime and test-deps are copied only over a parent of #ROCM_PROMOTE_PR's,
+    # never over one main built: an existing tag holding the recorded digest is an earlier
+    # attempt's copy, so a retry finishes the chain instead of stopping at it.
     git fetch -q origin "${ROCM_PROMOTE_SHA:?}"
-    git diff --quiet HEAD "$ROCM_PROMOTE_SHA" -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
-      || { echo "$ROCM_PROMOTE_SHA builds with another build.sh or bake file than main" >&2; exit 1; }
     keys=$(keys_at "$ROCM_PROMOTE_SHA") || { echo "cannot compute the keys of $ROCM_PROMOTE_SHA" >&2; exit 1; }
     read -r pKs pKr <<<"$keys"
     copied=0
@@ -455,7 +537,7 @@ case $MODE in
         echo "#$ROCM_PROMOTE_PR's CI recorded no $tag" >&2; exit 1
       fi
       echo "--- :docker: Copying $ref to $TRUSTED:$tag" >&2
-      docker buildx imagetools create -t "$TRUSTED:$tag" "$ref" || exit 75
+      docker buildx imagetools create --prefer-index=false -t "$TRUSTED:$tag" "$ref" || exit 75
       copied=1
     done
     ;;

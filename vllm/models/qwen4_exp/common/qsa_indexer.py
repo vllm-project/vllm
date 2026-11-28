@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVCacheLayout,
     MLAAttentionSpec,
+    SparseCacheRole,
 )
 
 
@@ -882,6 +883,7 @@ class QSACompressedKeyCache(_QSAIndexerCache):
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
+            cache_role=SparseCacheRole.INDEXER,
         )
         return FullAttentionManager.layer_config(spec)
 

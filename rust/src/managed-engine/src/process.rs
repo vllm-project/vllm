@@ -85,7 +85,11 @@ impl ManagedEngineConfig {
             .arg("--data-parallel-rpc-port")
             .arg(self.handshake_port.to_string())
             .arg("--data-parallel-size")
-            .arg(self.data_parallel_size.to_string());
+            .arg(self.data_parallel_size.to_string())
+            // vllm-rs has no multimodal processor cache yet, so the engine's
+            // receiver cache would never be hit. `python_args` can override it.
+            .arg("--mm-processor-cache-gb")
+            .arg("0");
         if let Some(client_handshake_address) = &self.client_handshake_address {
             command.arg("--headless-client-handshake-address").arg(client_handshake_address);
         }
@@ -312,6 +316,8 @@ mod tests {
                 "62100",
                 "--data-parallel-size",
                 "4",
+                "--mm-processor-cache-gb",
+                "0",
                 "--data-parallel-size-local",
                 "2",
                 "--data-parallel-start-rank",
@@ -361,7 +367,7 @@ mod tests {
         let command = config.to_command();
         assert!(format!("{command:?}").contains("hf_secret"));
 
-        expect![[r#"VLLM_USE_RUST_FRONTEND="1" "python3" "-m" "vllm.entrypoints.cli.main" "serve" "Qwen/Qwen3-0.6B" "--headless" "--data-parallel-address" "127.0.0.1" "--data-parallel-rpc-port" "62100" "--data-parallel-size" "1" "--hf-token" "***" "--api_key=***" "--hf-token" "--dtype" "float16""#]].assert_eq(&format!("{:?}", redacted_for_log(&command)));
+        expect![[r#"VLLM_USE_RUST_FRONTEND="1" "python3" "-m" "vllm.entrypoints.cli.main" "serve" "Qwen/Qwen3-0.6B" "--headless" "--data-parallel-address" "127.0.0.1" "--data-parallel-rpc-port" "62100" "--data-parallel-size" "1" "--mm-processor-cache-gb" "0" "--hf-token" "***" "--api_key=***" "--hf-token" "--dtype" "float16""#]].assert_eq(&format!("{:?}", redacted_for_log(&command)));
     }
 
     #[test]

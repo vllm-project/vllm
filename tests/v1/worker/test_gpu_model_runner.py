@@ -1,18 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
+from torch import nn
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
+from vllm.config.load import LoadConfig
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    bind_model_loader,
+)
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backend import MultipleOf
@@ -20,7 +31,6 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.binding import fit_mamba_blocks_to_attention
 from vllm.v1.kv_cache_interface import (
@@ -223,38 +233,29 @@ def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
         platform.update_block_size_for_backend(vllm_config)
 
 
-class _CheckpointingMambaLayer(MambaBase):
-    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
-
-    def __init__(self, prefill_checkpoint_alignment: int | None):
-        self._prefill_checkpoint_alignment = prefill_checkpoint_alignment
-
-    def get_prefill_checkpoint_alignment(self) -> int | None:
-        return self._prefill_checkpoint_alignment
-
-    def get_state_shape(self):
-        return ()
-
-    def get_state_dtype(self):
-        return ()
-
-
-def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
-    from tests.v1.attention.utils import create_vllm_config
+def _align_qwen3_5_blocks(
+    *prefill_checkpoint_alignments: int | None,
+    grid_layers: set[int] | None = None,
+    prefix_match_unit: int | None = None,
+):
+    from tests.v1.attention.utils import CheckpointingMambaLayer, create_vllm_config
 
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     cache_config = vllm_config.cache_config
-    cache_config.mamba_cache_mode = "align"
+    cache_config.enable_prefix_caching = True
+    cache_config.prefix_match_unit = prefix_match_unit
     forward_context = vllm_config.compilation_config.static_forward_context
     for i, alignment in enumerate(prefill_checkpoint_alignments):
-        forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
+        forward_context[f"mamba.{i}"] = CheckpointingMambaLayer(
+            alignment, requires_grid=bool(grid_layers and i in grid_layers)
+        )
     Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
     return vllm_config
 
 
 @pytest.mark.parametrize(
     ("prefill_checkpoint_alignments", "block_size"),
-    [((64,), 576), ((None,), 544), ((64, None), 544)],
+    [((64,), 576), ((16, 64), 576), ((None,), 544), ((64, None), 544)],
 )
 def test_blocks_land_on_the_mamba_checkpoint_grid(
     prefill_checkpoint_alignments, block_size
@@ -268,6 +269,42 @@ def test_blocks_land_on_the_mamba_checkpoint_grid(
     vllm_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
 
     assert vllm_config.cache_config.block_size == block_size
+
+
+@pytest.mark.parametrize(
+    ("alignments", "grid_layers", "prefix_match_unit", "expected_alignment"),
+    [
+        ((64, 1), set(), None, 64),
+        ((64, 1), {0}, None, 576),
+        ((64, 1), {0}, 16, 64),
+        ((64, 1), {0}, 256, 256),
+        ((64, None), {0}, None, None),
+    ],
+)
+def test_heterogeneous_mamba_layers_share_checkpoint_alignment(
+    alignments, grid_layers, prefix_match_unit, expected_alignment
+):
+    """All Mamba layers in a heterogeneous model derive one shared KV cache
+    checkpoint alignment from their per-layer declarations."""
+    from vllm.model_executor.layers.mamba.abstract import (
+        get_kv_cache_checkpoint_alignment,
+    )
+
+    vllm_config = _align_qwen3_5_blocks(
+        *alignments,
+        grid_layers=grid_layers,
+        prefix_match_unit=prefix_match_unit,
+    )
+    layers = vllm_config.compilation_config.static_forward_context
+
+    assert get_kv_cache_checkpoint_alignment(vllm_config) == expected_alignment
+    for i in range(len(alignments)):
+        layer_cfg = layers[f"mamba.{i}"].get_kv_cache_config(vllm_config)
+        params = layer_cfg.manager_config.params
+        assert params.prefill_checkpoint_alignment == expected_alignment
+        assert params.num_prefill_checkpoint_blocks == int(
+            expected_alignment is not None
+        )
 
 
 @pytest.mark.parametrize(
@@ -353,7 +390,7 @@ def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     )
     cache_config = SimpleNamespace(
         block_size=16,
-        mamba_cache_mode="none",
+        enable_prefix_caching=False,
         mamba_page_size_padded=None,
         user_specified_block_size=True,
         kv_cache_dtype_skip_layers=None,
@@ -381,13 +418,13 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     encoder_cache = EncoderCache()
     encoder_cache.mm_features["req-with-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-0",
             mm_position=PlaceholderRange(offset=0, length=2),
         ),
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-1",
             mm_position=PlaceholderRange(offset=2, length=3),
@@ -395,7 +432,7 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     ]
     encoder_cache.mm_features["req-no-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=MultiModalKwargsItem.dummy(),
             modality="image",
             identifier="img-2",
             mm_position=PlaceholderRange(offset=0, length=1),
@@ -454,7 +491,7 @@ def test_set_active_mm_loras_follows_modality_sorted_encoder_order():
     for req_id, modality, length in [("req-a", "video", 1), ("req-b", "image", 2)]:
         encoder_cache.mm_features[req_id] = [
             MultiModalFeatureSpec(
-                data=None,
+                data=MultiModalKwargsItem.dummy(),
                 modality=modality,
                 identifier=f"{req_id}-0",
                 mm_position=PlaceholderRange(offset=0, length=length),
@@ -486,6 +523,7 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     # silently re-streams the original checkpoint.
     loader = Mock()
     loader.get_all_weights.return_value = iter(())
+    loader.reload_model.side_effect = partial(BaseModelLoader.reload_model, loader)
     monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: loader)
     monkeypatch.setattr(reload_inplace_module, "start_reload", Mock())
     monkeypatch.setattr(reload_inplace_module, "finish_reload", Mock())
@@ -501,9 +539,12 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
             quantization=None,
         ),
     )
-    model = Mock()
-    model.named_parameters.return_value = []
-    model.load_weights.return_value = None
+
+    class EmptyModel(torch.nn.Module):
+        def load_weights(self, weights):
+            return {name for name, _ in weights}
+
+    model = EmptyModel()
 
     reload_inplace_module.reload_weights(
         vllm_config,
@@ -516,6 +557,26 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     loader.get_all_weights.assert_called_once_with(vllm_config.model_config, model)
     cfg = vllm_config.model_config
     assert (cfg.model, cfg.model_weights, cfg.revision) == ("org/new-model", "", None)
+
+
+def test_reload_weights_uses_fresh_generic_loader(monkeypatch):
+    """A loader without its own `reload_model` keeps per-load state (e.g. EP
+    expert filters) that must not leak into a reload."""
+    load_config = LoadConfig(load_format="auto")
+    model = nn.Module()
+    bind_model_loader(model, DefaultModelLoader(load_config))
+    fresh = Mock()
+    monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: fresh)
+
+    reload_inplace_module.reload_weights(
+        SimpleNamespace(load_config=load_config, model_config=SimpleNamespace()),
+        model,
+        weights_iterator=None,
+        weights_path=None,
+        is_checkpoint_format=True,
+    )
+
+    fresh.reload_model.assert_called_once()
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):

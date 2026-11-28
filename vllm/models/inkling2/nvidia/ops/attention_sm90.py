@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inkling2 relative-bias paged attention for Hopper (Triton).
+"""Inkling2 relative-bias paged attention for Hopper and SM12x (Triton).
 
 Stands in for tml_fa4 (prefill) and the tcgen05 decode/verify kernel of
 `ops/attention.py`, reading the same sheared relative logits of
@@ -35,6 +35,28 @@ def _sigmoid(x):
 
 
 @triton.jit
+def _load_fp8_kv(ptr, offsets, mask, dtype: tl.constexpr, D: tl.constexpr):
+    # Load each E4M3 pair once, retaining 16-bit packing for BF16 MMA order.
+    half = tl.arange(0, D // 2)
+    pair = tl.load(
+        ptr.to(tl.pointer_type(tl.uint16))
+        + tl.multiple_of(offsets // 2, D // 2)[:, None]
+        + half[None, :],
+        mask=mask[:, None],
+        other=0,
+    )
+    lo, hi = tl.inline_asm_elementwise(
+        "{ .reg .b32 pair; cvt.rn.f16x2.e4m3x2 pair, $2; mov.b32 {$0, $1}, pair; }",
+        "=h,=h,h",
+        [pair],
+        dtype=(tl.float16, tl.float16),
+        is_pure=True,
+        pack=1,
+    )
+    return tl.interleave(lo, hi).to(dtype)
+
+
+@triton.jit(do_not_specialize_on_alignment=["SeqLens", "num_tokens", "stride_lse_h"])
 def _rel_attention_kernel(
     Q,
     K,
@@ -136,9 +158,14 @@ def _rel_attention_kernel(
         kv_ptrs = (
             page.to(tl.int64) * stride_kv_blk + (keys % PAGE) * stride_kv_slot + kv_off
         )
-        k = tl.load(
-            K + kv_ptrs[None, :] + offs_d[:, None], mask=key_valid[None, :], other=0.0
-        )
+        if K.dtype.element_ty.primitive_bitwidth == 8:
+            k = _load_fp8_kv(K, kv_ptrs, key_valid, q.dtype, D).T
+        else:
+            k = tl.load(
+                K + kv_ptrs[None, :] + offs_d[:, None],
+                mask=key_valid[None, :],
+                other=0.0,
+            ).to(q.dtype)
         s = tl.dot(q, k) * qk_scale
         dist = pos[:, None] - keys[None, :]
         visible = (dist >= 0) & key_valid[None, :]
@@ -154,9 +181,14 @@ def _rel_attention_kernel(
         alpha = tl.exp2(m_i - m_safe)
         p = tl.exp2(s - m_safe[:, None])
         l_i = l_i * alpha + tl.sum(p, 1)
-        v = tl.load(
-            V + kv_ptrs[:, None] + offs_d[None, :], mask=key_valid[:, None], other=0.0
-        )
+        if V.dtype.element_ty.primitive_bitwidth == 8:
+            v = _load_fp8_kv(V, kv_ptrs, key_valid, q.dtype, D)
+        else:
+            v = tl.load(
+                V + kv_ptrs[:, None] + offs_d[None, :],
+                mask=key_valid[:, None],
+                other=0.0,
+            ).to(q.dtype)
         acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
         m_i = m_new
 

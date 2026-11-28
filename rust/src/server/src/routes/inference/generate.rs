@@ -13,6 +13,7 @@ use std::sync::Arc;
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{StreamExt as _, TryStreamExt as _, future, pin_mut};
@@ -36,10 +37,12 @@ use self::types::{
     PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
-pub(crate) use self::validate::validate_request_compat;
+pub(crate) use self::validate::validate_request;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
-use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
+use crate::error::{ApiError, engine_error, server_error, text_request_error};
+use crate::routes::openai::utils::choices::{
+    ChoiceChunk, ChoiceResponse, merge_choice_chunk_streams, merge_choice_responses,
+};
 use crate::routes::openai::utils::logprobs::{clamp_logprob, decoded_logprobs_to_openai_chat};
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
@@ -47,7 +50,6 @@ use crate::routes::openai::utils::metrics::{
 use crate::routes::openai::utils::types::{ChatLogProbs, Usage};
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validate_n_limit;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::npy_base64;
@@ -58,9 +60,11 @@ use crate::utils::{openai_sse_stream, resolve_request_context, sse_response, uni
 pub async fn generate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(mut body): ValidatedJson<GenerateRequest>,
+    body: Result<Json<GenerateRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let Json(mut body) = body?;
+    let request_context =
+        resolve_request_context(&headers, "generate-tokens-", body.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     let mut media = MultimodalInput::default();
@@ -120,7 +124,7 @@ pub async fn generate(
     }
     .instrument(request_span.clone())
     .await
-    .map_err(|error| text_submit_error("failed to submit raw generate request", error))?;
+    .map_err(|error| text_request_error("failed to submit raw generate request", error))?;
 
     if stream {
         let chunk_streams = text_streams
@@ -159,12 +163,7 @@ pub async fn generate(
     )
     .instrument(request_span.clone())
     .await
-    .map_err(|error| {
-        server_error!(
-            "failed to collect raw generate response: {}",
-            error.to_report_string()
-        )
-    })?;
+    .map_err(|error| text_request_error("failed to collect raw generate response", error))?;
 
     // Inside the request span, so the logs it emits carry the request ID.
     let responses = request_span.in_scope(|| {
@@ -186,22 +185,24 @@ pub async fn generate(
     Ok(Json(merge_choice_responses(responses)).into_response())
 }
 
-/// Merge the responses of a request's choices, in index order, like Python's
-/// non-streaming response for `n > 1`: the prompt-level fields come from the
-/// first choice, usage adds up per [`Usage::add_choice`], and per-request
-/// metrics, which describe a single sample, are reported only for `n = 1`.
-fn merge_choice_responses(responses: Vec<GenerateResponse>) -> GenerateResponse {
-    let mut responses = responses.into_iter();
-    let mut merged = responses.next().expect("a request has at least one choice");
-    for (index, response) in (1..).zip(responses) {
-        merged.metrics = None;
-        merged.usage.add_choice(&response.usage);
-        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+impl ChoiceResponse for GenerateResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
             choice.index = index;
-            choice
-        }));
+        }
     }
-    merged
+
+    fn usage_mut(&mut self) -> Option<&mut Usage> {
+        Some(&mut self.usage)
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
+
+    fn append_choices(&mut self, other: Self) {
+        self.choices.extend(other.choices);
+    }
 }
 
 impl ChoiceChunk for GenerateStreamResponse {
@@ -228,6 +229,7 @@ async fn generate_chunk_stream(
         enable_log_requests,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -236,12 +238,15 @@ async fn generate_chunk_stream(
         include_logprobs,
         // Ignored: raw generate streaming has no prompt-logprobs wire shape.
         include_prompt_logprobs: _,
+        prompt_logprob_start: _,
         return_token_ids,
         output_mode,
     }: ResponseOptions,
     mut mm_info: Option<MmResponseInfo>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     pin_mut!(stream);
     let mut prompt_token_ids = None;
     // Like Python, continuous usage counts tokens only; the final usage chunk
@@ -277,13 +282,14 @@ async fn generate_chunk_stream(
                     error = %error.as_report(),
                     "raw generate stream failed"
                 );
-                bail_server_error!("{}", error.to_report_string());
+                return Err(text_request_error("raw generate stream failed", error));
             }
         };
         let SampledDelta {
             token_ids,
             logprobs,
             sampling_mask,
+            ..
         } = sampled;
         continuous_usage.add_output_tokens(token_ids.len());
 
@@ -410,6 +416,7 @@ fn collect_generate(
         include_continuous_usage: _,
         include_logprobs,
         include_prompt_logprobs,
+        prompt_logprob_start,
         return_token_ids,
         output_mode,
     }: ResponseOptions,
@@ -426,33 +433,31 @@ fn collect_generate(
         return Err(engine_error(error.as_deref()));
     }
     let logprobs = if include_logprobs {
+        // A request that generated nothing, such as one aborted during
+        // prefill, has no positions to report.
+        let no_positions = DecodedLogprobs {
+            positions: Vec::new(),
+        };
         Some(choice_logprobs(
-            collected.logprobs.as_ref(),
+            collected
+                .logprobs
+                .as_ref()
+                .or(collected.token_ids.is_empty().then_some(&no_positions)),
             output_mode,
             default_return_tokens_as_token_ids,
         )?)
     } else {
         None
     };
-    let prompt_logprobs = if include_prompt_logprobs {
-        match collected.prompt_logprobs.as_ref() {
-            Some(prompt_logprobs) => Some(raw_prompt_logprobs_to_maps(
-                &prompt_logprobs.scored_positions,
-                collected.prompt_token_ids.len(),
-            )),
-            // A single-token prompt has no scored positions; same mapping
-            // as /v1/completions.
-            None if collected.prompt_token_ids.len() == 1 => Some(vec![None]),
-            None => {
-                return Err(ApiError::server_error(
-                    "raw generate response requested prompt_logprobs but generation returned none"
-                        .to_string(),
-                ));
-            }
-        }
-    } else {
-        None
-    };
+    let prompt_logprobs = include_prompt_logprobs.then(|| {
+        raw_prompt_logprobs_to_maps(
+            collected
+                .prompt_logprobs
+                .as_ref()
+                .map_or(&[][..], |prompt_logprobs| &prompt_logprobs.scored_positions),
+            prompt_logprob_start,
+        )
+    });
     let finish_reason = collected.finish_reason.as_str().to_string();
     let stop_reason = collected.finish_reason.as_stop_reason().cloned();
 
@@ -593,14 +598,15 @@ fn raw_logprobs_to_generate(logprobs: &DecodedLogprobs) -> Result<GenerateLogPro
     })
 }
 
-/// Like Python, positions with no scored row (the first token and those up to
-/// `prompt_logprob_start`) are `None`, so the list spans the whole prompt.
+/// Like Python's list, which starts with `None` for the first token and for
+/// each row before `prompt_logprob_start` and gets the scored rows once prefill
+/// completes. A one-token prompt has no row to score, and a request that ended
+/// during prefill got none, so either keeps only the unscored positions.
 fn raw_prompt_logprobs_to_maps(
     scored_positions: &[DecodedPositionLogprobs],
-    prompt_len: usize,
+    prompt_logprob_start: u32,
 ) -> Vec<Option<HashMap<u32, GenerateLogprob>>> {
-    let num_unscored = prompt_len.saturating_sub(scored_positions.len()).max(1);
-    std::iter::repeat_n(None, num_unscored)
+    std::iter::repeat_n(None, 1 + prompt_logprob_start as usize)
         .chain(scored_positions.iter().map(|position| Some(position_to_logprob_map(position))))
         .collect()
 }
@@ -1390,48 +1396,48 @@ mod tests {
     }
 
     #[test]
-    fn collect_generate_maps_prompt_logprobs_for_single_token_prompt() {
-        let output_without_payload = |prompt_token_ids: Vec<u32>| {
-            collected(&prompt_token_ids, vec![3], FinishReason::stop_eos())
-        };
-
-        let response = collect_generate(
-            output_without_payload(vec![9707]),
-            "raw-1".to_string(),
-            "model".to_string(),
-            0,
-            ApiServerOptions::default(),
-            ResponseOptions {
-                include_prompt_logprobs: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .expect("single-token prompt without payload maps to [None]");
-        let prompt_logprobs = response.prompt_logprobs.expect("prompt logprobs present");
-        assert_eq!(prompt_logprobs.len(), 1);
-        assert!(prompt_logprobs[0].is_none());
-
-        collect_generate(
-            output_without_payload(vec![9707, 11]),
-            "raw-2".to_string(),
-            "model".to_string(),
-            0,
-            ApiServerOptions::default(),
-            ResponseOptions {
-                include_prompt_logprobs: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .expect_err("multi-token prompt without payload is an engine failure");
+    fn collect_generate_maps_prompt_logprobs_without_payload_to_unscored_positions() {
+        // A one-token prompt has no row to score, and a request that ended
+        // during prefill got none.
+        for (output, prompt_logprob_start, expected_len) in [
+            (collected(&[9707], vec![3], FinishReason::stop_eos()), 0, 1),
+            (
+                collected(&[9707, 11, 1879], vec![], FinishReason::Abort),
+                0,
+                1,
+            ),
+            (
+                collected(&[9707, 11, 1879], vec![], FinishReason::Abort),
+                1,
+                2,
+            ),
+        ] {
+            let prompt_token_ids = output.prompt_token_ids.clone();
+            let response = collect_generate(
+                output,
+                "raw-1".to_string(),
+                "model".to_string(),
+                0,
+                ApiServerOptions::default(),
+                ResponseOptions {
+                    include_prompt_logprobs: true,
+                    prompt_logprob_start,
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("response");
+            let prompt_logprobs = response.prompt_logprobs.expect("prompt logprobs present");
+            assert_eq!(prompt_logprobs.len(), expected_len, "{prompt_token_ids:?}");
+            assert!(prompt_logprobs.iter().all(Option::is_none));
+        }
     }
 
     #[test]
     fn raw_prompt_logprobs_pad_positions_before_prompt_logprob_start() {
         // A 5-token prompt with prompt_logprob_start=1 scores tokens 2..=4.
         let scored_positions = [33, 44, 55].map(|id| position(&[(id, -1.0, 1)]));
-        let maps = raw_prompt_logprobs_to_maps(&scored_positions, 5);
+        let maps = raw_prompt_logprobs_to_maps(&scored_positions, 1);
         assert_eq!(maps.len(), 5);
         assert!(maps[..2].iter().all(Option::is_none));
         for (map, id) in maps[2..].iter().zip([33, 44, 55]) {

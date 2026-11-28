@@ -53,8 +53,8 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         )
 
 
-def test_gemma4_lora(gemma4_vision_lora_files):
-    llm = vllm.LLM(
+def test_gemma4_lora(vllm_runner, gemma4_vision_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -64,15 +64,15 @@ def test_gemma4_lora(gemma4_vision_lora_files):
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
         gpu_memory_utilization=0.8,
-    )
-
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=1)
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=2)
-def test_gemma4_lora_tp2(gemma4_vision_lora_files):
-    llm = vllm.LLM(
+def test_gemma4_lora_tp2(vllm_runner, gemma4_vision_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enforce_eager=True,
@@ -82,15 +82,15 @@ def test_gemma4_lora_tp2(gemma4_vision_lora_files):
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
-    )
-
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=1)
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=4)
-def test_gemma4_lora_tp4(gemma4_vision_lora_files):
-    llm = vllm.LLM(
+def test_gemma4_lora_tp4(vllm_runner, gemma4_vision_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enforce_eager=True,
@@ -100,7 +100,7 @@ def test_gemma4_lora_tp4(gemma4_vision_lora_files):
         limit_mm_per_prompt={"image": 1},
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
-    )
-
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=1)
-    generate_and_test(llm, gemma4_vision_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gemma4_vision_lora_files, lora_id=2)

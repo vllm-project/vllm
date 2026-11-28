@@ -44,7 +44,7 @@ def _make_scheduler_with_dynamic_sd(
         vllm_config=base_scheduler.vllm_config,
         kv_cache_config=base_scheduler.kv_cache_config,
         block_size=base_scheduler.block_size,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(base_scheduler.vllm_config),
     )
 

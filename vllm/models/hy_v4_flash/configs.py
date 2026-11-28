@@ -213,11 +213,15 @@ class HYV4FlashConfig(HYV4Config):
             raise ValueError(
                 "IndexPool requires index_topk=candidate_topk=group_topk*ratio"
             )
+        if self.index_topk % 128 or self.index_topk < self.sliding_window:
+            raise ValueError("index_topk must be 128-aligned and cover sliding_window")
         if self.compressed_indexer_head_dim != 128 or self.index_head_dim != 128:
             raise ValueError("IndexPool requires 128-dimensional keys")
         if not self.q_lora_rank:
             raise ValueError("IndexPool requires q_lora_rank")
         if self.engram_layer_ids:
+            if not self.enable_ihc:
+                raise ValueError("Flash Engram requires the iHC residual stream")
             layers = self.engram_layer_ids
             if len(set(layers)) != len(layers):
                 raise ValueError("engram_layer_ids must be unique")
@@ -253,7 +257,6 @@ class HYV4FlashConfig(HYV4Config):
 
     def verify_parallel_config(self, parallel: "ParallelConfig") -> None:
         for name in (
-            "pipeline_parallel_size",
             "prefill_context_parallel_size",
             "decode_context_parallel_size",
         ):
@@ -302,8 +305,8 @@ class HYV4FlashConfig(HYV4Config):
             raise ValueError("Flash DP requires linear expert placement")
         if self.n_routed_experts % ep:
             raise ValueError("Flash DP requires experts evenly divisible by DP * TP")
-        if parallel.all2all_backend != "allgather_reducescatter":
-            raise ValueError("Flash DP requires allgather_reducescatter")
+        if parallel.all2all_backend not in ("allgather_reducescatter", "passthrough"):
+            raise ValueError("Flash DP requires allgather_reducescatter or passthrough")
 
     def rope_for_layer(self, layer_idx: int) -> dict[str, Any]:
         rope = self.rope_parameters or {}

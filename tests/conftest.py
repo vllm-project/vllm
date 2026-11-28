@@ -13,11 +13,39 @@ from tblib import pickling_support
 # This should be run before any custom exception subclasses are defined.
 pickling_support.install()
 
+import os
+
+
+def _cgroup_v2_cpu_quota() -> int | None:
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+    except (OSError, ValueError):
+        return None
+    return None if quota == "max" else max(1, int(quota) // int(period))
+
+
+# torch sizes its CPU thread pool from OMP_NUM_THREADS on first use, otherwise
+# from the physical core count, which ignores the container's CPU quota and
+# gets parallel CPU ops throttled. Size it before torch loads and for this
+# process only: torch.set_num_threads() here breaks tests that fork, and a
+# leftover OMP_NUM_THREADS would override how vLLM sizes its own workers.
+_cpu_quota = _cgroup_v2_cpu_quota()
+if (
+    "OMP_NUM_THREADS" not in os.environ
+    and _cpu_quota is not None
+    and _cpu_quota < len(os.sched_getaffinity(0))
+):
+    os.environ["OMP_NUM_THREADS"] = str(_cpu_quota)
+    import torch
+
+    torch.get_num_threads()
+    del os.environ["OMP_NUM_THREADS"]
+
 import http.server
 import json
 import math
 import mimetypes
-import os
 import socket
 import tempfile
 import threading
@@ -69,7 +97,11 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import (
+    _cgroup_cpu_limit,
+    available_cpu_count,
+    set_default_torch_num_threads,
+)
 
 from torch._inductor.utils import fresh_cache
 
@@ -325,10 +357,45 @@ def narrow_dummy_fp8_weights(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def release_dynamo_tracked_fakes():
+    """Clear ShapeEnv.tracked_fakes once Dynamo has built a frame's guards.
+
+    The tracked FakeTensors and their ShapeEnv form a cycle through C++ SymInts
+    that gc cannot collect. torch only clears the list for registered backends
+    (https://github.com/pytorch/pytorch/pull/193015, torch >= 2.15), not for
+    the callable backends the tests compile with.
+    """
+    from torch._dynamo import convert_frame
+
+    original = convert_frame.clear_compile_context_weakrefs
+
+    def clear_compile_context_weakrefs(tracer_output, compiler_fn):
+        original(tracer_output, compiler_fn)
+        output_graph = tracer_output and tracer_output.output_graph_for_cleanup
+        if output_graph is not None and not output_graph.export:
+            output_graph.tracked_fakes.clear()
+
+    convert_frame.clear_compile_context_weakrefs = clear_compile_context_weakrefs
+    yield
+    convert_frame.clear_compile_context_weakrefs = original
+
+
 @pytest.fixture(autouse=True)
 def dynamo_reset():
     yield
     torch._dynamo.reset()
+
+    # These caches are unbounded or keyed by pattern and ShapeEnv objects, so in
+    # a process that compiles once per test they grow until every full
+    # gc.collect() takes seconds.
+    from torch._inductor.pattern_matcher import PatternPrettyPrinter
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    PatternPrettyPrinter.run.cache_clear()
+    for attr in vars(ShapeEnv).values():
+        if hasattr(attr, "cache_clear"):
+            attr.cache_clear()
 
 
 @pytest.fixture
@@ -1656,6 +1723,13 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_optional)
 
 
+def pytest_report_header(config):
+    return (
+        f"CPUs: cpu_count {os.cpu_count()}, usable {available_cpu_count()}, "
+        f"cgroup quota {_cgroup_cpu_limit()}, torch threads {torch.get_num_threads()}"
+    )
+
+
 @pytest.fixture(scope="session")
 def cli_config_file():
     """Return the path to the CLI config file."""
@@ -1998,7 +2072,7 @@ def gpu_model_runner_for_requests(dist_init, tmp_path):
             max_model_len=1024,
         ),
     )
-    device = torch.device("cuda", 0)
+    device = torch.device(current_platform.device_type)
     runner = GPUModelRunner(config, device)
     runner.model_state = DefaultModelState(config, nn.Module(), None, device)
     runner.block_tables = BlockTables(

@@ -26,8 +26,6 @@ ARG CUDA_VERSION=13.2.1
 ARG PYTHON_VERSION=3.14
 ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
-ARG TRITON_INSTALL_FROM_SOURCE_REPO=
-ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
@@ -234,7 +232,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         # it has no sdist. The build does not need it; the wheel still
         # requires it (the build stage re-copies cuda.txt), and the Ubuntu
         # runtime image installs it.
-        sed -i '/^PyNvVideoCodec==/d' requirements/cuda.txt; \
+        sed -i '/^PyNvVideoCodec\b/d' requirements/cuda.txt; \
     fi \
     && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
@@ -362,6 +360,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
 
 # Relink with the exact Git-derived package version.
 FROM rust-build-cache AS rust-build
+# Few crates recompile here, far from the open-file limit, and the job count
+# also caps the thin-LTO threads: lift the cap, as docker/Dockerfile.rocm does.
+ENV CARGO_BUILD_JOBS=default
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
@@ -512,12 +513,8 @@ FROM scratch AS kernel-symbol-map
 COPY --from=csrc-build /workspace/dist/kernel_symbol_map.json.gz /kernel_symbol_map.json.gz
 
 FROM base AS extensions-build
-ARG TARGETARCH
 ARG CUDA_VERSION
 ARG INSTALL_RUBIN_PRERELEASE
-ARG TRITON_INSTALL_FROM_SOURCE_REPO
-ARG TRITON_INSTALL_FROM_SOURCE_REVISION
-ARG max_jobs
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 ENV UV_HTTP_TIMEOUT=500
@@ -555,50 +552,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
         ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
-
-# Build Triton from source when a repository is configured. Triton 3.8 pins
-# ptxas-blackwell 13.3, which cannot assemble SM107. Rubin CUDA 13.4 and 13.5
-# builds use their SM107-capable system ptxas during the wheel build and at
-# runtime.
-COPY tools/build_triton_from_source.sh /tmp/build_triton_from_source.sh
-RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=cache,id=triton-source-${TARGETARCH},target=/root/.triton,sharing=locked \
-    --mount=type=cache,id=triton-source-ccache-${TARGETARCH},target=/root/.cache/ccache,sharing=locked \
-    set -eux; \
-    TRITON_WORKSPACE=/tmp/triton_from_source_workspace; \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] \
-        && [ -z "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
-        echo "Rubin prerelease builds require TRITON_INSTALL_FROM_SOURCE_REPO" >&2; \
-        exit 1; \
-    elif [ -z "${TRITON_INSTALL_FROM_SOURCE_REPO}" ] \
-        && [ -n "${TRITON_INSTALL_FROM_SOURCE_REVISION}" ]; then \
-        echo "TRITON_INSTALL_FROM_SOURCE_REVISION requires TRITON_INSTALL_FROM_SOURCE_REPO" >&2; \
-        exit 1; \
-    elif [ -n "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
-        dnf install -y --setopt=install_weak_deps=False zlib-devel; \
-        dnf clean all; \
-        rm -rf /var/cache/dnf; \
-        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
-        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-            case "${CUDA_MAJOR_MINOR}" in \
-                13.4|13.5) \
-                    export TRITON_PTXAS_BLACKWELL_PATH=/usr/local/cuda/bin/ptxas \
-                    ;; \
-                *) \
-                    echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
-                    exit 1 \
-                    ;; \
-            esac; \
-        fi; \
-        TRITON_WORKSPACE="${TRITON_WORKSPACE}" \
-        MAX_JOBS="${max_jobs:-}" \
-            bash /tmp/build_triton_from_source.sh; \
-    else \
-        mkdir -p "${TRITON_WORKSPACE}/dist"; \
-        printf '%s\n' disabled > "${TRITON_WORKSPACE}/dist/build-state"; \
-        (cd "${TRITON_WORKSPACE}/dist" \
-            && sha256sum build-state > wheel.sha256); \
-    fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -928,8 +881,7 @@ RUN chmod 0755 /usr/local/bin/vllm-nonroot-entrypoint.sh
 # Only needed for datacenter/professional GPUs with older drivers.
 # See: https://docs.nvidia.com/deploy/cuda-compatibility/
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
-# The final image's compat libraries, which can be newer than torch's CUDA
-# (Rubin: CUDA 13.5 image with cu134 torch).
+# The final image's compat libraries, which can be newer than torch's CUDA.
 ENV VLLM_CUDA_COMPATIBILITY_PATH=/usr/local/cuda/compat
 
 # ============================================================
@@ -1276,7 +1228,6 @@ ARG INSTALL_KV_CONNECTORS=false
 ARG EFA_INSTALLER_VERSION
 ARG EFA_INSTALLER_SHA256
 ARG INSTALL_RUBIN_PRERELEASE
-ARG TRITON_INSTALL_FROM_SOURCE_REPO
 ARG CUDA_VERSION
 ARG VLLM_BUILD_COMMIT
 ARG VLLM_BUILD_PIPELINE
@@ -1297,6 +1248,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/vllm-requirements/kv_connectors.txt,ro \
     --mount=type=bind,source=requirements/kv_connectors_cu12.txt,target=/tmp/vllm-requirements/kv_connectors_cu12.txt,ro \
+    --mount=type=bind,source=requirements/test/kv_connectors_cuda.overrides,target=/tmp/vllm-requirements/kv_connectors.overrides,ro \
     set -eu; \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
@@ -1314,11 +1266,17 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         uv pip freeze --system > /tmp/kv-installed.txt; \
         grep -E '^(torch|torchaudio|torchvision|triton|cuda-bindings|cuda-python|cuda-toolkit)==' \
             /tmp/kv-installed.txt > /tmp/kv-constraints.txt; \
-        uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" --no-build || ( \
+        # Keep vLLM's OpenTelemetry versions over lmcache's caps, as the CI image does. \
+        # --override replaces UV_OVERRIDE, so pass the NCCL override file again. \
+        uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" \
+            --override /tmp/vllm-requirements/kv_connectors.overrides \
+            ${UV_OVERRIDE:+--override "${UV_OVERRIDE}"} --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" --no-build-isolation && \
+            uv pip install --system -c /tmp/kv-constraints.txt -r "${KV_REQUIREMENTS}" \
+                --override /tmp/vllm-requirements/kv_connectors.overrides \
+                ${UV_OVERRIDE:+--override "${UV_OVERRIDE}"} --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
@@ -1370,8 +1328,9 @@ RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
 # time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
 # here so the image does not override mooncake's own default.
 
-# Install Rubin prerelease dependencies when explicitly requested. Keep this
-# after the public vLLM and KV connector dependency pins installed above.
+# Install Rubin prerelease dependencies when explicitly requested. Keep this the
+# last Python install: it restores the torch nightly and the Triton it requires
+# after the vLLM and KV connector installs above.
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
@@ -1380,40 +1339,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             --prerelease=allow --index-strategy unsafe-first-match \
             -r /tmp/vllm-requirements/rubin-prerelease.txt; \
     fi
-
-# Install source-built Triton last so dependency resolution cannot restore the
-# previously installed version.
-COPY --from=extensions-build \
-    /tmp/triton_from_source_workspace/dist/wheel.sha256 \
-    /tmp/triton-source-wheel.sha256
-COPY tools/install_triton_from_source.sh /tmp/install_triton_from_source.sh
-RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,from=extensions-build,source=/tmp/triton_from_source_workspace/dist,target=/tmp/triton-source-dist,ro \
-    if [ -n "${TRITON_INSTALL_FROM_SOURCE_REPO}" ]; then \
-        CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2); \
-        if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-            case "${CUDA_MAJOR_MINOR}" in \
-                13.4|13.5) \
-                    TRITON_SYSTEM_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-                    TRITON_EXPECTED_PTXAS_VERSION="${CUDA_MAJOR_MINOR}" \
-                        bash /tmp/install_triton_from_source.sh \
-                            /tmp/triton-source-dist \
-                            /tmp/triton-source-wheel.sha256 \
-                    ;; \
-                *) \
-                    echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
-                    exit 1 \
-                    ;; \
-            esac; \
-        else \
-            bash /tmp/install_triton_from_source.sh \
-                /tmp/triton-source-dist \
-                /tmp/triton-source-wheel.sha256; \
-        fi; \
-    fi \
-    && rm -f \
-        /tmp/install_triton_from_source.sh \
-        /tmp/triton-source-wheel.sha256
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \

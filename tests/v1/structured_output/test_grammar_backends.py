@@ -9,9 +9,6 @@ from transformers import AutoTokenizer
 
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
-from vllm.v1.structured_output.backend_lm_format_enforcer import (
-    LMFormatEnforcerBackend,
-)
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
@@ -26,23 +23,11 @@ BACKENDS = (
     pytest.param("xgrammar", id="xgrammar"),
     pytest.param("guidance", id="guidance"),
     pytest.param("outlines", id="outlines"),
-    pytest.param(
-        "lm-format-enforcer",
-        marks=pytest.mark.xfail(
-            reason=(
-                "lm-format-enforcer 0.11.3 imports the removed "
-                "vllm.transformers_utils.tokenizer path"
-            ),
-            strict=True,
-        ),
-        id="lm-format-enforcer",
-    ),
 )
 BACKEND_CLASSES: dict[str, Callable[..., StructuredOutputBackend]] = {
     "xgrammar": XgrammarBackend,
     "guidance": GuidanceBackend,
     "outlines": OutlinesBackend,
-    "lm-format-enforcer": LMFormatEnforcerBackend,
 }
 
 
@@ -104,6 +89,21 @@ def test_vocab_size_is_respected(tokenizer, backend: str, vocab_size_delta: int)
     invalid = _single_token(tokenizer, "z")
     assert bitmask[0, first >> 5].item() & (1 << (first & 31))
     assert not bitmask[0, invalid >> 5].item() & (1 << (invalid & 31))
+
+
+def test_allocate_token_bitmask_does_not_pin(monkeypatch):
+    """EngineCore may be unable to create the CUDA context that pinning needs."""
+    full = torch.full
+
+    def full_pinning_fails(*args, pin_memory=False, **kwargs):
+        if pin_memory:
+            raise torch.AcceleratorError("CUDA error: out of memory")
+        return full(*args, **kwargs)
+
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", True)
+    monkeypatch.setattr(torch, "full", full_pinning_fails)
+    bitmask = allocate_token_bitmask(num_rows=1, vocab_size=32)
+    assert not bitmask.is_pinned()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
