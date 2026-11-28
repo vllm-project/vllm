@@ -101,7 +101,7 @@ class MambaHybridModelState(DefaultModelState):
                 self.max_num_reqs, dtype=torch.bool, device=self.device
             )
         self.recoverssm = (
-            RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
+            RecoverSSMState() if self.cache_config.use_recoverssm else None
         )
         if self.prefix_caching or self._use_replayssm_trackers:
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None

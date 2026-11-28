@@ -85,6 +85,13 @@ else:
 
 logger = init_logger(__name__)
 
+# Architectures whose GDN (and PLE) layers run RecoverSSM under --use-replayssm.
+_QWEN4EXP_RECOVERSSM_ARCHS = (
+    "Qwen4ExpForCausalLM",
+    "Qwen4ExpForConditionalGeneration",
+    "Qwen4ExpMTP",
+)
+
 _QWEN3_5_ARCHITECTURES = frozenset(
     {
         "Qwen3_5ForCausalLM",
@@ -682,7 +689,7 @@ class VllmConfig:
         """Mamba2 ReplaySSM whose rings follow the runner-committed trackers."""
         return (
             self.cache_config.use_replayssm
-            and not self.cache_config.use_kda_recoverssm
+            and not self.cache_config.use_recoverssm
             and (self.use_flashinfer_replayssm or self.num_speculative_tokens > 0)
         )
 
@@ -3828,23 +3835,24 @@ class VllmConfig:
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
-            self.cache_config.use_kda_recoverssm = False
+            self.cache_config.use_recoverssm = False
             return self
 
-        kda_architectures = (
+        recoverssm_architectures = (
             "KimiLinearForCausalLM",
             "KimiK3ForConditionalGeneration",
             "KimiK31ForConditionalGeneration",
+            *_QWEN4EXP_RECOVERSSM_ARCHS,
         )
-        is_kda_model = (
+        is_recoverssm_model = (
             self.model_config is not None
-            and self.model_config.architecture in kda_architectures
+            and self.model_config.architecture in recoverssm_architectures
         )
-        self.cache_config.use_kda_recoverssm = (
-            self.num_speculative_tokens > 0 and is_kda_model
+        self.cache_config.use_recoverssm = (
+            self.num_speculative_tokens > 0 and is_recoverssm_model
         )
         use_mamba_replayssm_spec = (
-            self.num_speculative_tokens > 0 and not self.cache_config.use_kda_recoverssm
+            self.num_speculative_tokens > 0 and not self.cache_config.use_recoverssm
         )
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
@@ -3859,7 +3867,7 @@ class VllmConfig:
             raise ValueError(
                 "FlashInfer ReplaySSM requires --replayssm-buffer-len <= 16"
             )
-        if self.cache_config.use_kda_recoverssm:
+        if self.cache_config.use_recoverssm:
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
                     "RecoverSSM supports bfloat16/float32 "
@@ -3922,8 +3930,12 @@ class VllmConfig:
             and self.kv_transfer_config.is_kv_transfer_instance
             # A KDA RecoverSSM request's state is its conv and SSM state in the
             # stock Mamba page (the verify records are kept outside the KV
-            # cache), so KV connectors transfer it as usual.
-            and not self.cache_config.use_kda_recoverssm
+            # cache), so KV connectors transfer it as usual. Qwen4Exp GDN
+            # RecoverSSM keeps its records in the Mamba page.
+            and not (
+                self.cache_config.use_recoverssm
+                and self.model_config.architecture not in _QWEN4EXP_RECOVERSSM_ARCHS
+            )
         ):
             raise ValueError(
                 "--use-replayssm is incompatible with KV connectors "

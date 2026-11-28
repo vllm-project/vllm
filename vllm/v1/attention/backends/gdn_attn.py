@@ -289,7 +289,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         self.use_replayssm: bool = (
             vllm_config.cache_config.use_replayssm
-            and not vllm_config.cache_config.use_kda_recoverssm
+            and not vllm_config.cache_config.use_recoverssm
         )
         self.replayssm_buffer_len: int | None = (
             vllm_config.cache_config.replayssm_buffer_len

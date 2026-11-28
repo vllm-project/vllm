@@ -198,7 +198,7 @@ def unsupported(vllm_config) -> list[str]:
             ),
         ),
         (
-            not boundary_only and (cache.use_replayssm or cache.use_kda_recoverssm),
+            not boundary_only and (cache.use_replayssm or cache.use_recoverssm),
             "ReplaySSM / RecoverSSM (--use-replayssm)",
         ),
         # The KDA decode reads its projection weights directly as BF16.

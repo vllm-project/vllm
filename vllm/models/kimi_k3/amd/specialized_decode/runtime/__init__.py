@@ -219,7 +219,7 @@ def unsupported(vllm_config) -> list[str]:
                 "state (mamba cache dtype)"
             ),
         ),
-        (cc.use_replayssm or cc.use_kda_recoverssm, "ReplaySSM / RecoverSSM"),
+        (cc.use_replayssm or cc.use_recoverssm, "ReplaySSM / RecoverSSM"),
         # plan() and the layer kernels run in forward; a compiled forward would
         # trace them
         (

@@ -552,7 +552,7 @@ def _create_decode_vllm_config(
     num_speculative_tokens: int = 0,
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
-    use_kda_recoverssm: bool = False,
+    use_recoverssm: bool = False,
     decode_sizes: list[int] | None = None,
     max_decode_tokens: int | None = None,
     max_model_len: int = 8192,
@@ -579,7 +579,7 @@ def _create_decode_vllm_config(
         max_num_seqs=max_num_seqs
     )
     vllm_config.parallel_config = ParallelConfig()
-    vllm_config.cache_config = SimpleNamespace(use_kda_recoverssm=use_kda_recoverssm)
+    vllm_config.cache_config = SimpleNamespace(use_recoverssm=use_recoverssm)
     vllm_config.num_speculative_tokens = num_speculative_tokens
     if dynamic_spec_schedule is None:
         vllm_config.speculative_config = None
@@ -621,7 +621,7 @@ def _make_spec_decode_manager(
     num_speculative_tokens: int | None = None,
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
-    use_kda_recoverssm: bool = False,
+    use_recoverssm: bool = False,
     varlen_decode: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     if num_speculative_tokens is None:
@@ -641,7 +641,7 @@ def _make_spec_decode_manager(
         num_speculative_tokens=num_speculative_tokens,
         dynamic_spec_schedule=dynamic_spec_schedule,
         max_num_seqs=max_num_seqs,
-        use_kda_recoverssm=use_kda_recoverssm,
+        use_recoverssm=use_recoverssm,
     )
     manager = gpu_cudagraph_utils.CudaGraphManager(
         vllm_config=vllm_config,
@@ -703,9 +703,9 @@ def test_recoverssm_keeps_mixed_graphs_past_the_decode_token_cap(monkeypatch):
     """KDA RecoverSSM keeps the mixed graphs above max_num_seqs * (num_spec + 1)
     tokens."""
 
-    def mixed_sizes(use_kda_recoverssm: bool) -> list[int]:
+    def mixed_sizes(use_recoverssm: bool) -> list[int]:
         manager = _make_spec_decode_manager(
-            monkeypatch, max_num_seqs=2, use_kda_recoverssm=use_kda_recoverssm
+            monkeypatch, max_num_seqs=2, use_recoverssm=use_recoverssm
         )
         return sorted(
             d.num_tokens for d in manager._capture_descs[CUDAGraphMode.PIECEWISE]
