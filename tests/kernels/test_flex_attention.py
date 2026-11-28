@@ -439,6 +439,77 @@ def test_flex_attention_request_count_changes_reuse_compiled_graph(direct_build)
             )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
+)
+@torch.inference_mode()
+def test_flex_attention_strided_query_reuses_compiled_graph():
+    """A strided query view must reuse the graph compiled for a contiguous query."""
+    from torch._dynamo.utils import counters
+
+    from vllm.config import set_current_vllm_config
+    from vllm.v1.attention.backends.flex_attention import FlexAttentionImpl
+
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        max_model_len=128,
+        num_gpu_blocks=40,
+        max_num_seqs=8,
+        max_num_batched_tokens=128,
+    )
+    spec = create_standard_kv_cache_spec(config)
+    with registered_attention_layers(config, ["layer"]):
+        builder = FlexAttentionMetadataBuilder(spec, ["layer"], config, device)
+    num_tokens = 32
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[num_tokens], query_lens=[num_tokens]),
+        spec.block_size,
+        device,
+        max_block_idx=40,
+    )
+    metadata = builder.build(0, common)
+    # Query heads equal KV heads here; grouped-query attention is not needed
+    # to exercise the query layout.
+    num_heads = spec.num_kv_heads
+    with set_current_vllm_config(config):
+        impl = FlexAttentionImpl(
+            num_heads=num_heads,
+            head_size=spec.head_size,
+            scale=spec.head_size**-0.5,
+            num_kv_heads=spec.num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+        )
+    # Logical [num_blocks, num_kv_heads, block_size, 2 * head_size] view of a
+    # blocks-first cache, as the runner hands it to the backend.
+    kv_cache = torch.randn(
+        40, spec.block_size, spec.num_kv_heads, 2 * spec.head_size, device=device
+    ).transpose(1, 2)
+    layer = torch.nn.Identity()
+    hidden = num_heads * spec.head_size
+    query = torch.randn(num_tokens, hidden, device=device)
+    # Same values, but each row sits inside a wider buffer, as when q/k/v share one.
+    kv_width = 2 * spec.num_kv_heads * spec.head_size
+    wide = torch.randn(num_tokens, hidden + kv_width, device=device)
+    wide[:, :hidden] = query
+    strided = wide[:, :hidden]
+    assert not strided.is_contiguous()
+
+    def attend(q):
+        q = q.view(num_tokens, num_heads, spec.head_size)
+        output = torch.empty_like(q)
+        return impl.forward(layer, q, None, None, kv_cache, metadata, output)
+
+    expected = attend(query).clone()
+    num_graphs = counters["stats"]["unique_graphs"]
+    torch.testing.assert_close(attend(strided), expected, rtol=0, atol=0)
+    assert counters["stats"]["unique_graphs"] == num_graphs
+
+
 def test_physical_to_logical_mapping_handles_reused_blocks():
     """Regression test: reused physical blocks map to the latest logical block.
 

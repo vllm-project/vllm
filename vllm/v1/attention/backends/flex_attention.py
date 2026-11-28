@@ -1359,6 +1359,9 @@ class FlexAttentionImpl(AttentionImpl):
             # Flatten (num_blocks, block_size) into a single token dim.
             key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
             value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
+            # A layer may pass the query as a strided view (e.g. a slice of a
+            # fused qkv output). Dynamo guards on strides, so normalize it.
+            query = query.contiguous()
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key_cache, value_cache),
