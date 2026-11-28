@@ -43,6 +43,12 @@ from vllm.multimodal.cache import (
     engine_receiver_cache_from_config,
 )
 from vllm.outputs import RequestError
+from vllm.snapshot.kv_connector_lifecycle import (
+    refresh_scheduler_handshake_metadata_after_snapshot_restore,
+    rotate_engine_id,
+    snapshot_scheduler_runtime,
+)
+from vllm.snapshot.utils import is_restore
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -52,7 +58,12 @@ from vllm.utils.gc_utils import (
     maybe_attach_gc_debug_callback,
 )
 from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import (
+    get_ip,
+    make_zmq_socket,
+    replace_zmq_tcp_host,
+    split_zmq_path,
+)
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
@@ -1366,6 +1377,7 @@ class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    ENGINE_CORE_THREAD_FINISH = b"ENGINE_CORE_THREAD_FINISH"
     addresses: EngineZmqAddresses
 
     @instrument(span_name="EngineCoreProc init")
@@ -1396,6 +1408,13 @@ class EngineCoreProc(EngineCore):
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
         self.reject_new_requests = False
+        self.identity = identity
+        self.dp_group: Any = None
+        self._transport_lock = threading.Lock()
+        self._transport_reconnected = False
+        self._input_stop_event: threading.Event
+        self._input_stop_reader: int
+        self._input_stop_writer: int
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -1451,42 +1470,7 @@ class EngineCoreProc(EngineCore):
                     parallel_config=vllm_config.parallel_config,
                 )
 
-            # Background Threads and Queues for IO. These enable us to
-            # overlap ZMQ socket IO with GPU since they release the GIL,
-            # and to overlap some serialization/deserialization with the
-            # model forward pass.
-            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-            ready_event = threading.Event()
-            input_thread = threading.Thread(
-                target=self.process_input_sockets,
-                args=(
-                    addresses.inputs,
-                    addresses.coordinator_input,
-                    identity,
-                    ready_event,
-                ),
-                daemon=True,
-            )
-            input_thread.start()
-
-            self.output_thread = threading.Thread(
-                target=self.process_output_sockets,
-                args=(
-                    addresses.outputs,
-                    addresses.coordinator_output,
-                    self.engine_index,
-                ),
-                daemon=True,
-            )
-            self.output_thread.start()
-
-            # Don't complete handshake until DP coordinator ready message is
-            # received.
-            while not ready_event.wait(timeout=10):
-                if not input_thread.is_alive():
-                    raise RuntimeError("Input socket thread died during startup")
-                assert addresses.coordinator_input is not None
-                logger.info("Waiting for READY message from DP Coordinator...")
+            self._start_io_threads()
 
             # Send initial scheduler stats so that the scheduler-state gauges
             # are exported before the first request.
@@ -1500,6 +1484,160 @@ class EngineCoreProc(EngineCore):
                 refusal := self.checkpoint_prepare()
             ):
                 raise RuntimeError(refusal)
+
+
+        snapshot_config = vllm_config.snapshot_config
+        snapshot_metadata = (
+            snapshot_config.snapshot_metadata if snapshot_config is not None else None
+        )
+        if snapshot_metadata is not None and any(
+            split_zmq_path(address)[0] == "tcp" for address in self.addresses.inputs
+        ):
+            threading.Thread(
+                target=self._reconnect_transport_with_snapshot_metadata,
+                args=(snapshot_metadata,),
+                daemon=True,
+                name="reconnect-transport-worker",
+            ).start()
+
+    def _start_io_threads(self) -> None:
+        """Start the EngineCore input and output socket threads."""
+        ready_event = threading.Event()
+        self._input_stop_event = threading.Event()
+        self._input_stop_reader, self._input_stop_writer = os.pipe()
+        self.input_thread = threading.Thread(
+            target=self.process_input_sockets,
+            args=(
+                self.addresses.inputs,
+                self.addresses.coordinator_input,
+                self.identity,
+                ready_event,
+                self._input_stop_event,
+                self._input_stop_reader,
+            ),
+            daemon=True,
+        )
+        self.input_thread.start()
+
+        self.output_thread = threading.Thread(
+            target=self.process_output_sockets,
+            args=(
+                self.addresses.outputs,
+                self.addresses.coordinator_output,
+                self.engine_index,
+            ),
+            daemon=True,
+        )
+        self.output_thread.start()
+
+        # Don't complete handshake until DP coordinator ready message is received.
+        while not ready_event.wait(timeout=10):
+            if not self.input_thread.is_alive():
+                raise RuntimeError("Input socket thread died during startup")
+            assert self.addresses.coordinator_input is not None
+            logger.info("Waiting for READY message from DP Coordinator...")
+
+    def _stop_io_threads(self) -> None:
+        """Stop the EngineCore input and output socket threads."""
+        logger.info(
+            "[snapshot] engine core %d stopping transport IO threads",
+            self.engine_index,
+        )
+        self._input_stop_event.set()
+        # A threading.Event cannot wake a ZMQ poll blocked on a stale TCP
+        # connection after restore. The pipe fd is registered with the poller
+        # and makes the stop request immediately observable by the IO thread.
+        os.write(self._input_stop_writer, b"\0")
+        self.output_queue.put(EngineCoreProc.ENGINE_CORE_THREAD_FINISH)
+        self.input_thread.join(timeout=9999)
+        logger.info(
+            "[snapshot] engine core %d input IO thread stopped",
+            self.engine_index,
+        )
+        self.output_thread.join(timeout=9999)
+        logger.info(
+            "[snapshot] engine core %d output IO thread stopped",
+            self.engine_index,
+        )
+        os.close(self._input_stop_reader)
+        os.close(self._input_stop_writer)
+
+    def _reconnect_transport(self, data_parallel_master_ip: str) -> None:
+        """Reconnect EngineCore sockets to the restored master Pod IP."""
+        logger.info(
+            "[snapshot] engine core reconnecting transport to %s",
+            data_parallel_master_ip,
+        )
+        self._stop_io_threads()
+        self.vllm_config.parallel_config.data_parallel_master_ip = (
+            data_parallel_master_ip
+        )
+        self.addresses.inputs = [
+            replace_zmq_tcp_host(address, data_parallel_master_ip)
+            for address in self.addresses.inputs
+        ]
+        self.addresses.outputs = [
+            replace_zmq_tcp_host(address, data_parallel_master_ip)
+            for address in self.addresses.outputs
+        ]
+        if self.addresses.coordinator_input is not None:
+            self.addresses.coordinator_input = replace_zmq_tcp_host(
+                self.addresses.coordinator_input, data_parallel_master_ip
+            )
+        if self.addresses.coordinator_output is not None:
+            self.addresses.coordinator_output = replace_zmq_tcp_host(
+                self.addresses.coordinator_output, data_parallel_master_ip
+            )
+        logger.info(
+            "[snapshot] engine core %d starting transport IO threads with master IP %s",
+            self.engine_index,
+            data_parallel_master_ip,
+        )
+        self._start_io_threads()
+        logger.info(
+            "[snapshot] engine core %d transport reconnect completed",
+            self.engine_index,
+        )
+
+    def _reconnect_transport_with_snapshot_metadata(self, snapshot_metadata: str) -> None:
+        try:
+            from vllm.snapshot.utils import (
+                RETRY_INTERVAL,
+                RETRY_LOG_FREQUENCY,
+                load_snapshot_metadata,
+            )
+
+            while not is_restore():
+                time.sleep(RETRY_INTERVAL)
+
+            # The restore marker may appear before the controller writes the
+            # new master Pod IP. Keep reading metadata until that field is
+            # available; transport reconstruction failures remain fatal.
+            attempts = 0
+            while True:
+                try:
+                    data_parallel_master_ip = load_snapshot_metadata(
+                        snapshot_metadata, "data_parallel_master_ip"
+                    )
+                    break
+                except Exception as exc:
+                    attempts += 1
+                    if attempts == 1 or attempts % RETRY_LOG_FREQUENCY == 0:
+                        logger.warning(
+                            "[snapshot] data_parallel_master_ip is not ready "
+                            "after restore, will retry (attempt %d): %s",
+                            attempts,
+                            exc,
+                        )
+                    time.sleep(RETRY_INTERVAL)
+
+            with self._transport_lock:
+                self._reconnect_transport(data_parallel_master_ip)
+                self._transport_reconnected = True
+        except Exception:
+            logger.exception("[snapshot] engine core transport restore failed")
+            self.shutdown_state = EngineShutdownState.REQUESTED
+            self.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
 
     @contextmanager
     def _perform_handshakes(
@@ -2247,6 +2385,8 @@ class EngineCoreProc(EngineCore):
         coord_input_address: str | None,
         identity: bytes,
         ready_event: threading.Event,
+        stop_event: threading.Event,
+        stop_fd: int,
     ):
         """Input socket IO thread."""
         # Msgpack serialization decoding with optional tensor IPC receiver.
@@ -2281,6 +2421,7 @@ class EngineCoreProc(EngineCore):
 
             # Register sockets with poller.
             poller = zmq.Poller()
+            poller.register(stop_fd, zmq.POLLIN)
             ready_response = self._make_ready_response()
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:
@@ -2297,10 +2438,14 @@ class EngineCoreProc(EngineCore):
 
             ready_event.set()
             del ready_event
-            while True:
+            while not stop_event.is_set():
                 for input_socket, _ in poller.poll():
+                    if input_socket == stop_fd:
+                        os.read(stop_fd, 1)
+                        return
+                    parts = input_socket.recv_multipart(copy=False)
                     # (RequestType, RequestData)
-                    type_frame, *data_frames = input_socket.recv_multipart(copy=False)
+                    type_frame, *data_frames = parts
                     # NOTE(yongji): ignore READY message sent by DP coordinator
                     # that is used to notify newly started engines
                     if type_frame.buffer == b"READY":
@@ -2384,6 +2529,13 @@ class EngineCoreProc(EngineCore):
 
             while True:
                 output = self.output_queue.get()
+                if output == EngineCoreProc.ENGINE_CORE_THREAD_FINISH:
+                    logger.info(
+                        "[snapshot] engine core output thread received %s; "
+                        "stopping output thread",
+                        "ENGINE_CORE_THREAD_FINISH",
+                    )
+                    break
                 if output == EngineCoreProc.ENGINE_CORE_DEAD:
                     for socket in sockets:
                         socket.send(output)
@@ -2634,6 +2786,63 @@ class EngineCoreProc(EngineCore):
             for client_index, req_ids in by_client.items():
                 self._send_abort_outputs_to_client(list(req_ids), client_index)
 
+    def suspend(self, model_save_path: str | None = None) -> None:
+        self.model_executor.suspend(model_save_path)
+        snapshot_scheduler_runtime(self, "suspend")
+
+    def device_unlock(self) -> None:
+        snapshot_scheduler_runtime(self, "device_unlock")
+        self.model_executor.device_unlock()
+
+    def resume(
+        self,
+        data_parallel_master_ip: str | None = None,
+        model_path: str | None = None,
+    ) -> None:
+        assert data_parallel_master_ip is not None
+        snapshot_scheduler_runtime(self, "resume")
+        with self._transport_lock:
+            if not self._transport_reconnected:
+                self._reconnect_transport(data_parallel_master_ip)
+                self._transport_reconnected = True
+
+        parallel_config = self.vllm_config.parallel_config
+        parallel_config.data_parallel_master_ip = data_parallel_master_ip
+        local_ip = get_ip(force=True)
+        if local_ip in ("", "0.0.0.0", "::"):
+            raise RuntimeError(
+                "Unable to resolve local EngineCore IP for snapshot restore"
+            )
+
+        kv_config = self.vllm_config.kv_transfer_config
+        new_engine_id = None
+        if kv_config is not None and (
+            kv_config.is_kv_producer or kv_config.is_kv_consumer
+        ):
+            assert kv_config.engine_id is not None
+            old_engine_id = str(kv_config.engine_id)
+            new_engine_id = rotate_engine_id(old_engine_id)
+            kv_config.engine_id = new_engine_id
+            logger.info(
+                "[snapshot][kv-transfer] engine ID updated: old=%s new=%s",
+                old_engine_id,
+                new_engine_id,
+            )
+        self.model_executor.resume(
+            data_parallel_master_ip,
+            model_path,
+            new_engine_id,
+        )
+        if new_engine_id is not None and self.scheduler.connector is not None:
+            self.scheduler.connector.rebuild_kv_transfer_endpoint(local_ip, new_engine_id)
+
+        if self.dp_group is not None:
+            stateless_destroy_torch_distributed_process_group(self.dp_group)
+            self.dp_group = parallel_config.stateless_init_dp_group()
+
+        # Must after worker rebuild
+        refresh_scheduler_handshake_metadata_after_snapshot_restore(self)
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
@@ -2862,6 +3071,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.

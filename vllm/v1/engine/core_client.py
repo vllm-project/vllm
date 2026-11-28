@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -32,6 +33,8 @@ from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
+from vllm.snapshot.monitor import SnapshotMonitor
+from vllm.snapshot.utils import is_restore
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.async_utils import in_loop
@@ -39,6 +42,8 @@ from vllm.utils.network_utils import (
     close_sockets,
     get_open_zmq_inproc_path,
     make_zmq_socket,
+    replace_zmq_tcp_host,
+    split_zmq_path,
 )
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
@@ -344,6 +349,19 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
+        raise NotImplementedError
+
+    async def suspend_async(self, model_save_path: str | None = None) -> None:
+        raise NotImplementedError
+
+    async def resume_async(
+        self,
+        data_parallel_master_ip: str | None = None,
+        model_path: str | None = None,
+    ) -> None:
+        raise NotImplementedError
+
+    async def device_unlock_async(self) -> None:
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
@@ -674,16 +692,34 @@ class MPClient(EngineCoreClient):
             # State used for data parallel.
             self.engines_running = False
             parallel_config = vllm_config.parallel_config
-            # Elastic EP can remove a rank and later add it back with the same
-            # identity. The client input ROUTER needs handover to allow the new
-            # engine to replace the dead connection.
-            enable_input_socket_handover = parallel_config.enable_elastic_ep
+            # Engines reconnect with a fixed identity during elastic EP and
+            # snapshot resume. ROUTER_HANDOVER lets the new DEALER replace the
+            # old connection so its READY handshake is not lost.
+            enable_input_socket_handover = (
+                parallel_config.enable_elastic_ep
+                or vllm_config.snapshot_config is not None
+            )
 
             self.stats_update_address: str | None = None
             self.coordinator_input_address: str | None = None
             self.coordinator_output_address: str | None = None
+            # API workers receive a process-shared monitor from their parent;
+            # direct clients use the same state machine with local primitives.
+            if vllm_config.snapshot_config is None:
+                self.snapshot_monitor = None
+            else:
+                snapshot_monitor = (
+                    client_addresses.get("snapshot_monitor")
+                    if client_addresses
+                    else None
+                )
+                self.snapshot_monitor = (
+                    snapshot_monitor
+                    if snapshot_monitor is not None
+                    else SnapshotMonitor()
+                )
             tensor_queue: Queue | None = None
-            if client_addresses:
+            if client_addresses and "input_address" in client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
@@ -762,6 +798,7 @@ class MPClient(EngineCoreClient):
             output_socket = self.resources.output_socket
             assert output_socket is not None
             self.output_address = output_socket.getsockopt_string(zmq.LAST_ENDPOINT)
+            self._is_tcp_input_transport = split_zmq_path(self.input_address)[0] == "tcp"
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
             tensor_ipc_sender: TensorIpcSender | None = None
@@ -1446,6 +1483,128 @@ class AsyncMPClient(MPClient):
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
         return all(await self.call_utility_all_async("wake_up", tags))
 
+    async def wait_for_engines_ready(self):
+        identities = set(self.core_engines)
+        sync_input_socket = zmq.Socket.shadow(self.input_socket)
+        while len(identities):
+            if not sync_input_socket.poll(
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+            ):
+                raise TimeoutError(
+                    "[snapshot] Timed out waiting for engines to send "
+                    "initial message on input socket."
+                )
+            identity, _ = sync_input_socket.recv_multipart()
+            identities.remove(identity)
+            logger.info(
+                "[snapshot] Engine %s ready. Remaining: %d",
+                identity,
+                len(identities),
+            )
+        logger.info("[snapshot] api server wait for all engines ready!")
+
+    async def suspend_async(self, model_save_path: str | None = None) -> None:
+        snapshot_monitor = self.snapshot_monitor
+        if snapshot_monitor is None:
+            raise RuntimeError("Snapshot lifecycle requires --snapshot-config")
+        if not snapshot_monitor.try_start_suspending():
+            logger.warning("[snapshot] api server is suspending or already suspended.")
+            return
+
+        time_before_suspend = time.perf_counter()
+        try:
+            await self.call_utility_async("suspend", model_save_path)
+        except BaseException:
+            snapshot_monitor.mark_suspend_failed()
+            raise
+        snapshot_monitor.mark_suspend_done()
+        time_after_suspend = time.perf_counter()
+        logger.info(
+            "It took %.6f seconds to fall suspend.",
+            time_after_suspend - time_before_suspend,
+        )
+
+    async def device_unlock_async(self) -> None:
+        snapshot_monitor = self.snapshot_monitor
+        if snapshot_monitor is None:
+            raise RuntimeError("Snapshot lifecycle requires --snapshot-config")
+        if not snapshot_monitor.try_start_unlocking():
+            logger.warning(
+                "[snapshot] api server cannot unlock or is already unlocking."
+            )
+            return
+
+        time_before_unlock = time.perf_counter()
+        try:
+            await self.call_utility_async("device_unlock")
+        except BaseException:
+            snapshot_monitor.mark_unlock_failed()
+            raise
+        snapshot_monitor.mark_unlock_done()
+        time_after_unlock = time.perf_counter()
+        logger.info(
+            "It took %.6f seconds to device_unlock.",
+            time_after_unlock - time_before_unlock,
+        )
+
+    async def _reconnect_dp_coordinator(
+        self,
+        data_parallel_master_ip: str,
+    ) -> None:
+        """Reconnect client-side DP coordinator state after restore."""
+
+    async def _resume_engines(
+        self,
+        data_parallel_master_ip: str,
+        model_path: str | None,
+    ) -> None:
+        logger.info("[snapshot] api server wait_for_engines_ready")
+        ready_task = asyncio.create_task(self.wait_for_engines_ready())
+        if self._is_tcp_input_transport:
+            # Centralized DP restores TCP before the utility request can reach
+            # the EngineCores. Distributed DP retains its IPC transport.
+            await ready_task
+            await self.call_utility_async("resume", data_parallel_master_ip, model_path)
+        else:
+            await self.call_utility_async("resume", data_parallel_master_ip, model_path)
+            await ready_task
+
+    async def resume_async(
+        self,
+        data_parallel_master_ip: str | None = None,
+        model_path: str | None = None,
+    ) -> None:
+        snapshot_monitor = self.snapshot_monitor
+        if snapshot_monitor is None:
+            raise RuntimeError("Snapshot lifecycle requires --snapshot-config")
+        if not snapshot_monitor.is_suspend_done:
+            logger.warning("[snapshot] api server is not suspend.")
+            return
+        if not snapshot_monitor.try_start_resuming():
+            logger.warning("[snapshot] api server is resuming or already resumed.")
+            return
+        if not is_restore():
+            snapshot_monitor.mark_resume_failed()
+            logger.warning(
+                "[snapshot] api server resume fail, not find /root/.grusflag"
+            )
+            return
+        time_before_resume = time.perf_counter()
+
+        try:
+            assert data_parallel_master_ip is not None
+            await self._reconnect_dp_coordinator(data_parallel_master_ip)
+            await self._resume_engines(data_parallel_master_ip, model_path)
+        except BaseException:
+            snapshot_monitor.mark_resume_failed()
+            raise
+        snapshot_monitor.mark_resume_done()
+        time_after_resume = time.perf_counter()
+        logger.info(
+            "It took %.6f seconds to resume.",
+            time_after_resume - time_before_resume,
+        )
+
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_consensus_async("is_sleeping")
 
@@ -1791,6 +1950,33 @@ class DPAsyncMPClient(AsyncMPClient):
             if coordinator is None
             else await asyncio.to_thread(coordinator.get_status)
         )
+    async def _reconnect_dp_coordinator(
+        self,
+        data_parallel_master_ip: str,
+    ) -> None:
+        # Refresh the connection to the DP coordinator.
+        stats_update_task = self.resources.stats_update_task
+        assert stats_update_task is not None
+        if not stats_update_task.done():
+            stats_update_task.cancel()
+            try:
+                await stats_update_task
+            except asyncio.CancelledError:
+                logger.info(
+                    "[snapshot] api server stats_update_task cancelled successfully"
+                )
+        self.resources.stats_update_task = None
+        assert self.stats_update_address is not None
+        self.stats_update_address = replace_zmq_tcp_host(
+            self.stats_update_address,
+            data_parallel_master_ip,
+        )
+        self.scale_send_socket.close(linger=0)
+        self.scale_sock_addr = get_open_zmq_inproc_path()
+        self.scale_send_socket = self.resources.scale_send_socket = make_zmq_socket(
+            self.ctx, self.scale_sock_addr, zmq.PAIR, bind=True
+        )
+        self._ensure_stats_update_task()
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):

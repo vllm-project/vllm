@@ -64,6 +64,7 @@ from vllm.config import (
     ProfilerConfig,
     ReasoningConfig,
     SchedulerConfig,
+    SnapshotConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
     UVAOffloadConfig,
@@ -718,6 +719,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     aux_output_config: AuxOutputConfig = get_field(VllmConfig, "aux_output_config")
+    snapshot_config: SnapshotConfig | None = get_field(VllmConfig, "snapshot_config")
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
 
@@ -1934,6 +1936,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--aux-output-config", **vllm_kwargs["aux_output_config"]
         )
+        vllm_group.add_argument("--snapshot-config", **vllm_kwargs["snapshot_config"])
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument("--watchdog-config", **vllm_kwargs["watchdog_config"])
         vllm_group.add_argument(
@@ -2957,6 +2960,7 @@ class EngineArgs:
             ec_transfer_config=self.ec_transfer_config,
             ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,
+            snapshot_config=self.snapshot_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,

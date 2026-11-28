@@ -503,6 +503,24 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def prepare_for_snapshot_restore(self) -> None:
+        """Release old transport resources before rebuilding process groups.
+
+        Snapshot-aware connectors must release all shared-engine references
+        without creating new transports here. Other connectors need no action.
+        """
+        return None
+
+    def rebuild_kv_transfer_endpoint(
+        self, local_ip: str, new_engine_id: str | None = None
+    ) -> None:
+        """Rebuild local transport resources after snapshot restore.
+
+        Connectors whose endpoints or clients do not survive restore should
+        override this method. Other connectors require no restore action.
+        """
+        return None
+
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
         """Get the KV connector stats collected during the last interval."""
         return None

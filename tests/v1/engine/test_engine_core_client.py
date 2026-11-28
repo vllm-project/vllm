@@ -164,6 +164,8 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
     vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(effective_attention_block_size=None),
+
+        snapshot_config=None,
     )
 
     client = core_client_mod.MPClient(
