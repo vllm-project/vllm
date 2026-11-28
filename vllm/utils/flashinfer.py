@@ -1412,6 +1412,26 @@ def has_flashinfer_fp8_blockscale_gemm() -> bool:
     )
 
 
+flashinfer_gemm_fp8_nt_groupwise = _lazy_import_wrapper(
+    "flashinfer.gemm", "gemm_fp8_nt_groupwise"
+)
+
+
+@functools.cache
+def has_flashinfer_trtllm_fp8_groupwise_gemm() -> bool:
+    """Return `True` if FlashInfer's TRT-LLM groupwise FP8 GEMM
+    (`gemm_fp8_nt_groupwise(backend="trtllm")`) can be used. Enabled on SM100
+    and SM103, where it was measured against the CUTLASS block-FP8 GEMM."""
+    return (
+        has_flashinfer()
+        and (
+            current_platform.is_device_capability(100)
+            or current_platform.is_device_capability(103)
+        )
+        and hasattr(_get_submodule("flashinfer.gemm"), "gemm_fp8_nt_groupwise")
+    )
+
+
 @functools.cache
 def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
     """Return `True` if FlashInfer block-scale FP8 GEMM is supported."""
@@ -1535,6 +1555,7 @@ __all__ = [
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
+    "has_flashinfer_trtllm_fp8_groupwise_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
@@ -1544,6 +1565,7 @@ __all__ = [
     "flashinfer_scaled_fp8_mm",
     "flashinfer_quant_nvfp4_8x4_sf_layout",
     "flashinfer_fp8_blockscale_gemm",
+    "flashinfer_gemm_fp8_nt_groupwise",
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
     "is_flashinfer_cudnn_fp8_prefill_attn_supported",
