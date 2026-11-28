@@ -974,7 +974,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return "does not support scaled beta (linear_allow_neg_eigval)"
         if vllm_config.num_speculative_tokens > 0:
             return "does not support speculative decoding yet"
-        if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
+        # None selects automatically, which is Triton for Gated DeltaNet.
+        if vllm_config.mamba_config.backend not in (None, MambaBackendEnum.TRITON):
             return "requires --mamba-backend triton"
         if vllm_config.mamba_config.enable_stochastic_rounding:
             return "does not support --enable-mamba-cache-stochastic-rounding"

@@ -1714,18 +1714,6 @@ class VllmConfig:
             self.lora_config.verify_with_kernel_config(self.kernel_config)
             self.lora_config.verify_with_model_config(self.model_config)
 
-        if (
-            self.mamba_config.enable_stochastic_rounding
-            and self.cache_config.mamba_ssm_cache_dtype != "float16"
-        ):
-            raise ValueError(
-                "Stochastic rounding for Mamba cache requires "
-                "the SSM cache to be float16. Please set it explicitly, "
-                "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
-                "stochastic rounding by not specifying "
-                "`--enable-mamba-cache-stochastic-rounding`."
-            )
-
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
@@ -3847,13 +3835,16 @@ class VllmConfig:
             self.num_speculative_tokens > 0 and not self.cache_config.use_kda_recoverssm
         )
 
+        # ReplaySSM isn't a selected kernel yet: it runs Triton unless
+        # FlashInfer is requested.
+        backend = self.mamba_config.backend or MambaBackendEnum.TRITON
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
             )
         if (
-            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            backend == MambaBackendEnum.FLASHINFER
             and self.cache_config.replayssm_buffer_len > 16
         ):
             raise ValueError(
@@ -3870,20 +3861,17 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
-            if self.mamba_config.backend != MambaBackendEnum.TRITON:
+            if backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
-        elif self.mamba_config.backend not in (
+        elif backend not in (
             MambaBackendEnum.TRITON,
             MambaBackendEnum.FLASHINFER,
         ):
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
             )
-        elif (
-            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
-            or use_mamba_replayssm_spec
-        ):
-            is_flashinfer = self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        elif backend == MambaBackendEnum.FLASHINFER or use_mamba_replayssm_spec:
+            is_flashinfer = backend == MambaBackendEnum.FLASHINFER
             name = (
                 "FlashInfer ReplaySSM"
                 if is_flashinfer
@@ -3917,6 +3905,19 @@ class VllmConfig:
                         f"({query_len}); got "
                         f"{self.cache_config.replayssm_buffer_len}"
                     )
+        if (
+            backend == MambaBackendEnum.TRITON
+            and not self.cache_config.use_kda_recoverssm
+            and self.mamba_config.enable_stochastic_rounding
+            and current_platform.is_cuda()
+            and not current_platform.is_device_capability_family(100)
+        ):
+            raise ValueError(
+                "Triton ReplaySSM with stochastic rounding requires compute "
+                "capability 10.x (the `cvt.rs` PTX instruction). Set "
+                "`--mamba-backend flashinfer`, or omit "
+                "`--enable-mamba-cache-stochastic-rounding`."
+            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
