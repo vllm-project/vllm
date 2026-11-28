@@ -83,6 +83,16 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+def test_compressed_tensors_requires_checkpoint_metadata(vllm_runner):
+    with pytest.raises(
+        ValueError, match="compressed-tensors.*quantization_config.*compression_config"
+    ):
+        vllm_runner(
+            "vllm-project/tiny-random-LlamaForCausalLM",
+            quantization="compressed-tensors",
+        )
+
+
 def _compressed_tensors_actorder_config(actorder):
     return {
         "format": "pack-quantized",

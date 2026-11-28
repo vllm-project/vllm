@@ -344,6 +344,11 @@ def get_quant_config(
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
+        if model_config.quantization == "compressed-tensors":
+            raise ValueError(
+                "compressed-tensors requires a pre-quantized checkpoint with "
+                "quantization_config or compression_config in its config.json."
+            )
         if model_config.quantization == "fp8":
             logger.warning_once(
                 "--quantization fp8 is deprecated for online quantization; "

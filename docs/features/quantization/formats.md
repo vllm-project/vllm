@@ -42,6 +42,10 @@ reads `quant_method` from `config.json` and selects the method, so the flag is
 normally omitted. A method that does not correspond to a checkpoint format is
 used only when it is passed explicitly.
 
+`--quantization compressed-tensors` requires a pre-quantized checkpoint with
+`quantization_config` or `compression_config` in its `config.json`.
+For an unquantized checkpoint, omit the flag to load the original weights.
+
 --8<-- "gen:quantization-methods"
 
 - Names on one row are aliases of one implementation.
