@@ -788,18 +788,27 @@ class HYV4MLAAttention(nn.Module):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         out: torch.Tensor,  # [num_tokens, heads * v_head_dim], written in place
+        indexer_token_keys: torch.Tensor | None = None,
+        indexer_head_weights: torch.Tensor | None = None,
     ) -> None:
         """Run the lightning indexer and MLA attention in one eager segment.
 
         Both read per-batch attention metadata, so under the breakable cudagraph
-        they must not be captured. Keeping them in a single break (instead of one
-        break each) also means the attention inputs never have to survive a
-        capture-segment boundary. The nested `sparse_attn_indexer` and
-        `unified_mla_attention_with_output` breaks short-circuit here, since
-        the capture is no longer active inside an eager segment.
+        they must not be captured. Keeping them in a single break preserves one
+        eager segment. Precomputed projection tensors are direct arguments, so
+        the capture wrapper keeps weak references to them for replay. The nested
+        `sparse_attn_indexer` and `unified_mla_attention_with_output` breaks
+        short-circuit here, since the capture is no longer active inside an
+        eager segment.
         """
         if self.indexer is not None and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            self._run_indexer(
+                hidden_states,
+                q_c,
+                positions,
+                indexer_token_keys,
+                indexer_head_weights,
+            )
             if self.topk_snapshot is not None:
                 assert self.topk_indices_buffer is not None
                 num_rows = hidden_states.shape[0]
@@ -814,3 +823,17 @@ class HYV4MLAAttention(nn.Module):
                 output_shape=out.shape,
             )
         )
+
+    def _run_indexer(
+        self,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | None,
+        positions: torch.Tensor,
+        indexer_token_keys: torch.Tensor | None = None,
+        indexer_head_weights: torch.Tensor | None = None,
+    ) -> None:
+        """Run the indexer, allowing subclasses to provide precomputed inputs."""
+        if indexer_token_keys is not None or indexer_head_weights is not None:
+            raise ValueError("This indexer does not accept precomputed projections")
+        assert self.indexer is not None
+        self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)

@@ -7,7 +7,9 @@ from copy import deepcopy
 import torch
 from torch import nn
 
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+)
 from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_supported
@@ -71,6 +73,15 @@ class HYV4FlashAttention(HYV4MLAAttention):
             config.swa_v_head_dim if self.is_window_layer else config.v_head_dim
         )
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        self.qkv_a_split_sizes = [
+            self.q_lora_rank,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+        ]
+        self.fused_qkv_a_split_sizes = [
+            *self.qkv_a_split_sizes,
+            config.compressed_indexer_head_dim,
+            config.compressed_indexer_num_attention_heads,
+        ]
         self.scaling = self.qk_head_dim**-0.5
         self.is_sparse = self.create_indexer = True
         self.skip_topk = self.external_topk = False
@@ -103,14 +114,6 @@ class HYV4FlashAttention(HYV4MLAAttention):
         ):
             raise ValueError("Flash requires normalized ungrouped RoPE MLA")
         quant = vllm_config.quant_config
-        self.fused_qkv_a_proj = MergedColumnParallelLinear(
-            config.hidden_size,
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-            bias=False,
-            quant_config=quant,
-            prefix=f"{prefix}.fused_qkv_a_proj",
-            disable_tp=True,
-        )
         self.q_a_layernorm = RMSNorm(self.q_lora_rank, config.rms_norm_eps)
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, config.rms_norm_eps)
         self.q_b_proj = ColumnParallelLinear(
@@ -165,6 +168,18 @@ class HYV4FlashAttention(HYV4MLAAttention):
                 vllm_config, self.config, topk_indices_buffer, f"{prefix}.indexer"
             )
         )
+        if self.is_window_layer:
+            split_sizes = self.qkv_a_split_sizes
+        else:
+            split_sizes = self.fused_qkv_a_split_sizes
+        self.fused_qkv_a_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            split_sizes,
+            bias=False,
+            quant_config=quant,
+            prefix=f"{prefix}.fused_qkv_a_proj",
+            disable_tp=True,
+        )
         self.learnable_sink_param = make_attention_sink(
             self.num_local_heads, torch.float32
         )
@@ -197,9 +212,18 @@ class HYV4FlashAttention(HYV4MLAAttention):
         )
 
     def forward(self, positions, hidden_states, llama_4_scaling=None):
-        q_c, kv = self.fused_qkv_a_proj(hidden_states)[0].split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
-        )
+        projection = self.fused_qkv_a_proj(hidden_states)[0]
+        indexer_token_keys = None
+        indexer_head_weights = None
+        if self.is_window_layer:
+            q_c, kv = projection.split(self.qkv_a_split_sizes, dim=-1)
+        else:
+            (
+                q_c,
+                kv,
+                indexer_token_keys,
+                indexer_head_weights,
+            ) = projection.split(self.fused_qkv_a_split_sizes, dim=-1)
         if positions.ndim == 2:
             q_c, kv_c, k_pe, rope_pos, cos_sin = fused_mrope_norm(
                 self.rotary_emb,
@@ -227,7 +251,17 @@ class HYV4FlashAttention(HYV4MLAAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._indexer_and_attn(hidden_states, q_c, positions, q, kv_c, k_pe, out)
+        self._indexer_and_attn(
+            hidden_states,
+            q_c,
+            positions,
+            q,
+            kv_c,
+            k_pe,
+            out,
+            indexer_token_keys=indexer_token_keys,
+            indexer_head_weights=indexer_head_weights,
+        )
         if self.use_hpc_gated_mla:
             assert hidden_states.is_contiguous() and out.is_contiguous()
             out = hpc_gated_mla_gemm(hidden_states, self.linear_gate.weight, out)
@@ -237,3 +271,31 @@ class HYV4FlashAttention(HYV4MLAAttention):
         if self.post_proj_norm is None:
             return out
         return fused_allreduce_rms_norm(out, None, self.post_proj_norm)[0]
+
+    def _run_indexer(
+        self,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | None,
+        positions: torch.Tensor,
+        indexer_token_keys: torch.Tensor | None = None,
+        indexer_head_weights: torch.Tensor | None = None,
+    ) -> None:
+        if not isinstance(self.indexer, FlashCompressedIndexer):
+            assert all(
+                projection is None
+                for projection in (
+                    indexer_token_keys,
+                    indexer_head_weights,
+                )
+            )
+            return super()._run_indexer(hidden_states, q_c, positions)
+        assert indexer_token_keys is not None
+        assert indexer_head_weights is not None
+        self.indexer(
+            hidden_states,
+            q_c,
+            positions,
+            self.indexer_rope_emb,
+            indexer_token_keys=indexer_token_keys,
+            indexer_head_weights=indexer_head_weights,
+        )
