@@ -155,6 +155,9 @@ impl Error {
                 LlmError::PromptLogprobsUnsupported { parameter } => {
                     ErrorKind::invalid_param(parameter)
                 }
+                LlmError::ThinkingTokenBudgetUnsupported => {
+                    ErrorKind::invalid_param("thinking_token_budget")
+                }
                 LlmError::Unsupported { field } => ErrorKind::invalid_param(field),
                 LlmError::MmEmbedsExceedEncoderCache { .. }
                 | LlmError::InvalidMultimodalInput { .. }

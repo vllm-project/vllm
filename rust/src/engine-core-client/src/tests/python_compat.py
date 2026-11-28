@@ -552,6 +552,7 @@ class EngineCoreReadyResponse:
     config_hash: str | None = None
     enable_expert_parallel: bool = False
     supports_prompt_logprobs: bool = True
+    supports_thinking_token_budget: bool = True
     allow_missing_mm_embeddings: bool = False
     max_mm_embeds_per_request: int | None = None
     device_type: str | None = None
@@ -605,6 +606,7 @@ ready_response = EngineCoreReadyResponse(
     config_hash="0123456789",
     enable_expert_parallel=True,
     supports_prompt_logprobs=False,
+    supports_thinking_token_budget=False,
     allow_missing_mm_embeddings=True,
     max_mm_embeds_per_request=16384,
     device_type="cpu",

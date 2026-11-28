@@ -4387,6 +4387,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
     legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
     legacy_ready.as_object_mut().unwrap().remove("supports_prompt_logprobs");
+    legacy_ready.as_object_mut().unwrap().remove("supports_thinking_token_budget");
     legacy_ready.as_object_mut().unwrap().remove("allow_missing_mm_embeddings");
     legacy_ready.as_object_mut().unwrap().remove("max_mm_embeds_per_request");
     legacy_ready.as_object_mut().unwrap().remove("device_type");
@@ -4394,6 +4395,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
     assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(legacy_ready.supports_prompt_logprobs);
+    assert!(legacy_ready.supports_thinking_token_budget);
     assert!(!legacy_ready.allow_missing_mm_embeddings);
     assert!(legacy_ready.max_mm_embeds_per_request.is_none());
     assert!(legacy_ready.device_type.is_none());
@@ -4410,6 +4412,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(ready_response.config_hash.as_deref(), Some("0123456789"));
     assert!(ready_response.enable_expert_parallel);
     assert!(!ready_response.supports_prompt_logprobs);
+    assert!(!ready_response.supports_thinking_token_budget);
     assert!(ready_response.allow_missing_mm_embeddings);
     assert_eq!(ready_response.max_mm_embeds_per_request, Some(16384));
     assert_eq!(ready_response.device_type.as_deref(), Some("cpu"));

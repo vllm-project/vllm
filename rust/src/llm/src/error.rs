@@ -29,6 +29,13 @@ pub enum Error {
          (for example, it runs with --kv-sharing-fast-prefill)"
     )]
     PromptLogprobsUnsupported { parameter: &'static str },
+    /// The request sets `thinking_token_budget`, which the engine cannot
+    /// enforce without an enabled reasoning config.
+    #[error(
+        "thinking_token_budget is set but reasoning_config is not configured. Please set \
+         --reasoning-parser and/or --reasoning-config to use thinking_token_budget."
+    )]
+    ThinkingTokenBudgetUnsupported,
     /// Without chunked prefill, the request's multimodal items are all encoded
     /// in one step, and need more encoder cache than the engine has.
     #[error(

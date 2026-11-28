@@ -7204,6 +7204,70 @@ async fn prompt_logprobs_rejected_when_engine_lacks_them() {
     engine_task.await.expect("mock engine task");
 }
 
+/// Without an enabled reasoning config the engine cannot enforce
+/// `thinking_token_budget`, so a request setting it is a 400 like in Python,
+/// not silently unbudgeted; `-1` (unlimited) still runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn thinking_token_budget_rejected_without_reasoning_config() {
+    let (mut app, engine_task) = test_app_with_ready_and_engine_request_check(
+        vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+            supports_thinking_token_budget: false,
+            ..default_ready_response()
+        },
+        |llm| ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new())),
+        |request| {
+            let params = request.sampling_params.as_ref().expect("sampling params");
+            assert_eq!(params.thinking_token_budget, None);
+        },
+    )
+    .await;
+
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    for (uri, mut body) in [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 2,
+            }),
+        ),
+        (
+            "/v1/completions",
+            json!({"model": model, "prompt": "hi", "max_tokens": 2}),
+        ),
+        (
+            "/v1/responses",
+            json!({"model": model, "input": "hi", "max_output_tokens": 2}),
+        ),
+    ] {
+        body["thinking_token_budget"] = json!(1);
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {json}");
+        assert_eq!(
+            json["error"]["param"], "thinking_token_budget",
+            "{uri} {json}"
+        );
+        assert_eq!(
+            json["error"]["message"],
+            "thinking_token_budget is set but reasoning_config is not configured. Please set \
+             --reasoning-parser and/or --reasoning-config to use thinking_token_budget.",
+            "{uri} {json}"
+        );
+    }
+
+    let chat = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 2,
+        "thinking_token_budget": -1,
+    });
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", chat).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    engine_task.await.expect("mock engine task");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {

@@ -2232,6 +2232,10 @@ class EngineCoreProc(EngineCore):
             supports_prompt_logprobs=(
                 not self.vllm_config.cache_config.kv_sharing_fast_prefill
             ),
+            supports_thinking_token_budget=(
+                self.vllm_config.reasoning_config is not None
+                and self.vllm_config.reasoning_config.enabled
+            ),
             allow_missing_mm_embeddings=(
                 mm_config is not None and mm_config.allow_missing_mm_embeddings
             ),
