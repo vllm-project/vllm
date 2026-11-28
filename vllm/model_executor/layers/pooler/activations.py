@@ -112,7 +112,7 @@ class PoolerNormalize(PoolerActivation):
 
 class PoolerMultiLabelClassify(PoolerActivation):
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        return F.sigmoid(pooled_data)
+        return F.sigmoid(pooled_data.float())
 
 
 class PoolerClassify(PoolerActivation):
@@ -137,9 +137,9 @@ class PoolerClassify(PoolerActivation):
             num_labels = pooled_data.shape[-1]
 
         if num_labels < 2:
-            return F.sigmoid(pooled_data)
+            return F.sigmoid(pooled_data.float())
 
-        return F.softmax(pooled_data, dim=-1)
+        return F.softmax(pooled_data.float(), dim=-1)
 
 
 class LambdaPoolerActivation(PoolerActivation):
