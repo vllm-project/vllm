@@ -517,6 +517,9 @@ class Inkling2ForConditionalGeneration(
     SupportsEncoderCudaGraph,
     SupportsLoRA,
 ):
+    # Excludes the DSpark draft's mtp.safetensors, which shares this folder.
+    allow_patterns_overrides = ["model*.safetensors"]
+
     # LoRA (``lora.py``): adapters use the checkpoint's module names.
     packed_modules_mapping = PACKED_MODULES_MAPPING
     embedding_modules: dict[str, str] = {}
