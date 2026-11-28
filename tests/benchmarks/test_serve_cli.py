@@ -13,6 +13,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from ..utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+SERVED_MODEL_NAME = "benchmark-model"
 
 
 def generate_self_signed_cert(cert_dir: Path) -> tuple[Path, Path]:
@@ -73,7 +74,15 @@ class RemoteOpenAIServerSSL(RemoteOpenAIServer):
 
 @pytest.fixture(scope="function")
 def server():
-    args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "dummy"]
+    args = [
+        "--max-model-len",
+        "1024",
+        "--enforce-eager",
+        "--load-format",
+        "dummy",
+        "--served-model-name",
+        SERVED_MODEL_NAME,
+    ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -123,6 +132,7 @@ def test_bench_serve(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    assert "/tokenize unavailable" not in result.stdout
 
 
 @pytest.mark.benchmark
@@ -203,6 +213,8 @@ def test_bench_serve_chat(server):
         "serve",
         "--model",
         MODEL_NAME,
+        "--served-model-name",
+        SERVED_MODEL_NAME,
         "--host",
         server.host,
         "--port",
@@ -225,3 +237,4 @@ def test_bench_serve_chat(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    assert "/tokenize unavailable" not in result.stdout

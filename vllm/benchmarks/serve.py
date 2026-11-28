@@ -2295,7 +2295,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.dataset_name in ("random", "prefix_repetition"):
         input_requests = await _align_prompts_to_server_tokenizer(
-            base_url, model_id, input_requests, ssl_context
+            base_url, model_name or model_id, input_requests, ssl_context
         )
 
     goodput_config_dict = check_goodput_args(args)
