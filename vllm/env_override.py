@@ -3,6 +3,7 @@
 # ruff: noqa: E402
 import importlib.util
 import os
+from collections.abc import Callable
 
 
 def _get_torch_root():
@@ -190,6 +191,59 @@ os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
 # debug layout (see https://github.com/vllm-project/vllm/issues/41410).
 os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
 
+
+def _run_after_module_import(module_name: str, callback: Callable[[], None]) -> None:
+    """Run a backport after the target module is imported naturally.
+
+    Deferring until first import keeps `import vllm` from pulling in the
+    Inductor stack (slow on startup and order-sensitive: in CPU CI eager C++
+    codegen imports can fail with "import of torch._inductor.async_compile
+    halted; None in sys.modules").
+    """
+    import sys
+
+    if module_name in sys.modules:
+        callback()
+        return
+
+    import importlib.abc
+
+    class _PatchFinder(importlib.abc.MetaPathFinder):
+        _resolving = False
+
+        def find_spec(self, fullname, path, target=None):
+            if fullname != module_name or self._resolving:
+                return None
+            self._resolving = True
+            try:
+                spec = importlib.util.find_spec(fullname)
+            finally:
+                self._resolving = False
+            if spec is None or spec.loader is None:
+                return None
+            loader = spec.loader
+            original_exec = loader.exec_module
+
+            def _exec_then_patch(module):
+                spec.loader = module.__loader__ = loader
+                original_exec(module)
+                callback()
+                if self in sys.meta_path:
+                    sys.meta_path.remove(self)
+
+            # A finder can reuse its loader. Wrap only this spec's execution.
+            class _Loader(importlib.abc.Loader):
+                exec_module = staticmethod(_exec_then_patch)  # type: ignore[assignment]
+
+                def __getattr__(self, name):
+                    return getattr(loader, name)
+
+            spec.loader = _Loader()
+            return spec
+
+    sys.meta_path.insert(0, _PatchFinder())
+
+
 # ===================================================
 # torch < 2.13 Inductor implicit-fallback log message
 # ===================================================
@@ -219,45 +273,8 @@ def _apply_inductor_operator_str_patch() -> None:
     OperatorIssue.operator_str = staticmethod(operator_str)
 
 
-def _patch_inductor_operator_str_if_needed():
-    """Shorten the implicit-fallback message for vllm ops on torch < 2.13.
-
-    Defers application until torch._inductor.exc is imported, so that
-    importing vllm does not import torch._inductor.
-    """
-    if is_torch_equal_or_newer("2.13.0.dev"):
-        return
-
-    import sys
-
-    target_name = "torch._inductor.exc"
-    if target_name in sys.modules:
-        _apply_inductor_operator_str_patch()
-        return
-
-    import importlib.abc
-
-    class _OperatorStrPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_inductor_operator_str_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _OperatorStrPatchFinder())
-
-
-_patch_inductor_operator_str_if_needed()
+if not is_torch_equal_or_newer("2.13.0.dev"):
+    _run_after_module_import("torch._inductor.exc", _apply_inductor_operator_str_patch)
 
 
 def _apply_inductor_pattern_matcher_patch() -> None:
@@ -275,38 +292,50 @@ def _apply_inductor_pattern_matcher_patch() -> None:
     pattern_matcher.fallback_node_due_to_unsupported_type = fallback_for_builtin
 
 
-def _patch_inductor_pattern_matcher() -> None:
-    """Apply the backport when Inductor imports its pattern matcher."""
-    import sys
-
-    target_name = "torch._inductor.pattern_matcher"
-    if target_name in sys.modules:
-        _apply_inductor_pattern_matcher_patch()
-        return
-
-    import importlib.abc
-
-    class _PatternMatcherPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_inductor_pattern_matcher_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _PatternMatcherPatchFinder())
-
-
 # Remove once the minimum supported torch includes
 # https://github.com/pytorch/pytorch/pull/196013.
 if not is_torch_equal_or_newer("2.16.0.dev"):
-    _patch_inductor_pattern_matcher()
+    _run_after_module_import(
+        "torch._inductor.pattern_matcher", _apply_inductor_pattern_matcher_patch
+    )
+
+
+# ===================================================
+# torch >= 2.12 Inductor best_config path of a copied compile cache
+# ===================================================
+# A Triton autotuner restored from a compile cache entry keeps the absolute
+# best_config path of the directory it was compiled in. In a cache directory
+# that was copied elsewhere it misses its saved config and saves a new one to
+# the old location. Point it at the cache directory in use, as Inductor already
+# does for the kernel binary. Remove once the minimum supported torch includes
+# a fix for https://github.com/pytorch/pytorch/issues/206320.
+def _apply_inductor_autotune_cache_path_patch() -> None:
+    from functools import wraps
+    from pathlib import Path
+
+    from torch._inductor.runtime.runtime_utils import cache_dir
+    from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
+    original = CachingAutotuner.recheck_autotune_cache
+
+    @wraps(original)
+    def recheck_autotune_cache(self, reload_kernel_from_src):
+        cache = self.save_cache_hook and self.save_cache_hook.__self__
+        if self.filename and cache and cache.local_cache:
+            old = Path(self.filename)
+            new = Path(cache_dir(), old.parent.name, old.name)
+            # Keep the original location if the copy omitted the kernel source.
+            if new != old and new.is_file():
+                backend, key = cache.local_cache
+                self.filename = str(new)
+                cache.local_cache = (backend, str(new.parent / Path(key).name))
+        return original(self, reload_kernel_from_src)
+
+    CachingAutotuner.recheck_autotune_cache = recheck_autotune_cache
+
+
+if is_torch_equal_or_newer("2.12.0.dev"):
+    _run_after_module_import(
+        "torch._inductor.runtime.triton_heuristics",
+        _apply_inductor_autotune_cache_path_patch,
+    )
