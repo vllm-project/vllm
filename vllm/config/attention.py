@@ -35,6 +35,11 @@ class HiSparseConfig:
     resident-only and evicted pages are copied to host at spill time. Prefill
     rows are always mirrored during the forward."""
 
+    sparse_prefill_staging: bool = False
+    """Stage only the union of the batch's sparse top-k selected KV rows
+    during prefill instead of copying full prefix pages from host memory.
+    Disabled by default."""
+
 
 @config
 class AttentionConfig:
