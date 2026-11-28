@@ -71,3 +71,59 @@ class TestValidateRegexIsBuildable:
         )
         def test_supported_regex(self, regex):
             validate_regex_is_buildable(regex)
+
+    class TestUniversalStartState:
+        """A trailing anchor is only a problem when nothing before it has to
+        consume a character. The check must agree with outlines_core, which
+        is what compiles the regex for the request."""
+
+        # every match of the prefix consumes a character, so `$` is fine
+        BUILDABLE = [
+            r'[^"]+$',
+            r"[^a]$",
+            r"[^,]{2}$",
+            r"\d+?$",
+            r".+?$",
+            r"a++$",
+            r"(a|b){2}?$",
+            r"(?:[^a]|b)$",
+            r"abc$",
+            r"[^\n]+\n$",
+        ]
+        # the prefix can match the empty string, so the anchor comes first
+        NOT_BUILDABLE = [
+            r"^abc",
+            r"a*$",
+            r"\d*$",
+            r"(a|)$",
+            r"(a|b?)$",
+            r"(?:a?)$",
+            r"[^a]*?^b",
+        ]
+
+        @pytest.mark.parametrize("regex", BUILDABLE)
+        def test_buildable(self, regex):
+            validate_regex_is_buildable(regex)
+
+        @pytest.mark.parametrize("regex", NOT_BUILDABLE)
+        def test_not_buildable(self, regex):
+            with pytest.raises(VLLMValidationError):
+                validate_regex_is_buildable(regex)
+
+        @pytest.mark.parametrize("regex", BUILDABLE + NOT_BUILDABLE)
+        def test_matches_outlines_core(self, regex):
+            from outlines_core import Index, Vocabulary
+
+            vocab = Vocabulary(99, {c: [i] for i, c in enumerate('abc",1\n')})
+            try:
+                Index(regex, vocab)
+                core_ok = True
+            except Exception as e:
+                assert "universal start state" in str(e), e
+                core_ok = False
+            try:
+                validate_regex_is_buildable(regex)
+                ours_ok = True
+            except VLLMValidationError:
+                ours_ok = False
+            assert ours_ok == core_ok

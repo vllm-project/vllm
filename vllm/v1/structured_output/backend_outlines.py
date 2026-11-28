@@ -239,28 +239,33 @@ def validate_structured_output_request_outlines(params: SamplingParams):
         )
 
 
+_CONSUMERS = (_parser.LITERAL, _parser.NOT_LITERAL, _parser.IN, _parser.ANY)
+_REPEATS = (_parser.MAX_REPEAT, _parser.MIN_REPEAT, _parser.POSSESSIVE_REPEAT)
+
+
 def _prefix_needs_context(parsed) -> bool:
     """Return True if there's a look-around/anchor before any consumer."""
 
-    def subpattern_consumes(parsed) -> bool:
-        """Return True if subpattern can consume at least one character."""
+    def always_consumes(parsed) -> bool:
+        """Return True if every match of the subpattern consumes a character."""
         tokens = parsed.data if hasattr(parsed, "data") else parsed
         for ttype, tval in tokens:
-            # literal, character class, or dot always consumes
-            if ttype in (_parser.LITERAL, _parser.IN, _parser.ANY):
+            # literal, negated literal, character class, or dot always consumes
+            if ttype in _CONSUMERS:
                 return True
-            # quantified subpattern: check inner pattern
-            elif ttype == _parser.MAX_REPEAT:
-                _, mx, sub = tval
-                if mx != 0 and subpattern_consumes(sub):
+            # quantified subpattern (greedy, lazy or possessive): consumes
+            # only if it must repeat at least once and the inner pattern does
+            elif ttype in _REPEATS:
+                mn, _, sub = tval
+                if mn > 0 and always_consumes(sub):
                     return True
-            # alternation: if any branch consumes, the whole does
+            # alternation: consumes only if every branch does
             elif ttype == _parser.BRANCH:
                 _, branches = tval
-                if any(subpattern_consumes(br) for br in branches):
+                if all(always_consumes(br) for br in branches):
                     return True
             # grouped subpattern: recurse into its contents
-            elif ttype == _parser.SUBPATTERN and subpattern_consumes(tval[3]):
+            elif ttype == _parser.SUBPATTERN and always_consumes(tval[3]):
                 return True
         # No consumers, return False
         return False
@@ -276,30 +281,27 @@ def _prefix_needs_context(parsed) -> bool:
             # tval: (group, add_flags, del_flags, subpattern)
             if _prefix_needs_context(tval[3]):
                 return True
-            if subpattern_consumes(tval[3]):
+            if always_consumes(tval[3]):
                 return False
 
         # if any branch has a prefix anchor => True,
-        # else if at least one branch consumes => prefix ends => False
+        # else if every branch consumes => prefix ends => False
         elif ttype == _parser.BRANCH:
-            saw_consumer = False
             for br in tval[1]:
                 if _prefix_needs_context(br):
                     return True
-                if subpattern_consumes(br):
-                    saw_consumer = True
-            if saw_consumer:
+            if all(always_consumes(br) for br in tval[1]):
                 return False
 
         # Immediate consumer tokens
-        elif ttype in (_parser.LITERAL, _parser.IN, _parser.ANY):
+        elif ttype in _CONSUMERS:
             return False
 
-        # if subpattern has anchor => True, if it can consume => stop
-        elif ttype == _parser.MAX_REPEAT:
+        # if subpattern has anchor => True, if it must consume => stop
+        elif ttype in _REPEATS:
             if _prefix_needs_context(tval[2]):
                 return True
-            if subpattern_consumes(tval[2]):
+            if tval[0] > 0 and always_consumes(tval[2]):
                 return False
 
     return False
