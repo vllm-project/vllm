@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+import torch
 
 from tests.utils import multi_gpu_only, single_gpu_only
 from vllm import SamplingParams
@@ -102,6 +103,66 @@ cases = [
 def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runner):
     args.enforce_eager = enforce_eager
     assert_draft_model_correctness(args, vllm_runner)
+
+
+def _invalidate_draft_logits(worker) -> None:
+    draft = worker.get_draft_model()
+    assert draft is not None
+    assert (
+        draft.lm_head.weight.data_ptr() != worker.get_model().lm_head.weight.data_ptr()
+    )
+    with torch.no_grad():
+        draft.lm_head.weight.fill_(float("nan"))
+
+
+def _acceptance_estimator_state(worker) -> dict[str, list]:
+    speculator = worker.model_runner.speculator
+    estimator = speculator.acceptance_estimator
+    assert estimator is not None
+    state = {
+        name: getattr(estimator, name).cpu().tolist()
+        for name in ("features", "predictions", "counts", "info", "grad")
+    }
+    state["confidence"] = speculator.draft_token_confidence_probs.cpu().tolist()
+    return state
+
+
+@single_gpu_only
+def test_adaptive_verification_ignores_invalid_draft_logits(vllm_runner, monkeypatch):
+    """Malformed draft logits use fallback confidence without training on it."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    model = "Qwen/Qwen3-0.6B"
+    with vllm_runner(
+        model,
+        enforce_eager=False,
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.5,
+        speculative_config={
+            "method": "draft_model",
+            "model": model,
+            "num_speculative_tokens": 2,
+            "draft_sample_method": "greedy",
+            "enable_adaptive_verification": True,
+        },
+    ) as runner:
+        runner.collective_rpc(_invalidate_draft_logits)
+        outputs = runner.get_llm().generate(
+            ["The capital of France is"],
+            SamplingParams(temperature=0, max_tokens=8, ignore_eos=True),
+        )
+        states = runner.collective_rpc(_acceptance_estimator_state)
+
+    assert len(outputs[0].outputs[0].token_ids) == 8
+    assert states
+    for state in states:
+        assert state["predictions"] == [[0.0, 0.0]]
+        assert state["confidence"] == [[0.0, 0.0]]
+        assert state["features"] == [[0.0, 0.0]]
+        assert state["counts"] == [0.0, 0.0]
+        assert state["info"] == [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        assert state["grad"] == [[0.0, 0.0], [0.0, 0.0]]
 
 
 @single_gpu_only
