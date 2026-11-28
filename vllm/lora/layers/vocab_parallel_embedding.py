@@ -56,6 +56,14 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
 
+    def slot_weights(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        # A is stored transposed (vocab, rank) for the embedding lookup; the
+        # transposed view keeps the (rank, vocab) orientation set_lora takes.
+        # B includes embed_scale when the base embedding applies it.
+        return (self.lora_a_stacked[index].T,), (self.lora_b_stacked[index, 0],)
+
     def set_lora(
         self,
         index: int,
