@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.ops.fused_topk_topp_sampler import fused_topk_topp_sample
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
@@ -320,6 +321,7 @@ class Sampler:
             top_p,
             has_topp_only_rows,
             use_fused_sampler,
+            return_logprobs=return_logprobs,
         )
 
     def _sample_random(
@@ -332,6 +334,7 @@ class Sampler:
         top_p: torch.Tensor | None,
         has_topp_only_rows: bool,
         use_fused_sampler: bool,
+        return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if use_fused_sampler:
             if self.use_flashinfer:
@@ -340,7 +343,23 @@ class Sampler:
                 )
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
+        elif (top_k is not None or top_p is not None) and not (
+            return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES
+        ):
+            # Fast path: fused in-register top-k / top-p Gumbel sampling
+            sampled = fused_topk_topp_sample(
+                logits=processed_logits,
+                expanded_idx_mapping=expanded_idx_mapping,
+                temperature=self.sampling_states.temperature.gpu,
+                seeds=self.sampling_states.seeds.gpu,
+                pos=pos,
+                k=top_k,
+                p=top_p,
+            )
         else:
+            # Fallback path when callers explicitly require post-processed logits
+            # (e.g. for PROCESSED_LOGPROBS_MODES logprobs computation) or when
+            # requests are unfiltered (no top_k or top_p active).
             processed_logits = apply_top_k_top_p(
                 processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
             )
