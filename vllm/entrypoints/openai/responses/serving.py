@@ -1119,6 +1119,12 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
         ]
 
+    async def _mark_background_response_in_progress(self, response_id: str) -> None:
+        async with self.response_store_lock:
+            stored_response = self.response_store.get(response_id)
+            if stored_response is not None and stored_response.status == "queued":
+                stored_response.status = "in_progress"
+
     async def _run_background_request_stream(
         self,
         request: ResponsesRequest,
@@ -1128,6 +1134,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
+        await self._mark_background_response_in_progress(request.request_id)
         generator = self.responses_stream_generator(request, *args, **kwargs)
         try:
             async for event in generator:
@@ -1142,6 +1149,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         *args,
         **kwargs,
     ):
+        await self._mark_background_response_in_progress(request.request_id)
         response = await self.responses_full_generator(request, *args, **kwargs)
 
         if isinstance(response, ErrorResponse):
