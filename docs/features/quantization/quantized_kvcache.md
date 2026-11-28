@@ -183,3 +183,41 @@ if __name__ == "__main__":
 ```
 
 For more detailed and up-to-date examples, see the [`llm-compressor` official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples/quantization_kv_cache).
+
+---
+
+## Kitty 2-bit KV Cache
+
+Kitty stores the KV cache at about 2.5 bits per value, about 6× smaller than
+fp16, using the method from [Kitty](https://arxiv.org/abs/2511.18643). It needs
+no calibration and works with unmodified checkpoints. Enable it with
+`--kv-cache-dtype kitty`; vLLM then selects the `KITTY` attention backend.
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct --kv-cache-dtype kitty
+```
+
+```python
+llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", kv_cache_dtype="kitty")
+```
+
+K is quantized to 2 bits per channel, with the largest-magnitude channels of
+each 128-token page kept at 4 bits; V is quantized to 2 bits per token. The
+first 128 tokens of each request and its most recent tokens stay in fp16.
+
+`--attention-config.kitty_boost_ratio` sets the fraction of K channels kept at
+4 bits (default `0.25`, range `0` to `1`). Higher values cost more memory and
+reduce quantization error: `0` gives 2.28 bits per value, `0.25` 2.53, `1`
+3.28.
+
+Requirements:
+
+- NVIDIA GPU with compute capability 8.0 or newer.
+- fp16 or bf16 model with head size 128 and at most 16 query heads per KV
+  head on each GPU.
+- No sliding window, ALiBi, logits soft-capping or KV sharing across layers.
+
+Kitty does not currently support prefix caching, speculative decoding, KV
+connectors, KV offloading, `--kv-cache-dtype-skip-layers` or
+`--disable-hybrid-kv-cache-manager`. Its attention runs outside CUDA graphs;
+the rest of the model still uses piecewise CUDA graphs.

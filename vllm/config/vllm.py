@@ -1335,6 +1335,45 @@ class VllmConfig:
                 "VLLM_RELOAD_MODE=auto or layerwise."
             )
 
+    def _verify_kitty_kv_cache(self) -> None:
+        """Reject or adjust features the Kitty KV cache does not support."""
+        if self.cache_config.enable_prefix_caching:
+            logger.info("Disabling prefix caching: not supported with Kitty.")
+            self.cache_config.enable_prefix_caching = False
+        if self.speculative_config is not None:
+            raise ValueError("Kitty KV cache does not support speculative decoding.")
+        if self.scheduler_config.disable_hybrid_kv_cache_manager:
+            raise ValueError(
+                "Kitty KV cache requires the hybrid KV cache manager; remove "
+                "--disable-hybrid-kv-cache-manager."
+            )
+        if (
+            self.kv_transfer_config is not None
+            or self.cache_config.kv_offloading_size is not None
+        ):
+            raise ValueError(
+                "Kitty KV cache does not support KV connectors or KV offloading."
+            )
+        if self.cache_config.kv_cache_dtype_skip_layers:
+            raise ValueError(
+                "Kitty KV cache does not support kv_cache_dtype_skip_layers."
+            )
+        if self.model_config is None:
+            return
+        from vllm.v1.attention.ops.kitty.decode import G_PAD
+
+        model_config = self.model_config
+        group = model_config.get_num_attention_heads(
+            self.parallel_config
+        ) // model_config.get_num_kv_heads(self.parallel_config)
+        if group > G_PAD:
+            raise ValueError(
+                f"Kitty KV cache supports at most {G_PAD} query heads per KV "
+                f"head, but the model has {group}."
+            )
+        if getattr(model_config.hf_text_config, "attn_logit_softcapping", None):
+            raise ValueError("Kitty KV cache does not support logits soft-capping.")
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -2433,6 +2472,9 @@ class VllmConfig:
                 "--disable-hybrid-kv-cache-manager or use connectors that "
                 "support HMA."
             )
+
+        if self.cache_config.cache_dtype == "kitty":
+            self._verify_kitty_kv_cache()
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (

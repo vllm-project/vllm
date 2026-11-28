@@ -1249,6 +1249,19 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-t3nc-rocm.txt
 
+- label: ":nvidia: (H200 MIG 18GB) LM Eval Kitty KV Cache"
+  key: lm-eval-kitty
+  automatic_shard: true
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/v1/attention/backends/kitty_attn.py
+  - vllm/v1/attention/ops/kitty/
+  - tests/evals/gsm8k/configs/Qwen3-4B-Kitty.yaml
+  - tests/evals/gsm8k/configs/models-kitty.txt
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-kitty.txt
+
 # Octave kernels are built only for gfx942 and gfx1100, so this runs on MI300.
 - label: ":amd: (MI300 DPX) LM Eval Octave KV Cache"
   key: amd-lm-eval-octave-mi300

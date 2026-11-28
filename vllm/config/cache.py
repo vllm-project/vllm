@@ -59,6 +59,7 @@ CacheDType = Literal[
     "octave_k3v3",
     "octave_k3v3_compact",
     "ultraquant_4bit",
+    "kitty",
     "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
@@ -258,6 +259,8 @@ class CacheConfig:
     to fp8.
     "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
     scales per 16 values by minimizing squared reconstruction error.
+    "kitty" stores K and V in 2 bits with the largest K channels in 4 bits
+    (CUDA only, see `kitty_boost_ratio` in `AttentionConfig`).
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
