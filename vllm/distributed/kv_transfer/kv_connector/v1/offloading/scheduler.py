@@ -299,8 +299,8 @@ class OffloadingConnectorScheduler:
         self._current_batch_sync_loads: set[ReqId] = set()
         self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush: set[int] = set()
-        # GPU block IDs allocated in the current engine step
-        self._current_batch_allocated_block_ids: set[int] = set()
+        # GPU block IDs that may be written in the current engine step.
+        self._current_batch_write_candidate_block_ids: set[int] = set()
         # if GPU prefix caching is enabled,
         # Track loaded chunks to avoid redundant loads.
         self._chunks_being_loaded: set[OffloadKey] | None = (
@@ -1078,22 +1078,20 @@ class OffloadingConnectorScheduler:
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         req_status = self._req_status[request.request_id]
-        # Include allocations made by other connectors in a MultiConnector.
-        # Full-attention prefix hits were touched, not allocated.
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
-        for group_idx, group_blocks in enumerate(blocks.blocks):
-            if group_idx not in self._groups_sharing_offload_pool:
-                continue
-            num_prefix_blocks = self._num_prefix_blocks(
-                group_idx, num_locally_computed_tokens
-            )
-            self._current_batch_allocated_block_ids.update(
-                block.block_id
-                for block in group_blocks[num_prefix_blocks:]
-                if block.block_id != 0
-            )
-
         if num_external_tokens == 0:
+            # Includes sibling-managed loads, whose destinations are unknown here.
+            for group_idx, group_blocks in enumerate(blocks.blocks):
+                if group_idx not in self._groups_sharing_offload_pool:
+                    continue
+                num_prefix_blocks = self._num_prefix_blocks(
+                    group_idx, num_locally_computed_tokens
+                )
+                self._current_batch_write_candidate_block_ids.update(
+                    block.block_id
+                    for block in group_blocks[num_prefix_blocks:]
+                    if block.block_id != 0
+                )
             return
 
         # prepare_load() below pins keys that get_num_new_matched_tokens()
@@ -1198,6 +1196,11 @@ class OffloadingConnectorScheduler:
             dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
         )
 
+        # Null slots preserve transfer offsets and are excluded from fences.
+        self._current_batch_write_candidate_block_ids.update(
+            bid for bid in dst_block_ids if bid != 0
+        )
+
         load_job_id = self._generate_job_id()
         self._current_batch_load_jobs[load_job_id] = TransferJob(
             req_id=request.request_id,
@@ -1258,12 +1261,15 @@ class OffloadingConnectorScheduler:
                     num_prefix_blocks = self._num_prefix_blocks(
                         group_idx, local_prefix_tokens
                     )
-                    self._current_batch_allocated_block_ids.update(
+                    self._current_batch_write_candidate_block_ids.update(
                         bid for bid in group_blocks[num_prefix_blocks:] if bid != 0
                     )
 
+        self._current_batch_write_candidate_block_ids.update(
+            bid for bid in scheduler_output.new_block_ids_to_zero or () if bid != 0
+        )
         for copy in scheduler_output.kv_cache_block_copies or ():
-            self._current_batch_allocated_block_ids.add(copy.dst_block_id)
+            self._current_batch_write_candidate_block_ids.add(copy.dst_block_id)
 
         # Zero out stale block_ids in sliding window groups' pending-store
         # positions. Only sliding window groups can have stale entries (blocks
@@ -1272,7 +1278,10 @@ class OffloadingConnectorScheduler:
         # pending chunk is the lowest over the handlers and end is the
         # pre-extend length: earlier positions were already offloaded, later
         # ones are fresh allocations from this step.
-        if self._sliding_window_groups and self._current_batch_allocated_block_ids:
+        if (
+            self._sliding_window_groups
+            and self._current_batch_write_candidate_block_ids
+        ):
             blocks_per_chunk = self.config.blocks_per_chunk
             for req_id, req_status in self._req_status.items():
                 ends = new_block_ids_end.get(req_id)
@@ -1293,7 +1302,7 @@ class OffloadingConnectorScheduler:
                     for j in range(start, end):
                         if (
                             group_state.block_ids[j]
-                            in self._current_batch_allocated_block_ids
+                            in self._current_batch_write_candidate_block_ids
                         ):
                             group_state.block_ids[j] = 0
 
@@ -1342,7 +1351,7 @@ class OffloadingConnectorScheduler:
             # Register non-sliding-window blocks for flush detection.
             for bid in job_status.deferred_fence_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
-                if bid in self._current_batch_allocated_block_ids:
+                if bid in self._current_batch_write_candidate_block_ids:
                     self._current_batch_jobs_to_flush.add(job_id)
         return job_id
 
@@ -1396,16 +1405,16 @@ class OffloadingConnectorScheduler:
             assert any_job.is_store or any_job.is_sync_load
             self._current_batch_jobs_to_flush.update(jobs_to_flush)
 
-        # Flush jobs that contain re-allocated blocks.
+        # Fence stores whose source blocks may be written in this step.
         if (
             self._block_id_to_pending_jobs
             and not self._block_id_to_pending_jobs.keys().isdisjoint(
-                self._current_batch_allocated_block_ids
+                self._current_batch_write_candidate_block_ids
             )
         ):
             self._current_batch_jobs_to_flush.update(
                 jid
-                for bid in self._current_batch_allocated_block_ids
+                for bid in self._current_batch_write_candidate_block_ids
                 if bid in self._block_id_to_pending_jobs
                 for jid in self._block_id_to_pending_jobs[bid]
             )
@@ -1441,7 +1450,7 @@ class OffloadingConnectorScheduler:
         self._current_batch_sync_loads = set()
         self._current_batch_sync_load_bytes = 0
         self._current_batch_jobs_to_flush = set()
-        self._current_batch_allocated_block_ids = set()
+        self._current_batch_write_candidate_block_ids = set()
 
         # Last manager call of the step, after every prepare_store and
         # on_request_finished above. on_schedule_end is documented as running at
@@ -1704,7 +1713,7 @@ class OffloadingConnectorScheduler:
         # set if no step ran since; the new ids are merged into it.
         assert not self._current_batch_load_jobs
         assert not self._current_batch_sync_loads
-        assert not self._current_batch_allocated_block_ids
+        assert not self._current_batch_write_candidate_block_ids
 
         # Held for the whole reset. manager.reset_cache() drains tiers by
         # polling them itself, so a tier-poll thread locked out here loses

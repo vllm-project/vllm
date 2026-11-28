@@ -104,6 +104,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroup,
     KVCacheGroupRole,
+    MambaAttentionBackendEnum,
 )
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
@@ -5064,6 +5065,179 @@ def test_full_attention_pending_store_with_bounded_replay(prefix_tokens):
         assert output.scheduled_new_reqs[0].num_computed_tokens == 0
         assert set(a_ids) & set().union(*b_ids)
         assert jobs <= (metadata.jobs_to_flush or set())
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize(
+    ("layout", "store_finishes_during_load"),
+    [
+        pytest.param("swa", False, id="swa-store-pending"),
+        pytest.param("swa", True, id="swa-store-finished"),
+        pytest.param("mixed-swa", True, id="mixed-swa-zeroing"),
+        pytest.param("gdn-mtp", False, id="gdn-mtp-reservation"),
+    ],
+)
+def test_async_load_fences_block_writes(
+    async_scheduling, layout, store_finishes_during_load, request
+):
+    """Fence a pending store in the step that can overwrite its source."""
+    config = create_vllm_config(
+        block_size=4,
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 8 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "offload_prompt_only": False,
+        },
+    )
+    config.scheduler_config.async_scheduling = async_scheduling
+    spec = AttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    if layout == "gdn-mtp":
+        config.cache_config.prefix_match_unit = 4
+        config.cache_config.mamba_cache_mode = "align"
+        config.cache_config.prefix_cache_retention_interval = 4
+        set_mtp_config(config)
+        spec = replace(spec, dtype=torch.bfloat16)
+        other_group = make_kv_cache_group(
+            ["gdn"],
+            mamba_layer(
+                block_size=4,
+                mamba_cache_mode="align",
+                num_speculative_blocks=1,
+                shapes=((4, 4), (1, 4, 4)),
+                dtypes=(torch.bfloat16, torch.float32),
+                mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            ),
+        )
+        prefix_tokens, producer_tokens = 8, 20
+    else:
+        swa_spec = (
+            replace(spec, dtype=torch.bfloat16) if layout == "mixed-swa" else spec
+        )
+        other_group = make_kv_cache_group(
+            ["swa"],
+            SlidingWindowManager.layer_config(
+                swa_spec, sliding_window=8, bounded_replay=True
+            ),
+        )
+        prefix_tokens = producer_tokens = 12
+    # A small shared pool makes the consumer reserve a former store source.
+    cache = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[make_kv_cache_group(["full"], spec), other_group],
+    )
+    if layout == "gdn-mtp":
+        cache.cache_hit_alignment_tokens = 4
+        cache.prefix_cache_retention_interval = 4
+    assert cache.needs_kv_cache_zeroing == (layout != "swa")
+    scheduler = create_scheduler(config, kv_cache_config=cache, hash_block_size=4)
+    request.addfinalizer(scheduler.shutdown)
+
+    def prefill_and_finish(req: Request, *, complete_store: bool):
+        def report_step(output: SchedulerOutput):
+            metadata = output.kv_connector_metadata
+            assert isinstance(metadata, OffloadingConnectorMetadata)
+            store_jobs = metadata.store_jobs
+            worker_meta = (
+                OffloadingWorkerMetadata(completed_jobs=dict.fromkeys(store_jobs, 1))
+                if complete_store
+                else None
+            )
+            scheduler.update_from_output(
+                output,
+                create_model_runner_output(
+                    scheduler.running, kv_connector_worker_meta=worker_meta
+                ),
+            )
+            return store_jobs
+
+        scheduler.add_request(req)
+        output = scheduler.schedule()
+        assert req.request_id in output.num_scheduled_tokens
+        store_jobs = report_step(output)
+        scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_STOPPED)
+        store_jobs = store_jobs | report_step(scheduler.schedule())
+        assert store_jobs
+        return store_jobs
+
+    seed = create_request(
+        request_id=1,
+        num_tokens=prefix_tokens,
+        common_prefix_len=prefix_tokens,
+        block_size=4,
+    )
+    prefill_and_finish(seed, complete_store=True)
+    assert scheduler.reset_prefix_cache()
+
+    producer = create_request(request_id=2, num_tokens=producer_tokens, block_size=4)
+    store_jobs = prefill_and_finish(producer, complete_store=False)
+    sources_by_job = {}
+    for store_id, store in store_jobs.items():
+        assert isinstance(store.src_spec, GPULoadStoreSpec)
+        sources_by_job[store_id] = set(store.src_spec.block_ids.tolist())
+
+    consumer = create_request(
+        request_id=3,
+        num_tokens=prefix_tokens + 4,
+        common_prefix_len=prefix_tokens,
+        block_size=4,
+    )
+    scheduler.add_request(consumer)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    ((load_id, load),) = metadata.load_jobs.items()
+    assert not load.sync
+    assert not output.num_scheduled_tokens
+    assert not output.kv_cache_block_copies
+    assert isinstance(load.dst_spec, GPULoadStoreSpec)
+    _, reserved_group_blocks = scheduler.kv_cache_manager.get_block_ids(
+        consumer.request_id
+    )
+    load_destinations = set(load.dst_spec.block_ids.tolist())
+    reserved_blocks = set(reserved_group_blocks) - load_destinations - {0}
+    overlapping_stores = {
+        store_id
+        for store_id, sources in sources_by_job.items()
+        if sources & reserved_blocks
+    }
+    assert overlapping_stores
+    assert all(
+        sources.isdisjoint(load_destinations) for sources in sources_by_job.values()
+    )
+    if layout == "mixed-swa":
+        assert reserved_blocks <= set(output.new_block_ids_to_zero or ())
+        assert metadata.jobs_to_flush == overlapping_stores
+    else:
+        assert not output.new_block_ids_to_zero
+        assert not metadata.jobs_to_flush
+
+    completed_jobs = {load_id: 1}
+    if store_finishes_during_load:
+        completed_jobs.update(dict.fromkeys(store_jobs, 1))
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(
+            [],
+            finished_recving={consumer.request_id},
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs=completed_jobs
+            ),
+        ),
+    )
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    (new_req,) = output.scheduled_new_reqs
+    assert new_req.req_id == consumer.request_id
+    if layout != "gdn-mtp":
+        assert new_req.replay_start == 4
+        assert reserved_blocks.issubset(new_req.block_ids[1])
+    assert metadata.jobs_to_flush == (
+        set() if store_finishes_during_load else overlapping_stores
+    )
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
