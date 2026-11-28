@@ -71,6 +71,7 @@ EOS_TOKEN_ID = 50256
 
 def create_mock_connector() -> Mock:
     connector = Mock()
+    connector.take_unavailable_requests.return_value = set()
     connector.get_external_cache_hit_sources.side_effect = lambda request, num_tokens: (
         {CacheHitSource.EXTERNAL_UNSPECIFIED: num_tokens} if num_tokens else {}
     )
@@ -730,6 +731,7 @@ def make_nixl_push_scheduler(
     # Push-specific state.
     sched._push_pending_registrations = {}
     sched._push_registration_deadlines = {}
+    sched._unavailable_requests = set()
     sched._finished_request_blocks = {}
     sched._newly_finished_push_blocks = {}
     sched._push_registration_timeout = (
@@ -743,6 +745,7 @@ def make_nixl_push_scheduler(
     sched._heartbeat_by_engine = {}
     sched._heartbeat_req_engine = {}
     sched._last_heartbeat_time = 0.0
+    sched._heartbeat_interval = sched._kv_lease_duration // 6
     sched._new_heartbeat_reqs = set()
     sched.blocks_per_sw = []
 

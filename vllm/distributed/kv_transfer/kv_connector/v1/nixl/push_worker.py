@@ -882,6 +882,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._recving_transfers.setdefault(req_id, [])
         return set()
 
+    def _handle_heartbeat(self, payload: str) -> None:
+        # TODO(#59758): Until PUSH_REG has a transfer ID, renew all matching leases.
+        base_ids = {get_base_request_id(req_id) for req_id in payload.split(",")}
+        matched = [
+            rid for rid in self._reqs_to_send if get_base_request_id(rid) in base_ids
+        ]
+        if matched:
+            super()._handle_heartbeat(",".join(matched))
+
     def get_transfer_results(self) -> KVConnectorTransferResults:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion

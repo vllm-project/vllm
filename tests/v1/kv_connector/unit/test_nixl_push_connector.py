@@ -2286,3 +2286,318 @@ def test_push_handshake_rejects_different_block_sizes(
 
     with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
         worker._validate_remote_parallel_config(metadata)
+
+
+@pytest.fixture
+def push_heartbeat_setup(monkeypatch, dist_init):
+    import os
+
+    from vllm.config import set_current_vllm_config
+    from vllm.platforms import current_platform
+
+    from .test_nixl_desc_geometry import _RecordingNixl as FakeNixlWrapper
+    from .utils import create_scheduler, create_vllm_config
+
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    # Respect the CPU test runner's affinity when the worker reserves a core.
+    monkeypatch.setattr(
+        current_platform,
+        "discover_numa_topology",
+        lambda: [list(os.sched_getaffinity(0))],
+    )
+    clock = [100.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    config = create_vllm_config(kv_connector="NixlPushConnector", kv_role="kv_producer")
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_buffer_device = "cpu"
+    p = create_scheduler(config, num_blocks=32)
+    d = create_scheduler(create_vllm_config(kv_connector="NixlPushConnector"))
+    import torch
+
+    from tests.v1.attention.utils import dense_kv_cache_views
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+
+    with set_current_vllm_config(config):
+        worker = NixlPushConnectorWorker(config, "producer", p.kv_cache_config)
+        (spec,) = p.kv_cache_config.kv_cache_groups[0].distinct_specs
+        assert isinstance(spec, AttentionSpec)
+        raw = torch.zeros(spec.page_size_bytes * 32, dtype=torch.int8)
+        (cache,) = dense_kv_cache_views(raw, spec, 32, 1, KVCacheLayout.LBNHC)
+        worker.register_kv_caches({"layer": cache})
+    try:
+        yield clock, p, d, worker
+    finally:
+        worker.shutdown()
+        p.shutdown()
+        d.shutdown()
+
+
+@pytest.mark.cpu_test
+def test_push_heartbeat_renews_producer_lease(push_heartbeat_setup):
+    """A router ID and independently randomized P/D IDs renew the same lease."""
+    from .utils import create_model_runner_output
+
+    clock, p, d, worker = push_heartbeat_setup
+    prefill = create_request(num_tokens=32, do_remote_decode=True)
+    prefill.request_id = "cmpl-shared-0-aaaaaaaa"
+    p.add_request(prefill)
+    step = p.schedule()
+    worker.start_load_kv(step.kv_connector_metadata)
+    p.update_from_output(step, create_model_runner_output([prefill]))
+    worker.start_load_kv(p.schedule().kv_connector_metadata)
+
+    clock[0] = 120.0
+    decode = create_request(num_tokens=32, do_remote_prefill=True)
+    decode.request_id = "cmpl-shared-0-bbbbbbbb"
+    assert decode.kv_transfer_params is not None
+    decode.kv_transfer_params["remote_request_id"] = "shared"
+    d.add_request(decode)
+    heartbeat_meta = d.schedule().kv_connector_metadata
+    assert isinstance(heartbeat_meta, NixlConnectorMetadata)
+    for heartbeat in heartbeat_meta.heartbeat_by_engine.values():
+        worker._handle_heartbeat(",".join(heartbeat.req_ids))
+
+    clock[0] = 131.0
+    assert prefill.request_id not in worker.get_transfer_results().finished_sending
+    clock[0] = 141.0
+    assert worker.get_transfer_results().finished_sending == {prefill.request_id}
+
+
+@pytest.mark.cpu_test
+def test_push_heartbeat_renews_shared_base_leases(push_heartbeat_setup, monkeypatch):
+    clock, _, d, worker = push_heartbeat_setup
+    first = "cmpl-shared-0-aaaaaaaa"
+    retry = "cmpl-shared-0-bbbbbbbb"
+    meta = NixlConnectorMetadata()
+    meta.reqs_in_batch = {first, retry}
+    meta.reqs_to_send = {first: 130.0, retry: 130.0}
+    worker.start_load_kv(meta)
+    worker._push_finished_blocks.update({first: ([1],), retry: ([2],)})
+
+    # Pair both registrations while their reverse handshakes are pending.
+    monkeypatch.setattr(worker, "_ensure_handshake", lambda *args: Future())
+    reg = _registration_data("cmpl-shared-0-cccccccc")
+    worker._handle_push_reg_notif(PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(reg))
+    assert set(worker._push_finished_blocks) == {retry}
+
+    clock[0] = 120.0
+    decode = create_request(num_tokens=32, do_remote_prefill=True)
+    decode.request_id = "cmpl-shared-0-dddddddd"
+    d.add_request(decode)
+    meta = d.schedule().kv_connector_metadata
+    assert isinstance(meta, NixlConnectorMetadata)
+    reg = meta.push_registrations[decode.request_id]
+    worker._handle_push_reg_notif(PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(reg))
+    assert not worker._push_finished_blocks
+    for heartbeat in meta.heartbeat_by_engine.values():
+        worker._handle_heartbeat(",".join(heartbeat.req_ids))
+
+    clock[0] = 131.0
+    assert worker.get_transfer_results().finished_sending == set()
+    clock[0] = 141.0
+    assert worker.get_transfer_results().finished_sending == {first, retry}
+
+
+@pytest.mark.cpu_test
+def test_abort_before_push_registration_expiry(monkeypatch):
+    from vllm.v1.request import RequestStatus
+
+    from .utils import create_model_runner_output, create_scheduler, create_vllm_config
+
+    now = 100.0
+    monkeypatch.setattr(time, "perf_counter", lambda: now)
+    scheduler = create_scheduler(
+        create_vllm_config(
+            kv_connector="NixlPushConnector",
+            kv_connector_extra_config={"push_registration_timeout": 10},
+        )
+    )
+    try:
+        request = create_request(num_tokens=32, do_remote_prefill=True)
+        scheduler.add_request(request)
+        step = scheduler.schedule()
+        scheduler.update_from_output(step, create_model_runner_output([]))
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+        now = 109.0
+        aborted = scheduler.finish_requests(
+            request.request_id, RequestStatus.FINISHED_ABORTED
+        )
+        assert aborted == [request]
+        now = 111.0
+        for expected_finished in ({request.request_id}, set()):
+            step = scheduler.schedule()
+            assert step.finished_req_ids == expected_finished
+            outputs = scheduler.update_from_output(step, create_model_runner_output([]))
+            assert all(not batch.outputs for batch in outputs.values())
+        assert request.status == RequestStatus.FINISHED_ABORTED
+    finally:
+        scheduler.shutdown()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+@pytest.mark.parametrize("multi", [False, True])
+def test_push_watchdog_ends_request_without_reusing_blocks(monkeypatch, policy, multi):
+    """Expiry ends the request; only a late completion makes its blocks reusable."""
+    from vllm.v1.engine import EngineCoreOutput
+    from vllm.v1.request import RequestStatus
+
+    from .utils import create_model_runner_output, create_scheduler, create_vllm_config
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    extra: dict[str, Any] = {"push_registration_timeout": 10}
+    if multi:
+        extra = {
+            "connectors": [
+                {
+                    "kv_connector": "NixlPushConnector",
+                    "kv_role": "kv_consumer",
+                    "kv_connector_extra_config": extra,
+                }
+            ]
+        }
+    config = create_vllm_config(
+        kv_connector="MultiConnector" if multi else "NixlPushConnector",
+        kv_connector_extra_config=extra,
+        kv_load_failure_policy=policy,
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    try:
+        pool = scheduler.kv_cache_manager.block_pool
+        initial_free = pool.get_num_free_blocks()
+        request = create_request(num_tokens=32, do_remote_prefill=True)
+        scheduler.add_request(request)
+        step = scheduler.schedule()
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        held = scheduler.kv_cache_manager.get_blocks(request.request_id).get_block_ids()
+        free_while_waiting = pool.get_num_free_blocks()
+        assert free_while_waiting < initial_free
+        scheduler.update_from_output(step, create_model_runner_output([]))
+
+        clock[0] = 111.0
+        errors: list[EngineCoreOutput] = []
+        for _ in range(3):
+            step = scheduler.schedule()
+            outputs = scheduler.update_from_output(step, create_model_runner_output([]))
+            errors.extend(
+                output for batch in outputs.values() for output in batch.outputs
+            )
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert [output.request_id for output in errors] == [request.request_id]
+        assert errors[0].finish_reason == request.get_finished_reason()
+        assert pool.get_num_free_blocks() == free_while_waiting
+        assert all(pool.blocks[bid].ref_cnt > 0 for group in held for bid in group)
+
+        # Independent requests can use other blocks while the timed-out transfer
+        # still owns its destination. No local recompute may touch that destination.
+        healthy = create_request(num_tokens=16, max_tokens=1)
+        scheduler.add_request(healthy)
+        step = scheduler.schedule()
+        assert request.request_id not in step.num_scheduled_tokens
+        healthy_blocks = scheduler.kv_cache_manager.get_blocks(healthy.request_id)
+        assert not {bid for group in held for bid in group}.intersection(
+            bid for group in healthy_blocks.get_block_ids() for bid in group
+        )
+        scheduler.update_from_output(step, create_model_runner_output([healthy]))
+        assert healthy.is_finished()
+        assert pool.get_num_free_blocks() == free_while_waiting
+
+        step = scheduler.schedule()
+        scheduler.update_from_output(
+            step,
+            create_model_runner_output([], finished_recving={request.request_id}),
+        )
+        assert request.request_id not in scheduler.requests
+        assert pool.get_num_free_blocks() == initial_free
+    finally:
+        scheduler.shutdown()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("completion_time", [109.0, 111.0])
+def test_push_completion_precedes_watchdog_failure(monkeypatch, completion_time):
+    """A completed receive wins even when its report coincides with expiry."""
+    from vllm.v1.request import RequestStatus
+
+    from .utils import create_model_runner_output, create_scheduler, create_vllm_config
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    config = create_vllm_config(
+        kv_connector="NixlPushConnector",
+        kv_connector_extra_config={"push_registration_timeout": 10},
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    try:
+        pool = scheduler.kv_cache_manager.block_pool
+        initial_free = pool.get_num_free_blocks()
+        request = create_request(num_tokens=32, do_remote_prefill=True, max_tokens=1)
+        scheduler.add_request(request)
+        step = scheduler.schedule()
+        scheduler.update_from_output(step, create_model_runner_output([]))
+
+        clock[0] = completion_time
+        step = scheduler.schedule()
+        scheduler.update_from_output(
+            step, create_model_runner_output([], finished_recving={request.request_id})
+        )
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        clock[0] = 200.0
+        step = scheduler.schedule()
+        assert request.request_id in step.num_scheduled_tokens
+        scheduler.update_from_output(step, create_model_runner_output([request]))
+        assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert pool.get_num_free_blocks() == initial_free
+    finally:
+        scheduler.shutdown()
+
+
+@pytest.mark.cpu_test
+def test_push_immediate_heartbeat_and_stop_cleanup():
+    """Push mode keys immediate heartbeats, leases and stop cleanup by local ID."""
+    sched = make_nixl_push_scheduler()
+    engine_id = "prefill-engine"
+    first = _make_request(request_id="req-d-1", remote_request_id="req-p-1")
+    sched.on_new_request(first)
+    first_meta = sched.build_connector_meta(MagicMock())
+    assert isinstance(first_meta, NixlConnectorMetadata)
+    assert first_meta.heartbeat_by_engine[engine_id].req_ids == {"req-d-1"}
+
+    # Arriving between rounds triggers an immediate heartbeat keyed by D's ID.
+    late = _make_request(request_id="req-d-2", remote_request_id="req-p-2")
+    late.kv_transfer_params["remote_blocks_expiry_time"] = 1234.5
+    late.kv_transfer_params["remote_lease_extension"] = 20
+    sched.on_new_request(late)
+    immediate_meta = sched.build_connector_meta(MagicMock())
+    assert isinstance(immediate_meta, NixlConnectorMetadata)
+    immediate = immediate_meta.heartbeat_by_engine[engine_id]
+    assert immediate.req_ids == {"req-d-2"}
+    assert immediate.leases == {"req-d-2": (1234.5, 20)}
+    assert sched._heartbeat_by_engine[engine_id].req_ids == {"req-d-1", "req-d-2"}
+    assert sched._heartbeat_by_engine[engine_id].leases == {"req-d-2": (1234.5, 20)}
+    assert not sched._new_heartbeat_reqs
+
+    # Stopping a newly tracked request before the next step prevents sending it.
+    aborted = _make_request(request_id="req-d-3", remote_request_id="req-p-3")
+    aborted.kv_transfer_params["remote_blocks_expiry_time"] = 2345.0
+    aborted.kv_transfer_params["remote_lease_extension"] = 20
+    sched.on_new_request(aborted)
+    sched._stop_heartbeat("req-d-3")
+    assert not sched._new_heartbeat_reqs
+    assert "req-d-3" not in sched._heartbeat_by_engine[engine_id].leases
+    throttled_meta = sched.build_connector_meta(MagicMock())
+    assert isinstance(throttled_meta, NixlConnectorMetadata)
+    assert throttled_meta.heartbeat_by_engine == {}
+
+    # Stopping remaining requests cleans up leases and the engine entry.
+    sched._stop_heartbeat("req-d-2")
+    assert sched._heartbeat_by_engine[engine_id].leases == {}
+    assert sched._heartbeat_by_engine[engine_id].req_ids == {"req-d-1"}
+    sched._stop_heartbeat("req-d-1")
+    assert sched._heartbeat_by_engine == {}
+    assert sched._heartbeat_req_engine == {}
