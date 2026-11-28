@@ -10,9 +10,16 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     make_kv_cache_group,
     make_kv_cache_group_from_specs,
 )
+from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     TransferJob,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+    OffloadingConnectorWorker,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
@@ -43,6 +50,8 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
 NUM_BLOCKS = 10
 BLOCK_SIZE = 16
@@ -107,10 +116,6 @@ def _make_worker(
     config_replicated_layout: bool = True,
 ):
     """Create an OffloadingConnectorWorker with mocked dependencies."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
-        OffloadingConnectorWorker,
-    )
-
     spec = MagicMock(spec=OffloadingSpec)
     spec.replicated_layout = replicated_layout
     spec.async_init = False
@@ -286,6 +291,78 @@ def test_handle_preemptions_non_writer_acks_flushed_store():
     meta = worker.build_connector_worker_meta()
     assert meta is not None
     assert meta.completed_jobs == {10: 1}
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="CPU offload requires an accelerator",
+)
+@pytest.mark.parametrize("flush", [True, False], ids=["flush_first", "fifo"])
+def test_handle_preemptions_store_order(dist_init, flush: bool):
+    """Fenced stores complete before ordinary stores, with FIFO within each group."""
+    vllm_config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 20},
+    )
+    assert vllm_config.model_config is not None
+    num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+    layer_name = "model.layers.0.self_attn"
+    layer_spec = AttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=num_kv_heads,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[],
+        kv_cache_groups=[make_kv_cache_group([layer_name], layer_spec)],
+    )
+    worker = OffloadingConnectorWorker(
+        CPUOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config)),
+        vllm_config,
+        kv_cache_config,
+    )
+    kv_cache = torch.zeros(
+        (NUM_BLOCKS, 2, BLOCK_SIZE, num_kv_heads, HEAD_SIZE),
+        dtype=DTYPE,
+        device=DEVICE_TYPE,
+    )
+    worker.register_kv_caches({layer_name: kv_cache})
+
+    def store(job_id: int) -> TransferJob:
+        return TransferJob(
+            req_id=f"req-{job_id}",
+            src_spec=GPULoadStoreSpec([job_id], group_sizes=(1,), block_indices=(0,)),
+            dst_spec=CPULoadStoreSpec([job_id]),
+        )
+
+    previous_job_ids = [5, 3, 2, 1]
+    worker.prepare_store_kv(
+        OffloadingConnectorMetadata(
+            load_jobs={},
+            store_jobs={job_id: store(job_id) for job_id in previous_job_ids},
+        )
+    )
+    metadata = OffloadingConnectorMetadata(
+        load_jobs={},
+        store_jobs={4: store(4), 6: store(6)},
+        jobs_to_flush={1, 3, 4} if flush else None,
+    )
+    try:
+        worker.handle_preemptions(metadata)
+        torch.accelerator.synchronize()
+        worker.get_finished(set())
+        result = worker.build_connector_worker_meta()
+        assert result is not None
+        assert not result.failed_jobs
+        expected_order = [3, 1, 4, 5, 2] if flush else previous_job_ids
+        assert list(result.completed_jobs) == expected_order
+        assert len(result.transfer_stats.store.sizes) == len(expected_order)
+        assert set(metadata.store_jobs) == ({6} if flush else {4, 6})
+    finally:
+        worker.shutdown()
 
 
 def test_start_kv_transfers_non_writer_still_submits_load():

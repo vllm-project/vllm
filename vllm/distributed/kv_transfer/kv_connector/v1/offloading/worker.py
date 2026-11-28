@@ -234,10 +234,11 @@ class OffloadingConnectorWorker:
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
 
+        jobs_to_flush = kv_connector_metadata.jobs_to_flush
         # Pop jobs_to_flush from store_jobs into _unsubmitted_store_jobs
         # so the existing submission loop below submits them before wait().
-        if kv_connector_metadata.jobs_to_flush:
-            for job_id in kv_connector_metadata.jobs_to_flush:
+        if jobs_to_flush:
+            for job_id in jobs_to_flush:
                 entry = kv_connector_metadata.store_jobs.pop(job_id, None)
                 if entry is not None:
                     if not self._is_store_writer:
@@ -247,6 +248,10 @@ class OffloadingConnectorWorker:
                     self._unsubmitted_store_jobs.append(
                         (job_id, entry.src_spec, entry.dst_spec)
                     )
+            # Avoid waiting for ordinary stores ahead of a fenced store.
+            self._unsubmitted_store_jobs.sort(
+                key=lambda job: job[0] not in jobs_to_flush
+            )
 
         # Submit deferred stores from previous step (and jobs_to_flush above).
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
@@ -256,8 +261,8 @@ class OffloadingConnectorWorker:
             assert success
         self._unsubmitted_store_jobs.clear()
 
-        if kv_connector_metadata.jobs_to_flush:
-            self.worker.wait(kv_connector_metadata.jobs_to_flush)
+        if jobs_to_flush:
+            self.worker.wait(jobs_to_flush)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
