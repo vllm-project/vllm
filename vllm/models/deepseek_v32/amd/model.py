@@ -242,7 +242,11 @@ class DeepseekV32Model(torch.nn.Module):
                 }
             )
 
-        hidden_states, _ = fused_allreduce_rms_norm(hidden_states, residual, self.norm)
+        hidden_states, residual = fused_allreduce_rms_norm(
+            hidden_states, residual, self.norm
+        )
+        if self.end_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(residual.clone())
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
