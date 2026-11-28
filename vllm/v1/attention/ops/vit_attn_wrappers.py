@@ -23,6 +23,169 @@ from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 
+# ---------------------------------------------------------------------------
+# ROCm: vision-tower FMHA fast path for head sizes the assembly kernel lacks.
+#
+# aiter's gfx950 assembly FMHA ships head_dim 128/192/256 only. A vision tower with a
+# smaller head (Qwen3-VL uses 72) therefore falls back to ck_tile, which is ~2.7x less
+# efficient per useful FLOP than the assembly kernel. Zero-padding the head to 128 costs
+# 1.78x the matrix work and is still a net win on large segments: softmax_scale stays
+# 1/sqrt(head_dim) and the padded lanes are zero, so they affect neither Q.K nor amax.
+#
+# Only worth it on big segments, so segments are binned and only the large ones take the
+# padded path; the rest stay on one batched ck_tile call.
+# ---------------------------------------------------------------------------
+
+# Head size the assembly FMHA pads up to (smallest shipped gfx950 tile).
+_VIT_ASM_PAD_HEAD_DIM = 128
+# Minimum segment length for the padded bf16 assembly path to pay for the padding.
+_VIT_ASM_MIN_SEQLEN = 8192
+# Minimum segment length for the fp8 variant, which additionally pays a quantize pass.
+_VIT_FP8_MIN_SEQLEN = 12288
+
+_vit_bin_cu = None
+_vit_bin_plan = None
+
+
+def _vit_segment_plan(cu_seqlens: torch.Tensor):
+    """Partition a varlen batch into large segments (routed individually to the padded
+    assembly kernel) and the remainder (one batched call). Cached, because the vision
+    segmentation is stable across steps."""
+    global _vit_bin_cu, _vit_bin_plan
+    if (
+        _vit_bin_cu is not None
+        and _vit_bin_cu.numel() == cu_seqlens.numel()
+        and bool(torch.equal(_vit_bin_cu, cu_seqlens))
+    ):
+        return _vit_bin_plan
+    seg = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    dev = cu_seqlens.device
+    large = [i for i, L in enumerate(seg) if L >= _VIT_ASM_MIN_SEQLEN]
+    rest = [i for i, L in enumerate(seg) if L < _VIT_ASM_MIN_SEQLEN]
+    large_plan = [
+        (
+            int(cu_seqlens[i]),
+            int(cu_seqlens[i + 1]),
+            torch.tensor([0, seg[i]], dtype=torch.int32, device=dev),
+            seg[i],
+        )
+        for i in large
+    ]
+    rest_plan = None
+    if rest:
+        ridx = torch.cat(
+            [
+                torch.arange(int(cu_seqlens[i]), int(cu_seqlens[i + 1]), device=dev)
+                for i in rest
+            ]
+        )
+        rcu = [0]
+        for i in rest:
+            rcu.append(rcu[-1] + seg[i])
+        rest_plan = (
+            ridx,
+            torch.tensor(rcu, dtype=torch.int32, device=dev),
+            max(seg[i] for i in rest),
+        )
+    _vit_bin_cu = cu_seqlens.clone()
+    _vit_bin_plan = (large_plan, rest_plan)
+    return _vit_bin_plan
+
+
+def _vit_pad_head(x: torch.Tensor, n: int, h: int, d: int) -> torch.Tensor:
+    p = torch.zeros(n, h, _VIT_ASM_PAD_HEAD_DIM, dtype=x.dtype, device=x.device)
+    p[:, :, :d] = x
+    return p
+
+
+def _vit_fp8_asm_segment(q, k, v, cu, max_seqlen, scale, h, d):
+    """fp8 assembly FMHA for one large vision segment, head padded to 128.
+
+    Descales are computed per call from this segment's amax rather than from a running
+    history: vLLM feeds zero-filled dummy inputs during profiling and cuda-graph warmup,
+    and a history would collapse toward zero, after which real activations overflow fp8.
+    Padded lanes are zero and so do not move amax."""
+    from aiter.ops.mha import flash_attn_varlen_fp8_pertensor_func
+    from aiter.utility import dtypes
+
+    n = q.shape[0]
+    fp8_max = float(torch.finfo(dtypes.fp8).max)
+    eps = torch.finfo(torch.float32).tiny
+    qp = _vit_pad_head(q, n, h, d)
+    kp = _vit_pad_head(k, n, h, d)
+    vp = _vit_pad_head(v, n, h, d)
+    qd = (qp.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
+    kd = (kp.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
+    vd = (vp.abs().amax().float() / fp8_max).clamp_min(eps).reshape(1)
+    out = flash_attn_varlen_fp8_pertensor_func(
+        (qp.float() / qd).to(dtypes.fp8).contiguous(),
+        (kp.float() / kd).to(dtypes.fp8).contiguous(),
+        (vp.float() / vd).to(dtypes.fp8).contiguous(),
+        qd,
+        kd,
+        vd,
+        cu,
+        cu,
+        max_seqlen,
+        max_seqlen,
+        causal=False,
+        softmax_scale=scale,
+    )
+    out = out[0] if isinstance(out, (tuple, list)) else out
+    return out[:, :, :d].contiguous()
+
+
+def _vit_binned_fmha(q, k, v, cu_seqlens, max_seqlen, scale, varlen_fn, kwargs):
+    """Large vision segments -> head-padded assembly FMHA (fp8 when long enough);
+    everything else -> a single batched ck_tile call. Returns None when no segment is
+    large enough to benefit, so the caller keeps the unmodified path."""
+    large_plan, rest_plan = _vit_segment_plan(cu_seqlens)
+    if not large_plan:
+        return None
+
+    n_tok, h, d = q.shape
+    out = torch.empty_like(q)
+    for s, e, cu, seg_len in large_plan:
+        if seg_len >= _VIT_FP8_MIN_SEQLEN:
+            out[s:e] = _vit_fp8_asm_segment(
+                q[s:e], k[s:e], v[s:e], cu, seg_len, scale, h, d
+            )
+            continue
+        n = e - s
+        o = varlen_fn(
+            _vit_pad_head(q[s:e], n, h, d),
+            _vit_pad_head(k[s:e], n, h, d),
+            _vit_pad_head(v[s:e], n, h, d),
+            cu_seqlens_q=cu,
+            cu_seqlens_k=cu,
+            max_seqlen_q=seg_len,
+            max_seqlen_k=seg_len,
+            dropout_p=0.0,
+            causal=False,
+            softmax_scale=scale,
+            **kwargs,
+        )
+        o = o[0] if isinstance(o, (tuple, list)) else o
+        out[s:e] = o[:, :, :d]
+    if rest_plan is not None:
+        ridx, rcu, rmax = rest_plan
+        o = varlen_fn(
+            q[ridx],
+            k[ridx],
+            v[ridx],
+            cu_seqlens_q=rcu,
+            cu_seqlens_k=rcu,
+            max_seqlen_q=rmax,
+            max_seqlen_k=rmax,
+            dropout_p=0.0,
+            causal=False,
+            softmax_scale=scale,
+            **kwargs,
+        )
+        o = o[0] if isinstance(o, (tuple, list)) else o
+        out[ridx] = o
+    return out
+
 
 def flash_attn_maxseqlen_wrapper(
     q: torch.Tensor,
@@ -70,19 +233,27 @@ def flash_attn_maxseqlen_wrapper(
             )
         else:
             kwargs["out"] = torch.empty_like(q, memory_format=torch.contiguous_format)
-    output = flash_attn_varlen_func(
-        q,
-        k,
-        v,
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=max_seqlen,
-        max_seqlen_k=max_seqlen,
-        dropout_p=0.0,
-        causal=False,
-        softmax_scale=scale,
-        **kwargs,
-    )
+    output = None
+    if is_rocm_aiter and q.shape[-1] < _VIT_ASM_PAD_HEAD_DIM:
+        # aiter's assembly FMHA has no tile below head_dim 128; pad large segments up
+        # to it rather than leaving the whole batch on the slower ck_tile path.
+        output = _vit_binned_fmha(
+            q, k, v, cu_seqlens, max_seqlen, scale, flash_attn_varlen_func, kwargs
+        )
+    if output is None:
+        output = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            dropout_p=0.0,
+            causal=False,
+            softmax_scale=scale,
+            **kwargs,
+        )
     if not supports_out:
         output = output.contiguous()
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
