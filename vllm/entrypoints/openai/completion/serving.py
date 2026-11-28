@@ -143,7 +143,7 @@ def _get_prompt_text_offsets(
     source_text: str | None = None,
 ) -> list[int] | None:
     """Return prompt starts and the continuation boundary in echoed text."""
-    if tokenizer is None or not token_ids or text.isascii():
+    if tokenizer is None or not token_ids:
         return None
     source_offsets = None
     if prompt_input is not None and prompt_input["type"] == "token":
@@ -180,6 +180,13 @@ def _get_prompt_text_offsets(
     # Some policies echo literal vocabulary pieces rather than decoded bytes.
     pieces = batch_decode_singleton_tokens(tokenizer, token_ids)
     if pieces is not None:
+        if source_offsets is not None and "".join(pieces) != text:
+            visible_pieces = [
+                "" if start == end == 0 else piece
+                for piece, (start, end) in zip(pieces, source_offsets)
+            ]
+            if "".join(visible_pieces) == text:
+                return [0, *itertools.accumulate(map(len, visible_pieces))]
         if "".join(pieces) == text:
             return [0, *itertools.accumulate(map(len, pieces))]
     else:
@@ -192,13 +199,13 @@ def _get_prompt_text_offsets(
         else:
             if offsets[-1] == len(text):
                 return offsets
-    # Trimmed encoding spans cannot establish decoded token starts, even
-    # when the source text and token IDs match. Keep the legacy fallback.
+    # Trimmed spans cannot establish decoded token starts. Tokenizer-added
+    # tokens can still be matched as zero-width slots.
     if untrimmed_source is None:
         untrimmed_source = _has_untrimmed_source_offsets(tokenizer)
-    if not untrimmed_source:
+    if not untrimmed_source and pieces is None:
         return None
-    if source_offsets is not None:
+    if untrimmed_source and source_offsets is not None:
         source_mask = [int(start == end == 0) for start, end in source_offsets]
         if starts := _get_source_text_offsets(text, source_offsets, source_mask):
             return starts
@@ -214,7 +221,7 @@ def _get_prompt_text_offsets(
                     tokenizer,
                     text,
                     add_special_tokens=add_special_tokens,
-                    return_offsets_mapping=True,
+                    return_offsets_mapping=untrimmed_source,
                 )
             except (NotImplementedError, TypeError, ValueError):
                 return None
@@ -222,14 +229,24 @@ def _get_prompt_text_offsets(
             special_tokens_mask = encoding.get("special_tokens_mask")
             if (
                 encoding["input_ids"] == token_ids
-                and encoding_offsets is not None
-                and len(encoding_offsets) == len(token_ids)
                 and special_tokens_mask is not None
                 and len(special_tokens_mask) == len(token_ids)
             ):
-                return _get_source_text_offsets(
-                    text, encoding_offsets, special_tokens_mask
-                )
+                if pieces is not None:
+                    visible_pieces = [
+                        "" if special else piece
+                        for piece, special in zip(pieces, special_tokens_mask)
+                    ]
+                    if "".join(visible_pieces) == text:
+                        return [0, *itertools.accumulate(map(len, visible_pieces))]
+                if (
+                    untrimmed_source
+                    and encoding_offsets is not None
+                    and len(encoding_offsets) == len(token_ids)
+                ):
+                    return _get_source_text_offsets(
+                        text, encoding_offsets, special_tokens_mask
+                    )
     return None
 
 
@@ -511,8 +528,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         else self.return_tokens_as_token_ids
                     )
                     and tokenizer is not None
-                    and final_res.prompt
-                    and not final_res.prompt.isascii()
+                    and final_res.prompt is not None
                 ):
                     assert final_res.prompt_token_ids is not None
                     source = (
@@ -702,7 +718,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             if (
                                 prompt_idx not in prompt_text_offsets
                                 and tokenizer is not None
-                                and not prompt_text.isascii()
                             ):
                                 source = (
                                     (

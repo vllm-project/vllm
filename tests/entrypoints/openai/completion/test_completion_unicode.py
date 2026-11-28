@@ -47,9 +47,10 @@ async def client(server):
 
 
 async def _get_echo_logprobs(client, model, prompt, stream, max_tokens, extra_body):
+    request_prompt = [prompt] if prompt == "" else prompt
     reference = await client.completions.create(
         model=model,
-        prompt=prompt,
+        prompt=request_prompt,
         max_tokens=max(1, max_tokens),
         temperature=0,
         logprobs=0,
@@ -57,7 +58,7 @@ async def _get_echo_logprobs(client, model, prompt, stream, max_tokens, extra_bo
     )
     response = await client.completions.create(
         model=model,
-        prompt=prompt,
+        prompt=request_prompt,
         echo=True,
         max_tokens=max_tokens,
         temperature=0,
@@ -74,10 +75,52 @@ async def _get_echo_logprobs(client, model, prompt, stream, max_tokens, extra_bo
     return reference.choices[0], text, offsets, tokens
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [
+        ("facebook/opt-125m", UNICODE_SERVER_ARGS),
+        ("facebook/opt-125m", "unicode_unknown_trimmed_server_args"),
+    ],
+    indirect=True,
+    scope="module",
+)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("max_tokens", [0, 3])
+@pytest.mark.parametrize("add_special_tokens", [False, True])
+@pytest.mark.parametrize(
+    "prompt,starts", [("Hi", [0]), ("  Hi", [0, 1]), ("</s>Hi", [0, 4])]
+)
+async def test_echo_ascii_offsets_with_added_bos(
+    client, stream, max_tokens, add_special_tokens, prompt, starts
+):
+    model = (await client.models.list()).data[0].id
+    reference, text, offsets, _ = await _get_echo_logprobs(
+        client,
+        model,
+        prompt,
+        stream,
+        max_tokens,
+        {"add_special_tokens": add_special_tokens},
+    )
+    expected = [0, *starts] if add_special_tokens else starts
+    count = len(expected)
+    assert len(reference.prompt_token_ids) == count
+    assert text == prompt + (reference.text if max_tokens else "")
+    assert offsets[:count] == expected
+    assert offsets[count:] == (
+        [len(prompt) + offset for offset in reference.logprobs.text_offset]
+        if max_tokens
+        else []
+    )
+
+
 def _unicode_trimmed_server_args(tmp_path_factory, *, replace=False):
     tokenizer = cast(TokenizersBackend, get_tokenizer("facebook/opt-125m"))
     backend = Tokenizer.from_str(tokenizer.backend_tokenizer.to_str())
-    backend.post_processor = processors.ByteLevel(trim_offsets=True)
+    backend.post_processor = processors.Sequence(
+        [processors.ByteLevel(trim_offsets=True), backend.post_processor]
+    )
     steps = [backend.decoder, decoders.Fuse()]
     if replace:
         steps.append(decoders.Replace("\r\n", "\n"))
@@ -216,7 +259,7 @@ def unicode_eos_server_args(tmp_path_factory):
 )
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("max_tokens", [0, 3])
-@pytest.mark.parametrize("prompt", [" 𐍈x", " 𐍈x </s>", " 𐍈x  "])
+@pytest.mark.parametrize("prompt", ["", " 𐍈x", " 𐍈x </s>", " 𐍈x  "])
 async def test_echo_unicode_offsets_with_added_eos(
     client, server, stream, max_tokens, prompt
 ):

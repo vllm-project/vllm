@@ -212,7 +212,7 @@ class TokenizeParams:
     data; otherwise silently ignored."""
 
     retain_token_offsets: bool = False
-    """Retain source offsets internally for non-ASCII completion echoes."""
+    """Retain source offsets internally for completion echoes."""
 
     needs_detokenization: bool = False
     """

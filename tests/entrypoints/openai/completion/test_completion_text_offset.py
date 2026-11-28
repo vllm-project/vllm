@@ -46,6 +46,7 @@ TEXT_DELTAS = ["ab", "c d", "e!"]
 @pytest.mark.parametrize(
     "text,source_starts",
     [
+        (" X x", [1, 3]),
         (" É x", [1, 3]),
         (" É x ", [1, 3]),
         ("</s> É x", [0, 5, 7]),
@@ -137,7 +138,7 @@ def test_echo_offsets_reuse_source_before_singleton_decodes(
         ("É", {"logprobs": 0}, False),
         ("É", {"echo": True, "logprobs": 0, "return_token_ids": True}, False),
         ("É", {"echo": True, "logprobs": 0, "return_tokens_as_token_ids": True}, False),
-        ("x", {"echo": True, "logprobs": 0}, False),
+        ("x x", {"echo": True, "logprobs": 0}, True),
     ],
     ids=["normalized", "no-logprobs", "no-echo", "token-ids", "placeholders", "ascii"],
 )

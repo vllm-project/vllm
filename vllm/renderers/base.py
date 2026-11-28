@@ -641,10 +641,7 @@ class BaseRenderer(ABC, Generic[_T]):
         params: "TokenizeParams",
     ) -> bool:
         return (
-            (
-                params.return_token_offsets
-                or (params.retain_token_offsets and not prompt["prompt"].isascii())
-            )
+            (params.return_token_offsets or params.retain_token_offsets)
             and self._can_produce_offsets()
             and not prompt.get("multi_modal_data")
             and not prompt.get("multi_modal_uuids")
