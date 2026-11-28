@@ -39,6 +39,15 @@ register_backend(
     AttentionBackendEnum.FLASH_ATTN_MLA,
     "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend",
 )
+_TRITON_XPU_KERNEL_HEURISTICS = {
+    # A large BLOCK_SIZE loses precision in the single-pass pivot
+    # approximation on XPU; smaller tiles give accurate top-p results.
+    "vllm.v1.sample.ops.topk_topp_triton._topk_topp_kernel": {
+        "BLOCK_SIZE": 4096,
+        "BLOCK_SIZE_TRUNC": 2048,
+        "num_warps": 4,
+    },
+}
 
 
 def get_mem_info_wrapper(
@@ -149,6 +158,14 @@ class XPUPlatform(Platform):
         # Do not import vllm._C
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
+
+    @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        from vllm.triton_utils import HAS_TRITON
+        from vllm.triton_utils.dispatcher import override_kernel_heuristics
+
+        if HAS_TRITON:
+            override_kernel_heuristics(_TRITON_XPU_KERNEL_HEURISTICS)
 
     @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
