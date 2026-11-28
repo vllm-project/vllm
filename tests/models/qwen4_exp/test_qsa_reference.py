@@ -1495,8 +1495,7 @@ def test_qsa_flashinfer_prefill_correctness(
         k_scale=k_scale,
         v_scale=v_scale,
     )
-    # FP8 Q runs the kernel's FP8 MMAs, which round beyond the FP8 inputs the
-    # reference already sees.
+    # FP8 MMAs round beyond the FP8 inputs the reference sees.
     tol = 5e-2 if fp8 else 2e-2
     torch.testing.assert_close(actual, expected.to(actual.dtype), rtol=tol, atol=tol)
 

@@ -95,11 +95,8 @@ def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
 def _check_main_outputs(
     main: dict, decode_q_out, prefill_q_out, gate_out, rope, positions
 ) -> None:
-    """Compare with fused_qk_rmsnorm_rope_gate + reshape_and_cache_flash.
-
-    FP8 prefill Q rows must match the reference cast to FP8, as the unfused
-    FlashInfer FP8 prefill path casts them.
-    """
+    """Compare with fused_qk_rmsnorm_rope_gate + reshape_and_cache_flash;
+    FP8 prefill Q against the reference cast to FP8."""
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.model_executor.layers.fused_qk_norm_rope import (
         fused_qk_rmsnorm_rope_gate,
@@ -354,8 +351,7 @@ def test_qsa_fused_prepare_matches_unfused(
     fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
     # The main-attention cache follows the recipe's pairing with the indexer.
     main = _make_main_inputs(num_tokens, indexer_dtype == torch.float8_e4m3fn)
-    # Split before the last request, as decode rows lead the batch. Without
-    # FP8 Q both buffers are views of one Q, as the attention layer passes.
+    # Decode rows lead; without FP8 Q both buffers view one Q, as in the layer.
     num_decode = num_tokens - query_lens[-1]
     main_q = torch.empty(
         num_tokens, MAIN_HQ, MAIN_D, dtype=torch.bfloat16, device=device

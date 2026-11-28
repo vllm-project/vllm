@@ -247,11 +247,10 @@ class QSAIndexer(nn.Module):
         index).
 
         With `attn.use_fused_qsa_prepare`, the same launch also writes
-        `attn`'s K/V into `main_kv_cache` at `slot_mapping` and prepares
-        its Q into `main_decode_q_out` and `main_prefill_q_out` (see
-        `qsa_prepare`) and its gate, returned as the second element (None
-        otherwise). The `main_*` inputs, `qkv` and `slot_mapping` are only
-        read in that mode.
+        `attn`'s K/V into `main_kv_cache` at `slot_mapping`, its Q into the
+        `main_*_q_out` buffers, and returns its gate as the second element
+        (None otherwise). `qkv`, `slot_mapping` and `main_*` are only read in
+        that mode.
 
         `block_indices` [num_tokens, token_topk // compress_ratio] receives
         the selected compressed blocks before expansion: each row's leading

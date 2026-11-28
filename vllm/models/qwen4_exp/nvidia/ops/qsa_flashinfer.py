@@ -19,9 +19,7 @@ GROUP_SIZE = 8
 
 
 def q_dtype(kv_dtype: torch.dtype, attention_config: AttentionConfig) -> torch.dtype:
-    """Q dtype of the FlashInfer prefill: FP8 for an FP8 cache when the
-    operator opts in to prefill query quantization (and does not disable
-    FlashInfer Q quantization), else BF16."""
+    """FlashInfer prefill Q dtype: FP8 for an opted-in FP8 cache, else BF16."""
     if (
         kv_dtype == torch.uint8
         and attention_config.use_prefill_query_quantization

@@ -233,8 +233,7 @@ def _qsa_prepare_kernel(
                 tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale))
         else:
             out = (token * MAIN_HQ + head) * MAIN_D
-            # Each Q buffer's dtype sets the cast. Unit scale for FP8: the
-            # RMS-normalized Q is far inside e4m3's range.
+            # Unit scale for FP8: normalized Q is far inside e4m3's range.
             if token < num_main_decode_tokens:
                 _store_rotated(main_decode_q_out_ptr + out, y, o1, o2, 1.0)
             else:
@@ -546,12 +545,9 @@ def qsa_prepare(
     """Normalize Q, compress K, then update the circular raw state.
 
     Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
-    and returns its gate. The main Q rows are split by position only: the
-    first `main_decode_q_out.shape[0]` rows go to `main_decode_q_out` and the
-    rest to `main_prefill_q_out`, each cast to its buffer's dtype (FP8 at unit
-    scale). Nothing here checks which rows are decodes; the names follow the
-    caller, whose batches put decode tokens first. For one contiguous Q, pass
-    two views of one buffer.
+    and returns its gate. Main Q is split by row position, not checked: the
+    first `main_decode_q_out.shape[0]` rows (the caller's decodes) go there,
+    the rest to `main_prefill_q_out`, each in its buffer's dtype.
     """
     num_tokens = q.shape[0]
     main_head_dim = main_kv_cache.shape[-1] // 2

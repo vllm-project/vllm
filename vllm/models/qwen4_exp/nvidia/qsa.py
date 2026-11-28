@@ -493,8 +493,8 @@ class Qwen4ExpQSAImpl(
     ) -> torch.Tensor:
         """Run sparse attention over the owner's indexer-selected K/V rows.
 
-        `prefill_query`, if given, is the FlashInfer prefill rows' Q in its
-        query dtype; `query` then holds only the decode rows.
+        With `prefill_query` (FlashInfer prefill Q), `query` has only the
+        decode rows.
         """
         num_tokens = attn_metadata.num_actual_tokens
         # No zero fill: the kernel writes every actual row (empty selections
@@ -550,9 +550,8 @@ class Qwen4ExpQSAImpl(
                 if prefill_query is None:
                     prefill_query = query[prefill_rows]
                     if prefill_query.dtype != query_dtype:
-                        # The unfused prepare writes BF16 Q. Unit scale: Q is
-                        # RMS-normalized, far inside e4m3's range (|Q| <= 19 on
-                        # Qwen3.8).
+                        # Unfused prepare writes BF16 Q; unit scale as in
+                        # qsa_prepare.
                         prefill_query = prefill_query.to(query_dtype)
                 assert prefill_query.dtype == query_dtype
                 qsa_sparse_paged_prefill(
@@ -1044,9 +1043,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 num_tokens, slot_mapping.shape[0]
             )
             main_kv_cache = self.impl.kv_view(resident)
-        # The fused prepare writes decode and prefill Q rows to separate
-        # buffers: for FlashInfer FP8 prefill the prefill rows go straight to
-        # FP8, else both are views of one BF16 Q.
+        # Prefill Q goes straight to FP8 for FlashInfer FP8 prefill; otherwise
+        # both buffers view one BF16 Q.
         prefill_query = None
         decode_q_out = prefill_q_out = None
         if self.use_fused_qsa_prepare:
