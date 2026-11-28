@@ -58,8 +58,9 @@ HB_NOTIF_PREFIX = "HB:"
 #      region_members and the cache group of each layer
 #  17: Export remote_blocks_expiry_time for P blocks too, plus
 #      remote_lease_extension; the consumer gates every remote read on it
+#  18: Advertise TP/PP sizes for peer topology validation
 #
-NIXL_CONNECTOR_VERSION: int = 17
+NIXL_CONNECTOR_VERSION: int = 18
 
 
 @dataclass(slots=True)
@@ -90,6 +91,10 @@ class NixlAgentMetadata:
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Actual topology sizes, checked before peer-provided values drive
+    # rank-list construction.
+    tp_size: int = 1
+    pp_size: int = 1
 
 
 @dataclass
