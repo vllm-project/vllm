@@ -1310,3 +1310,75 @@ def test_pop_blocks_for_free_trims_null_head():
     block_pool.free_blocks([null])
     assert null.ref_cnt == null_ref_cnt
     assert block_pool.get_num_free_blocks() == num_free_blocks
+
+
+@pytest.mark.parametrize("chunked", [False, True], ids=["swa", "chunked-local"])
+@pytest.mark.parametrize("tail", [2, 96], ids=["short-tail", "long-tail"])
+def test_window_admission_covers_shared_prefix_pool_usage(chunked, tail):
+    block_size = 2
+    prefix = 30
+    step = 8
+    base = AttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    if chunked:
+        cls = ChunkedLocalAttentionManager
+        layer = cls.layer_config(base, attention_chunk_size=8)
+    else:
+        cls = SlidingWindowManager
+        layer = cls.layer_config(base, sliding_window=8)
+    end = prefix + tail
+    cap = cls.max_admission_blocks(layer.manager_config, block_size, step, 256)
+    pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=block_size)
+    manager = cls(
+        new_kv_cache_group(["layer"], layer),
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        max_admission_blocks_per_request=cap,
+    )
+    init_none_hash(sha256)
+    producer = Request(
+        request_id="producer",
+        prompt_token_ids=list(range(prefix)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+    )
+    manager.allocate_new_blocks("producer", prefix, prefix)
+    manager.cache_blocks(producer, prefix, replay_boundaries=())
+    manager.remove_skipped_blocks("producer", prefix)
+    hits = list(manager.req_to_blocks["producer"])
+    assert hits[0].is_null and hits[-1].block_hash is not None
+
+    def admission(req_id, new_hits):
+        return manager.get_num_blocks_to_allocate(
+            req_id, end, new_hits, prefix, prefix, end, apply_admission_cap=True
+        )
+
+    predicted = admission("consumer", hits)
+    assert predicted > 0
+
+    # A cached reservation must survive a second owner touching a published hit.
+    parked = manager.get_inflight_window_reservation("producer", end)
+    if tail > step:
+        assert admission("producer", []) < parked
+    free_before = pool.get_num_free_blocks()
+    manager.add_local_computed_blocks("consumer", hits, prefix, 0)
+    assert pool.get_num_free_blocks() == free_before
+    assert admission("consumer", []) == predicted
+    assert admission("producer", []) == parked
+
+    peak = 0
+    for computed in range(prefix, end, step):
+        manager.remove_skipped_blocks("consumer", computed)
+        target = min(computed + step, end)
+        manager.allocate_new_blocks("consumer", target, target)
+        peak = max(peak, free_before - pool.get_num_free_blocks())
+    assert 0 < peak <= predicted
+    if tail <= step:
+        assert predicted == peak
+    manager.free("consumer")
+    manager.free("producer")
+    assert pool.get_num_free_blocks() == pool.num_gpu_blocks - 1

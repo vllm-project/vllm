@@ -54,6 +54,16 @@ $$
 
 However, in hybrid models, `num_hidden_layers` varies by attention type, which would normally produce mismatched page sizes. The cases below show how we unify them.
 
+### Reserving blocks after a prefix hit
+
+Sliding-window and chunked-local groups bound admission by the additional
+physical blocks a request can need while its remaining prefill advances. A
+long prefix can contain skipped positions with no backing block. A shared
+prefix block serves the current window, but sliding past it returns a block to
+the free pool only when the last holder releases it. For a short remaining
+prefill, the number of new slots needed through the end of the sequence can
+be smaller than the window's peak.
+
 ### Case 1: toy model
 
 Let's start with a toy example: a model has 1 full attention layer and 3 sliding window attention layers. All layers have the same `kv_hidden_size`.

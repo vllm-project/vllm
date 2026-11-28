@@ -3732,6 +3732,7 @@ class Scheduler(SchedulerInterface):
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
             prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
+            for_inflight_reservation=True,
         )
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:

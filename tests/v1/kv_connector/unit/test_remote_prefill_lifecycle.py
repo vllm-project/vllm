@@ -1194,3 +1194,54 @@ def test_deferred_lookup_does_not_block_parked_load():
         scheduler_output = scheduler.schedule()
         assert req_a.status == RequestStatus.RUNNING
         assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+def test_windowed_remote_prefills_finish_in_a_tight_pool():
+    block_size = 16
+    config = create_vllm_config(
+        block_size=block_size, max_num_batched_tokens=16 * block_size
+    )
+    scheduler = create_scheduler(
+        config,
+        num_blocks=160,
+        kv_cache_config=make_kv_cache_config(
+            block_size, swa_enabled=True, sw_size=2 * block_size, num_blocks=160
+        ),
+    )
+    requests = [
+        create_request(
+            request_id=i,
+            block_size=block_size,
+            num_tokens=80 * block_size,
+            do_remote_prefill=True,
+            max_tokens=1,
+        )
+        for i in (1, 2, 3)
+    ]
+    for req in requests:
+        scheduler.add_request(req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        return_value=(64 * block_size, True),
+    ):
+        for _ in range(2 * len(requests) + 1):
+            step = scheduler.schedule()
+            running = [r for r in requests if r.request_id in step.num_scheduled_tokens]
+            received = {
+                r.request_id
+                for r in requests
+                if r.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            }
+            # Each load leaves exactly one chunk to compute before sampling.
+            assert all(r.num_computed_tokens == r.num_tokens for r in running)
+            assert running or received
+            scheduler.update_from_output(
+                step, create_model_runner_output(running, finished_recving=received)
+            )
+            if all(r.is_finished() for r in requests):
+                break
+    assert all(r.is_finished() for r in requests)
+    scheduler.update_from_output(scheduler.schedule(), EMPTY_MODEL_RUNNER_OUTPUT)
+    assert_scheduler_empty(scheduler)

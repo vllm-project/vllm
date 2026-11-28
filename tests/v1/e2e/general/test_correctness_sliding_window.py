@@ -131,6 +131,58 @@ def test_hybrid_sliding_window_honors_user_block_size(vllm_runner):
     assert outputs[0].num_cached_tokens == block_size
 
 
+def test_shared_sliding_prefix_finishes_without_preemption(tmp_path, vllm_runner):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from vllm.v1.metrics.reader import Counter
+
+    block_size = 128
+    config = LlamaConfig(
+        vocab_size=512,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        max_position_embeddings=4096,
+        sliding_window=2 * block_size,
+        layer_types=["sliding_attention"] * 2,
+    )
+    LlamaForCausalLM(config).save_pretrained(tmp_path)
+    prefix = list(range(50, 146)) * 16
+    prompts = [{"prompt_token_ids": prefix + [i] * 1024} for i in (111, 222, 223, 224)]
+    sampling = SamplingParams(temperature=0, max_tokens=1, detokenize=False)
+
+    with vllm_runner(
+        str(tmp_path),
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        dtype="float16",
+        block_size=block_size,
+        max_model_len=2816,
+        max_num_seqs=4,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        scheduler_reserve_full_isl=True,
+        max_num_batched_tokens=2 * block_size,
+        long_prefill_token_threshold=block_size,
+        long_prefill_token_threshold_adaptive=False,
+        # One null block and five real blocks can serve one prefill to completion.
+        num_gpu_blocks_override=6,
+        disable_log_stats=False,
+        async_scheduling=False,
+    ) as runner:
+        llm = runner.get_llm()
+        llm.generate([{"prompt_token_ids": prefix + [80]}], sampling)
+        outputs = llm.generate(prompts, sampling)
+        preemptions = next(
+            m for m in llm.get_metrics() if m.name == "vllm:num_preemptions"
+        )
+        assert isinstance(preemptions, Counter)
+        assert preemptions.value == 0
+        assert all(o.num_cached_tokens == len(prefix) and o.finished for o in outputs)
+
+
 def check_length(prompts: list[str], llm: LLM, sliding_window: int):
     """Check if the prompt length is valid, i.e., longer than the sliding window
     size and shorter than the model's max length.
