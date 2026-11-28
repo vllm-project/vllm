@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-11-23
+  date_updated: 2026-11-25
   tasks:
     - text
     - multimodal
@@ -272,7 +272,6 @@ compatible_strategies:
   - multi_node_tep
   - pd_cluster
 
-
 hardware_overrides:
   blackwell: &m31_blackwell
     extra_args:
@@ -412,6 +411,127 @@ strategy_overrides:
 presets:
   # GB300 AgentX under Dynamo: aggregated TP4 workers, and DEP4 prefill
   # workers feeding one DEP decode worker. Each preset restates its engine
+  # flags, so it does not depend on the pd_cluster GB300 block above.
+  rtx_pro_6000_nvfp4_kv_tp4:
+
+    label: "NVFP4 KV (4x RTX PRO 6000)"
+
+    hardware: rtx_pro_6000
+
+    strategy: single_node_tp
+
+    variants: [default]
+
+    workload: "SM120 NVFP4 KV reader"
+
+    description: "TP4/EP4 on 4x RTX PRO 6000 Blackwell SE (96 GB, sm_120) with the Triton NVFP4 KV reader (vllm PR #67518). KV pages 72 B/token; pool 803,712 -> 1,110,528 tokens (+38.2%)."
+
+    tp: 4
+
+    args:
+
+      - "--enable-expert-parallel"
+
+      - "--kv-cache-dtype"
+
+      - "nvfp4"
+
+      - "--attention-config"
+
+      - '{"indexer_kv_dtype": "fp8"}'
+
+      - "--compilation-config"
+
+      - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+
+      - "--max-model-len"
+
+      - "1048576"
+
+      - "--max-num-batched-tokens"
+
+      - "32768"
+
+      - "--gpu-memory-utilization"
+
+      - "0.95"
+
+    env:
+
+      VLLM_ATTENTION_BACKEND: "TRITON_ATTN"
+
+      VLLM_FLOAT32_MATMUL_PRECISION: "high"
+
+    points:
+
+      c16:
+
+        label: "16"
+
+        concurrency: 16
+
+        default: true
+
+      c8:
+
+        label: "8"
+
+        concurrency: 8
+
+    runbook: |
+
+      **Measured on-site, NVFP4 KV reader vs FP8 KV (same pod, same node, only
+
+      `--kv-cache-dtype` changes; `vllm bench serve`, random dataset, LMCache
+
+      disabled on both legs, warm-up pass excluded, `--ignore-eos`):**
+
+      | point | FP8 KV | NVFP4 KV | Delta |
+
+      |---:|---:|---:|---:|
+
+      | KV pool | 803,712 tok (1.53x) | **1,110,528 tok (2.12x)** | **+38.2%** |
+
+      | C16 (512 in / 128 out) | 344.0 tok/s | **367.3 tok/s** | **+6.8%** |
+
+      | C8 (concurrency 8) | 221.5 tok/s | 230.2 tok/s | +3.9% |
+
+      | C1 (512/128) | 79.8 tok/s | 78.1 tok/s | -2.1% |
+
+      | 8k in / 64 out | 36.4 tok/s | **41.2 tok/s** | **+13.2%** |
+
+      | TTFT 8k | 5,963 ms | **3,932 ms** | **-34.1%** |
+
+      | prefill 32k - TTFT | 6,054 ms | **5,451 ms** | -10.0% |
+
+      | prefill 128k - TTFT | 24,795 ms | **22,058 ms** | -11.0% |
+
+      | ITL C8 / C16 | 54.5 / 67.2 ms | **52.8 / 62.7 ms** | -3.1 / -6.7% |
+
+Nothing in this preset
+
+      is bolted on: the reader is the numerically validated Triton kernel (cosine
+
+      0.9977 vs exact NVFP4 dequantization) and the same engine also serves TP=8
+
+      (2,900,992-token pool = 2.77 concurrent 1M requests; needs the gate move in
+
+      PR #67518).
+
+      **LMCache offload caveat.** The connector cannot copy the 72-byte NVFP4 pages
+
+      (see [LMCache#6617](https://github.com/LMCache/LMCache/issues/6617)); its two
+
+      fixes plus `"kv_load_failure_policy": "recompute"` are needed before enabling
+
+      KV offload here.
+
+      **Kernels + harness:** [Vincent-PRO-AI/vllm-minimax-sm120-nvfp4](https://github.com/Vincent-PRO-AI/vllm-minimax-sm120-nvfp4).
+
+  # GB300 AgentX under Dynamo: aggregated TP4 workers, and DEP4 prefill
+
+  # workers feeding one DEP decode worker. Each preset restates its engine
+
   # flags, so it does not depend on the pd_cluster GB300 block above.
   gb300_agentx_agg:
     label: "AgentX TP4 (Dynamo)"
