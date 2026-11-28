@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 import transformers
+from packaging.version import Version
 from torch.nn.utils.rnn import pad_sequence
 
 import vllm.envs as envs
@@ -88,6 +89,9 @@ _MAX_FRAMES_PER_VIDEO = 16
 _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
 _MIN_DUMMY_SIDE = 224
+# Transformers >= 5.23 no longer writes the kwargs of `_get_num_multimodal_tokens` into
+# the processor class's defaults, where a request's kwargs would stay for later requests
+_COUNT_TAKES_REQUEST_KWARGS = Version(transformers.__version__) >= Version("5.23.0")
 
 
 def _get_embed_token_id(
@@ -927,6 +931,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         hf_inputs: "BatchFeature",
         mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
         num_images: int,
     ) -> torch.Tensor:
         """How many rows of the image fields belong to each image.
@@ -936,7 +941,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         """
         if (grid := hf_inputs.get("image_grid_thw")) is not None:
             num_patches = grid.prod(-1)
-        elif (counts := self._get_num_patches_per_image(mm_data)) is not None:
+        elif (
+            counts := self._get_num_patches_per_image(mm_data, mm_kwargs)
+        ) is not None:
             num_patches = torch.tensor(counts)
         else:
             num_patches = torch.ones(num_images, dtype=torch.long)
@@ -957,16 +964,18 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         return num_patches
 
     def _get_num_patches_per_image(
-        self, mm_data: Mapping[str, object]
+        self, mm_data: Mapping[str, object], mm_kwargs: Mapping[str, object]
     ) -> list[int] | None:
         """Ask the HF processor how many rows of image data each image produces."""
         images = mm_data.get("images")
         if not isinstance(images, Iterable) or not images:
             return None
+        if not _COUNT_TAKES_REQUEST_KWARGS:
+            mm_kwargs = {}
         try:
             sizes = [(image.height, image.width) for image in images]
             mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
-                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
+                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
             )
             return list(mm_tokens["num_image_patches"])
         except (AttributeError, KeyError, TypeError):
@@ -1101,7 +1110,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
             if modality == "image":
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
-                    hf_inputs, hf_data, len(seqs)
+                    hf_inputs, hf_data, hf_kwargs, len(seqs)
                 )
             elif modality == "audio":
                 hf_inputs["num_audio_tokens"] = _count_embed_tokens(

@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import transformers
+from packaging.version import Version
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -276,6 +278,36 @@ def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
         hf_processor_mm_kwargs={},
     )
     assert result["prompt_token_ids"] == hf_ids
+
+
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0"),
+    reason="Earlier versions count with the server's kwargs only",
+)
+def test_image_rows_counted_with_request_kwargs():
+    """Each image's rows are counted with the request's processor kwargs, which here
+    resize SmolVLM's images before they are split into tiles."""
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(
+            model="HuggingFaceTB/SmolVLM-256M-Instruct", model_impl="transformers"
+        )
+    )
+    image = ImageAsset("cherry_blossom").pil_image
+    result = mm_processor(
+        prompt="<image><image>",
+        mm_items=mm_processor.info.parse_mm_data(
+            {"image": [image, image.resize((200, 600))]}
+        ),
+        hf_processor_mm_kwargs={"size": {"longest_edge": 1024}},
+    )
+
+    rows = []
+    for item in result["mm_kwargs"]["image"]:
+        assert item is not None
+        pixel_values = item["pixel_values"].data
+        assert isinstance(pixel_values, torch.Tensor)
+        rows.append(pixel_values.shape[1])
+    assert rows == [5, 3]
 
 
 def test_nested_image_fields_split_per_image():
