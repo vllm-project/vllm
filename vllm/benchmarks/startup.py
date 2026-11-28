@@ -125,6 +125,7 @@ def cold_startup():
 
     # Use temporary directory for caching to avoid any pollution between cold startups
     original_cache_root = os.environ.get("VLLM_CACHE_ROOT")
+    original_compile_cache_root = os.environ.pop("VLLM_COMPILE_CACHE_ROOT", None)
     temp_cache_dir = tempfile.mkdtemp(prefix="vllm_startup_bench_cold_")
     try:
         os.environ["VLLM_CACHE_ROOT"] = temp_cache_dir
@@ -137,6 +138,8 @@ def cold_startup():
             os.environ["VLLM_CACHE_ROOT"] = original_cache_root
         else:
             os.environ.pop("VLLM_CACHE_ROOT", None)
+        if original_compile_cache_root:
+            os.environ["VLLM_COMPILE_CACHE_ROOT"] = original_compile_cache_root
 
 
 def run_startup_in_subprocess(engine_args, result_queue):

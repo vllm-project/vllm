@@ -46,6 +46,7 @@ from ..utils import create_new_process_for_each_test
 def vllm_tmp_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Fixture that sets VLLM_CACHE_ROOT to a temporary directory."""
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
+    monkeypatch.delenv("VLLM_COMPILE_CACHE_ROOT", raising=False)
     return tmp_path
 
 
@@ -987,7 +988,11 @@ def graph_cache_probe(tmp_path):
     def run(offset, *, standalone="1", native=""):
         private = Path(tempfile.mkdtemp(dir=tmp_path))
         env = os.environ.copy()
-        for key in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
+        for key in (
+            "TORCHINDUCTOR_CACHE_DIR",
+            "TRITON_CACHE_DIR",
+            "VLLM_COMPILE_CACHE_ROOT",
+        ):
             env.pop(key, None)
         for key in ("HOME", "TMPDIR", "XDG_CACHE_HOME"):
             directory = private / key

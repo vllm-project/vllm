@@ -95,8 +95,8 @@ _CACHE_REMEDY = "recreate the snapshot or restore with the same cache state"
 def _generated_cache_prefixes() -> tuple[str, ...]:
     """Path prefixes of the generated caches an engine process keeps open.
 
-    vLLM redirects Inductor and Triton under `VLLM_CACHE_ROOT` when it
-    compiles, but a process can still hold their upstream defaults open.
+    vLLM redirects Inductor and Triton under `VLLM_COMPILE_CACHE_ROOT` when
+    it compiles, but a process can still hold their upstream defaults open.
     A cache root is resolved and separator-terminated so that it still matches
     the kernel-canonical descriptor targets under a symlinked root, and so that
     a sibling directory sharing its name does not. Inductor's default location
@@ -109,6 +109,7 @@ def _generated_cache_prefixes() -> tuple[str, ...]:
         f"{os.path.realpath(os.path.expanduser(root)).rstrip(os.sep)}{os.sep}"
         for root in (
             envs.VLLM_CACHE_ROOT,
+            envs.VLLM_COMPILE_CACHE_ROOT,
             os.environ.get("TRITON_CACHE_DIR") or "~/.triton/cache",
             os.environ.get("FLASHINFER_CACHE_DIR") or "~/.cache/flashinfer",
             # torch's hummingbird launcher cache: the compiled launcher is

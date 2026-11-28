@@ -585,7 +585,7 @@ class InductorAdaptor(CompilerInterface):
                     "likely reason for this is that a previous compilation "
                     "failed, leading to a corrupted compilation artifact. "
                     "We recommend trying to "
-                    "remove ~/.cache/vllm/torch_compile_cache and try again "
+                    f"remove {envs.VLLM_COMPILE_CACHE_ROOT} and try again "
                     "to see the real issue. "
                 )
             assert file_path is not None, (

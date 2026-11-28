@@ -1951,6 +1951,48 @@ def use_fresh_inductor_cache():
         yield
 
 
+# Compilation rewrites these in os.environ (compiler_interface.py,
+# decorators.py), so one test's cache directories would reach the next.
+_COMPILE_CACHE_ENV = ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR", "DG_JIT_CACHE_DIR")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def session_compile_cache():
+    """Keep engines built by module- and session-scoped fixtures off the
+    persistent torch.compile cache, and remember the compile-related
+    environment as it was before any test ran."""
+    envs.disable_envs_cache()
+    original_env = {key: os.environ.get(key) for key in _COMPILE_CACHE_ENV}
+    with (
+        pytest.MonkeyPatch.context() as mp,
+        tempfile.TemporaryDirectory() as compile_cache_root,
+    ):
+        mp.setenv("VLLM_COMPILE_CACHE_ROOT", compile_cache_root)
+        yield compile_cache_root, original_env
+    envs.disable_envs_cache()
+
+
+@pytest.fixture(autouse=True)
+def isolated_compile_cache(monkeypatch, session_compile_cache):
+    """Give every test its own torch.compile cache.
+
+    Set through the environment so EngineCore and worker processes inherit it.
+    The compile-related environment is restored first, so a directory a
+    previous test compiled into does not leak into this one.
+    """
+    _, original_env = session_compile_cache
+    for key, value in original_env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    envs.disable_envs_cache()
+    with tempfile.TemporaryDirectory() as compile_cache_root:
+        monkeypatch.setenv("VLLM_COMPILE_CACHE_ROOT", compile_cache_root)
+        yield compile_cache_root
+    envs.disable_envs_cache()
+
+
 @pytest.fixture
 def disable_vllm_compile_cache(monkeypatch, use_fresh_inductor_cache):
     """
@@ -1972,6 +2014,7 @@ def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
     """Temporary VLLM_CACHE_ROOT combined with a fresh inductor cache."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         monkeypatch.setenv("VLLM_CACHE_ROOT", tmp_dir)
+        monkeypatch.delenv("VLLM_COMPILE_CACHE_ROOT", raising=False)
         yield tmp_dir
 
 
