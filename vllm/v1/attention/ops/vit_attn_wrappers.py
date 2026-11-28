@@ -11,7 +11,8 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
-from typing import Any
+from functools import cache
+from typing import TYPE_CHECKING, Any
 
 import einops
 import torch
@@ -22,6 +23,35 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
+
+if TYPE_CHECKING:
+    from vllm.vllm_flash_attn.cute.config import FwdConfig
+
+
+@cache
+def _get_fixed_fa4_config() -> "FwdConfig":
+    from vllm.vllm_flash_attn.cute.config import FwdConfig, Sm100Registers
+
+    return FwdConfig(
+        device_capacity=10,
+        tile_m=128,
+        tile_n=128,
+        mma_pv_is_rs=False,
+        intra_wg_overlap=False,
+        q_stage=1,
+        pack_gqa=False,
+        use_clc_scheduler=False,
+        is_static_persistent=False,
+        use_tma_o=False,
+        use_s_ping_pong=False,
+        num_splits=1,
+        use_2cta_instrs=False,
+        registers=Sm100Registers(softmax=200, correction=64, other=48),
+        ex2_emu_freq=16,
+        ex2_emu_start_frg=1,
+        overlap_sO_sQ=False,
+        kv_stage=12,
+    )
 
 
 def flash_attn_maxseqlen_wrapper(
@@ -34,6 +64,7 @@ def flash_attn_maxseqlen_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    use_fixed_fa4_config: bool = False,
 ) -> torch.Tensor:
     kwargs: dict[str, Any] = {}
     if is_rocm_aiter:
@@ -70,19 +101,24 @@ def flash_attn_maxseqlen_wrapper(
             )
         else:
             kwargs["out"] = torch.empty_like(q, memory_format=torch.contiguous_format)
-    output = flash_attn_varlen_func(
-        q,
-        k,
-        v,
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=max_seqlen,
-        max_seqlen_k=max_seqlen,
-        dropout_p=0.0,
-        causal=False,
-        softmax_scale=scale,
-        **kwargs,
-    )
+    varlen_kwargs = {
+        "cu_seqlens_q": cu_seqlens,
+        "cu_seqlens_k": cu_seqlens,
+        "max_seqlen_q": max_seqlen,
+        "max_seqlen_k": max_seqlen,
+        "causal": False,
+        "softmax_scale": scale,
+    }
+    if use_fixed_fa4_config:
+        from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
+
+        output, *_ = _flash_attn_fwd(
+            q, k, v, out=kwargs["out"], config=_get_fixed_fa4_config(), **varlen_kwargs
+        )
+    else:
+        output = flash_attn_varlen_func(
+            q, k, v, dropout_p=0.0, **varlen_kwargs, **kwargs
+        )
     if not supports_out:
         output = output.contiguous()
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
@@ -99,6 +135,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    use_fixed_fa4_config: bool = False,
 ) -> torch.Tensor:
     return torch.empty_like(q, memory_format=torch.contiguous_format)
 
@@ -120,6 +157,7 @@ def vit_flash_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    use_fixed_fa4_config: bool = False,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
         q,
@@ -131,6 +169,7 @@ def vit_flash_attn_wrapper(
         scale,
         cu_seqlens,
         max_seqlen,
+        use_fixed_fa4_config,
     )
 
 

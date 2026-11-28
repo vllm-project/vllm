@@ -483,6 +483,7 @@ class Qwen3_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            supports_fixed_fa4_config=True,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,

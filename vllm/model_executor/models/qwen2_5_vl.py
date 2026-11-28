@@ -325,6 +325,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        supports_fixed_fa4_config: bool = False,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -366,6 +368,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
+            supports_fixed_fa4_config=supports_fixed_fa4_config,
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
