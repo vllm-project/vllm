@@ -4,6 +4,12 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES, Apache-2.0.
 """DeepSeek-V4.1 shifted mHC boundary for decode-size batches (CuTe DSL).
 
+Runs on SM100 and on SM90 (sm_90a). The only Blackwell-only instructions, packed
+`f32x2` FMA/MUL, become pairs of scalar `fma.rn[.ftz].f32` / `mul.rn[.ftz].f32` on
+SM90, which round identically element by element; everything else (mma.sync BF16,
+ldmatrix, bulk copies with mbarriers, `st.async` to distributed shared memory,
+16-CTA clusters, PDL) exists on sm_90a.
+
 The hidden dimension is split into 16 slices. For every token, a slice's CTA updates its
 part of the residual stream, collapses it with the lagged pre-mix, and multiplies the
 updated residual with its slice of the mixer weight on BF16 tensor cores. The weight is
@@ -20,6 +26,7 @@ order, so results are deterministic.
 """
 
 from collections.abc import Callable
+from functools import cache
 
 import cutlass
 import cutlass.cute as cute
@@ -30,6 +37,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.utils import SmemAllocator
 
 from vllm.cute_utils.cvt import fp32x2_to_bf16x2
+from vllm.platforms import current_platform
 
 CLUSTER = 16
 # Two CTAs of 320 threads (96 registers each) and at most ~110 KB of shared memory share
@@ -332,6 +340,58 @@ def mma_bf16(a, b, c, *, loc=None, ip=None):
     return _fields(out, 4, T.f32(), Float32, loc, ip)
 
 
+@cache
+def _packed_f32x2() -> bool:
+    """Packed `f32x2` FMA/MUL exist from SM100 on; SM90 uses scalar pairs."""
+    return current_platform.is_device_capability_family(100)
+
+
+@dsl_user_op
+def _f32_op3(name, a, b, c, *, loc=None, ip=None):
+    return Float32(
+        _asm(
+            T.f32(),
+            [Float32(a), Float32(b), Float32(c)],
+            f"{name} $0, $1, $2, $3;",
+            "=f,f,f,f",
+            side_effects=False,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def _f32_op2(name, a, b, *, loc=None, ip=None):
+    return Float32(
+        _asm(
+            T.f32(),
+            [Float32(a), Float32(b)],
+            f"{name} $0, $1, $2;",
+            "=f,f,f",
+            side_effects=False,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+def fma2(a, b, c, ftz=False):
+    """`fma.rn[.ftz].f32x2`, or two scalar `fma.rn[.ftz].f32` on SM90."""
+    if _packed_f32x2():
+        return cute.arch.fma_packed_f32x2(a, b, c, ftz=ftz)
+    name = "fma.rn.ftz.f32" if ftz else "fma.rn.f32"
+    return tuple(_f32_op3(name, a[i], b[i], c[i]) for i in range(2))
+
+
+def mul2(a, b, ftz=False):
+    """`mul.rn[.ftz].f32x2`, or two scalar `mul.rn[.ftz].f32` on SM90."""
+    if _packed_f32x2():
+        return cute.arch.mul_packed_f32x2(a, b, ftz=ftz)
+    name = "mul.rn.ftz.f32" if ftz else "mul.rn.f32"
+    return tuple(_f32_op2(name, a[i], b[i]) for i in range(2))
+
+
 @dsl_user_op
 def rcp(x, *, loc=None, ip=None):
     """IEEE reciprocal of a normal input: the fast path of rcp.rn.f32 without its
@@ -390,11 +450,9 @@ def residual_update(pw, cm, xw, rw):
     for s in range(MULT):
         words = []
         for p in range(4):
-            nu = cute.arch.mul_packed_f32x2((pw[s], pw[s]), xf[p], ftz=True)
+            nu = mul2((pw[s], pw[s]), xf[p], ftz=True)
             for j in range(MULT):
-                nu = cute.arch.fma_packed_f32x2(
-                    (cm[j][s], cm[j][s]), rf[j][p], nu, ftz=True
-                )
+                nu = fma2((cm[j][s], cm[j][s]), rf[j][p], nu, ftz=True)
             words.append(fp32x2_to_bf16x2(nu[0], nu[1]))
         cur.append(words)
     return cur
@@ -408,12 +466,12 @@ def lagged_collapse(cur, pre, ssq_rc, ssq_li):
         acc = (Float32(0.0), Float32(0.0))
         for j in range(MULT):
             v = (bf16x2_lo(cur[j][p]), bf16x2_hi(cur[j][p]))
-            ssq_rc = cute.arch.fma_packed_f32x2(v, v, ssq_rc)
-            acc = cute.arch.fma_packed_f32x2((pre[j], pre[j]), v, acc)
+            ssq_rc = fma2(v, v, ssq_rc)
+            acc = fma2((pre[j], pre[j]), v, acc)
         word = fp32x2_to_bf16x2(acc[0], acc[1])
         li.append(word)
         v = (bf16x2_lo(word), bf16x2_hi(word))
-        ssq_li = cute.arch.fma_packed_f32x2(v, v, ssq_li)
+        ssq_li = fma2(v, v, ssq_li)
     return li, ssq_rc, ssq_li
 
 
