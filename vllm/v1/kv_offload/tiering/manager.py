@@ -152,6 +152,9 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         # Chunks of failed writes the writer may still be filling; their
         # release to the free pool is deferred until release_deferred_write().
         self._deferred_release_chunk_ids: set[int] = set()
+        # Chunks held for requests that started a promotion, released when the
+        # request loads them or finishes. Held chunks are not evictable.
+        self._held_keys: dict[str, set[OffloadKey]] = {}
 
         self._kv_memoryview = mmap_region.create_kv_memoryview()
 
@@ -159,7 +162,42 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
         """Prepare a secondary-to-primary write. It has no store trigger."""
+        self._held_keys.setdefault(req_context.req_id, set())
         return self._prepare_store(keys, req_context)
+
+    def hold(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
+        """Hold ready chunks for a request that started a promotion."""
+        held = self._held_keys.get(req_context.req_id)
+        if held is None:
+            return
+        for key in keys:
+            chunk = self._policy.get(key)
+            if key in held or chunk is None or not chunk.is_ready:
+                continue
+            if chunk.ref_cnt == 0:
+                self._policy.mark_non_evictable(key)
+                self._num_evictable_cache_chunks -= 1
+            chunk.ref_cnt += 1
+            held.add(key)
+
+    @override
+    def prepare_load(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> LoadStoreSpec:
+        spec = super().prepare_load(keys, req_context)
+        held = self._held_keys.get(req_context.req_id)
+        if held:
+            loaded = held.intersection(keys)
+            held.difference_update(loaded)
+            self.complete_load(loaded, req_context)
+        return spec
+
+    @override
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        held = self._held_keys.pop(req_context.req_id, None)
+        if held:
+            self.complete_load(held, req_context)
+        super().on_request_finished(req_context)
 
     def complete_write(
         self,
@@ -169,6 +207,8 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     ) -> None:
         """Complete a secondary-to-primary write."""
         self._complete_store(keys, req_context, success)
+        if success:
+            self.hold(keys, req_context)
 
     def prepare_read(
         self, keys: Collection[OffloadKey], req_context: ReqContext
@@ -226,6 +266,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         assert not self._deferred_release_chunk_ids, (
             "reset_cache with deferred-release chunks: a tier may still write to them"
         )
+        self._held_keys.clear()
         super().reset_cache()
 
     def get_kv_memoryview(self) -> memoryview:
@@ -763,6 +804,7 @@ class TieringOffloadingManager(OffloadingManager):
             lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
+            self.primary_tier.hold((key,), req_context)
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING

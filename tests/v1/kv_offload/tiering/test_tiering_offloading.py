@@ -1015,6 +1015,57 @@ class TestTieringOffloadingManager:
             == 1
         )
 
+    def test_promoting_requests_hold_their_chunks(self, manager_setup):
+        """Promotions and stores never evict a chunk that a request waiting on
+        a promotion has found or promoted, and finishing releases them."""
+        waiting = [
+            (ReqContext(req_id="waiting-a"), to_keys(range(0, 2))),
+            (ReqContext(req_id="waiting-b"), to_keys(range(2, 4))),
+        ]
+        for ctx, keys in waiting:
+            for i, key in enumerate(keys):
+                ctx.set_offload_key_position(key, (i + 1) * 16)
+                self.secondary_tier1.chunks[key] = True
+            self._start_request(ctx)
+
+        def promote(ctx: ReqContext, key: OffloadKey) -> None:
+            assert self.manager.lookup(key, ctx) is LookupResult.HIT_PENDING
+            self._simulate_on_schedule_end()
+            self._simulate_on_schedule_end()
+
+        def store(req_id: str, keys: list[OffloadKey]) -> None:
+            ctx = ReqContext(req_id=req_id)
+            self._start_request(ctx)
+            trigger = StoreTrigger.ON_COMPUTE
+            assert self.manager.prepare_store(keys, ctx, trigger=trigger) is not None
+            self.manager.complete_store(keys, ctx, trigger=trigger, success=True)
+            self.manager.on_request_finished(ctx)
+            self._simulate_on_schedule_end()
+            self._simulate_on_schedule_end()
+
+        for ctx, keys in waiting:
+            promote(ctx, keys[0])
+        # Chunks of a request that finishes later rank as more recent than
+        # the waiting requests' chunks.
+        store("finished", to_keys(range(10, 13)))
+        for ctx, keys in waiting:
+            promote(ctx, keys[1])
+        store("stored-later", to_keys(range(20, 21)))
+
+        for ctx, keys in waiting:
+            assert all(
+                self.primary_tier.lookup(key, ctx) is LookupResult.HIT for key in keys
+            )
+
+        # Finished requests release their chunks for eviction.
+        for ctx, _ in waiting:
+            self.manager.on_request_finished(ctx)
+        ctx = ReqContext(req_id="after")
+        self._start_request(ctx)
+        keys = to_keys(range(30, 35))
+        out = self.manager.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+        assert out is not None and len(out.keys_to_store) == len(keys)
+
     def test_partial_lookup(self, manager_setup):
         """Test lookup with partial hits."""
         chunks = to_keys(range(5))
