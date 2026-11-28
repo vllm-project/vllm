@@ -61,12 +61,13 @@ def _hc_two_stage_combine_and_mix(
     injection: torch.Tensor,
     norm_weight: torch.Tensor,
     w_down_inject: torch.Tensor,
-    w_down_inject_folded: torch.Tensor,
+    w_down_inject_skinny: torch.Tensor,
     w_up: torch.Tensor,
     eps: float,
     hc_count: int,
     hc_lowrank: int,
     max_tokens: int,
+    fold_w: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # The graph is compiled for a symbolic token count, so the choice between
     # the skinny decode kernels and the Triton chain has to be made here.
@@ -76,11 +77,12 @@ def _hc_two_stage_combine_and_mix(
             block_output=block_output,
             injection=injection,
             norm_weight=norm_weight,
-            w_down_inject_folded=w_down_inject_folded,
+            w_down_inject=w_down_inject_skinny,
             w_up=w_up,
             hc_count=hc_count,
             hc_lowrank=hc_lowrank,
             eps=eps,
+            fold_w=fold_w,
         )
 
     out, xn = _hc_combine_norm(
@@ -99,12 +101,13 @@ def _hc_two_stage_combine_and_mix_fake(
     injection: torch.Tensor,
     norm_weight: torch.Tensor,
     w_down_inject: torch.Tensor,
-    w_down_inject_folded: torch.Tensor,
+    w_down_inject_skinny: torch.Tensor,
     w_up: torch.Tensor,
     eps: float,
     hc_count: int,
     hc_lowrank: int,
     max_tokens: int,
+    fold_w: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Both paths return the injection as a column slice of the down output,
     # and Inductor checks the real strides against these.
@@ -142,7 +145,7 @@ class GatedResidual(nn.Module):
     standard quant_method mechanism.
     """
 
-    w_down_inject_folded: torch.Tensor
+    w_down_inject_folded: torch.Tensor | None
 
     def __init__(
         self,
@@ -206,14 +209,16 @@ class GatedResidual(nn.Module):
             return_bias=False,
         )
 
-        # The two-stage skinny decode kernels need the norm affine folded into
-        # the down+inject weight; process_weights_after_loading fills it.
-        # Under VLLM_BATCH_INVARIANT this stays off, because the token-count
-        # dispatch in the op would make outputs depend on batch size. The
-        # kernels take only bf16 weights and activations.
+        # AITER releases without SKINNY_DECODE_UNFOLDED need the norm affine
+        # folded into a copy of the down+inject weight, which
+        # process_weights_after_loading fills. Under VLLM_BATCH_INVARIANT
+        # this stays off, because the token-count dispatch in the op would
+        # make outputs depend on batch size. The kernels take only bf16
+        # weights and activations.
         model_config = get_current_vllm_config().model_config
         act_dtype = config.params_dtype if model_config is None else model_config.dtype
         self.hc_two_stage_max_tokens = 0
+        self.register_buffer("w_down_inject_folded", None, persistent=False)
         if (
             use_combine
             and not envs.VLLM_BATCH_INVARIANT
@@ -224,7 +229,15 @@ class GatedResidual(nn.Module):
             self.hc_two_stage_max_tokens = rocm_aiter_ops.hc_two_stage_max_tokens(
                 self.hyper_hidden_size, down_rows, self.hc_count, self.hc_lowrank
             )
-            if self.hc_two_stage_max_tokens:
+            if (
+                self.hc_two_stage_max_tokens
+                and not rocm_aiter_ops.hc_two_stage_takes_unfolded_weight()
+            ):
+                logger.warning_once(
+                    "AITER does not export SKINNY_DECODE_UNFOLDED; keeping a "
+                    "norm-folded copy of each HC down+inject weight. AITER with "
+                    "ROCm/aiter#8087 removes this copy."
+                )
                 self.register_buffer(
                     "w_down_inject_folded",
                     torch.empty(
@@ -232,6 +245,7 @@ class GatedResidual(nn.Module):
                     ),
                     persistent=False,
                 )
+            if self.hc_two_stage_max_tokens:
                 logger.info_once(
                     "Using AITER FlyDSL two-stage HC combine_and_mix for <= %d tokens.",
                     self.hc_two_stage_max_tokens,
@@ -250,7 +264,7 @@ class GatedResidual(nn.Module):
     # fp32 intermediates alive through the buffer's autograd graph.
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        if self.hc_two_stage_max_tokens:
+        if self.w_down_inject_folded is not None:
             w_down_inject = self.input_mix_weight_down_block_inject.weight
             assert isinstance(w_down_inject, torch.Tensor)
             self.w_down_inject_folded.copy_(
@@ -305,18 +319,21 @@ class GatedResidual(nn.Module):
                 self.input_mix_weight_down_block_inject, MergedColumnParallelLinear
             )
         ):
+            w_down_inject = self.input_mix_weight_down_block_inject.weight
+            folded = self.w_down_inject_folded
             return torch.ops.vllm.qwen4_exp_hc_two_stage_combine_and_mix(
                 hidden_states,
                 prev_block_output,
                 prev_injection,
                 self.hc_norm.weight,
-                self.input_mix_weight_down_block_inject.weight,
-                self.w_down_inject_folded,
+                w_down_inject,
+                w_down_inject if folded is None else folded,
                 self.input_mix_weight_up.weight,
                 self.config.rms_norm_eps,
                 self.hc_count,
                 self.hc_lowrank,
                 self.hc_two_stage_max_tokens,
+                folded is not None,
             )
 
         hidden_states, xn = hc_combine_norm(

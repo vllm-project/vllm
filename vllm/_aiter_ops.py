@@ -3014,11 +3014,20 @@ class rocm_aiter_ops:
         return min(DECODE_MAX_M, cls._HC_TWO_STAGE_MAX_TOKENS)
 
     @staticmethod
+    def hc_two_stage_takes_unfolded_weight() -> bool:
+        """Whether the two-stage skinny decode kernels apply the GemmaRMSNorm
+        `(1 + w)` themselves, so the merged weight needs no folded copy."""
+        from aiter.ops.flydsl.kernels.hyper_connection_gated_residual import k1
+
+        return getattr(k1, "SKINNY_DECODE_UNFOLDED", False)
+
+    @staticmethod
     def hc_fold_norm_weight(
         w_down_inject: torch.Tensor, norm_weight: torch.Tensor, hc_count: int
     ) -> torch.Tensor:
         """Bake the grouped GemmaRMSNorm `(1 + w)` into the merged down+inject
-        weight, which the two-stage skinny decode kernels require."""
+        weight, which the two-stage skinny decode kernels need unless
+        `hc_two_stage_takes_unfolded_weight()`."""
         from aiter.ops.flydsl.kernels.hyper_connection_gated_residual import (
             fold_norm_weight,
         )
@@ -3033,16 +3042,18 @@ class rocm_aiter_ops:
         block_output: torch.Tensor,
         injection: torch.Tensor,
         norm_weight: torch.Tensor,
-        w_down_inject_folded: torch.Tensor,
+        w_down_inject: torch.Tensor,
         w_up: torch.Tensor,
         hc_count: int,
         hc_lowrank: int,
         eps: float,
+        fold_w: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Combine a pending block output into the HC streams, then mix them.
 
+        With `fold_w`, `w_down_inject` must come from `hc_fold_norm_weight`.
         Returns `(residual, block_input, injection)`. The injection is a
-        column slice of a `[tokens, w_down_inject_folded.shape[0]]` buffer.
+        column slice of a `[tokens, w_down_inject.shape[0]]` buffer.
         """
         from aiter.ops.flydsl.kernels.hyper_connection_gated_residual import (
             flydsl_gr_two_stage_combine_and_mix,
@@ -3053,13 +3064,13 @@ class rocm_aiter_ops:
             block_output=block_output,
             injection=injection,
             norm_weight=norm_weight,
-            w_down=w_down_inject_folded[:hc_lowrank],
+            w_down=w_down_inject[:hc_lowrank],
             w_up=w_up,
-            w_inject=w_down_inject_folded[hc_lowrank : hc_lowrank + hc_count],
+            w_inject=w_down_inject[hc_lowrank : hc_lowrank + hc_count],
             hc_count=hc_count,
             eps=eps,
-            w_down_merged=w_down_inject_folded,
-            fold_w=True,
+            w_down_merged=w_down_inject,
+            fold_w=fold_w,
         )
 
     @classmethod
