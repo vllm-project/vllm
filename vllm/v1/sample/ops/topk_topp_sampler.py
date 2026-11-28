@@ -334,7 +334,7 @@ def apply_top_k_top_p_cpu(
 
 def flashinfer_sample(
     logits: torch.Tensor,
-    k: torch.Tensor | None,
+    k: torch.Tensor | int | None,
     p: torch.Tensor | None,
     generators: dict[int, torch.Generator] = {},  # noqa
 ) -> torch.Tensor:
