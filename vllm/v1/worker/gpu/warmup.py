@@ -13,6 +13,7 @@ from vllm import PoolingParams, SamplingParams
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -110,16 +111,20 @@ def _warmup_block_counter(
     return block_count
 
 
+def _num_draft_slots(model_runner: GPUModelRunner) -> int:
+    """Token budget the scheduler reserves per request for drafting."""
+    spec_config = model_runner.speculative_config
+    return spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
+
+
 def _cap_num_warmup_reqs(
     model_runner: GPUModelRunner, num_reqs: int, num_tokens_per_req: int
 ) -> int:
     """Limit synthetic requests to the scheduler's token budget."""
-    spec_config = model_runner.speculative_config
-    num_draft_slots = (
-        spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
-    )
     return min(
-        num_reqs, model_runner.max_num_tokens // (num_tokens_per_req + num_draft_slots)
+        num_reqs,
+        model_runner.max_num_tokens
+        // (num_tokens_per_req + _num_draft_slots(model_runner)),
     )
 
 
@@ -162,6 +167,16 @@ def _fixed_draft_counts(model_runner: GPUModelRunner) -> Iterator[None]:
             rejection_sampler.enable_adaptive_verification = True
 
 
+def _pack_prefill_lens(num_tokens: int, num_prompts: int, max_len: int) -> list[int]:
+    """Lengths of `num_prompts` prompts of at least one token each, the rest of
+    `num_tokens` filling the first ones up to `max_len` each."""
+    num_extra = num_tokens - num_prompts
+    return [
+        1 + min(max_len - 1, max(num_extra - i * (max_len - 1), 0))
+        for i in range(num_prompts)
+    ]
+
+
 def run_mixed_prefill_decode_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -172,12 +187,15 @@ def run_mixed_prefill_decode_warmup(
     req_id_prefix: str = "_v2_mixed_warmup",
     prompt_logprobs: int | None = None,
     prefill_only_fallback: bool = False,
+    num_prefill_reqs: int | None = None,
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs,
     requesting prompt_logprobs on the prefill requests.
 
     Prefill tokens beyond what one request can hold (max_model_len - 1) are
-    split across further prefill requests, up to max_num_reqs. If
+    split across further prefill requests, up to max_num_reqs. With
+    num_prefill_reqs, up to that many prefill requests the token budget admits
+    hold a token each, and the rest of the tokens fill the first ones. If
     prefill_only_fallback, the prefills run alone when request slots rather
     than tokens limit them, including on a runner limited to one request.
     """
@@ -186,34 +204,47 @@ def run_mixed_prefill_decode_warmup(
         return False
 
     max_prefill_len = model_runner.max_model_len - 1
+    fewest_prefills = num_prefill_reqs is None
     # The decode request verifies a full set of drafts, as in serving: some
     # backends allocate their largest decode workspace only to verify.
     num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens
     decode_query_len = model_runner.decode_query_len if num_spec_steps else 1
+    num_draft_slots = _num_draft_slots(model_runner)
     if with_decode and prefill_only_fallback:
         # The decode request takes a slot a further prefill could fill.
-        with_decode = (
+        num_requested = (
             cdiv(num_tokens - decode_query_len, max_prefill_len)
-            < model_runner.max_num_reqs
+            if num_prefill_reqs is None
+            else num_prefill_reqs
         )
+        with_decode = num_requested < model_runner.max_num_reqs
     num_decode_reqs = int(with_decode)
     decode_scheduled_tokens = num_decode_reqs * decode_query_len
+    if num_prefill_reqs is None:
+        num_prefill_reqs = cdiv(num_tokens - decode_scheduled_tokens, max_prefill_len)
+    else:
+        # As the scheduler admits them: a token and its draft slots each.
+        num_prefill_reqs = min(
+            num_prefill_reqs,
+            (
+                model_runner.max_num_tokens
+                - num_decode_reqs * (decode_query_len + num_draft_slots)
+            )
+            // (1 + num_draft_slots),
+        )
     num_prefill_reqs = min(
-        cdiv(num_tokens - decode_scheduled_tokens, max_prefill_len),
-        model_runner.max_num_reqs - num_decode_reqs,
+        num_prefill_reqs, model_runner.max_num_reqs - num_decode_reqs
     )
     num_warmup_reqs = num_decode_reqs + num_prefill_reqs
     num_tokens = min(
         num_tokens, decode_scheduled_tokens + num_prefill_reqs * max_prefill_len
     )
     # This synthetic batch bypasses the scheduler's correction-slot reservation.
-    spec_config = model_runner.speculative_config
-    if spec_config is not None:
+    if model_runner.speculative_config is not None:
         # Keep room for the draft slots of every request.
         num_tokens = min(
             num_tokens,
-            model_runner.max_num_tokens
-            - num_warmup_reqs * spec_config.max_num_new_slots_for_drafting,
+            model_runner.max_num_tokens - num_warmup_reqs * num_draft_slots,
         )
     if num_tokens < 3:
         return False
@@ -222,11 +253,12 @@ def run_mixed_prefill_decode_warmup(
     decode_req_ids = [decode_req_id] if with_decode else []
     decode_prompt_len = 2
     total_prefill_len = num_tokens - decode_scheduled_tokens
+    if fewest_prefills:
+        num_prefill_reqs = cdiv(total_prefill_len, max_prefill_len)
     # Full-length prompts first, then the remainder.
-    prefill_lens = [
-        min(max_prefill_len, total_prefill_len - i)
-        for i in range(0, total_prefill_len, max_prefill_len)
-    ]
+    prefill_lens = _pack_prefill_lens(
+        total_prefill_len, min(num_prefill_reqs, total_prefill_len), max_prefill_len
+    )
     decode_token_ids = _warmup_token_ids(model_runner, decode_prompt_len)
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
@@ -482,9 +514,14 @@ def run_kv_cache_sizing_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    *,
+    size_many_prompts: bool | None = None,
 ) -> None:
     """Run the steps an extensible KV cache measures its transient reserve on.
     These size rather than compile, so they run without JIT warmup.
+
+    size_many_prompts also measures a step with a prompt in every request slot.
+    It defaults to on for ROCm, the only platform it has been measured on.
     """
     if model_runner.is_encoder_decoder:
         return
@@ -522,6 +559,24 @@ def run_kv_cache_sizing_warmup(
         prefill_only_fallback=True,
         mixed_step_context=_measure_sizing_step(model_runner),
     )
+    if size_many_prompts is None:
+        size_many_prompts = current_platform.is_rocm()
+    # The step above holds the fewest prompts. State kept per sequence or per
+    # 64-token chunk (linear attention, SSMs) peaks with a prompt in every slot
+    # the budget admits and the rest of the budget on the first ones.
+    num_prompts = _cap_num_warmup_reqs(model_runner, model_runner.max_num_reqs, 1)
+    if size_many_prompts and num_prompts > cdiv(
+        max_num_tokens, model_runner.max_model_len - 1
+    ):
+        run_mixed_prefill_decode_warmup(
+            model_runner,
+            worker_execute_model,
+            worker_sample_tokens,
+            max_num_tokens,
+            prefill_only_fallback=True,
+            num_prefill_reqs=num_prompts,
+            mixed_step_context=_measure_sizing_step(model_runner),
+        )
     if model_runner.model_config.use_mla:
         from vllm.model_executor.layers.attention.mla_attention import (
             MLACommonMetadataBuilder,
