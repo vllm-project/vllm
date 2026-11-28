@@ -141,7 +141,14 @@ def _topk_topp_kernel(
             k = tl.load(K + row_id)
             if k < VOCAB_SIZE:
                 # Zeroth pass: Compute avg and std from a sample block
-                offs = tl.arange(0, BLOCK_SIZE)
+                # sampled from all 4 quarters of LOGITS_ROW
+                # to avoid layout bias
+                SUB_TILE = BLOCK_SIZE // 4
+                Q_STRIDE = VOCAB_SIZE // 4
+                i = tl.arange(0, BLOCK_SIZE)
+                quarter_idx = i // SUB_TILE
+                sub_idx = i % SUB_TILE
+                offs = quarter_idx * Q_STRIDE + sub_idx
                 mask_n = offs < VOCAB_SIZE
                 logits_blk0 = tl.load(
                     LOGITS_ROW + offs, mask=mask_n, other=-float("inf")
@@ -167,7 +174,7 @@ def _topk_topp_kernel(
                 percentile = tl.cast(k / VOCAB_SIZE * 200, tl.uint32)
                 percentile = tl.minimum(percentile, 199)
                 sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
-                sigma = sigma + tl.abs(sigma) * -0.15
+                sigma = sigma + tl.abs(sigma) * -0.5
                 outlier_pivot = avg_logit + std_logit * sigma
                 num_outliers = tl.zeros((), dtype=tl.uint32)
 
@@ -300,9 +307,58 @@ def _topk_topp_kernel(
                             num_min_larger = num_min_larger_0
                             found_pivot = 1
                 else:
-                    # If top-k outlier gathering failed, search whole logit space
+                    # Fallback path
+                    # If top-k outlier gathering failed, shift
+                    # gather_pivot to avg_logit computed in 0th pass
+                    num_outliers_fb = tl.zeros((), dtype=tl.uint32)
+                    for i in range(0, NUM_TILES):
+                        offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                        mask_n = offs_n < VOCAB_SIZE
+                        logits_blk = tl.load(
+                            LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                        )
+
+                        fb_mask = (
+                            (logits_blk > avg_logit)
+                            & mask_n
+                            & (logits_blk > -float("inf"))
+                        )
+                        cumulative_pos = tl.cast(
+                            tl.cumsum(fb_mask) - 1 + num_outliers_fb, tl.int32
+                        )
+                        num_outliers_fb += tl.sum(fb_mask)
+                        write_pos = tl.where(fb_mask, cumulative_pos, -1)
+                        tl.store(BUFFER_ROW + write_pos, logits_blk, mask=fb_mask)
+
+                    # If avg_logit gather yielded <= k, fallback to all finite logits
+                    if num_outliers_fb <= k:
+                        num_outliers_fb = tl.zeros((), dtype=tl.uint32)
+                        for i in range(0, NUM_TILES):
+                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                            mask_n = offs_n < VOCAB_SIZE
+                            logits_blk = tl.load(
+                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                            )
+
+                            fb_mask = (logits_blk > -float("inf")) & mask_n
+                            cumulative_pos = tl.cast(
+                                tl.cumsum(fb_mask) - 1 + num_outliers_fb, tl.int32
+                            )
+                            num_outliers_fb += tl.sum(fb_mask)
+                            write_pos = tl.where(fb_mask, cumulative_pos, -1)
+                            tl.store(BUFFER_ROW + write_pos, logits_blk, mask=fb_mask)
+
+                        min_range = min_logit
+                    else:
+                        # Lower search bound MUST match the gather pivot (avg_logit)
+                        min_range = avg_logit
+
                     max_range = max_logit
-                    min_range = min_logit
+                    search_range = tl.cast(num_outliers_fb, tl.int32)
+                    search_iters = tl.cast(
+                        (num_outliers_fb + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
+                        tl.int32,
+                    )
                     found_pivot = 0
                     while found_pivot == 0:
                         k_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
@@ -317,11 +373,13 @@ def _topk_topp_kernel(
 
                         # Single fused pass over full vocab (same approach
                         # as the buffer path above).
-                        for i in range(0, NUM_TILES):
-                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                            mask_n = offs_n < VOCAB_SIZE
+                        for i in range(0, search_iters):
+                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
+                                0, BLOCK_SIZE_TRUNC
+                            )
+                            mask_n_2 = offs_n < search_range
                             logits_blk2 = tl.load(
-                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                                BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
                             )
 
                             above_0 = logits_blk2 > k_pivot_0
