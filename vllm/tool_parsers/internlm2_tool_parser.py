@@ -35,6 +35,7 @@ class Internlm2ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
         self.position = 0
+        self._stream_text = ""
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -64,6 +65,7 @@ class Internlm2ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        self._stream_text = current_text
         if "<|action_start|>" not in current_text:
             self.position = len(current_text)
             return DeltaMessage(content=delta_text)
@@ -73,10 +75,20 @@ class Internlm2ToolParser(ToolParser):
             return DeltaMessage(content="")
 
         last_pos = self.position
-        if "<|action_start|><|plugin|>" not in current_text[last_pos:]:
-            return None
-
         new_delta = current_text[last_pos:]
+        if "<|action_start|><|plugin|>" not in new_delta:
+            # InternLM2 also emits non-plugin actions (e.g. <|interpreter|>).
+            # Hold back only while the text after <|action_start|> can still
+            # grow into "<|plugin|>"; anything else streams as content,
+            # matching the non-streaming path.
+            action_start = new_delta.find("<|action_start|>")
+            if action_start >= 0:
+                after = new_delta[action_start + len("<|action_start|>") :]
+                if "<|plugin|>".startswith(after):
+                    return None
+            self.position = len(current_text)
+            return DeltaMessage(content=new_delta)
+
         text, action = new_delta.split("<|action_start|><|plugin|>")
 
         if len(text) > 0:
@@ -208,6 +220,21 @@ class Internlm2ToolParser(ToolParser):
                 "Skipping chunk as a result of tool streaming extraction error"
             )
             return None
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        """Release text still held back when the stream ends.
+
+        Only the ambiguous window after ``<|action_start|>`` is ever held;
+        once the stream ends it can no longer grow into a plugin call, so it
+        goes out as content, matching the non-streaming path.
+        """
+        if self.current_tool_name_sent:
+            return None
+        held = self._stream_text[self.position :]
+        if not held or "<|action_start|><|plugin|>" in held:
+            return None
+        self.position = len(self._stream_text)
+        return DeltaMessage(content=held)
 
     def extract_tool_calls(
         self,
