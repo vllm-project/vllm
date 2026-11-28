@@ -398,3 +398,33 @@ def test_non_contiguous_strided_view(device, pinned):
 
     # Correctness check: values match original transposed CPU tensor
     assert torch.equal(gpu_view.cpu(), cpu_view)
+
+
+def test_disable_uva_env_uses_device_buffers(monkeypatch):
+    """VLLM_DISABLE_UVA=1 must route staged tensors and buffer pools away from
+    UVA, for GPUs that cannot read pinned host memory directly."""
+    monkeypatch.setenv("VLLM_DISABLE_UVA", "1")
+    # is_uva_available() is cached, and earlier tests have already called it.
+    is_uva_available.cache_clear()
+    try:
+        assert not is_uva_available()
+
+        device = torch.device(DEVICES[0])
+        with torch.accelerator.device_index(device.index):
+            staged = StagedWriteTensor(
+                (3, 4096),
+                dtype=torch.int32,
+                device=device,
+                max_concurrency=2,
+                uva_instead_of_gpu=True,
+            )
+            assert not hasattr(staged, "_uva_buf")
+            assert staged.gpu.device.type == DEVICE_TYPE
+            assert staged.write_indices._buffer_cls is buffer_utils.NonUvaBuffer
+
+            staged.stage_write(2, 3, [11, 12, 13])
+            staged.apply_write()
+            torch.accelerator.synchronize()
+            assert staged.gpu[2, 3:6].tolist() == [11, 12, 13]
+    finally:
+        is_uva_available.cache_clear()

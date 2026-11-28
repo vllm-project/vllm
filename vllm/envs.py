@@ -336,6 +336,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
+    VLLM_DISABLE_UVA: bool = False
     VLLM_RELOAD_MODE: Literal["auto", "layerwise", "direct"] = "auto"
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
@@ -2331,6 +2332,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
     ),
+    # Treat UVA (Unified Virtual Addressing) as unavailable everywhere, as under
+    # NVIDIA Confidential Computing: the v2 model runner keeps its large staged
+    # tensors (such as M-RoPE positions) on the GPU and uploads per-step buffers
+    # with explicit host-to-device copies. Set to 1 when the GPU cannot read
+    # pinned host memory directly, which fails at the first request with
+    # cudaErrorContained (Xid 94), seen with GPUs passed through to a VM.
+    "VLLM_DISABLE_UVA": lambda: bool(int(os.getenv("VLLM_DISABLE_UVA", "0"))),
     # How weight updates reload the model: "layerwise" rebuilds each layer
     # from the checkpoint tensors; "direct" writes them into the live
     # tensors and reruns post-load processing in place; "auto" reloads
