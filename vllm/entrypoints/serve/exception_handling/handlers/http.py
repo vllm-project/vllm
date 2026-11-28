@@ -28,4 +28,6 @@ async def http_exception_handler(req: Request, exc: HTTPException):
             code=exc.status_code,
         )
     )
-    return JSONResponse(err.model_dump(), status_code=exc.status_code)
+    return JSONResponse(
+        err.model_dump(), status_code=exc.status_code, headers=exc.headers
+    )
