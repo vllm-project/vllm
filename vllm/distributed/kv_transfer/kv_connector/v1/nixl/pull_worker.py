@@ -452,6 +452,24 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         if self.use_mla and tp_ratio < 0 and not self._has_mamba and not dcp_active:
             assert len(read_specs) == 1
 
+        validate = self._kv_validator is not None and bool(local_block_ids)
+        if validate and (
+            meta.kv_expected_hashes is None
+            or len(stages) != 1
+            or dcp_active
+            or different_block_sizes
+            or self._physical_blocks_per_logical_kv_block != 1
+            or self._mixed_mem_types
+            or any(spec.block_ids_by_region for spec in read_specs)
+        ):
+            logger.warning_once(
+                "kv_block_validation does not cover reads from engine %s yet "
+                "(needs equal block sizes, one remote PP stage and no DCP); "
+                "they are not validated.",
+                engine_id,
+            )
+            validate = False
+
         for i, spec in enumerate(read_specs):
             remote_block_size = remote_info.remote_block_size
             logger.debug(
@@ -506,6 +524,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_agent=self._remote_agents[engine_id][
                         (stage.pp_rank, spec.remote_rank)
                     ],
+                    validate=validate,
+                    source_index=i,
                 ):
                     return
 
@@ -548,12 +568,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         region_pairs: _RegionPairs,
         remote_region_num_blocks: list[int],
         remote_agent: str,
+        validate: bool = False,
+        source_index: int = 0,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
 
         The caller resolves the remote region mapping, block counts and
-        notification agent.
+        notification agent. With `validate`, the read also schedules a read of
+        the remote KV block metadata (see `_advance_kv_validation`), and the
+        producer is notified only after it.
 
         Returns True when the read was posted (or was unnecessary), False
         when the request was routed to failure reporting — the caller must
@@ -660,6 +684,19 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
+        meta_read = (
+            self._kv_meta_read(
+                request_id,
+                local_block_ids[0],
+                remote_block_ids[0],
+                len(read_spec.remote_block_ids[0]),
+            )
+            if validate
+            and self._kv_validator is not None
+            and self._kv_validator.supports(dst_engine_id, remote_rank)
+            else None
+        )
+
         # Prepare transfer with Nixl.
         handle = None
         try:
@@ -682,7 +719,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 local_block_descs_ids,
                 remote_xfer_side_handle,
                 remote_block_descs_ids,
-                notif_msg=notif_id,
+                # The producer may free its blocks once notified, so a validated
+                # read notifies it after the metadata read instead.
+                notif_msg=b"" if meta_read is not None else notif_id,
             )
 
             # Begin async xfer.
@@ -690,6 +729,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
             # Use handle to check completion in future step().
             self._recving_transfers[request_id].append(handle)
+            if meta_read is not None:
+                assert self._kv_validator is not None
+                self._pending_recv_notifs.setdefault(request_id, []).append(
+                    (remote_agent, notif_id)
+                )
+                self._kv_validator.add_read(
+                    request_id, dst_engine_id, remote_rank, source_index, *meta_read
+                )
             return True
         except Exception as e:
             self._log_failure(
@@ -706,6 +753,37 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 assert handle is not None
                 self._recving_transfers[request_id].append(handle)
             return False
+
+    def _kv_meta_read(
+        self,
+        request_id: str,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        num_remote_blocks: int,
+    ) -> tuple[list[int], list[int], list[bytes]] | None:
+        """Pair the read blocks with the hashes they are expected to hold.
+
+        The remote list starts at the request's first block and was end-trimmed
+        to the local one, so remote position j is logical block
+        `num_remote_blocks - len(remote_block_ids) + j`.
+        """
+        meta = self._recving_metadata.get(request_id)
+        if meta is None or meta.kv_expected_hashes is None:
+            return None
+        hashes = meta.kv_expected_hashes
+        first = num_remote_blocks - len(remote_block_ids) - meta.kv_expected_hash_offset
+        local: list[int] = []
+        remote: list[int] = []
+        expected: list[bytes] = []
+        for j, (local_id, remote_id) in enumerate(
+            zip(local_block_ids, remote_block_ids)
+        ):
+            # The partial last block has no hash yet.
+            if 0 <= first + j < len(hashes):
+                local.append(local_id)
+                remote.append(remote_id)
+                expected.append(hashes[first + j])
+        return (local, remote, expected) if local else None
 
     def _read_blocks_mixed(
         self,

@@ -40,6 +40,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.kv_validation import (
+    KVBlockMetaPool,
+    KVBlockValidationMode,
+    KVBlockValidator,
+    get_block_hash_identity,
+    get_kv_block_validation_mode,
+    make_entries,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     HB_NOTIF_PREFIX,
@@ -223,6 +231,11 @@ class _RemoteStage:
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
 
 
+# How long a step waits for kv_block_validation metadata reads it just
+# posted before leaving them to the next step.
+_KV_META_READ_SPIN_S = 200e-6
+
+
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
@@ -230,6 +243,13 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
+
+    # kv_block_validation state; class defaults keep it off for partially
+    # constructed workers.
+    _kv_validation_mode: KVBlockValidationMode = "off"
+    _kv_meta_pool: KVBlockMetaPool | None = None
+    _kv_validator: KVBlockValidator | None = None
+    _kv_meta_handles: set[int]
 
     # Default UCX `num_threads` (kv_connector_extra_config can override it).
     _DEFAULT_NUM_THREADS: int = 4
@@ -1123,6 +1143,15 @@ class NixlBaseConnectorWorker:
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
         self._recv_failures: set[ReqId] = set()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
+
+        # kv_block_validation: the local KV block metadata pool, the consumer-side
+        # validator, and the in-flight metadata reads (kept out of xfer stats).
+        self._kv_validation_mode = get_kv_block_validation_mode(
+            vllm_config, kv_cache_config, self._TRANSFER_MODE
+        )
+        self._kv_meta_pool = None
+        self._kv_validator = None
+        self._kv_meta_handles = set()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -2121,6 +2150,12 @@ class NixlBaseConnectorWorker:
             self.register_local_xfer_handler(self.block_size)
         )
 
+        kv_meta_base_addr = None
+        if self._kv_validation_mode != "off":
+            kv_meta_base_addr = self._setup_kv_validation(
+                next(iter(kv_caches.values())).device
+            )
+
         # After KV Caches registered, listen for new connections.
         agent_metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
@@ -2153,6 +2188,15 @@ class NixlBaseConnectorWorker:
                 for name in names
             },
             packed_member_layouts=self._packed_member_layouts,
+            kv_meta_base_addr=kv_meta_base_addr,
+            kv_meta_num_entries=(
+                self._kv_meta_pool.num_blocks if self._kv_meta_pool is not None else 0
+            ),
+            kv_meta_hash_identity=(
+                get_block_hash_identity(self.vllm_config)
+                if self._kv_meta_pool is not None
+                else None
+            ),
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -2161,6 +2205,55 @@ class NixlBaseConnectorWorker:
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
+
+    def _setup_kv_validation(self, device: torch.device) -> int | None:
+        """Set up kv_block_validation for this engine's role.
+
+        A producer keeps the metadata pool its consumers read; a consumer
+        validates what it reads. A consumer's blocks are never read, so it
+        keeps no pool. Returns the address of the pool, if any.
+        """
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        if self._kv_meta_pool is None and kv_transfer_config.is_kv_producer:
+            self._kv_meta_pool = KVBlockMetaPool(
+                self.kv_cache_config.num_blocks, device
+            )
+        if self._kv_validator is None and kv_transfer_config.is_kv_consumer:
+            self._kv_validator = KVBlockValidator(
+                self.nixl_wrapper,
+                self.nixl_backends,
+                self._kv_validation_mode,
+                get_block_hash_identity(self.vllm_config),
+                self.kv_cache_config.num_blocks,
+                remote_mem_type=self.nixl_memory_type,
+                pool=self._kv_meta_pool,
+            )
+        if self._kv_meta_pool is None:
+            return None
+        entries = self._kv_meta_pool.entries
+        descs = self.nixl_wrapper.get_reg_descs(
+            [(entries.data_ptr(), entries.numel(), self.device_id, "")],
+            self.nixl_memory_type,
+        )
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+        self._registered_descs.append(descs)
+        return entries.data_ptr()
+
+    def apply_kv_meta_before_forward(self, metadata: NixlConnectorMetadata) -> None:
+        """Invalidate the entries of blocks this step's forward pass rewrites."""
+        if self._kv_meta_pool is not None:
+            self._kv_meta_pool.invalidate(metadata.kv_meta_invalidate)
+
+    def apply_kv_meta_after_forward(self, metadata: NixlConnectorMetadata) -> None:
+        """Publish the hashes of blocks this step's forward pass filled."""
+        if self._kv_meta_pool is not None and metadata.kv_meta_publish_ids:
+            self._kv_meta_pool.write(
+                metadata.kv_meta_publish_ids,
+                make_entries(metadata.kv_meta_publish_hashes),
+            )
+            # wait_for_save can run twice for one metadata (deferred finalize).
+            metadata.kv_meta_publish_ids = []
 
     def _ple_page_len(self) -> int:
         """Transfer length of one PLE state page.
@@ -2878,6 +2971,16 @@ class NixlBaseConnectorWorker:
         stage.xfer_side_handles[remote_tp_rank] = self.nixl_wrapper.prep_xfer_dlist(
             remote_agent_name, blocks_data, mem_type=remote_mem_types.pop()
         )
+        if self._kv_validator is not None and remote_pp_size == 1:
+            self._kv_validator.add_remote(
+                engine_id,
+                remote_tp_rank,
+                remote_agent_name,
+                nixl_agent_meta.kv_meta_base_addr,
+                nixl_agent_meta.kv_meta_num_entries,
+                nixl_agent_meta.device_id,
+                nixl_agent_meta.kv_meta_hash_identity,
+            )
 
         return remote_agent_name
 
@@ -3514,6 +3617,8 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving, newly_failed = self._pop_done_transfers(self._recving_transfers)
+        if self._kv_validator is not None:
+            done_recving = self._advance_kv_validation(done_recving, newly_failed)
         if newly_failed:
             self._recv_failures.update(newly_failed)
 
@@ -3754,8 +3859,14 @@ class NixlBaseConnectorWorker:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                     if xfer_state == "DONE":
-                        res = self.nixl_wrapper.get_xfer_telemetry(handle)
-                        self.xfer_stats.record_transfer(res)
+                        if (
+                            self._kv_validator is not None
+                            and handle in self._kv_meta_handles
+                        ):
+                            self._kv_meta_handles.discard(handle)
+                        else:
+                            res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                            self.xfer_stats.record_transfer(res)
                         self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
@@ -3786,6 +3897,73 @@ class NixlBaseConnectorWorker:
             else:
                 transfers[req_id] = in_progress
         return done_req_ids, failed_req_ids
+
+    def _advance_kv_validation(
+        self, done_recving: set[ReqId], failed: set[ReqId]
+    ) -> set[ReqId]:
+        """Run the validation stage of requests whose reads completed.
+
+        Once a request's KV data has landed, read the remote metadata entries of
+        its blocks; once those landed, compare them with the expected hashes.
+        Returns the requests that are done. A mismatch under "enforce" is added
+        to `failed` and follows kv_load_failure_policy.
+        """
+        validator = self._kv_validator
+        assert validator is not None
+        complete: set[ReqId] = set()
+        posted: dict[ReqId, list[int]] = {}
+        for req_id in done_recving:
+            if req_id in failed or req_id in self._recv_failures:
+                validator.drop(req_id)
+                complete.add(req_id)
+            elif validator.is_posted(req_id):
+                self._finish_kv_validation(req_id, failed, complete)
+            elif not validator.has_pending(req_id):
+                complete.add(req_id)
+            else:
+                try:
+                    handles = validator.post(req_id)
+                except Exception as e:
+                    self._log_failure(
+                        failure_type="transfer_setup_failed",
+                        req_id=req_id,
+                        msg="Could not read the KV block metadata",
+                        error=e,
+                    )
+                    validator.drop(req_id)
+                    self._handle_failed_transfer(req_id, None, failed, error=e)
+                    continue
+                self._kv_meta_handles.update(handles)
+                posted[req_id] = handles
+        # The entries are small, so poll briefly rather than wait a step.
+        deadline = time.perf_counter() + _KV_META_READ_SPIN_S
+        while posted:
+            landed, newly_failed = self._pop_done_transfers(posted)
+            failed |= newly_failed
+            for req_id in landed:
+                if req_id in newly_failed:
+                    validator.drop(req_id)
+                    complete.add(req_id)
+                else:
+                    self._finish_kv_validation(req_id, failed, complete)
+            if time.perf_counter() >= deadline:
+                break
+        self._recving_transfers.update(posted)
+        return complete
+
+    def _finish_kv_validation(
+        self, req_id: ReqId, failed: set[ReqId], complete: set[ReqId]
+    ) -> None:
+        assert self._kv_validator is not None
+        mismatched = self._kv_validator.finish(req_id)
+        if mismatched:
+            self.xfer_stats.record_kv_block_validation_failure()
+        if mismatched and self._kv_validation_mode == "enforce":
+            # The read itself finished, so the producer may free its blocks.
+            self._send_pending_recv_notifs(req_id)
+            failed.add(req_id)
+        else:
+            complete.add(req_id)
 
     def _try_release_xfer_handle(self, req_id: str, handle: int) -> bool:
         """Release a handle, returning False if the caller must retain it."""
@@ -4467,6 +4645,8 @@ class NixlBaseConnectorWorker:
         """
         assert engine_id in self._remote_agents
 
+        if self._kv_validator is not None:
+            self._kv_validator.remove_remote(engine_id)
         # Notif-only engines (push-mode D side) have no descriptor state.
         for stage in self._remote_stages.pop(engine_id, {}).values():
             for handle in stage.xfer_side_handles.values():
@@ -4529,6 +4709,11 @@ class NixlBaseConnectorWorker:
 
     def _finish_shutdown(self) -> None:
         self._recving_transfers.clear()
+        if self._kv_validator is not None:
+            try:
+                self._kv_validator.shutdown()
+            except Exception:
+                logger.exception("KV block validator shutdown failed.")
         try:
             self._release_local_xfer_handles()
         except Exception:

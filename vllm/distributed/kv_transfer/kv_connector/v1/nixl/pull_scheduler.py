@@ -203,6 +203,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         """
         from vllm.v1.request import RequestStatus
 
+        if self._kv_meta_tracker is not None:
+            self._kv_meta_tracker.remove_request(request.request_id)
         params = request.kv_transfer_params
         logger.debug(
             "NIXLConnector request_finished(%s), request_status=%s, "

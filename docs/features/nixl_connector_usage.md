@@ -436,6 +436,42 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 !!! warning
     Using `kv_load_failure_policy="recompute"` can lead to performance degradation in production deployments. When KV loads fail, the decode instance will execute prefill work with decode-optimized configurations, which is inefficient and defeats the purpose of disaggregated prefilling. This also increases tail latency for other ongoing decode requests.
 
+### KV Block Validation
+
+NIXL moves KV blocks by block ID, so a read that succeeds can still deliver the
+wrong content: a prefiller block freed and reused before the decoder read it,
+a block overwritten while being read, or a block-ID mapping bug. With
+`kv_block_validation`, every KV block has a small metadata entry holding its
+prefix-caching block hash. The prefiller invalidates an entry before the block
+is rewritten and publishes the hash after the forward pass that filled it. The
+decoder reads the entries after the KV data and compares them with the hashes
+it computes from its own prompt before it uses the blocks.
+
+Set the same value on the prefiller and the decoder:
+
+```bash
+--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"kv_block_validation":"enforce"}}'
+```
+
+- **off** (default): no metadata pool, no validation.
+- **log**: count and log mismatches, but use the blocks.
+- **enforce**: a mismatch fails the load, which then follows
+  `kv_load_failure_policy`.
+
+Only producers keep the metadata pool, so use `kv_role="kv_consumer"` on decode
+instances: with `kv_both`, a decoder also updates its own pool every step.
+
+Each mismatch is logged with the request, the remote engine and the first bad
+block, and counted in `vllm:nixl_num_kv_block_validation_failures`. Both sides
+must use the same `prefix_caching_hash_algo` and `PYTHONHASHSEED` (required
+with a non-cryptographic hash); the decoder skips, with a warning, a prefiller
+that hashes differently or does not publish entries.
+
+Validation currently requires pull mode, prefix caching, and a single KV cache
+group, and does not support `kv_buffer_device="cpu"`, bidirectional transfer,
+or context or pipeline parallelism. The partial last block of a prompt is not
+validated. See the [design](../design/nixl_kv_checksum.md) for details.
+
 ### For NVIDIA GB-series GPUs
 
 GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set the `--enable-cumem-allocator` flag, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
@@ -479,6 +515,7 @@ as interval counts in the same line and via Prometheus (see
 | `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
 | `Num failed transfers` | count | Failed NIXL transfers, handshakes, and completion notifications (`send_notif`) in the interval, grouped because all are sporadic lower-transport-layer events. |
 | `Num KV expired reqs` | count | Requests whose KV blocks expired before being read. Reported separately from the failure counts above because it is an autoscaler/lease-tuning signal rather than a transport issue. |
+| `Num KV block validation failures` | count | Received requests whose KV blocks held content other than expected (see [KV Block Validation](#kv-block-validation)). |
 
 ### Prometheus metrics
 
@@ -495,6 +532,7 @@ exported when NixlConnector is active:
 | `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed notifications (`send_notif`), retained for compatibility. These failures are also included in `vllm:nixl_num_failed_transfers`; do not sum the two counters. |
 | `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). Kept separate from the failure counters above: KV expiry is an autoscaler/lease-tuning signal, not a transport issue. |
 | `vllm:nixl_num_notifications_after_expiry` | Counter | Completion notifications that arrive for a request that is no longer tracked, usually because its KV lease expired first. Pull connector: counted on P, where it means the decoder may have read blocks that were already reused; each matches a "Potentially invalid KV blocks" error log. Push connector: counted on whichever instance tracks the request as neither a send nor a receive (P after the lease expired, or D after the receive completed or was abandoned); each matches an "Unrecognized request" error log. Counted per notification, not per request: each remote rank notifies separately, so with TP > 1 or heterogeneous TP one late request counts several times, and the value is not comparable to `vllm:nixl_num_kv_expired_reqs`. |
+| `vllm:nixl_num_kv_block_validation_failures` | Counter | Received requests whose KV blocks held content other than expected, with `kv_block_validation` on. Under `enforce` each one follows `kv_load_failure_policy`. Tracked on the reading instance. |
 | `vllm:nixl_num_declined_expired_reads` | Counter | Remote reads the consumer declined because the producer's lease had run out before the read reached it (the blocks may have been recycled); each one is a request that follows `kv_load_failure_policy`. Tracked on the reading instance; the producer-side view is `vllm:nixl_num_kv_expired_reqs`. |
 
 !!! tip

@@ -21,6 +21,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.kv_validation import (
+    KVBlockMetaTracker,
+    get_kv_block_validation_mode,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     HeartbeatInfo,
@@ -57,6 +61,9 @@ class NixlBaseConnectorScheduler:
     # pull (READ) producer from a push (WRITE) one. Overridden by the push
     # scheduler.
     _TRANSFER_MODE: str = "pull"
+    # kv_block_validation bookkeeping; None when validation is off.
+    _kv_meta_tracker: KVBlockMetaTracker | None = None
+    _kv_validation: bool = False
 
     def __init__(
         self,
@@ -189,6 +196,20 @@ class NixlBaseConnectorScheduler:
             )
         )
 
+        # kv_block_validation: tracks which KV block metadata entries each step
+        # invalidates and publishes.
+        # A producer maintains the pool; a consumer attaches the hashes it
+        # expects to each pull.
+        self._kv_meta_tracker = None
+        self._kv_validation = (
+            get_kv_block_validation_mode(
+                vllm_config, kv_cache_config, self._TRANSFER_MODE
+            )
+            != "off"
+        )
+        if self._kv_validation and vllm_config.kv_transfer_config.is_kv_producer:
+            self._kv_meta_tracker = KVBlockMetaTracker(self.block_size)
+
         if self.is_bidirectional_kv_xfer_enabled and self.kv_recompute_threshold > 0:
             logger.info(
                 "Bidirectional KV transfer is enabled and the kv "
@@ -206,6 +227,8 @@ class NixlBaseConnectorScheduler:
 
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
+        if self._kv_meta_tracker is not None:
+            self._kv_meta_tracker.add_request(request)
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode"):
             self._truncate_request_for_prefill(request)
@@ -580,9 +603,23 @@ class NixlBaseConnectorScheduler:
                 local_num_computed_blocks=cached,
                 awaiting_kvs=awaiting_kvs,
             )
+            if self._kv_validation and block_ids and block_ids[0]:
+                if self._kv_meta_tracker is not None:
+                    # The blocks are about to be overwritten by the pull.
+                    meta.kv_meta_invalidate.extend(block_ids[0])
+                first_block = cached[0] if cached else 0
+                recv_meta = meta.reqs_to_recv[req_id]
+                recv_meta.kv_expected_hashes = list(req.block_hashes[first_block:])
+                recv_meta.kv_expected_hash_offset = first_block
 
         if self.use_host_buffer:
             self._build_save_meta(meta, scheduler_output)
+
+        if self._kv_meta_tracker is not None:
+            invalidate, meta.kv_meta_publish_ids, meta.kv_meta_publish_hashes = (
+                self._kv_meta_tracker.collect(scheduler_output)
+            )
+            meta.kv_meta_invalidate.extend(invalidate)
 
         meta.reqs_to_send = self._reqs_need_send
         # Clock reference for reqs_to_send: deadlines above are in this

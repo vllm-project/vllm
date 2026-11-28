@@ -43,6 +43,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_kv_expired_reqs": [],
             "num_notifications_after_expiry": [],
             "num_declined_expired_reads": [],
+            "num_kv_block_validation_failures": [],
         }
 
     def record_transfer(self, res: "nixlXferTelemetry | None"):
@@ -78,6 +79,10 @@ class NixlKVConnectorStats(KVConnectorStats):
         """Record a remote read declined because the remote's lease ran out."""
         self.data["num_declined_expired_reads"].append(1)
 
+    def record_kv_block_validation_failure(self):
+        """Record a received request whose KV blocks held unexpected content."""
+        self.data["num_kv_block_validation_failures"].append(1)
+
     def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
         self.reset()
@@ -93,6 +98,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             and len(self.data["num_kv_expired_reqs"]) == 0
             and len(self.data["num_notifications_after_expiry"]) == 0
             and len(self.data["num_declined_expired_reads"]) == 0
+            and len(self.data["num_kv_block_validation_failures"]) == 0
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
@@ -119,6 +125,9 @@ class NixlKVConnectorStats(KVConnectorStats):
             "Num KV expired reqs": len(self.data["num_kv_expired_reqs"]),
             "Num notifs after expiry": len(self.data["num_notifications_after_expiry"]),
             "Num declined expired reads": len(self.data["num_declined_expired_reads"]),
+            "Num KV block validation failures": len(
+                self.data["num_kv_block_validation_failures"]
+            ),
         }
         if self.num_successful_transfers == 0:
             # Timing / throughput stats only cover successful transfers. If
@@ -304,6 +313,19 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_declined_expired_reads, self.per_engine_labelvalues
         )
 
+        counter_nixl_num_kv_block_validation_failures = self._counter_cls(
+            name="vllm:nixl_num_kv_block_validation_failures",
+            documentation="Number of received requests whose KV blocks held "
+            "content other than expected (kv_block_validation). Under 'enforce' "
+            "each one follows kv_load_failure_policy. NOTE: This metric is "
+            "tracked on the reading (consumer) instance.",
+            labelnames=labelnames,
+        )
+        self.counter_nixl_num_kv_block_validation_failures = create_metric_per_engine(
+            counter_nixl_num_kv_block_validation_failures,
+            self.per_engine_labelvalues,
+        )
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
             [
@@ -328,6 +350,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 self.counter_nixl_num_kv_expired_reqs,
                 self.counter_nixl_num_notifications_after_expiry,
                 self.counter_nixl_num_declined_expired_reads,
+                self.counter_nixl_num_kv_block_validation_failures,
             ],
             [
                 # Transfer, handshake and notification failures are grouped:
@@ -343,6 +366,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 ("num_kv_expired_reqs",),
                 ("num_notifications_after_expiry",),
                 ("num_declined_expired_reads",),
+                ("num_kv_block_validation_failures",),
             ],
         ):
             for counter_item_key in counter_item_keys:

@@ -58,8 +58,9 @@ HB_NOTIF_PREFIX = "HB:"
 #      region_members and the cache group of each layer
 #  17: Export remote_blocks_expiry_time for P blocks too, plus
 #      remote_lease_extension; the consumer gates every remote read on it
+#  18: Advertise the KV block metadata pool for kv_block_validation
 #
-NIXL_CONNECTOR_VERSION: int = 17
+NIXL_CONNECTOR_VERSION: int = 18
 
 
 @dataclass(slots=True)
@@ -90,6 +91,11 @@ class NixlAgentMetadata:
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # KV block metadata pool (kv_block_validation): base address, one entry per
+    # logical block, and a digest of the block hash function. None when off.
+    kv_meta_base_addr: int | None = None
+    kv_meta_num_entries: int = 0
+    kv_meta_hash_identity: str | None = None
 
 
 @dataclass
@@ -278,6 +284,10 @@ class ReqMeta:
     # Worker-only, per-group range of the remote-sized sub-blocks of each local
     # group a pull covers. None derives it from the block counts.
     covered_sub_blocks: list[range] | None = None
+    # kv_block_validation (D side): this request's block hashes, starting at
+    # logical block kv_expected_hash_offset. None when not validated.
+    kv_expected_hashes: list[bytes] | None = None
+    kv_expected_hash_offset: int = 0
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -301,6 +311,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # kv_block_validation: metadata entries to invalidate before this step's
+        # forward pass, and to publish after it.
+        self.kv_meta_invalidate: list[int] = []
+        self.kv_meta_publish_ids: list[int] = []
+        self.kv_meta_publish_hashes: list[bytes] = []
 
     def _add_new_req(
         self,
