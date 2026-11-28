@@ -22,7 +22,9 @@ from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_see
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 from vllm.v1.attention.backends.zentorch_sdpa import (
+    should_use_zentorch_prefill_sdpa,
     should_use_zentorch_sdpa,
+    zentorch_prefill_sdpa,
     zentorch_sdpa_attn,
 )
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -72,6 +74,12 @@ ZEN_ENCODER_SEQ_LENS = [
 _skip_no_zentorch_sdpa = pytest.mark.skipif(
     not current_platform.is_zen_cpu() or not has_zentorch_op(["zentorch_sdpa_attn"]),
     reason="zentorch_sdpa requires a Zen CPU with the op registered",
+)
+_skip_no_zentorch_sdpa_out = pytest.mark.skipif(
+    not current_platform.is_zen_cpu()
+    or not has_zentorch_op(["zentorch_sdpa"])
+    or not hasattr(torch.ops.zentorch.zentorch_sdpa, "out"),
+    reason="zentorch_sdpa.out requires a Zen CPU with the op registered",
 )
 # should_use_zentorch_sdpa additionally gates each dtype on its ISA.
 _skip_no_avx512_bf16 = pytest.mark.skipif(
@@ -979,6 +987,176 @@ def test_should_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> None:
 )
 def test_should_not_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> None:
     assert not should_use_zentorch_sdpa(attn_type, dtype)
+
+
+# (query_len, seq_len) per request, decodes first as the builder reorders them.
+ZEN_PREFILL_BATCHES = [
+    [(1, 40), (64, 64), (64, 64)],  # decode + equal-length fresh prompts
+    [(1, 40), (50, 50), (97, 97)],  # decode + ragged fresh prompts
+    [(1, 40), (1, 77), (33, 100), (70, 70), (1, 65)],  # decode + cached context
+    [(96, 96), (200, 200)],  # prefill only
+]
+
+
+@_skip_no_zentorch_sdpa_out
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("seq_lens", ZEN_PREFILL_BATCHES)
+@pytest.mark.parametrize("sliding_window", [None, 16])
+@pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
+@torch.inference_mode()
+def test_zentorch_prefill_sdpa_matches_native(
+    seq_lens: list[tuple[int, int]],
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+) -> None:
+    """Decoder prefill on zentorch_sdpa must match the paged CPU kernel."""
+    if kv_cache_dtype != "auto" and (
+        current_platform.get_cpu_architecture() != CpuArchEnum.X86
+    ):
+        pytest.skip("FP8 KV cache requires x86")
+    if get_attn_isa(dtype=dtype) == "amx" and any(q != s for q, s in seq_lens):
+        pytest.skip("cached context under AMX stays on the native kernel")
+    set_random_seed(0)
+    num_heads, num_kv_heads, head_size, block_size = 8, 2, 128, 32
+    query_lens = [q for q, _ in seq_lens]
+    kv_lens = [s for _, s in seq_lens]
+    device = torch.device("cpu")
+    layer_name = "model.layers.0.self_attn.attn"
+    vllm_config = create_vllm_config(dtype=dtype, block_size=block_size)
+    vllm_config.cache_config.cache_dtype = kv_cache_dtype
+
+    with set_current_vllm_config(vllm_config):
+        layer = Attention(
+            num_heads,
+            head_size,
+            head_size**-0.5,
+            num_kv_heads=num_kv_heads,
+            cache_config=vllm_config.cache_config,
+            per_layer_sliding_window=sliding_window,
+            attn_type=AttentionType.DECODER,
+            prefix=layer_name,
+        )
+        layer._k_scale_float = layer._v_scale_float = 0.05
+        spec = AttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+        )
+        builder = layer.get_attn_backend().get_builder_cls()(
+            spec, [layer_name], vllm_config, device
+        )
+    assert layer.impl.kv_cache_dtype == kv_cache_dtype
+    assert layer.impl.use_zentorch_prefill_sdpa
+    assert builder.use_zentorch_prefill_sdpa
+
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=kv_lens, query_lens=query_lens),
+        block_size,
+        device,
+        arange_block_indices=True,
+    )
+    max_blocks = common_attn_metadata.block_table_tensor.shape[1]
+    num_blocks = len(seq_lens) * max_blocks
+    kv_cache = torch.zeros(
+        num_blocks,
+        num_kv_heads,
+        block_size,
+        2 * head_size,
+        dtype=torch.uint8 if kv_cache_dtype != "auto" else dtype,
+    )
+
+    # Write every token, context and current step alike, as the model runner
+    # does before forward; the current chunk is then the tail of each request.
+    key_full = torch.randn(sum(kv_lens), num_kv_heads, head_size, dtype=dtype)
+    value_full = torch.randn_like(key_full)
+    slots = torch.cat(
+        [
+            torch.arange(kv_len) + i * max_blocks * block_size
+            for i, kv_len in enumerate(kv_lens)
+        ]
+    )
+    layer.impl.do_kv_cache_update(layer, key_full, value_full, kv_cache, slots)
+    ends = torch.tensor(kv_lens).cumsum(0)
+    current = torch.cat(
+        [
+            torch.arange(end - q, end)
+            for q, end in zip(query_lens, ends.tolist(), strict=True)
+        ]
+    )
+    key, value = key_full[current], value_full[current]
+    query = torch.randn(sum(query_lens), num_heads, head_size, dtype=dtype)
+
+    zen_metadata = builder.build(0, common_attn_metadata)
+    num_decodes = next((i for i, q in enumerate(query_lens) if q > 1), len(seq_lens))
+    assert zen_metadata.num_decodes == num_decodes
+    assert zen_metadata.num_prefills == len(seq_lens) - num_decodes
+    output = torch.zeros_like(query)
+    layer.impl.forward(layer, query, key, value, kv_cache, zen_metadata, output)
+
+    layer.impl.use_zentorch_prefill_sdpa = False
+    builder.use_zentorch_prefill_sdpa = False
+    native_metadata = builder.build(0, common_attn_metadata)
+    ref_output = torch.zeros_like(query)
+    layer.impl.forward(layer, query, key, value, kv_cache, native_metadata, ref_output)
+
+    torch.testing.assert_close(output, ref_output, atol=3e-2, rtol=3e-2)
+
+
+@_skip_no_zentorch_sdpa_out
+def test_zentorch_prefill_sdpa_amx_cached_context_falls_back() -> None:
+    """AMX stores a tiled cache the gather cannot read: defer to native."""
+    attn_metadata = SimpleNamespace(
+        num_decodes=0,
+        num_decode_tokens=0,
+        query_start_loc=torch.tensor([0, 8], dtype=torch.int32),
+        seq_lens=torch.tensor([24], dtype=torch.int32),
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+    )
+    query = torch.zeros(8, 4, 128, dtype=torch.bfloat16)
+    cache = torch.zeros(1, 1, 32, 128, dtype=torch.bfloat16)
+    assert not zentorch_prefill_sdpa(
+        query, query, query, query, cache, cache, attn_metadata, 1.0, -1, "amx", "auto"
+    )
+
+
+@_skip_no_zentorch_sdpa_out
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
+def test_should_use_zentorch_prefill_sdpa(
+    kv_cache_dtype: str, dtype: torch.dtype
+) -> None:
+    assert should_use_zentorch_prefill_sdpa(
+        AttentionType.DECODER, dtype, kv_cache_dtype, None, 0, None, None
+    )
+
+
+@_skip_no_zentorch_sdpa_out
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"attn_type": AttentionType.ENCODER_ONLY},
+        {"attn_type": AttentionType.ENCODER_DECODER},
+        {"alibi_slopes": torch.ones(4)},
+        {"logits_soft_cap": 30.0},
+        {"sinks": torch.zeros(4)},
+        {"kv_sharing_target_layer_name": "model.layers.0.self_attn.attn"},
+        {"kv_cache_dtype": "int8_per_token_head"},
+        {"dtype": torch.float16},
+    ],
+)
+def test_should_not_use_zentorch_prefill_sdpa(overrides: dict) -> None:
+    kwargs = dict(
+        attn_type=AttentionType.DECODER,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        alibi_slopes=None,
+        logits_soft_cap=0,
+        sinks=None,
+        kv_sharing_target_layer_name=None,
+    )
+    assert not should_use_zentorch_prefill_sdpa(**{**kwargs, **overrides})
 
 
 @pytest.mark.skipif(

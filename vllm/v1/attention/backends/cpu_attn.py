@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
@@ -13,7 +13,7 @@ from vllm import _cpu_ops as ops
 from vllm import envs
 from vllm.config import (
     VllmConfig,
-    get_current_vllm_config,
+    get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
 )
 from vllm.logger import init_logger
@@ -31,9 +31,12 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     get_attn_type_from_layers,
     get_num_attention_heads_from_layers,
+    split_decodes_and_prefills,
 )
 from vllm.v1.attention.backends.zentorch_sdpa import (
+    should_use_zentorch_prefill_sdpa,
     should_use_zentorch_sdpa,
+    zentorch_prefill_sdpa,
     zentorch_sdpa_attn,
 )
 from vllm.v1.kv_cache_interface import (
@@ -135,6 +138,12 @@ class CPUAttentionMetadata:
 
     encoder_cache: torch.Tensor | None = None
 
+    # Set when the trailing prefill requests run on zentorch_sdpa; the leading
+    # decodes keep the paged kernel with their own scheduler metadata.
+    num_decodes: int = 0
+    num_prefills: int = 0
+    decode_scheduler_metadata: torch.Tensor | None = None
+
 
 class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]):
     def __init__(
@@ -172,6 +181,15 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         attn_type = get_attn_type_from_layers(vllm_config, layer_names)
         self.is_cross_attention = attn_type == AttentionType.ENCODER_DECODER
         self.is_encoder_only_attention = attn_type == AttentionType.ENCODER_ONLY
+        self.use_zentorch_prefill_sdpa = any(
+            getattr(layer.impl, "use_zentorch_prefill_sdpa", False)
+            for layer in get_layers_from_vllm_config(
+                vllm_config, Attention, layer_names
+            ).values()
+        )
+        if self.use_zentorch_prefill_sdpa:
+            # Decodes must lead the batch so the prefills are one trailing run.
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
     def _set_isa_to_layers(self, layer_names: list[str]) -> None:
         attn_layers = get_layers_from_vllm_config(
@@ -203,13 +221,35 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         window = windows.pop()
         return -1 if window is None else window
 
+    def _get_scheduler_metadata(
+        self,
+        seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        causal: bool,
+        dynamic_causal: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        return ops.cpu_attn_get_scheduler_metadata(
+            num_reqs=seq_lens.shape[0],
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            seq_lens=seq_lens,
+            dtype=self.dtype,
+            query_start_loc=query_start_loc,
+            causal=causal,
+            sliding_window_size=self.window_size,
+            isa=self.isa,
+            enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
+            dynamic_causal=dynamic_causal,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
+
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CPUAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -259,20 +299,8 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             )
             block_table_tensor = encoder_block_table
 
-        scheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
-            num_reqs=num_reqs,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            head_dim=self.head_dim,
-            seq_lens=seq_lens,
-            dtype=self.dtype,
-            query_start_loc=query_start_loc,
-            causal=causal,
-            sliding_window_size=self.window_size,
-            isa=self.isa,
-            enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
-            dynamic_causal=dynamic_casual,
-            kv_cache_dtype=self.kv_cache_dtype,
+        scheduler_metadata = self._get_scheduler_metadata(
+            seq_lens, query_start_loc, causal, dynamic_casual
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -288,6 +316,21 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             encoder_cache=encoder_cache_tensor,
             dynamic_causal=dynamic_casual,
         )
+
+        if self.use_zentorch_prefill_sdpa and causal and dynamic_casual is None:
+            (
+                attn_metadata.num_decodes,
+                attn_metadata.num_prefills,
+                attn_metadata.num_decode_tokens,
+                _,
+            ) = split_decodes_and_prefills(
+                common_attn_metadata, self.reorder_batch_threshold or 1
+            )
+            if attn_metadata.num_prefills and attn_metadata.num_decodes:
+                n = attn_metadata.num_decodes
+                attn_metadata.decode_scheduler_metadata = self._get_scheduler_metadata(
+                    seq_lens[:n], query_start_loc[: n + 1], causal, None
+                )
 
         return attn_metadata
 
@@ -343,10 +386,24 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        vllm_config = get_current_vllm_config()
-        self.use_zentorch_sdpa = should_use_zentorch_sdpa(
-            attn_type,
-            vllm_config.model_config.dtype,
+        vllm_config = get_current_vllm_config_or_none()
+        dtype = (
+            vllm_config.model_config.dtype
+            if vllm_config is not None
+            else torch.bfloat16
+        )
+        self.use_zentorch_sdpa = should_use_zentorch_sdpa(attn_type, dtype)
+        self.use_zentorch_prefill_sdpa = (
+            vllm_config is not None
+            and should_use_zentorch_prefill_sdpa(
+                attn_type,
+                dtype,
+                kv_cache_dtype,
+                self.alibi_slopes,
+                self.logits_soft_cap,
+                self.sinks,
+                kv_sharing_target_layer_name,
+            )
         )
 
     def forward(
@@ -434,6 +491,38 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
                 kv_cache_dtype=self.kv_cache_dtype,
+            )
+
+        if (
+            self.use_zentorch_prefill_sdpa
+            and attn_metadata.num_prefills
+            and zentorch_prefill_sdpa(
+                query,
+                key,
+                value,
+                output,
+                key_cache,
+                value_cache,
+                attn_metadata,
+                self.scale,
+                self.sliding_window,
+                layer.isa,  # type: ignore
+                self.kv_cache_dtype,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+            )
+        ):
+            num_decodes = attn_metadata.num_decodes
+            if num_decodes == 0:
+                return output
+            # Only the leading decodes are left for the paged kernel.
+            num_actual_tokens = attn_metadata.num_decode_tokens
+            attn_metadata = replace(
+                attn_metadata,
+                query_start_loc=attn_metadata.query_start_loc[: num_decodes + 1],
+                seq_lens=attn_metadata.seq_lens[:num_decodes],
+                block_table=attn_metadata.block_table[:num_decodes],
+                scheduler_metadata=attn_metadata.decode_scheduler_metadata,
             )
 
         # The CPU kernel executes attention sinks natively in bf16. If the
