@@ -22,6 +22,13 @@ SETUP_PY = REPO_ROOT / "setup.py"
 # zentorch is the AMD Zen *CPU* extra, so the CPU requirement file is the
 # authoritative source for the torch version it must track.
 CPU_REQUIREMENTS = REPO_ROOT / "requirements" / "cpu.txt"
+# The zen CI image build and the zen5 local-build fallback each carry their own
+# copy of the zentorch pin; they must match setup.py so CI installs the same
+# zentorch that `vllm[zen]` would.
+CPU_PIPELINE = REPO_ROOT / ".buildkite" / "hardware_tests" / "cpu.yaml"
+ZEN_TEST_SCRIPT = (
+    REPO_ROOT / ".buildkite" / "scripts" / "hardware_ci" / "run-zen-cpu-test.sh"
+)
 
 
 def _extract_zentorch_version() -> str:
@@ -77,3 +84,46 @@ def test_zentorch_pin_tracks_torch_release():
         f"torch=={torch_version}. When bumping torch, bump the first three "
         "components of the zentorch pin in setup.py to match."
     )
+
+
+def _extract_ci_zentorch_pins() -> dict[str, str]:
+    """Pull the ZENTORCH_VERSION the zen CI build/test paths hardcode."""
+    pins: dict[str, str] = {}
+
+    # cpu.yaml: `ZENTORCH_VERSION: "2.x.x.x"` in the zen-cpu-image-build step.
+    yaml_matches = re.findall(
+        r"(?m)^\s*ZENTORCH_VERSION:\s*[\"']?([0-9][0-9A-Za-z.\-+]*)",
+        CPU_PIPELINE.read_text(),
+    )
+    assert yaml_matches, f"No 'ZENTORCH_VERSION:' pin found in {CPU_PIPELINE}"
+    assert len(set(yaml_matches)) == 1, (
+        f"Conflicting ZENTORCH_VERSION pins in {CPU_PIPELINE}: {yaml_matches}"
+    )
+    pins[str(CPU_PIPELINE)] = yaml_matches[0]
+
+    # run-zen-cpu-test.sh: `ZENTORCH_VERSION="${ZENTORCH_VERSION:-2.x.x.x}"`.
+    sh_matches = re.findall(
+        r"ZENTORCH_VERSION:-([0-9][0-9A-Za-z.\-+]*)",
+        ZEN_TEST_SCRIPT.read_text(),
+    )
+    assert sh_matches, (
+        f"No 'ZENTORCH_VERSION:-<version>' default found in {ZEN_TEST_SCRIPT}"
+    )
+    assert len(set(sh_matches)) == 1, (
+        f"Conflicting ZENTORCH_VERSION defaults in {ZEN_TEST_SCRIPT}: {sh_matches}"
+    )
+    pins[str(ZEN_TEST_SCRIPT)] = sh_matches[0]
+
+    return pins
+
+
+def test_ci_zentorch_pins_match_setup():
+    expected = _extract_zentorch_version()
+
+    for path, version in _extract_ci_zentorch_pins().items():
+        assert version == expected, (
+            f"{path} pins ZENTORCH_VERSION={version} but setup.py pins "
+            f"zentorch=={expected}. These must stay in sync so the zen CI image "
+            "build and the zen5 local-build fallback install the same zentorch "
+            "that `vllm[zen]` resolves; update them together."
+        )
