@@ -936,6 +936,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUDA_ARCHS "${SCALED_MM_2X_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SCALED_MM_C2X_SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C2X=1")
+    # The SM89 kernels trap on any other arch, so only dispatch to them when
+    # this file is built for sm_89.
+    if("8.9" IN_LIST SCALED_MM_2X_ARCHS OR "8.9+PTX" IN_LIST SCALED_MM_2X_ARCHS)
+      list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM89=1")
+    endif()
     message(STATUS "Building scaled_mm_c2x for archs: ${SCALED_MM_2X_ARCHS}")
   else()
     if (SCALED_MM_3X_ARCHS)

@@ -650,6 +650,16 @@ def test_cutlass_support_opcheck():
     opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability_int,))
 
 
+@pytest.mark.parametrize(
+    "supports",
+    [ops.cutlass_scaled_mm_supports_fp8, ops.cutlass_scaled_mm_supports_block_fp8],
+)
+def test_cutlass_fp8_support_requires_compiled_kernel(supports):
+    # Kernel selection trusts these helpers, so they must not report support
+    # for an arch with no compiled CUTLASS FP8 kernel (no build has SM 13.0).
+    assert not supports(130)
+
+
 @pytest.mark.parametrize("num_experts", [8, 64])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
