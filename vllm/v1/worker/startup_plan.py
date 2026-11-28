@@ -21,6 +21,7 @@ trusted.
 import hashlib
 import json
 import os
+import re
 from typing import TYPE_CHECKING
 
 import torch
@@ -37,6 +38,59 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 PLAN_SCHEMA_VERSION = 2
+
+# Environment variables that differ between the processes, hosts or pods of one
+# deployment (ranks, device lists and rendezvous, pod identity, Kubernetes
+# service links) or that carry credentials: they never change what a worker
+# measures or tunes.
+_ENV_NOT_FACTORS = re.compile(
+    r"^(RANK|LOCAL_RANK|GROUP_RANK|ROLE_RANK|WORLD_SIZE|LOCAL_WORLD_SIZE"
+    r"|.*_VISIBLE_DEVICES"
+    r"|GROUP_WORLD_SIZE|ROLE_WORLD_SIZE|MASTER_ADDR|MASTER_PORT|TORCHELASTIC_.*"
+    r"|HOSTNAME|PWD|OLDPWD|SHLVL|_|TERM|POD_.*|NODE_NAME|.*HOST_IP"
+    r"|KUBERNETES_.*|.*_SERVICE_(HOST|PORT)(_.*)?|.*_PORT_[0-9]+_(TCP|UDP|SCTP)(_.*)?"
+    r"|.*(TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY).*)$"
+)
+
+
+def environment_factors() -> dict:
+    """The environment a measured or tuned result depends on.
+
+    vLLM's own variables count as in `envs.compile_factors()`. Every other
+    variable counts too, except those matched by `_ENV_NOT_FACTORS`: kernels
+    and allocators read variables directly, outside `envs.py` (e.g.
+    `PYTORCH_CUDA_ALLOC_CONF` sets the allocator's behavior), so any of them
+    can change what is measured or which kernel wins.
+    """
+    return {
+        "vllm": sorted((k, repr(v)) for k, v in envs.compile_factors().items()),
+        "other": sorted(
+            (k, v)
+            for k, v in os.environ.items()
+            if not k.startswith("VLLM_") and not _ENV_NOT_FACTORS.match(k)
+        ),
+    }
+
+
+def memory_sizing_factors(vllm_config: VllmConfig) -> dict:
+    """Settings that size the measured memory but that the config's compile
+    factors leave out because they do not change compiled graphs."""
+    cache = getattr(vllm_config, "cache_config", None)
+    scheduler = getattr(vllm_config, "scheduler_config", None)
+    return {
+        "gpu_memory_utilization": getattr(cache, "gpu_memory_utilization", None),
+        "num_gpu_blocks_override": getattr(cache, "num_gpu_blocks_override", None),
+        "enable_extensible_kv_cache": getattr(
+            cache, "enable_extensible_kv_cache", None
+        ),
+        "max_num_scheduled_tokens": getattr(
+            scheduler, "max_num_scheduled_tokens", None
+        ),
+        "max_num_encoder_input_tokens": getattr(
+            scheduler, "max_num_encoder_input_tokens", None
+        ),
+        "encoder_cache_size": getattr(scheduler, "encoder_cache_size", None),
+    }
 
 
 def _pp_transport_in_use(worker: "Worker") -> str:
@@ -77,6 +131,10 @@ def compute_plan_fingerprint(
         # The PP transport in use changes the memory reserved beside the KV
         # cache, and "auto" may pick either.
         "pp_transport": pp_transport,
+        # Sizing settings the compile factors leave out (they do not change
+        # compiled graphs), and the environment.
+        "sizing": memory_sizing_factors(vllm_config),
+        "env": environment_factors(),
     }
     digest = hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     return digest[:16]

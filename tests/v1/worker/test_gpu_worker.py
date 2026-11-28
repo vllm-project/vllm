@@ -447,6 +447,44 @@ def test_startup_plan_fingerprint_sensitivity(plan_env):
         assert base != fp(_plan_worker().vllm_config, 0, 1)
 
 
+def test_startup_plan_fingerprint_covers_sizing_settings_and_the_environment(
+    plan_env, monkeypatch: pytest.MonkeyPatch
+):
+    """Settings the compile factors leave out because they do not change
+    compiled graphs, and variables read outside envs.py, still change the
+    measured memory, so they change the fingerprint; per-process and per-pod
+    variables do not."""
+    fp = startup_plan.compute_plan_fingerprint
+
+    def config(utilization=0.85):
+        return SimpleNamespace(
+            compile_factors=lambda: {"id": "abc123"},
+            cache_config=SimpleNamespace(gpu_memory_utilization=utilization),
+            scheduler_config=SimpleNamespace(max_num_scheduled_tokens=None),
+        )
+
+    base = fp(config(), 0, 1)
+    assert base != fp(config(utilization=0.9), 0, 1)
+
+    monkeypatch.setenv("STARTUP_PLAN_TEST_KERNEL_FORMAT", "bf16")
+    assert fp(config(), 0, 1) != base
+    monkeypatch.delenv("STARTUP_PLAN_TEST_KERNEL_FORMAT")
+    assert fp(config(), 0, 1) == base
+
+    for name, value in (
+        ("POD_NAME", "worker-x7k2p"),
+        ("HOSTNAME", "worker-x7k2p"),
+        ("VLLM_HOST_IP", "10.0.0.2"),
+        ("MASTER_PORT", "29511"),
+        ("CUDA_VISIBLE_DEVICES", "3"),
+        ("KUBERNETES_SERVICE_HOST", "10.43.0.1"),
+        ("FRONTEND_SERVICE_HOST", "10.43.7.7"),
+        ("HF_TOKEN", "hf_x"),
+    ):
+        monkeypatch.setenv(name, value)
+    assert fp(config(), 0, 1) == base
+
+
 def test_startup_plan_apply_gate(plan_env):
     """Only a fingerprint-matching, memory-safe plan is ever applied."""
     maybe_save_startup_plan(_plan_worker(), 50 * GiB_bytes)
