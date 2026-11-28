@@ -19,7 +19,9 @@ import argparse
 import gzip
 import json
 import statistics
+import time
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 import regex as re
@@ -34,6 +36,9 @@ _GPU_CATEGORIES = ("kernel", "gpu_memcpy", "gpu_memset")
 _GENERIC = re.compile(r"(^|::)(device_kernel|Kernel|kernel|KernelWrapper)$")
 # CuTe DSL kernel names embed per-shape layouts after these markers.
 _CUTE_DSL_SUFFIX = re.compile(r"_object_at_|_tensorptr")
+# ROCm kernel names end with the kernel descriptor's `.kd` (demangled:
+# `[clone .kd]`).
+_ROCM_KD_SUFFIX = re.compile(r"\s*\[clone \.kd\]$|\.kd$")
 
 
 def _match_back(text: str, end: int, open_ch: str, close_ch: str) -> int:
@@ -62,7 +67,7 @@ def short_name(name: str) -> str:
     `cutlass::device_kernel<Op<...>>`) keep their first template argument."""
     if name.startswith("kernel_cutlass_"):
         return _CUTE_DSL_SUFFIX.split(name, maxsplit=1)[0]
-    head = name.strip()
+    head = _ROCM_KD_SUFFIX.sub("", name.strip())
     if head.endswith(")"):
         head = head[: max(_match_back(head, len(head) - 1, "(", ")"), 0)].rstrip()
     template = ""
@@ -186,6 +191,21 @@ def profile_graph(
     with open(f"{prefix}.kernels.json", "w") as f:
         json.dump(summary, f, indent=1)
     return summary
+
+
+def count_gpu_activities(fn: Callable[[], None]) -> int:
+    """GPU activities (kernels, copies, memsets) `fn` launches when run eagerly."""
+    with torch.profiler.profile(
+        activities=get_default_torch_profiler_activities()
+    ) as prof:
+        fn()
+        torch.accelerator.synchronize()
+        # The last records can be stamped after the sync returns.
+        time.sleep(0.05)
+    return sum(
+        e.device_type != torch.autograd.DeviceType.CPU and not e.is_user_annotation
+        for e in prof.events()
+    )
 
 
 def format_summary(summary: dict[str, Any], top: int = 20) -> str:

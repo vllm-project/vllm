@@ -112,10 +112,14 @@ that the JSON summary excludes.
   `is_current_stream_capturing()`; that's expected, not a bug.
 - KV cache is zero-initialized (`--kv-init zeros`); random KV was within 3%.
 - Uniform DP only: every rank gets the same case; no idle ranks.
-- CUDA only: it hangs on ROCm (untested cause: likely the in-graph timing
-  events).
+- CUDA and ROCm (in-graph timing events work on both). On ROCm, keep
+  `ROCPROFILER_QUEUE_INTERPOSITION=0` (set in vLLM's ROCm image) for
+  `--profile-dir` until ROCm/rocm-systems#16311 lands. Multi-GPU is untested
+  on ROCm.
 - Large prefills/prefix hits need room: raise `--max-num-batched-tokens` /
   `--max-model-len` / `--gpu-memory-utilization` if build fails on KV blocks.
+  An OOM while snapshotting KV (large batches, extensible KV cache) needs the
+  opposite: lower `--gpu-memory-utilization`.
 - Startup cost is JIT/autotune, not the bench: install FlashInfer jit-cache
   and cubin; DeepGEMM warmup is skipped (each case's eager pass compiles its
   own shapes).
