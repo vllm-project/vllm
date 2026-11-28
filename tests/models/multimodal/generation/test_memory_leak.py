@@ -5,8 +5,10 @@ import gc
 import random
 import string
 import sys
+from pathlib import Path
 
 import pytest
+import regex as re
 import torch
 from PIL import Image
 
@@ -96,10 +98,37 @@ def _ru_maxrss_bytes() -> int | None:
     return rss if sys.platform == "darwin" else rss * KiB_bytes
 
 
+_DRM_SIZE_UNITS = {"": 1, "KiB": KiB_bytes, "MiB": MiB_bytes}
+
+
+def _rocm_process_vram_bytes() -> int:
+    """VRAM of this process's amdgpu clients, from DRM client usage stats.
+
+    Unlike PyTorch allocator stats, this also counts device memory allocated
+    outside PyTorch. See https://docs.kernel.org/gpu/drm-usage-stats.html.
+    """
+    vram_by_client: dict[str, int] = {}
+    for fdinfo in Path("/proc/self/fdinfo").iterdir():
+        try:
+            stats = dict(re.findall(r"^([\w-]+):\s*(.*)$", fdinfo.read_text(), re.M))
+        except OSError:
+            continue
+        if stats.get("drm-driver") != "amdgpu":
+            continue
+        # drm-memory-vram counts only resident memory, so eviction would move it.
+        size, _, unit = stats["drm-total-vram"].partition(" ")
+        # Duplicated fds share one client, identified by its GPU VM.
+        vram_by_client[stats["pasid"]] = int(size) * _DRM_SIZE_UNITS[unit]
+    assert vram_by_client, "no amdgpu DRM client in /proc/self/fdinfo"
+    return sum(vram_by_client.values())
+
+
 def _gpu_memory_bytes() -> tuple[int, int]:
     # Process-local: device-wide used memory also counts other processes on
     # the GPU, and even a bare HIP context adds 2 MiB to it.
     torch.accelerator.synchronize()
+    if current_platform.is_rocm():
+        return torch.accelerator.memory_allocated(), _rocm_process_vram_bytes()
     return torch.accelerator.memory_allocated(), torch.accelerator.memory_reserved()
 
 
