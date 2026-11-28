@@ -132,11 +132,57 @@ steps:
       source_file_dependencies:
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
+      - "!vllm/distributed/device_communicators/cpu_communicator.py"
+      - "!vllm/distributed/device_communicators/mnnvl_compat.py"
+      - "!vllm/distributed/device_communicators/shm_tensor_arena.py"
+      - "!vllm/distributed/ec_transfer/ec_connector/cpu/"
+      - "!vllm/distributed/ec_transfer/ec_connector/example_connector.py"
+      - "!vllm/distributed/ec_transfer/ec_connector/mooncake/"
+      - "!vllm/distributed/ec_transfer/ec_connector/mooncake_ec_connector.py"
+      - "!vllm/distributed/ec_transfer/ec_connector/mooncake_store_embedding/"
+      - "!vllm/distributed/engram_pool/"
+      - "!vllm/distributed/mooncake_store.py"
+      - "!vllm/distributed/pp_transport/copy_engine.py"
+      - "!vllm/distributed/pp_transport/rocm_sdma.py"
+      - "!vllm/distributed/weight_transfer/ipc_engine.py"
+      - "!vllm/distributed/weight_transfer/m2n_common.py"
+      - "!vllm/distributed/weight_transfer/m2n_engine.py"
+      - "!vllm/distributed/weight_transfer/m2n_layout.py"
+      - "!vllm/distributed/weight_transfer/m2n_trainer.py"
+      - "!vllm/distributed/weight_transfer/modelexpress_engine.py"
+      - "!vllm/distributed/weight_transfer/nccl_common.py"
+      - "!vllm/distributed/weight_transfer/nccl_engine.py"
+      - "!vllm/distributed/weight_transfer/packed_tensor.py"
+      - "!vllm/distributed/weight_transfer/sharded_rdt_common.py"
+      - "!vllm/distributed/weight_transfer/sharded_rdt_engine.py"
+      - "!vllm/distributed/weight_transfer/sharded_rdt_fake.py"
+      - "!vllm/distributed/weight_transfer/sharded_rdt_trainer.py"
+      - "!vllm/distributed/weight_transfer/sparse_nccl_engine.py"
       - vllm/engine/
       - vllm/v1/executor/
+      - "!vllm/v1/executor/cuda_checkpoint_executor.py"
       - vllm/v1/worker/worker_base.py
       - vllm/v1/engine/
       - vllm/v1/worker/
+      - "!vllm/v1/worker/cpu/"
+      - "!vllm/v1/worker/cpu_worker.py"
+      - "!vllm/v1/worker/xpu_model_runner.py"
+      - "!vllm/v1/worker/xpu_worker.py"
+      - "!vllm/v1/worker/mm_encoder_model_runner.py"
+      - "!vllm/v1/worker/gpu/model_states/encoder_decoder.py"
+      - "!vllm/v1/worker/gpu/model_states/encoder_only.py"
+      - "!vllm/v1/worker/gpu/spec_decode/dflash2/"
+      - "!vllm/v1/worker/gpu/spec_decode/dfly/"
+      - "!vllm/v1/worker/gpu/spec_decode/dspine/"
+      - "!vllm/v1/worker/gpu/spec_decode/extract_hidden_states.py"
+      - "!vllm/v1/worker/gpu/spec_decode/extract_hidden_states_config.py"
+      - "!vllm/v1/worker/gpu/spec_decode/gemma4/"
+      - "!vllm/v1/worker/gpu/spec_decode/lilicorr/"
+      - "!vllm/v1/worker/gpu/spec_decode/multi_module_mtp/"
+      - "!vllm/v1/worker/gpu/spec_decode/ngram/"
+      - "!vllm/v1/worker/gpu/spec_decode/standalone_ar/"
+      - "!vllm/v1/worker/gpu/spec_decode/suffix/"
+      - "!vllm/v1/worker/gpu/spec_decode/xpress/"
       - tests/v1/distributed
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
       - vllm/platforms/rocm.py
