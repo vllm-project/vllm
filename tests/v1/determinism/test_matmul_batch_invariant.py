@@ -11,6 +11,7 @@ import torch
 from utils import skip_unsupported
 
 import vllm.model_executor.determinism.batch_invariant as bi
+import vllm.model_executor.determinism.batch_invariant_configs as bi_configs
 from vllm.model_executor.determinism.batch_invariant import (
     enable_batch_invariant_mode,
     matmul_batch_invariant,
@@ -21,6 +22,7 @@ from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_tuned_matmul_arch_family,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -134,6 +136,69 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     batch_output = matmul_batch_invariant(a, b)
 
     assert torch.equal(single_output[0], batch_output[0])
+
+
+def test_hopper_generic_matmul_config_fallback(monkeypatch):
+    """Untuned Hopper bf16 shapes use generic M buckets; tuned shapes win."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "get_device_capability", lambda: DeviceCapability(9, 0)
+    )
+    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_CONFIGS_RESOLVED", False)
+    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_CONFIGS_FOR_DEVICE", None)
+    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_ARCH_FAMILY", None)
+
+    default = {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 3,
+    }
+    expected_by_m = {
+        1: (16, 64, 5),
+        5: (16, 32, 5),
+        32: (32, 32, 5),
+        100: (64, 128, 4),
+        600: (128, 128, 3),
+        16384: (128, 128, 3),
+    }
+    for m, (block_m, block_n, stages) in expected_by_m.items():
+        result = bi_configs._get_matmul_config(m, 12345, 6789, torch.bfloat16, default)
+        assert result == {
+            "BLOCK_SIZE_M": block_m,
+            "BLOCK_SIZE_N": block_n,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 8,
+            "num_warps": 4,
+            "num_stages": stages,
+        }
+
+    tuned = bi_configs._get_matmul_config(1, 12288, 2048, torch.bfloat16, default)
+    assert (
+        tuned["BLOCK_SIZE_K"]
+        == _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["hopper"][(12288, 2048)].block_k
+    )
+
+
+def test_hopper_generic_matmul_config_is_bf16_only_and_hopper_only(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "get_device_capability", lambda: DeviceCapability(8, 9)
+    )
+    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_CONFIGS_RESOLVED", False)
+    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_CONFIGS_FOR_DEVICE", None)
+    monkeypatch.setattr(bi_configs, "_TUNED_MATMUL_ARCH_FAMILY", None)
+    default = {"BLOCK_SIZE_M": 128}
+
+    assert (
+        bi_configs._get_matmul_config(1, 12345, 6789, torch.bfloat16, default)
+        is default
+    )
+    assert (
+        bi_configs._get_matmul_config(1, 12345, 6789, torch.float16, default) is default
+    )
 
 
 @pytest.fixture
