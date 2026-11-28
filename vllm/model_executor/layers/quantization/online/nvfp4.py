@@ -65,12 +65,18 @@ def _quantize_nvfp4(
     global_scale = (
         amax.float().reshape(()) / (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX)
     ).clamp(min=1e-12)
-    inv_global_scale = (1.0 / global_scale).reshape(())
+    packed, scales = _pack_nvfp4(weight, global_scale.reciprocal(), chunk_rows)
+    return packed, scales, global_scale
+
+
+def _pack_nvfp4(
+    weight: torch.Tensor, inv_global_scale: torch.Tensor, chunk_rows: int = 8192
+) -> tuple[torch.Tensor, torch.Tensor]:
     if weight.dtype in (torch.float16, torch.bfloat16) and cutlass_fp4_supported():
         packed, scales = scaled_fp4_quant(
             weight.contiguous(), inv_global_scale, is_sf_swizzled_layout=False
         )
-        return packed, scales, global_scale
+        return packed, scales
     # E2M1 magnitudes 0, 0.5, ..., 6 doubled to integers, mapped to their codes.
     code_of = torch.zeros(13, dtype=torch.uint8, device=weight.device)
     code_of[torch.tensor([0, 1, 2, 3, 4, 6, 8, 12])] = torch.arange(
@@ -89,7 +95,7 @@ def _quantize_nvfp4(
         codes = code_of[(values.abs() * 2).long()] | ((values < 0).to(torch.uint8) << 3)
         packed[rows] = codes[:, 0::2] | (codes[:, 1::2] << 4)
         scales[rows] = block_scales.to(torch.float8_e4m3fn)
-    return packed, scales, global_scale
+    return packed, scales
 
 
 class Nvfp4WeightOnlyOnlineLinearMethod(OnlineLinearBase):
@@ -190,9 +196,8 @@ def _quantize_moe_weight_to_nvfp4(
         amax = amax_for_moe_weight_quant(amax, moe_tp_size).clamp_min(1e-8)
         global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
 
-    # Keep the original BF16/FP16 values as the quantizer input. Folding each
-    # expert's FP32 global scale into the weight would add a BF16/FP16 rounding
-    # before the group-16 scale and E2M1 values are selected.
+    # Pass the global scale separately to avoid rounding the scaled weights
+    # before selecting the group-16 scales and E2M1 values.
     qweight = torch.empty((num_experts, n, k // 2), dtype=torch.uint8, device=device)
     block_scale = torch.empty(
         (num_experts, n, k // 16), dtype=torch.float8_e4m3fn, device=device
@@ -207,9 +212,7 @@ def _quantize_moe_weight_to_nvfp4(
         else:
             expert_scale = global_scale[expert]
         weight_scale_2[expert] = 1.0 / expert_scale
-        qweight[expert], block_scale[expert] = scaled_fp4_quant(
-            expert_weight, expert_scale, is_sf_swizzled_layout=False
-        )
+        qweight[expert], block_scale[expert] = _pack_nvfp4(expert_weight, expert_scale)
     return (
         qweight,
         block_scale,

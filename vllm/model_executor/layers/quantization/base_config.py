@@ -96,8 +96,8 @@ class QuantizeMethodBase(ABC):
             layer: Layer holding the serialized weights.
 
         Returns:
-            The dequantized weight for linear layers. For MoE layers, an
-            iterator of `(experts, w13, w2)` over groups of experts.
+            The dequantized FP32 weight for linear layers. For MoE layers, an
+            iterator of `(experts, w13, w2)` with FP32 weights over groups of experts.
 
         """
         raise NotImplementedError(

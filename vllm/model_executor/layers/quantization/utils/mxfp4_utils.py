@@ -370,8 +370,8 @@ def _downcast_to_mxfp(
         f"{mx_scale_ptr.dtype.element_ty=} must be uint8",
     )
     tl.static_assert(
-        (src_dtype == tl.bfloat16) or (src_dtype == tl.float16),
-        f"{src_dtype=} must be bfloat16 or float16",
+        src_dtype == tl.bfloat16 or src_dtype == tl.float16 or src_dtype == tl.float32,
+        f"{src_dtype=} must be bfloat16, float16, or float32",
     )
 
     outer_block = tl.program_id(0).to(tl.int64)
@@ -524,18 +524,18 @@ def downcast_to_mxfp(
 
 
 def mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a bf16/fp16 tensor to MXFP4 along its last dimension.
+    """Quantize a bf16/fp16/fp32 tensor to MXFP4 along its last dimension.
 
     Dispatches to the fastest backend available on the current platform:
 
-    - the native XPU custom op on XPU,
-    - aiter on ROCm when `aiter` is installed,
+    - the native XPU custom op for half-precision inputs on XPU,
+    - aiter for BF16 on supported ROCm GPUs,
     - and the portable Triton kernel (`downcast_to_mxfp`) otherwise.
 
     Returns packed FP4 values (uint8, two values per byte) and per-block
     (group-32) e8m0 scales (uint8).
     """
-    if current_platform.is_xpu():
+    if current_platform.is_xpu() and x.dtype != torch.float32:
         return xpu_mxfp4_quantize(x)
 
     from vllm._aiter_ops import is_aiter_found_and_supported

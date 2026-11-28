@@ -271,7 +271,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             num_w13_shards=self.moe.w13_num_shards,
             weight_block_size=self.weight_block_size,
             static_input_scales=self.static_input_scales,
-            out_dtype=layer.orig_dtype,
+            out_dtype=torch.float32,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:

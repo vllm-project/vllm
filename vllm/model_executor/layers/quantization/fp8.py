@@ -738,7 +738,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             num_w13_shards=self.moe.w13_num_shards,
             weight_block_size=self.scale_block_size,
             static_input_scales=self.quant_config.activation_scheme == "static",
-            out_dtype=layer.orig_dtype,
+            out_dtype=torch.float32,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:

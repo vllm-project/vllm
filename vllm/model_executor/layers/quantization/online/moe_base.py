@@ -168,8 +168,8 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
                 slice(num_routed, num_routed + num_shared),
                 *self._pad_requantized_weights(
                     layer,
-                    shared_w13.to(layer.orig_dtype),
-                    shared_w2.to(layer.orig_dtype),
+                    shared_w13.float(),
+                    shared_w2.float(),
                     num_shared,
                 ),
             )

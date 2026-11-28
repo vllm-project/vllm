@@ -240,8 +240,9 @@ def _mxfp8_e4m3_quantize_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
 
+    # FlashInfer's packer takes half-precision inputs, not FP32 staging weights.
     flashinfer_mxfp8_quantize = _flashinfer_mxfp8_quantize()
-    if flashinfer_mxfp8_quantize is not None:
+    if flashinfer_mxfp8_quantize is not None and x.dtype != torch.float32:
         x_q, x_scales = flashinfer_mxfp8_quantize(
             x,
             is_sf_swizzled_layout=is_sf_swizzled_layout,
@@ -277,8 +278,8 @@ def mxfp8_e4m3_quantize(
     return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout, alignment)
 
 
-def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    """Dequantize MXFP8 tensor to BF16."""
+def dequant_mxfp8(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Dequantize an MXFP8 tensor to FP32."""
     x_float = x.to(torch.float32)
 
     num_blocks = x.shape[-1] // MXFP8_BLOCK_SIZE
@@ -286,11 +287,12 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
 
     descale = torch.exp2(scales.to(torch.float32) - 127.0)
 
-    dequantized = x_blocked * descale.unsqueeze(-1)
+    return (x_blocked * descale.unsqueeze(-1)).view_as(x)
 
-    dequantized = dequantized.view(*x.shape)
 
-    return dequantized.to(torch.bfloat16)
+def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Dequantize an MXFP8 tensor to BF16 for inference."""
+    return dequant_mxfp8(x, scales).to(torch.bfloat16)
 
 
 def mxfp8_e4m3fn_to_e4m3fnuz(

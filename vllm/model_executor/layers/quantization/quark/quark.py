@@ -1049,7 +1049,7 @@ class QuarkLinearMethod(LinearMethodBase, InputHadamardFusable):
     def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
         """Reconstruct serialized weights for online requantization."""
         from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-            dequant_mxfp8_to_bf16,
+            dequant_mxfp8,
         )
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             kMxfp8Static,
@@ -1059,9 +1059,7 @@ class QuarkLinearMethod(LinearMethodBase, InputHadamardFusable):
             raise NotImplementedError(
                 "Quark weight dequantization is only supported for MXFP8."
             )
-        return dequant_mxfp8_to_bf16(
-            layer.weight.contiguous(), layer.weight_scale.contiguous()
-        )
+        return dequant_mxfp8(layer.weight.contiguous(), layer.weight_scale.contiguous())
 
     def create_weights(
         self,

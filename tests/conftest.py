@@ -381,21 +381,30 @@ def release_dynamo_tracked_fakes():
     convert_frame.clear_compile_context_weakrefs = original
 
 
+@pytest.fixture(scope="module")
+def reset_dynamo_caches():
+    """Let tests that share compiled graphs choose when to reset the caches."""
+
+    def reset():
+        torch._dynamo.reset()
+
+        # These caches are unbounded or keyed by pattern and ShapeEnv objects, so
+        # repeated compilation can make full gc.collect() take seconds.
+        from torch._inductor.pattern_matcher import PatternPrettyPrinter
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        PatternPrettyPrinter.run.cache_clear()
+        for attr in vars(ShapeEnv).values():
+            if hasattr(attr, "cache_clear"):
+                attr.cache_clear()
+
+    return reset
+
+
 @pytest.fixture(autouse=True)
-def dynamo_reset():
+def dynamo_reset(reset_dynamo_caches):
     yield
-    torch._dynamo.reset()
-
-    # These caches are unbounded or keyed by pattern and ShapeEnv objects, so in
-    # a process that compiles once per test they grow until every full
-    # gc.collect() takes seconds.
-    from torch._inductor.pattern_matcher import PatternPrettyPrinter
-    from torch.fx.experimental.symbolic_shapes import ShapeEnv
-
-    PatternPrettyPrinter.run.cache_clear()
-    for attr in vars(ShapeEnv).values():
-        if hasattr(attr, "cache_clear"):
-            attr.cache_clear()
+    reset_dynamo_caches()
 
 
 @pytest.fixture
