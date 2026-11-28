@@ -141,3 +141,36 @@ The coordinator process also runs in this scenario, co-located with the DP rank 
 </figure>
 
 In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+
+## Troubleshooting
+
+### The engine fails to start with "Address already in use"
+
+The rank 0 frontend binds the data parallel RPC port (`--data-parallel-rpc-port`,
+`29550` by default) for the startup handshake. When a previous engine hangs or
+exits abnormally, that stale process keeps the port and the accelerator devices
+alive, so starting an engine again on the same node fails with:
+
+```text
+zmq.error.ZMQError: Address already in use (addr='tcp://<node-ip>:29550')
+```
+
+vLLM checks the port before the engine starts and reports the process that holds it:
+
+```text
+The data parallel RPC port 10.99.48.128:29550 is already in use by PID 1234 (python).
+```
+
+Recover from it by stopping the stale process, or by restarting the node or
+container:
+
+```bash
+# Show the process that still holds the port.
+ss -lntp | grep 29550
+
+# Stop the stale engine process.
+kill -9 <pid>
+```
+
+Restarting the node or container always releases both the port and the accelerator
+devices.
