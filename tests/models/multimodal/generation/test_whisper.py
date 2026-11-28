@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import pytest
+import regex as re
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer
 
@@ -172,6 +173,85 @@ def test_audio_tensor_inputs(vllm_runner: type[VllmRunner]) -> None:
                 name_0="NumPy",
                 name_1=name,
             )
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="Requires Hopper FlashAttention for full mixed-batch CUDA graphs",
+)
+def test_cudagraph_with_new_audio_and_decode(
+    vllm_runner: type[VllmRunner],
+    resampled_assets,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog_vllm: pytest.LogCaptureFixture,
+) -> None:
+    """A new audio request and an active decode can replay one decoder graph."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    prompts = [
+        {"prompt": VLLM_PROMPT, "multi_modal_data": {"audio": audio}}
+        for audio in resampled_assets
+    ]
+    sampling = SamplingParams(temperature=0, max_tokens=6, ignore_eos=True, logprobs=5)
+    results = []
+    for enforce_eager in (True, False):
+        with vllm_runner(
+            "openai/whisper-tiny",
+            dtype="half",
+            max_model_len=448,
+            max_num_batched_tokens=2048,
+            max_num_seqs=2,
+            gpu_memory_utilization=0.055,
+            enforce_eager=enforce_eager,
+            async_scheduling=False,
+            enable_prefix_caching=False,
+            attention_config={"backend": "FLASH_ATTN", "flash_attn_version": 3},
+            compilation_config={
+                "cudagraph_mode": "FULL",
+                "prefill_cudagraph_capture_token_sizes": [8],
+            },
+            disable_log_stats=False,
+            cudagraph_metrics=True,
+            enable_logging_iteration_details=True,
+        ) as runner:
+            llm = runner.llm
+            engine = llm.llm_engine
+            llm.enqueue(prompts[0], sampling, use_tqdm=False)
+            engine.step()
+            engine.do_log_stats()
+            caplog_vllm.clear()
+
+            llm.enqueue(prompts[1], sampling, use_tqdm=False)
+            engine.step()
+            engine.do_log_stats()
+            logs = caplog_vllm.text
+            assert re.search(
+                r"1 context requests, \d+ context tokens, 1 generation requests, "
+                r"1 generation tokens.*encoder inputs: 1\b",
+                logs,
+            ), logs
+            expected_mode = "NONE" if enforce_eager else "FULL"
+            assert re.search(rf"\|\s+{expected_mode}\s+\|", logs), logs
+
+            outputs = llm.wait_for_completion(use_tqdm=False)
+            assert len(outputs) == len(prompts)
+            completions = [output.outputs[0] for output in outputs]
+            assert all(
+                len(output.token_ids) == sampling.max_tokens for output in completions
+            )
+            results.append(
+                [
+                    (output.token_ids, output.text, output.logprobs)
+                    for output in completions
+                ]
+            )
+
+    check_logprobs_close(
+        outputs_0_lst=results[0],
+        outputs_1_lst=results[1],
+        name_0="eager",
+        name_1="full CUDA graph",
+    )
 
 
 @pytest.mark.parametrize("dtype", ["half"])

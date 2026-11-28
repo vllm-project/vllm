@@ -2070,6 +2070,16 @@ class VllmConfig:
                     model_config.is_encoder_decoder
                     and self.compilation_config.cudagraph_mode
                     not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
+                    and not (
+                        self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+                        and model_config.architecture
+                        == "WhisperForConditionalGeneration"
+                        and current_platform.is_cuda()
+                        and self.attention_config.flash_attn_version != 2
+                        and self.lora_config is None
+                        and self.offload_config.uva.cpu_offload_gb == 0
+                        and self.offload_config.prefetch.offload_group_size == 0
+                    )
                 ):
                     logger.info_once(
                         "Encoder-decoder models do not support %s. "
