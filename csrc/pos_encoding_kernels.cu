@@ -116,6 +116,13 @@ void rotary_embedding(
     int64_t head_size,
     torch::stable::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox, int64_t rope_dim_offset, bool inverse) {
+  STD_TORCH_CHECK(query.stride(-1) == 1,
+                  "query must have stride 1 in the last dimension");
+  if (key.has_value()) {
+    STD_TORCH_CHECK(key->stride(-1) == 1,
+                    "key must have stride 1 in the last dimension");
+  }
+
   // num_tokens = batch_size * seq_len
   int64_t num_tokens = positions.numel();
   int positions_ndim = positions.dim();
