@@ -462,6 +462,46 @@ def test_compressed_tensors_kv_scales_fnuz_doubling(
 
 
 @pytest.mark.parametrize(
+    "kv_cache_dtype, expected_k_scale, expected_v_scale",
+    [
+        ("auto", 1.0, 1.0),
+        ("fp8", 0.0038, 0.0344),
+    ],
+)
+def test_compressed_tensors_kv_scales_follow_kv_cache_dtype(
+    monkeypatch, kv_cache_dtype, expected_k_scale, expected_v_scale
+):
+    """Checkpoint k/v scales must not reach a layer whose KV cache is
+    unquantized, such as one kept in BF16 by kv_cache_dtype_skip_layers."""
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: False)
+    quant_config = Mock(
+        kv_cache_scheme={
+            "num_bits": 8,
+            "type": "float",
+            "strategy": "tensor",
+            "symmetric": True,
+            "dynamic": False,
+        }
+    )
+    method = CompressedTensorsKVCacheMethod(quant_config)
+    layer = torch.nn.Module()
+    layer.kv_cache_dtype = kv_cache_dtype
+    layer._k_scale_cpu = torch.tensor(1.0)
+    layer._v_scale_cpu = torch.tensor(1.0)
+    method.create_weights(layer)
+    layer.k_scale.data.fill_(0.0038)
+    layer.v_scale.data.fill_(0.0344)
+    layer.q_scale.data.fill_(0.5)
+
+    method.process_weights_after_loading(layer)
+
+    assert layer._k_scale_float == pytest.approx(expected_k_scale)
+    assert layer._v_scale_float == pytest.approx(expected_v_scale)
+    assert layer._k_scale.item() == pytest.approx(expected_k_scale)
+    assert layer._v_scale.item() == pytest.approx(expected_v_scale)
+
+
+@pytest.mark.parametrize(
     "args",
     [
         ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", True),

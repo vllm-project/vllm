@@ -1420,6 +1420,21 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         )
         q_loaded = bool((layer.q_scale > 0).all())
 
+        # Checkpoint k/v scales only apply to a quantized KV cache. Layers kept
+        # unquantized (e.g. kv_cache_dtype_skip_layers) use unit scales, as
+        # BaseKVCacheMethod does.
+        kv_quantized = is_quantized_kv_cache(layer.kv_cache_dtype)
+        k_scale = (
+            layer.k_scale.detach() * fnuz_factor
+            if kv_quantized
+            else torch.ones_like(layer.k_scale)
+        )
+        v_scale = (
+            layer.v_scale.detach() * fnuz_factor
+            if kv_quantized
+            else torch.ones_like(layer.v_scale)
+        )
+
         # Buffers, not Parameters: updates don't rewrite them, so level-2 sleep
         # must keep them. ATTN_HEAD changes shape.
         def _set_scale(name: str, value: torch.Tensor) -> None:
@@ -1429,8 +1444,8 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             else:
                 layer.register_buffer(name, value)
 
-        _set_scale("_k_scale", layer.k_scale.detach() * fnuz_factor)
-        _set_scale("_v_scale", layer.v_scale.detach() * fnuz_factor)
+        _set_scale("_k_scale", k_scale)
+        _set_scale("_v_scale", v_scale)
         _set_scale(
             "_q_scale",
             layer.q_scale.detach() * fnuz_factor
