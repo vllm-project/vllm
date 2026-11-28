@@ -563,6 +563,43 @@ def _run_flashinfer_autotune_dummy_runs(
             autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
+def _run_flashinfer_cutedsl_bf16_autotune(runner: "GPUModelRunner") -> None:
+    """Tune the FlashInfer CuTe-DSL GEMMs of unquantized linear layers.
+
+    They run only M <= 32 and fall back to torch above, so the dummy runs of
+    max_num_batched_tokens never reach them. One dummy run of 32 tokens with
+    the M buckets up to 32 tunes every BF16 GEMM shape the model runs there.
+    """
+    import vllm.utils.flashinfer as fi_utils
+    from vllm.model_executor.layers.utils import _FLASHINFER_CUTEDSL_BF16_MAX_M
+
+    # UnquantizedLinearMethod selects them for both of these backends.
+    linear_backend = runner.vllm_config.kernel_config.linear_backend
+    if (
+        linear_backend not in ("auto", "flashinfer_cutedsl")
+        or not fi_utils.is_flashinfer_cutedsl_bf16_gemm_supported()
+    ):
+        return
+    num_tokens = min(
+        _FLASHINFER_CUTEDSL_BF16_MAX_M, runner.scheduler_config.max_num_batched_tokens
+    )
+    tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
+    start = time.perf_counter()
+    with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            randomize_inputs=True,
+            skip_attn=True,
+        )
+    logger.info(
+        "FlashInfer CuTe-DSL BF16 GEMM autotune with token buckets %s took %.2fs.",
+        tuning_buckets,
+        time.perf_counter() - start,
+    )
+
+
 def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
     """Identify a saved autotune file by its FlashInfer metadata and size."""
     try:
@@ -695,6 +732,9 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             if not cache_hit:
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
                 _run_flashinfer_autotune_mm_encoder(runner)
+            # Also after a cache hit: a file saved without these GEMMs would
+            # leave them untuned, and with them the pass profiles nothing.
+            _run_flashinfer_cutedsl_bf16_autotune(runner)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:

@@ -47,6 +47,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import copy_weight_, set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import is_flashinfer_cutedsl_bf16_gemm_supported
 
 logger = init_logger(__name__)
 
@@ -176,6 +177,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
         linear_backend = (
             config.kernel_config.linear_backend if config is not None else "auto"
         )
+        # auto: FlashInfer CuTe-DSL for BF16 GEMMs with M <= 32, torch above.
+        self._auto_cutedsl = (
+            linear_backend == "auto" and is_flashinfer_cutedsl_bf16_gemm_supported()
+        )
+        if self._auto_cutedsl:
+            linear_backend = "flashinfer_cutedsl"
         self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
 
     def create_weights(
@@ -220,8 +227,17 @@ class UnquantizedLinearMethod(LinearMethodBase):
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
         elif current_platform.is_rocm():
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
-        elif self._gemm_impl is cuda_unquantized_gemm:
-            maybe_use_skinny_gemm(layer)
+        elif current_platform.is_cuda():
+            from vllm.model_executor.layers.vocab_parallel_embedding import (
+                ParallelLMHead,
+            )
+
+            # The LM head runs eagerly, where a FlashInfer call costs far more
+            # host time than this GEMM, so auto keeps the default one for it.
+            if self._auto_cutedsl and isinstance(layer, ParallelLMHead):
+                self._gemm_impl = cuda_unquantized_gemm
+            if self._gemm_impl is cuda_unquantized_gemm:
+                maybe_use_skinny_gemm(layer)
 
     def apply(
         self,

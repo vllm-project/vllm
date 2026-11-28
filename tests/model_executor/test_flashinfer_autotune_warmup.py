@@ -182,6 +182,7 @@ def _make_runner(modules, *, max_tokens: int = 8192):
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
             model_config=None,
+            kernel_config=SimpleNamespace(linear_backend="torch"),
             attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(
                 enable_elastic_ep=False,
@@ -376,6 +377,9 @@ def test_flashinfer_autotune_lifecycle(
 
     monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
     monkeypatch.setattr(warmup, "_run_flashinfer_autotune_dummy_runs", events.dummy)
+    monkeypatch.setattr(
+        warmup, "_run_flashinfer_cutedsl_bf16_autotune", events.cutedsl_bf16
+    )
     monkeypatch.setattr(warmup, "replayssm_autotune_warmup", events.replayssm)
     monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", events.kimi)
     monkeypatch.setattr(
@@ -405,7 +409,9 @@ def test_flashinfer_autotune_lifecycle(
     )
     if hisparse:
         expected.append(call.hisparse(runner))
+    # The CuTe-DSL BF16 pass runs after a cache hit too.
     warmup_calls: list[tuple[str, object, dict]] = [
+        ("cutedsl_bf16", runner, {}),
         ("replayssm", runner, {}),
         ("kimi", model, {}),
     ]
@@ -636,6 +642,7 @@ class _AutotuneRun:
         self.tuners = {}
         self.saves = []
         self.profile_groups = defaultdict(list)
+        self.linear_backend = "torch"
 
     def cache_path(self, rank):
         return self.cache_dir / f"autotune_configs_dp0_rank{rank}.json"
@@ -664,6 +671,11 @@ class _AutotuneRun:
             self.tuners[rank] = _AutotuneTuner(self)
             runner = _make_runner([])
             runner.vllm_config.parallel_config.pipeline_parallel_size = self.pp
+            runner.vllm_config.kernel_config.linear_backend = self.linear_backend
+            # The bounded CuTe-DSL BF16 dummy run.
+            runner._dummy_run.side_effect = lambda **kwargs: self.tuners[
+                self.rank
+            ].profile("cutedsl_bf16_gemm")
             flashinfer_autotune(runner)
         return self
 
@@ -715,6 +727,14 @@ def autotune_run(monkeypatch, tmp_path):
         )
         monkeypatch.setattr(warmup, "replayssm_autotune_warmup", lambda runner: None)
         monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", lambda model: None)
+        monkeypatch.setattr(
+            fi_utils, "is_flashinfer_cutedsl_bf16_gemm_supported", lambda: True
+        )
+        monkeypatch.setattr(
+            fi_utils,
+            "flashinfer_get_hybrid_num_tokens_buckets",
+            lambda max_tokens: (1, 2, 4, 8, 16, 32),
+        )
         return run
 
     return make_run
@@ -845,3 +865,157 @@ def test_autotune_cache_key_separates_moe_routed_tuning_under_dp(monkeypatch):
     assert key(2, "1", routed=False) == key(2, "0", routed=False)
     sim = "uniform_random"
     assert key(2, "1", routed=True, sim=sim) == key(2, "0", routed=True, sim=sim)
+
+
+@pytest.mark.parametrize("backend", ["auto", "flashinfer_cutedsl"])
+@pytest.mark.parametrize(
+    "max_tokens,num_tokens,buckets",
+    [(8192, 32, (1, 2, 4, 8, 16, 32)), (16, 16, (1, 2, 4, 8, 16))],
+)
+def test_cutedsl_bf16_autotune_is_one_bounded_dummy_run(
+    monkeypatch, backend, max_tokens, num_tokens, buckets
+):
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    runner = _make_runner([], max_tokens=max_tokens)
+    runner.vllm_config.kernel_config.linear_backend = backend
+    events = Mock()
+
+    @contextmanager
+    def autotune(**kwargs):
+        events.enter(**kwargs)
+        yield
+        events.exit()
+
+    dummy_run_signature = signature(GPUModelRunner._dummy_run)
+    events.dummy_run.side_effect = lambda **kwargs: dummy_run_signature.bind(
+        None, **kwargs
+    )
+    runner._dummy_run = events.dummy_run
+    monkeypatch.setattr(
+        fi_utils, "is_flashinfer_cutedsl_bf16_gemm_supported", lambda: True
+    )
+    monkeypatch.setattr(fi_utils, "autotune", autotune)
+    monkeypatch.setattr(
+        fi_utils,
+        "flashinfer_get_hybrid_num_tokens_buckets",
+        lambda n: tuple(b for b in (1, 2, 4, 8, 16, 32, 64) if b <= n),
+    )
+
+    warmup._run_flashinfer_cutedsl_bf16_autotune(runner)
+
+    assert events.mock_calls == [
+        call.enter(tuning_buckets=buckets, round_up=True),
+        call.dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            randomize_inputs=True,
+            skip_attn=True,
+        ),
+        call.exit(),
+    ]
+
+
+@pytest.mark.parametrize(
+    "backend,supported",
+    [("torch", True), ("flashinfer_cudnn", True), ("auto", False)],
+)
+def test_cutedsl_bf16_autotune_needs_the_cutedsl_backend(
+    monkeypatch, backend, supported
+):
+    runner = _make_runner([])
+    runner.vllm_config.kernel_config.linear_backend = backend
+    autotune = Mock()
+    monkeypatch.setattr(
+        fi_utils, "is_flashinfer_cutedsl_bf16_gemm_supported", lambda: supported
+    )
+    monkeypatch.setattr(fi_utils, "autotune", autotune)
+
+    warmup._run_flashinfer_cutedsl_bf16_autotune(runner)
+
+    autotune.assert_not_called()
+    runner._dummy_run.assert_not_called()
+
+
+@pytest.mark.parametrize("pp, tp", [(1, 1), (1, 4), (2, 4)])
+def test_cutedsl_bf16_pass_tunes_after_a_cache_hit_without_it(autotune_run, pp, tp):
+    """A cache saved without the CuTe-DSL BF16 GEMMs still hits for the other
+    ops; every rank then tunes only these GEMMs, in its usual tuning group."""
+    world = pp * tp
+    old = autotune_run(pp=pp, tp=tp).execute()
+    assert all("cutedsl_bf16_gemm" not in cache for _, _, cache in old.saves)
+
+    run = autotune_run(pp=pp, tp=tp)
+    run.linear_backend = "auto"
+    run.execute()
+    run.assert_collectives_match()
+    assert all(tuner.loaded is not None for tuner in run.tuners.values())
+    for rank in range(world):
+        expected = tuple(range(rank // tp * tp, (rank // tp + 1) * tp))
+        assert run.profile_groups[rank] == [expected if world > 1 else None]
+    assert sorted(rank for rank, _, _ in run.saves) == list(range(world))
+    assert all("cutedsl_bf16_gemm" in cache for _, _, cache in run.saves)
+
+    warm = autotune_run(pp=pp, tp=tp)
+    warm.linear_backend = "auto"
+    warm.execute()
+    assert not warm.profile_groups and not warm.saves
+
+
+@pytest.mark.parametrize(
+    "backend,supported,expected",
+    [
+        ("auto", True, "flashinfer_cutedsl"),
+        ("auto", False, "auto"),
+        ("torch", True, "torch"),
+        ("flashinfer_cudnn", True, "flashinfer_cudnn"),
+    ],
+)
+def test_unquantized_linear_auto_uses_cutedsl_where_supported(
+    monkeypatch, backend, supported, expected
+):
+    from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers import linear
+
+    dispatch = Mock()
+    monkeypatch.setattr(linear, "dispatch_unquantized_gemm", dispatch)
+    monkeypatch.setattr(
+        linear, "is_flashinfer_cutedsl_bf16_gemm_supported", lambda: supported
+    )
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend=backend))
+    with set_current_vllm_config(config):
+        linear.UnquantizedLinearMethod()
+
+    dispatch.assert_called_once_with(expected)
+
+
+@pytest.mark.parametrize("auto", [True, False])
+@pytest.mark.parametrize("lm_head", [True, False])
+def test_unquantized_lm_head_keeps_the_default_gemm(monkeypatch, lm_head, auto):
+    from vllm.model_executor.layers import linear
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    monkeypatch.setattr(
+        linear,
+        "current_platform",
+        SimpleNamespace(
+            is_cpu=lambda: False, is_rocm=lambda: False, is_cuda=lambda: True
+        ),
+    )
+    skinny = Mock()
+    monkeypatch.setattr(linear, "maybe_use_skinny_gemm", skinny)
+    method = linear.UnquantizedLinearMethod.__new__(linear.UnquantizedLinearMethod)
+    flashinfer_gemm = object()
+    method._gemm_impl = flashinfer_gemm
+    method._auto_cutedsl = auto
+    layer = ParallelLMHead.__new__(ParallelLMHead) if lm_head else torch.nn.Module()
+
+    method.process_weights_after_loading(layer)
+
+    if lm_head and auto:
+        assert method._gemm_impl is linear.cuda_unquantized_gemm
+        skinny.assert_called_once_with(layer)
+    else:
+        assert method._gemm_impl is flashinfer_gemm
+        skinny.assert_not_called()
