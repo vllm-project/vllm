@@ -15,6 +15,7 @@ from vllm.model_executor.determinism.batch_invariant import (
     gptq_linear_batch_invariant,
 )
 from vllm.model_executor.kernels.linear import (
+    HummingLinearKernel,
     MPLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
@@ -326,9 +327,11 @@ class AutoGPTQLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AutoGPTQConfig) -> None:
         self.quant_config = quant_config
         self.quant_type = self.quant_config.quant_type
-        # The Marlin GEMM picks its tiling and K-split from the number of
-        # tokens, so its results depend on the batch size. In batch-invariant
-        # mode, dequantize the weight and use the batch-invariant matmul.
+        # Machete and Marlin pick their tiling from the number of tokens, so
+        # their results depend on the batch size. In batch-invariant mode only
+        # a Humming selection may run (Humming honors the flag itself);
+        # everything else dequantizes the weight and uses the batch-invariant
+        # matmul.
         self.use_batch_invariant = envs.VLLM_BATCH_INVARIANT
         self.kernel: MPLinearKernel | None = None
 
@@ -372,8 +375,25 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         )
 
         if self.use_batch_invariant:
-            kernel_type = None
-            backend_name = "dequantize + batch-invariant matmul"
+            # Only Humming honors VLLM_BATCH_INVARIANT; the other candidates
+            # tile on the token count, so any other selection (or none) keeps
+            # the dequantize fallback. 4-bit only: W8A16's Humming-side
+            # correctness is not validated.
+            kernel_type: type[MPLinearKernel] | None = None
+            if self.quant_type.size_bits == 4:
+                try:
+                    if (
+                        choose_mp_linear_kernel(mp_linear_kernel_config)
+                        is HummingLinearKernel
+                    ):
+                        kernel_type = HummingLinearKernel
+                except ValueError:
+                    pass  # no kernel implements this layer; the fallback does
+            backend_name = (
+                kernel_type.__name__
+                if kernel_type is not None
+                else "dequantize + batch-invariant matmul"
+            )
         else:
             kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
             backend_name = kernel_type.__name__
@@ -479,8 +499,8 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             self.kernel.w_zp_name = "w_zp"
             return
 
-        if self.use_batch_invariant:
-            # No Marlin repacking: apply() unpacks the checkpoint layout.
+        if self.use_batch_invariant and self.kernel is None:
+            # No kernel repacking: apply() unpacks the checkpoint layout.
             for name in ("qweight", "scales", "qzeros"):
                 replace_parameter(layer, name, getattr(layer, name).data)
             return
@@ -494,7 +514,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.use_batch_invariant:
+        if self.use_batch_invariant and self.kernel is None:
             return gptq_linear_batch_invariant(
                 x,
                 layer.qweight,
