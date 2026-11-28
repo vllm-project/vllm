@@ -634,15 +634,17 @@ def invoke_block_moe_gemv_kernel(
     `expert_ids` (slot i is routed row i). `num_tokens_post_padded` is unused.
     """
     N = qweight.size(1)
+    K = a.size(1)
+    bk = next(b for b in (256, 128, 64, 32) if b <= config["BK"] and K % b == 0)
     slots = expert_ids.numel() if sorted_token_ids is None else expert_ids.size(0)
     _moe_gemv_kernel[(slots, triton.cdiv(N, config["BN"]))](
         a, qweight, scales, lut, c, topk_weights, sorted_token_ids, expert_ids,
-        N, a.size(1), a.size(0) * top_k, a.stride(0), qweight.stride(0),
+        N, K, a.size(0) * top_k, a.stride(0), qweight.stride(0),
         qweight.stride(1), scales.stride(0), scales.stride(1), c.stride(-2),
         top_k=top_k, MUL_ROUTED_WEIGHT=mul_routed_weight,
         DIRECT_ROUTING=sorted_token_ids is None,
         APPLY_RELU2=apply_relu2,
-        CODEC=_CODEC_ID[codec], BN=config["BN"], BK=config["BK"],
+        CODEC=_CODEC_ID[codec], BN=config["BN"], BK=bk,
         num_warps=config["num_warps"], num_stages=config["num_stages"],
     )  # fmt: skip
 

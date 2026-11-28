@@ -319,19 +319,22 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
         self.codec = codec.lower()
         self.block_size, self.block_bytes = B12X_BLOCK_CODECS[self.codec]
         self.is_embedding = False
+        self.params_dtype = torch.bfloat16
+        self.use_triton: bool | None = None
+
+    def _resolve_backend(self, params_dtype: torch.dtype) -> bool:
         from vllm.model_executor.kernels.linear import _get_linear_backend
         from vllm.utils.b12x import get_b12x_blockscaled
 
         api = get_b12x_blockscaled()
-        self.use_triton = _use_triton(
+        return _use_triton(
             self.codec,
             _get_linear_backend(quantization=self.codec),
             api is not None
             and hasattr(api, "BlockQuantLinearWeight")
             and api.is_supported(),
             "linear",
-            # The params_dtype that LinearBase passes to create_weights.
-            torch.get_default_dtype(),
+            params_dtype,
         )
 
     def create_weights(
@@ -351,6 +354,7 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
         if self.is_embedding and self.codec != "q8_0":
             raise ValueError("packed embedding currently requires Q8_0")
         self.params_dtype = params_dtype
+        self.use_triton = self._resolve_backend(params_dtype)
         if (
             params_dtype not in (torch.bfloat16, torch.float16)
             or input_size_per_partition % self.block_size
@@ -374,6 +378,8 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer):
+        if self.use_triton is None:
+            self.use_triton = self._resolve_backend(self.params_dtype)
         if self.use_triton:
             qweight, scales = repack_blocks(layer.weight.data, self.codec)
             replace_parameter(layer, "weight", qweight)
@@ -485,11 +491,11 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
         )
 
     def apply(self, layer, x, bias=None):
-        if x.dtype not in (torch.bfloat16, torch.float16):
-            raise ValueError(
-                "Block-quantized dense execution requires BF16 or FP16 activations"
-            )
         if self.use_triton:
+            if x.dtype not in (torch.bfloat16, torch.float16):
+                raise ValueError(
+                    "Block-quantized dense execution requires BF16 or FP16 activations"
+                )
             out = torch.ops.vllm.modelopt_block_linear(
                 x.reshape(-1, x.shape[-1]),
                 layer.weight,
@@ -500,6 +506,10 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
             if bias is not None:
                 out.add_(bias)
             return out.view(*x.shape[:-1], -1)
+        if x.dtype != torch.bfloat16:
+            raise ValueError(
+                "Block-quantized dense execution requires BF16 activations"
+            )
         api = get_b12x_blockscaled()
         assert api is not None
         output = api.mm(

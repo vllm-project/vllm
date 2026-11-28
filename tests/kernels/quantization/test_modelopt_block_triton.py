@@ -521,6 +521,19 @@ def test_moe_matches_reference(codec, activation, top_k, M, dtype, workspace_ini
     assert_moe_close_to_unfused(got, x, w1, w2, topk_weights, topk_ids, activation)
 
 
+@pytest.mark.parametrize("K,inter", [(384, 384), (1024, 640)])
+@pytest.mark.parametrize("activation", [MoEActivation.RELU2_NO_MUL, MoEActivation.SILU])
+@pytest.mark.parametrize("M", [1, 8, 17])
+def test_q8_moe_odd_128_multiples(K, inter, activation, M, workspace_init):
+    """Q8_0 MoE aligns K and inter to 128; odd multiples of 128 (e.g. 2560 / 4
+    = 640) must pick a K tile that divides K on both GEMV and tl.dot."""
+    run, w1, w2 = make_moe("q8_0", activation, E=4, K=K, inter=inter, top_k=2)
+    x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    topk_weights, topk_ids = make_routing(M, 4, 2)
+    got = run(x, topk_weights, topk_ids)
+    assert_moe_close_to_unfused(got, x, w1, w2, topk_weights, topk_ids, activation)
+
+
 @pytest.mark.parametrize("M", [1, 8, 64, 512])
 def test_moe_bolt_shape(M, workspace_init):
     """Bolt's most common routed-expert layer: 240 experts of 2048 x 1024, top 9."""
@@ -648,6 +661,7 @@ def test_batch_invariant_rows(workspace_init, monkeypatch):
 def test_backend_selection(monkeypatch, b12x, backend, codec, dtype, expected):
     """b12x stays the SM12x BF16 default; elsewhere IQ2_XXS / Q8_0 take Triton,
     and unsupported requests fail at construction."""
+    import vllm.model_executor.parameter as parameter_module
     import vllm.utils.b12x as b12x_utils
     from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
     from vllm.model_executor.layers.quantization.modelopt_block_quant import (
@@ -656,6 +670,10 @@ def test_backend_selection(monkeypatch, b12x, backend, codec, dtype, expected):
     )
 
     monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: b12x)
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
     monkeypatch.setattr(
         b12x_utils,
         "get_b12x_blockscaled",
@@ -668,15 +686,84 @@ def test_backend_selection(monkeypatch, b12x, backend, codec, dtype, expected):
     moe_config = make_dummy_moe_config(hidden_dim=256, intermediate_size=512)
     moe_config.moe_backend = backend
     moe_config.in_dtype = dtype
+
+    def build_linear():
+        method = ModelOptBlockQuantLinearMethod(codec)
+        method.create_weights(
+            torch.nn.Module(),
+            256,
+            [256],
+            256,
+            256,
+            dtype,
+            weight_loader=lambda *_: None,
+        )
+        return method
+
     builders = (
         lambda: ModelOptBlockQuantMoEMethod(moe_config, codec=codec),
-        lambda: ModelOptBlockQuantLinearMethod(codec),
+        build_linear,
     )
     vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend=backend))
-    with set_current_vllm_config(vllm_config), set_default_torch_dtype(dtype):
+    with set_current_vllm_config(vllm_config):
         for build in builders:
             if expected == "error":
                 with pytest.raises(ValueError, match=f"ModelOpt {codec.upper()}"):
                     build()
             else:
                 assert build().use_triton == (expected == "triton")
+
+
+def test_linear_backend_selection_ignores_default_dtype(monkeypatch):
+    """Linear backend selection follows create_weights's params_dtype, not
+    torch.get_default_dtype()."""
+    import vllm.model_executor.parameter as parameter_module
+    import vllm.utils.b12x as b12x_utils
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+    )
+
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    monkeypatch.setattr(
+        b12x_utils,
+        "get_b12x_blockscaled",
+        lambda: SimpleNamespace(
+            BlockQuantLinearWeight=object, is_supported=lambda: True
+        ),
+    )
+    vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend="auto"))
+    with set_current_vllm_config(vllm_config):
+        with set_default_torch_dtype(torch.float32):
+            method = ModelOptBlockQuantLinearMethod("q8_0")
+            assert method.use_triton is None
+            method.create_weights(
+                torch.nn.Module(),
+                256,
+                [256],
+                256,
+                256,
+                torch.bfloat16,
+                weight_loader=lambda *_: None,
+            )
+            assert method.use_triton is False
+            with pytest.raises(ValueError, match="BF16 activations"):
+                method.apply(
+                    torch.nn.Module(), torch.empty(1, 256, dtype=torch.float16)
+                )
+
+        with set_default_torch_dtype(torch.bfloat16):
+            method = ModelOptBlockQuantLinearMethod("q8_0")
+            method.create_weights(
+                torch.nn.Module(),
+                256,
+                [256],
+                256,
+                256,
+                torch.float16,
+                weight_loader=lambda *_: None,
+            )
+            assert method.use_triton is True
