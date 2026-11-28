@@ -38,9 +38,10 @@ pub(crate) fn validate_n_limit(n: u32, max_n_sequences: i64) -> Result<(), ApiEr
 }
 
 /// Reject an output budget larger than the whole context window, like
-/// Python's `TokenizeParams` check for chat and completions. A budget that
-/// fits the window is still clamped to the room the prompt leaves when the
-/// request is lowered; `/inference/v1/generate` only clamps, as in Python.
+/// Python's `TokenizeParams` check for chat, completions and responses. A
+/// budget that fits the window is still clamped to the room the prompt leaves
+/// when the request is lowered; `/inference/v1/generate` only clamps, as in
+/// Python.
 pub(crate) fn validate_max_output_tokens(
     param: &'static str,
     max_tokens: Option<u32>,

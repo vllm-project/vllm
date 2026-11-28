@@ -44,6 +44,7 @@ use self::types::{
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, chat_request_error, engine_error, server_error};
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
+use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::state::AppState;
 use crate::utils::{EventExt as _, resolve_request_context, sse_response, unix_timestamp};
 
@@ -61,6 +62,11 @@ pub async fn create_responses(
         .await;
 
     let prepared = prepare_responses_request(body, &lora_resolution, request_context)?;
+    validate_max_output_tokens(
+        "max_output_tokens",
+        prepared.chat_request.sampling_params.max_tokens,
+        state.llm().info().max_model_len,
+    )?;
     let request_span = tracing::info_span!(
         "responses",
         request_id = %prepared.request_id,
