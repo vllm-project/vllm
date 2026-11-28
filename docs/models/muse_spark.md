@@ -5,7 +5,10 @@ vLLM supports `meta-models/Muse-Spark-Open-816B-A42B-NVFP4` through
 on NVIDIA and AMD ROCm GPUs. Serve it with `--reasoning-parser muse` and the
 Muse [tool-call parser](../features/tool_calling.md). The
 `Inferact/Muse-Spark-Open-DSpark` draft runs through
-`--speculative-config '{"method": "dspark", ...}'`.
+`--speculative-config '{"method": "dspark", ...}'`, and the
+`RadixArk/Muse-Spark-Open-DFlash2` draft through
+`--speculative-config '{"method": "dflash", ...}'` (see
+[the DFlash2 section](#dflash2-draft)).
 
 By default every batch uses the stock execution path. See
 [ModelOpt](../features/quantization/modelopt.md) for the NVFP4 MoE backends.
@@ -23,8 +26,10 @@ unsupported deployment is refused at startup with
 - TP4, TP8 or TP16 with EP equal to TP, and data/pipeline parallel sizes of one.
 - BF16 activations and logits, a BF16 or FP8 (E4M3, per-tensor scales) KV
   cache, `--block-size 16` and `--attention-backend FLASHINFER`.
-- DSpark with seven speculative tokens, probabilistic draft sampling and
-  adaptive verification disabled.
+- DSpark or DFlash2 with seven speculative tokens, and adaptive verification
+  disabled. DSpark additionally needs probabilistic draft sampling
+  (`draft_sample_method`); DFlash2's selector walk samples probabilistically
+  by construction and takes no `draft_sample_method`.
 - Compilation mode `NONE` and a CUDA graph mode whose decode component is
   `FULL`.
 - None of LoRA, DBO, decode-context parallelism, batch-sharded sampling, sleep
@@ -79,3 +84,31 @@ vllm serve meta-models/Muse-Spark-Open-816B-A42B-NVFP4 \
     --monokernel \
     --compilation-config '{"mode": 0, "decode_cudagraph_capture_request_sizes": [1, 2, 4, 8]}'
 ```
+
+## DFlash2 draft
+
+The `RadixArk/Muse-Spark-Open-DFlash2` draft is a block-diffusion proposer:
+five conv-attention layers with a candidate selector propose all seven draft
+tokens in parallel, where DSpark's Markov chain samples them sequentially. It
+runs on the stock execution path and on the specialized decode alike: the
+fused Markov loop is a hook only `DSparkSpeculator` asks for, and the DFlash2
+speculator's own propose path (its model forward plus a Triton selector walk)
+is CUDA-graph-captured with the rest of the step.
+
+```bash
+--speculative-config '{"method": "dflash", "model": "RadixArk/Muse-Spark-Open-DFlash2", "num_speculative_tokens": 7, "rejection_sample_method": "block"}'
+```
+
+On the same 75k-context agentic benchmark (4x B300, TP4+EP4, the
+specialized decode, server-default sampling) the two drafters accept at
+parity, and DFlash2's unfused draft costs about 0.9 ms more per step than
+DSpark's fused draft:
+
+| Draft position | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| DSpark | 0.650 | 0.418 | 0.281 | 0.190 | 0.130 | 0.078 | 0.051 |
+| DFlash2 | 0.641 | 0.388 | 0.240 | 0.164 | 0.116 | 0.082 | 0.060 |
+
+(mean acceptance 2.80 vs 2.69). On short coding prompts DFlash2 accepts
+much more (mean 3.62), so acceptance is content-dependent: measure the
+trade-off on your own traffic before switching drafters.
