@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import cached_property
 from typing import Any
 
 import torch
@@ -38,6 +39,19 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         )
 
         self.inputs_embeds: torch.Tensor | None = None
+
+    @cached_property
+    def has_draft_kv_cache(self) -> bool:
+        """Whether draft prefill needs to populate a draft-owned KV cache.
+
+        Drafters that use only the target's KV cache (e.g. the Gemma 4 assistant)
+        can skip their prefill forward when no draft tokens are requested.
+        """
+        return any(
+            layer_name in self.draft_attn_layer_names
+            for tensor in self.kv_cache_config.kv_cache_tensors
+            for layer_name in tensor.layers
+        )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
@@ -131,6 +145,8 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         num_reqs = input_batch.num_reqs
         if num_speculative_tokens is None:
             num_speculative_tokens = self.num_speculative_steps
+        if num_speculative_tokens == 0 and not self.has_draft_kv_cache:
+            return self.draft_tokens[:num_reqs].fill_(-1)
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
         max_query_len = input_batch.num_scheduled_tokens.max()
