@@ -3,19 +3,24 @@
 """The DSV4.1 delayed mHC seams on ROCm.
 
 On gfx950, `mhc_pre_delayed_overlap` moves the gate projection onto a side
-stream, overlapped with the next sublayer. On gfx942, `mhc_pre_delayed_seam`
-runs AITER's `mhc_fused_post_pre_delayed`, which applies the previous
-sublayer's post, collapses the residual with the carried pre-mix and computes
-the next gates in one call, from `MHC_SEAM_MIN_TOKENS` tokens on seams that
-have a post block and no fused norm.
+stream, overlapped with the next sublayer, and with
+VLLM_ROCM_USE_AITER_FLYDSL_MHC `mhc_pre_delayed_flydsl` runs the seams AITER's
+FlyDSL kernel is faster at, and `mhc_tail_flydsl` the step-end tail. On
+gfx942, `mhc_pre_delayed_seam` runs AITER's `mhc_fused_post_pre_delayed`, which
+applies the previous sublayer's post, collapses the residual with the carried
+pre-mix and computes the next gates in one call, from `MHC_SEAM_MIN_TOKENS`
+tokens on seams that have a post block and no fused norm.
 """
 
 import functools
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.triton import mhc_post_collapse_rms_norm_triton
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.mhc import (
@@ -28,6 +33,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dyna
 from vllm.models.deepseek_v4.amd.model import attach_mxfp8_input
 from vllm.platforms.rocm import get_cdna_version
 from vllm.utils.torch_utils import aux_stream
+
+logger = init_logger(__name__)
 
 MHC_OVERLAP_MAX_TOKENS = 128
 
@@ -262,6 +269,247 @@ def mhc_pre_delayed_mxfp8(
         layer_input,
         next_pre_mix,
     )
+
+
+def get_flydsl_mhc_ops(hidden_size: int, hc_mult: int) -> Any | None:
+    """AITER's FlyDSL mHC kernels (`aiter.ops.flydsl`) if
+    VLLM_ROCM_USE_AITER_FLYDSL_MHC is on and they take this model's shape,
+    else None."""
+    ops = rocm_aiter_ops.flydsl_mhc_ops()
+    if ops is None or not ops.flydsl_mhc_post_pre_rmsnorm_supported(
+        0, hidden_size, hc_mult
+    ):
+        return None
+    logger.info_once("Using AITER's FlyDSL mHC seam and step-end tail kernels.")
+    return ops
+
+
+def flydsl_seam_takes(
+    ops: Any, residual_shape: tuple[int, ...], aux_mean: bool = False
+) -> bool:
+    """Whether the FlyDSL seam takes a `[T, hc_mult, hidden_size]` residual
+    and is faster than Mega-MHC at its row count (AITER's measured rule). With
+    `aux_mean` the seam also returns the mean of the post-mixed streams, which
+    replaces an `mhc_post` and a mean launch."""
+    num_tokens, hc_mult, hidden_size = residual_shape
+    return bool(
+        ops.flydsl_mhc_post_pre_rmsnorm_supported(num_tokens, hidden_size, hc_mult)
+        and ops.flydsl_mhc_post_pre_rmsnorm_preferred(num_tokens, aux_mean=aux_mean)
+    )
+
+
+@functools.cache
+def _flydsl_seam_max_tokens(
+    ops: Any, hidden_size: int, hc_mult: int, aux_mean: bool
+) -> int:
+    """The most rows at which `flydsl_seam_takes` holds (AITER's rule)."""
+    num_tokens = most = 0
+    while ops.flydsl_mhc_post_pre_rmsnorm_supported(
+        num_tokens + 1, hidden_size, hc_mult
+    ):
+        num_tokens += 1
+        if ops.flydsl_mhc_post_pre_rmsnorm_preferred(num_tokens, aux_mean=aux_mean):
+            most = num_tokens
+    return most
+
+
+@functools.cache
+def warmup_flydsl_seam(
+    ops: Any,
+    device: torch.device,
+    hidden_size: int,
+    hc_mult: int,
+    sinkhorn_repeat: int,
+    *,
+    mxfp8: bool,
+    aux_mean: bool,
+    has_post: bool,
+    identity_pre: bool,
+) -> None:
+    """Compile one FlyDSL seam variant for every split configuration AITER's
+    rule can pick, once per process, so no seam compiles while serving: each
+    (split configuration, variant) pair is a separate kernel that otherwise
+    compiles on its first call, which under DP/EP would stall the other ranks
+    in the next collective. Runs on the current stream, outside capture."""
+    ops.warmup_flydsl_mhc_post_pre_rmsnorm(
+        _flydsl_seam_max_tokens(ops, hidden_size, hc_mult, aux_mean),
+        out_dtype="mxfp8" if mxfp8 else "bf16",
+        aux_mean=aux_mean,
+        has_post=has_post,
+        identity_pre=identity_pre,
+        sinkhorn_repeat=sinkhorn_repeat,
+        device=device,
+    )
+
+
+@functools.cache
+def warmup_flydsl_tail(
+    ops: Any, device: torch.device, hidden_size: int, hc_mult: int, keep_residual: bool
+) -> None:
+    """Compile the FlyDSL tail variants the model can launch (with the
+    post-mix, keeping the residual or not, and collapse + norm only), once per
+    process, so none compiles while serving."""
+    residual = torch.zeros(1, hc_mult, hidden_size, dtype=torch.bfloat16, device=device)
+    pre_mix = torch.zeros(1, hc_mult, device=device)
+    weight = torch.zeros(hidden_size, dtype=torch.bfloat16, device=device)
+    post = (
+        torch.zeros(1, hidden_size, dtype=torch.bfloat16, device=device),
+        torch.zeros(1, hc_mult, 1, device=device),
+        torch.zeros(1, hc_mult, hc_mult, device=device),
+    )
+    ops.flydsl_mhc_post_collapse_rmsnorm(residual, pre_mix, weight, 1e-6)
+    ops.flydsl_mhc_post_collapse_rmsnorm(
+        residual, pre_mix, weight, 1e-6, *post, keep_residual=keep_residual
+    )
+
+
+def mhc_pre_delayed_flydsl(
+    fallback: Callable[..., tuple[torch.Tensor, ...]],
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None = None,
+    x: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+    sublayer_out: torch.Tensor | None = None,
+    post_layer_mix: torch.Tensor | None = None,
+    comb_res_mix: torch.Tensor | None = None,
+    fn_packed: torch.Tensor | None = None,
+    *,
+    ops: Any,
+    fn_flydsl: torch.Tensor,
+    mxfp8: bool,
+    aux_out: list[torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """A Mega-MHC seam on AITER's FlyDSL kernel where `flydsl_seam_takes`.
+
+    Same arguments and returns as `MHCPreDelayedOp`; `fn_flydsl` is `fn`
+    packed by `flydsl_mhc_pack_fn` (not Mega-MHC's layout). With `mxfp8` the
+    layer input carries its MXFP8 copy, as in `mhc_pre_delayed_mxfp8`. Other
+    seams run `fallback`. With `aux_out`, which the caller gives only to a
+    post-mix seam `flydsl_seam_takes` with `aux_mean`, the mean of the
+    post-mixed streams is appended to it.
+
+    The kernel's split-K scratch is keyed by the stream a seam is launched or
+    captured on, so all seams captured on one stream share it: replays of
+    graphs captured on the same stream must not overlap. The model runner
+    replays the target's and the DSpark drafter's graphs one after the other on
+    one stream, and DBO (separate ubatch streams) keeps Mega-MHC. The eager
+    warm-up before capture, on the capture stream, allocates the scratch.
+    """
+    if aux_out is None and (
+        x is not None
+        or norm_weight is None
+        or norm_weight.dtype != torch.bfloat16
+        or residual.dim() != 3
+        or not flydsl_seam_takes(ops, tuple(residual.shape))
+    ):
+        return fallback(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix=pre_mix,
+            x=x,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            sublayer_out=sublayer_out,
+            post_layer_mix=post_layer_mix,
+            comb_res_mix=comb_res_mix,
+            fn_packed=fn_packed,
+        )
+    assert aux_out is None or sublayer_out is not None
+    post: tuple[torch.Tensor | None, ...] = (None, None, None)
+    if sublayer_out is not None:
+        assert post_layer_mix is not None and comb_res_mix is not None
+        post = (
+            sublayer_out.contiguous(),
+            post_layer_mix.contiguous(),
+            comb_res_mix.contiguous(),
+        )
+    out = ops.flydsl_mhc_post_pre_rmsnorm(
+        residual.contiguous(),
+        fn_flydsl,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        None if pre_mix is None else pre_mix.contiguous(),
+        *post,
+        norm_weight,
+        norm_eps,
+        out_dtype="mxfp8" if mxfp8 else "bf16",
+        aux_mean=aux_out is not None,
+    )
+    residual, post_mix, comb_mix, layer_input, next_pre_mix = out[:5]
+    if aux_out is not None:
+        aux_out.append(out[5])
+    if mxfp8:
+        layer_input, values, scales = layer_input
+        attach_mxfp8_input(
+            layer_input,
+            QuantizedActivation(
+                values, scales, layer_input.dtype, layer_input.shape, kMxfp8Dynamic
+            ),
+        )
+    return residual, post_mix, comb_mix, layer_input, next_pre_mix
+
+
+def mhc_tail_flydsl(
+    ops: Any,
+    residual: torch.Tensor,
+    pre_mix: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_eps: float,
+    sublayer_out: torch.Tensor | None = None,
+    post_layer_mix: torch.Tensor | None = None,
+    comb_res_mix: torch.Tensor | None = None,
+    *,
+    residual_out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """The step-end tail in one FlyDSL launch: the last post-mix (when
+    `sublayer_out` is given), the collapse with `pre_mix` and the final
+    RMSNorm. Returns the normed `[T, hidden_size]` hidden states.
+
+    `residual_out` (`[T, hc_mult, hidden_size]`, e.g. a view of the MTP hidden
+    buffer) receives the post-mixed residual, or a copy of `residual` when
+    there is no post-mix.
+    """
+    residual, pre_mix = residual.contiguous(), pre_mix.contiguous()
+    if sublayer_out is None:
+        if residual_out is not None:
+            residual_out.copy_(residual)
+        out, _, _ = ops.flydsl_mhc_post_collapse_rmsnorm(
+            residual, pre_mix, norm_weight, norm_eps
+        )
+        return out
+    assert post_layer_mix is not None and comb_res_mix is not None
+    out, _, _ = ops.flydsl_mhc_post_collapse_rmsnorm(
+        residual,
+        pre_mix,
+        norm_weight,
+        norm_eps,
+        sublayer_out.contiguous(),
+        post_layer_mix.contiguous(),
+        comb_res_mix.contiguous(),
+        residual_out=residual_out,
+    )
+    return out
 
 
 # Chosen so decode-only steps at low concurrency keep their current path. With

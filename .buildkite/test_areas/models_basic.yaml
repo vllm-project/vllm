@@ -94,6 +94,7 @@ steps:
   - tests/models/test_muse_spark_rocm_mono.py
   - tests/models/test_muse_spark_fp32_rope.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
+  - tests/kernels/models/amd/test_dsv41_flydsl_mhc.py
   - tests/models/test_muse_spark_rocm_drafter.py
   - tests/models/hy_v4/test_dfly_config.py
   - tests/models/hy_v4/test_hy_v4_mrope.py
@@ -120,6 +121,7 @@ steps:
       models/test_muse_spark_rocm_mono.py
       models/test_muse_spark_fp32_rope.py
       kernels/models/amd/test_muse_spark_fused_markov.py
+      kernels/models/amd/test_dsv41_flydsl_mhc.py
       models/test_muse_spark_rocm_drafter.py
       models/hy_v4/test_dfly_config.py
       models/hy_v4/test_hy_v4_mrope.py
@@ -135,6 +137,7 @@ steps:
       source_file_dependencies:
       - vllm/models/deepseek_v4/
       - vllm/models/deepseek_v41/
+      - vllm/_aiter_ops.py
       - tests/models/test_deepseek_v4_vl_rocm.py
       - tests/models/test_deepseek_v4_vl.py
       - tests/models/test_hyv4_rocm.py
@@ -191,6 +194,7 @@ steps:
       - tests/models/test_muse_spark_rocm_mono.py
       - tests/models/test_muse_spark_fp32_rope.py
       - tests/kernels/models/amd/test_muse_spark_fused_markov.py
+      - tests/kernels/models/amd/test_dsv41_flydsl_mhc.py
       - tests/models/test_muse_spark_rocm_drafter.py
       - tests/models/test_muse_spark_rocm_draft_fp8.py
       commands:
@@ -220,6 +224,7 @@ steps:
         models/test_muse_spark_rocm_mono.py
         models/test_muse_spark_fp32_rope.py
         kernels/models/amd/test_muse_spark_fused_markov.py
+        kernels/models/amd/test_dsv41_flydsl_mhc.py
         models/test_muse_spark_rocm_drafter.py
         models/test_muse_spark_rocm_draft_fp8.py
         models/test_utils.py::test_merge_multimodal_embeddings_no_sync

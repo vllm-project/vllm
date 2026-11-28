@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
     VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
+    VLLM_ROCM_USE_AITER_FLYDSL_MHC: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1452,6 +1453,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
     "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
+    ),
+    # Run DeepSeek-V4.1's mHC residual on AITER's FlyDSL kernels (requires
+    # VLLM_ROCM_USE_AITER=1): the delayed seams at the row counts AITER
+    # measures faster than Mega-MHC, the seams that also produce a DSpark
+    # auxiliary hidden state, and the step-end post-mix, collapse and final
+    # norm. Hidden size 5120 and hc_mult 4 (DeepSeek-V4.1-Flash) on gfx950
+    # only. Disabled by default.
+    "VLLM_ROCM_USE_AITER_FLYDSL_MHC": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_MHC", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.

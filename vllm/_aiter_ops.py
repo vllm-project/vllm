@@ -2334,6 +2334,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
+        VLLM_ROCM_USE_AITER_FLYDSL_MHC: FlyDSL mHC seam and step-end tail of
+            DeepSeek-V4.1 (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2411,6 +2413,7 @@ class rocm_aiter_ops:
     # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
     # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
+    _FLYDSL_MHC = envs.VLLM_ROCM_USE_AITER_FLYDSL_MHC
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2444,6 +2447,7 @@ class rocm_aiter_ops:
         cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
             envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
         )
+        cls._FLYDSL_MHC = envs.VLLM_ROCM_USE_AITER_FLYDSL_MHC
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
         _sync_aiter_situv2_moe_env()
@@ -5740,6 +5744,44 @@ class rocm_aiter_ops:
             )
         )
         return post_mix, comb_mix, layer_input, next_pre_mix
+
+    @staticmethod
+    @functools.cache
+    def _flydsl_mhc_module() -> Any | None:
+        try:
+            flydsl = importlib.import_module("aiter.ops.flydsl")
+            # Resolve the lazy exports now, so an AITER without them falls back
+            # here rather than in the forward pass.
+            for name in (
+                "flydsl_mhc_pack_fn",
+                "flydsl_mhc_post_pre_rmsnorm",
+                "flydsl_mhc_post_pre_rmsnorm_supported",
+                "flydsl_mhc_post_pre_rmsnorm_preferred",
+                "flydsl_mhc_post_collapse_rmsnorm",
+                "flydsl_mhc_post_collapse_rmsnorm_supported",
+                "warmup_flydsl_mhc_post_pre_rmsnorm",
+            ):
+                getattr(flydsl, name)
+            return flydsl
+        except Exception as e:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FLYDSL_MHC is set, but AITER's FlyDSL mHC "
+                "kernels could not be imported (%s); using the default mHC path.",
+                e,
+            )
+            return None
+
+    @classmethod
+    @if_aiter_supported
+    def flydsl_mhc_ops(cls) -> Any | None:
+        """`aiter.ops.flydsl` with its mHC seam and tail kernels if
+        VLLM_ROCM_USE_AITER_FLYDSL_MHC is on, this is gfx950 and they import,
+        else None."""
+        from vllm.platforms.rocm import on_gfx950
+
+        if not (cls._AITER_ENABLED and cls._FLYDSL_MHC and on_gfx950()):
+            return None
+        return cls._flydsl_mhc_module()
 
     @staticmethod
     def mega_mhc_pack_fn(fn: torch.Tensor) -> torch.Tensor:
