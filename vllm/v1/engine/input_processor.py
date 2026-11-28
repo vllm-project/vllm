@@ -536,6 +536,16 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            elif sampling_params.bad_words:
+                # bad_words are only tokenized above, so without a tokenizer
+                # they would silently never apply.
+                raise VLLMValidationError(
+                    "bad_words requires a tokenizer, but none is loaded "
+                    "(--skip-tokenizer-init). Remove bad_words, or load a "
+                    "tokenizer.",
+                    parameter="bad_words",
+                    value=sampling_params.bad_words,
+                )
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:

@@ -211,6 +211,18 @@ def _process_inputs_with_max_model_len(
     )
 
 
+def test_bad_words_rejected_without_tokenizer():
+    """bad_words are tokenized by the engine's tokenizer; without one they would
+    never reach the sampler."""
+    with pytest.raises(VLLMValidationError, match="requires a tokenizer") as exc_info:
+        _process_inputs_with_max_model_len(SamplingParams(bad_words=["foo"]))
+
+    assert exc_info.value.parameter == "bad_words"
+
+    request = _process_inputs_with_max_model_len(SamplingParams())
+    assert request.sampling_params.bad_words_token_ids is None
+
+
 def test_unset_max_tokens_rejects_oversized_min_tokens():
     """Reject min_tokens that only becomes invalid after max_tokens is filled."""
     params = SamplingParams(max_tokens=None, min_tokens=2147483648)
