@@ -2507,6 +2507,28 @@ class rocm_aiter_ops:
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
+    def is_rdna_mla_enabled(cls) -> bool:
+        """RDNA analog of is_mla_enabled() (aiter Triton MLA)."""
+        return cls.is_rdna_aiter_enabled() and cls._MLA_ENABLED
+
+    @staticmethod
+    @functools.cache
+    def is_triton_mla_decode_tuned() -> bool:
+        """Whether AITER ships a BF16 Triton MLA decode tuning for this GPU."""
+        try:
+            import aiter.ops.triton.attention.mla  # noqa: F401
+            from aiter.ops.triton.utils.config_utils import (
+                load_config_json,
+                resolve_config_dir,
+            )
+
+            config_dir = resolve_config_dir("attention", "MLA_DECODE")
+            config = load_config_json(f"{config_dir}/DEFAULT.json", required=False)
+        except (AssertionError, AttributeError, ImportError, OSError):
+            return False
+        return bool(config and config.get("bfloat16"))
+
+    @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED

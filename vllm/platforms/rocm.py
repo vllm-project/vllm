@@ -523,6 +523,11 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
             ]
+        elif rocm_aiter_ops.is_rdna_mla_enabled():
+            return [
+                AttentionBackendEnum.ROCM_AITER_RDNA_MLA,
+                AttentionBackendEnum.TRITON_MLA,
+            ]
         else:
             return [
                 AttentionBackendEnum.TRITON_MLA,
