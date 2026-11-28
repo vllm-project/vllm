@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -10,6 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.lora.layers import FusedMoEWithLoRA
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
@@ -20,7 +21,9 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 
 if TYPE_CHECKING:
+    from vllm.lora.lora_model import LoRAModel
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.lora_utils import LoraState
     from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 logger = init_logger(__name__)
@@ -73,6 +76,7 @@ class PCPManager:
         dcp_rank: int = 0,
         cp_interleave: int = 1,
         moe_gathers_tokens: bool = False,
+        expert_lora_supported: bool = True,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -81,6 +85,7 @@ class PCPManager:
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
         self.shard_decode_requests = shard_decode_requests
+        self.expert_lora_supported = expert_lora_supported
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
@@ -88,6 +93,18 @@ class PCPManager:
         self.draft_prefill_batch: InputBatch | None = None
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
+        self._padded_gather_idx_np: np.ndarray | None = None
+        self._padded_num_tokens = 0
+        self._per_rank_num_tokens: list[int] = []
+        self._pcp_moe_lora_mapping: torch.Tensor | None = (
+            torch.empty(
+                max_num_tokens * pcp_world_size,
+                dtype=torch.int32,
+                device=device,
+            )
+            if max_num_tokens is not None
+            else None
+        )
         self._gathered_kv_write_mask: torch.Tensor | None = None
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
         # Padding mask over the PCP-gathered rows the MoE routes (rank-major).
@@ -155,6 +172,25 @@ class PCPManager:
         )
 
     @staticmethod
+    def validate_lora_adapter(
+        lora_model: "LoRAModel", expert_lora_supported: bool = True
+    ) -> None:
+        if expert_lora_supported:
+            return
+        expert_modules = sorted(
+            module_name
+            for module_name in lora_model.loras
+            if "experts" in module_name.split(".")
+        )
+        if expert_modules:
+            raise NotImplementedError(
+                "PCP + EP expert LoRA is not supported yet; use an "
+                "attention-only adapter or disable expert parallelism. "
+                f"Adapter {lora_model.id} contains MoE expert "
+                f"module(s): {', '.join(expert_modules)}."
+            )
+
+    @staticmethod
     def validate_config(
         vllm_config: VllmConfig,
         supports_mm_inputs: bool,
@@ -178,8 +214,6 @@ class PCPManager:
             raise NotImplementedError(
                 "MRV2 PCP supports MM inputs only for DeepSeek-V4.1 on CUDA."
             )
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and (
             reason := speculative_config.speculator_config.pcp_unsupported_reason(
@@ -412,10 +446,81 @@ class PCPManager:
         self._padded_gather_idx = async_tensor_h2d(
             padded_gather_idx, device=self.device
         )
+        self._padded_gather_idx_np = padded_gather_idx
+        self._padded_num_tokens = padded_num_tokens
+        self._per_rank_num_tokens = per_rank_num_tokens
         self._gathered_kv_write_mask = async_tensor_h2d(
             gathered_kv_write_mask, device=self.device
         )
         return segments_by_rank, per_rank_num_tokens
+
+    def _clear_moe_lora_mapping(self) -> None:
+        if self._pcp_moe_lora_mapping is not None:
+            self._pcp_moe_lora_mapping.fill_(-1)
+
+    def build_moe_lora_mapping(
+        self,
+        lora_state: "LoraState",
+        global_batch: InputBatch | None,
+        lora_index_to_id: list[int | None],
+    ) -> torch.Tensor | None:
+        """Map PCP-gathered token rows to active Punica LoRA slots."""
+        if (
+            global_batch is None
+            or self._padded_gather_idx_np is None
+            or not np.any(lora_state.lora_ids[global_batch.idx_mapping_np] > 0)
+        ):
+            self._clear_moe_lora_mapping()
+            return None
+
+        global_mapping = np.repeat(
+            lora_state.lora_ids[global_batch.idx_mapping_np],
+            global_batch.num_scheduled_tokens,
+        )
+        mapping = global_mapping[self._padded_gather_idx_np]
+        # `_padded_num_tokens` is the CUDA-graph bucket size set by
+        # partition_batch(); it must match the PCP all-gather row stride.
+        for rank, n in enumerate(self._per_rank_num_tokens):
+            start = rank * self._padded_num_tokens
+            mapping[start + n : start + self._padded_num_tokens] = -1
+
+        lora_id_to_index = {
+            lora_id: index
+            for index, lora_id in enumerate(lora_index_to_id)
+            if lora_id is not None
+        }
+        mapping = np.array(
+            [
+                lora_id_to_index.get(lora_id, -1) if lora_id > 0 else -1
+                for lora_id in mapping
+            ],
+            dtype=np.int32,
+        )
+        if self._pcp_moe_lora_mapping is None:
+            assert self._max_num_tokens is not None
+            self._pcp_moe_lora_mapping = torch.empty(
+                self._max_num_tokens * self.pcp_world_size,
+                dtype=torch.int32,
+                device=self.device,
+            )
+        out = async_tensor_h2d(mapping, out=self._pcp_moe_lora_mapping[: mapping.size])
+        return out
+
+    def prepare_moe_lora_capture(
+        self, layers: Iterable[FusedMoEWithLoRA], num_tokens: int
+    ) -> None:
+        """Point captured MoE LoRA kernels at the graph-stable token mapping."""
+        if self._pcp_moe_lora_mapping is None:
+            assert self._max_num_tokens is not None
+            self._pcp_moe_lora_mapping = torch.empty(
+                self._max_num_tokens * self.pcp_world_size,
+                dtype=torch.int32,
+                device=self.device,
+            )
+        mapping = self._pcp_moe_lora_mapping[: num_tokens * self.pcp_world_size]
+        mapping.fill_(-1)
+        for layer in layers:
+            layer.set_pcp_token_lora_mapping(mapping)
 
     def get_num_tokens_for_dispatch(
         self,
@@ -467,6 +572,9 @@ class PCPManager:
 
         global_batch = input_batch
         self._global_batch = global_batch
+        self._padded_gather_idx_np = None
+        self._padded_num_tokens = 0
+        self._per_rank_num_tokens = []
 
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
@@ -730,6 +838,9 @@ class PCPManager:
         self, input_batch: InputBatch
     ) -> InputBatch:
         """Stage a capture or dummy batch in persistent PCP input buffers."""
+        # DP dummy steps can replay FULL graphs without a real-batch mapping
+        # rebuild; dummy tokens must not consume the previous batch's slots.
+        self._clear_moe_lora_mapping()
         input_buffers = self.input_buffers
         num_reqs = input_batch.num_reqs_after_padding
         num_tokens = input_batch.num_tokens_after_padding
@@ -935,4 +1046,5 @@ def maybe_build_pcp_manager(
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
         # Without EP all2all kernels, MoERunner all-gathers PCP tokens to route.
         moe_gathers_tokens=not parallel_config.enable_expert_parallel,
+        expert_lora_supported=not parallel_config.enable_expert_parallel,
     )

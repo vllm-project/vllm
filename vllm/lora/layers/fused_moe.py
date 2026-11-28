@@ -462,6 +462,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def set_mapping(self, punica_wrapper):
         super().set_mapping(punica_wrapper)
         lora_context = self._build_lora_context()
+        self._lora_context = lora_context
         fused_experts = self._moe_kernel.fused_experts
         assert isinstance(fused_experts, LoRAExpertsMixin), (
             f"{type(fused_experts).__name__} does not support LoRA context setup."
@@ -470,6 +471,16 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         prepare_finalize = self._moe_kernel.prepare_finalize
         if hasattr(prepare_finalize, "set_lora_context"):
             prepare_finalize.set_lora_context(lora_context)
+
+    def set_pcp_token_lora_mapping(self, mapping: torch.Tensor | None) -> None:
+        lora_context = getattr(self, "_lora_context", None)
+        if lora_context is not None:
+            lora_context.local_token_lora_mapping = mapping
+
+    def clear_pcp_token_lora_mapping(self) -> None:
+        lora_context = getattr(self, "_lora_context", None)
+        if lora_context is not None:
+            lora_context.local_token_lora_mapping = None
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)

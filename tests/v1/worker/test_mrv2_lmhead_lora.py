@@ -65,6 +65,40 @@ def test_prompt_lora_mapping_repeats_for_multiple_sampled_tokens():
     assert token == (3, 3, 0, 0)
 
 
+def test_pcp_prompt_lora_mapping_follows_global_batch():
+    """Under PCP the model runs on a rank's chunks but samples globally.
+
+    Token ids must cover the local tokens while lm_head ids cover every
+    logits row of the global batch, including requests this rank skipped.
+    """
+    state = LoraState(max_num_reqs=4)
+    lora_a = LoRARequest("adapter-a", 3, "/tmp/adapter-a")
+    lora_b = LoRARequest("adapter-b", 5, "/tmp/adapter-b")
+    state.add_request("req-a", 2, lora_a)
+    state.add_request("req-b", 0, None)
+    state.add_request("req-c", 1, lora_b)
+
+    # This rank holds a 4-token chunk of req-a and a 2-token chunk of req-b.
+    num_scheduled = np.array([4, 2], dtype=np.int32)
+    # Global batch order is req-c, req-a, req-b; req-a has two logits rows.
+    num_logits = np.array([1, 2, 1], dtype=np.int32)
+
+    prompt, token, requests = state.make_lora_inputs(
+        ["req-a", "req-b"],
+        np.array([2, 0], dtype=np.int32),
+        num_scheduled,
+        num_logits,
+        prompt_req_ids=["req-c", "req-a", "req-b"],
+        prompt_idx_mapping=np.array([1, 2, 0], dtype=np.int32),
+    )
+
+    assert len(token) == int(num_scheduled.sum())
+    assert token == (3, 3, 3, 3, 0, 0)
+    assert len(prompt) == int(num_logits.sum())
+    assert prompt == (5, 3, 3, 0)
+    assert requests == {lora_a, lora_b}
+
+
 def test_num_active_loras_counts_base_requests_with_adapters():
     """The LoRA kernels count no-LoRA requests as one more active LoRA, so
     the CUDA graph key must too."""
