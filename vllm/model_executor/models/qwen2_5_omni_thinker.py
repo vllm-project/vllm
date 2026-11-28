@@ -23,6 +23,7 @@
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -49,8 +50,9 @@ from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
+from vllm.exceptions import VLLMValidationError
 from vllm.forward_context import set_forward_context
-from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -90,6 +92,8 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
+    ProcessorInputs,
+    TimingContext,
 )
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
@@ -101,7 +105,12 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.utils import get_mm_embedding_modality_masks
+from vllm.multimodal.utils import (
+    VIDEO_AUDIO_UUID_PREFIX,
+    get_mm_embedding_modality_masks,
+    get_use_audio_in_video,
+    resolve_mm_processor_kwarg,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -680,6 +689,97 @@ _PASS_AUDIO_FROM_VIDEO_INDICES = Version(transformers.__version__) >= Version(
 
 
 class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
+    def apply(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        """Reject a silent video before the cache or the prompt updates run.
+
+        The renderer keeps `mm_data`/`mm_uuids` aligned for a video without an
+        audio track by inserting a `(None, uuid)` audio item whose UUID starts
+        with `VIDEO_AUDIO_UUID_PREFIX`. Neither the processor cache (which
+        reports a misleading "Cache miss") nor the prompt updates
+        (`assert audio is not None`) can consume that item, so report the
+        cause while it is still known.
+        """
+        use_audio_in_video = get_use_audio_in_video(
+            self.info.ctx.get_merged_mm_kwargs(inputs.hf_processor_mm_kwargs)
+        )
+        if use_audio_in_video:
+            # Count before the cache drops hits: a cached audio is not missing.
+            mm_counts = inputs.mm_data_items.get_all_counts()
+            if mm_counts.get("audio", 0) < mm_counts.get("video", 0):
+                raise ValueError(
+                    "Video doesn't have audio track with `audio_in_video=True`"
+                )
+
+        if (
+            use_audio_in_video
+            and "audio" in inputs.mm_data_items
+            and "video" in inputs.mm_data_items
+        ):
+            audio_items = inputs.mm_data_items["audio"]
+            audio_uuids = (inputs.mm_uuid_items or {}).get("audio") or ()
+            # A `None` audio item is also a data-less reference to a cached
+            # audio, so only the renderer's prefixed UUID marks a silent video.
+            if isinstance(audio_items, AudioProcessorItems) and any(
+                audio is None
+                and uuid is not None
+                and uuid.startswith(VIDEO_AUDIO_UUID_PREFIX)
+                for audio, uuid in zip(audio_items.get_all(), audio_uuids)
+            ):
+                raise VLLMValidationError(
+                    "A video in this request has no audio track, but "
+                    "`use_audio_in_video` is enabled. Remove the flag or "
+                    "send a video with an audio track.",
+                    parameter="video_url",
+                )
+        return super().apply(inputs, timing_ctx)
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingResult:
+        cache = inputs.cache
+        if cache is None:
+            return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
+            inputs.hf_processor_mm_kwargs
+        )
+        if not get_use_audio_in_video(merged_kwargs):
+            return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
+        mm_hashes = self._get_mm_hashes(inputs)
+        video_is_cached = cache.is_cached(mm_hashes.get("video", []))
+        audio_is_cached = cache.is_cached(mm_hashes.get("audio", []))
+
+        # The HF processor needs each video and its paired audio in the same
+        # call, but per-item caching can leave a video miss with an audio hit.
+        # Such a request bypasses the cache.
+        if not all(video_is_cached) and any(audio_is_cached):
+            audio_items = inputs.mm_data_items.get("audio")
+            if isinstance(audio_items, AudioProcessorItems) and any(
+                item is None for item in audio_items.get_all()
+            ):
+                # A data-less audio item only exists in the cache, and the
+                # cache stores processed kwargs rather than raw media, so the
+                # bypass below would hand `None` to the HF processor. Reject
+                # with an actionable message instead of an assertion deep in
+                # the processor.
+                raise VLLMValidationError(
+                    "This request pairs a new video with an audio track that is "
+                    "only referenced by UUID, so its data is not in the request. "
+                    "A new video must be processed together with its audio: send "
+                    "the audio data again, or reuse the cached video as well.",
+                    parameter="audio_url",
+                )
+            inputs = replace(inputs, cache=None)
+
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -691,16 +791,16 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
         mm_counts = mm_items.get_all_counts()
-        if hf_kwargs.get("use_audio_in_video"):
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+        use_audio_in_video = get_use_audio_in_video(merged_kwargs)
+        if use_audio_in_video:
             num_videos = mm_counts.get("video", 0)
-            if mm_counts.get("audio", 0) < num_videos:
-                raise ValueError(
-                    "Video doesn't have audio track with `audio_in_video=True`"
-                )
-
             if num_videos and "text" in hf_inputs.hf_data:
                 standalone_mm_counts = dict(mm_counts)
-                standalone_mm_counts["audio"] -= num_videos
+                # The paired audio may be a cache hit and absent from `mm_items`.
+                standalone_mm_counts["audio"] = max(
+                    0, standalone_mm_counts.get("audio", 0) - num_videos
+                )
                 hf_inputs.hf_data["text"] = self._get_hf_mm_text(standalone_mm_counts)
                 if _PASS_AUDIO_FROM_VIDEO_INDICES:
                     num_standalone = standalone_mm_counts["audio"]
@@ -716,33 +816,46 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
         if audios:
             hf_data["audio"] = audios
-        elif (
-            normalized_kwargs.get("use_audio_in_video")
-            and "audio" not in hf_data
-            and hf_data.get("videos")
-        ):
-            raise ValueError(
-                "Video doesn't have audio track with `audio_in_video=True`"
-            )
 
-        merged = self.info.ctx.get_merged_mm_kwargs(normalized_kwargs)
         if hf_data.get("videos") and (
-            merged.keys() & {"size", "min_pixels", "max_pixels"}
+            merged_kwargs.keys() & {"size", "min_pixels", "max_pixels"}
         ):
             normalized_kwargs = dict(normalized_kwargs)
             video_size = dict(self.info.get_hf_processor().video_processor.size)
-            size_override = merged.get("size")
+            size_override = merged_kwargs.get("size")
             if size_override is not None:
                 video_size = video_size | size_override
-            min_pixels = merged.get("min_pixels")
+            min_pixels = merged_kwargs.get("min_pixels")
             if min_pixels is not None:
                 video_size["shortest_edge"] = min_pixels
-            max_pixels = merged.get("max_pixels")
+            max_pixels = merged_kwargs.get("max_pixels")
             if max_pixels is not None:
                 video_size["longest_edge"] = max_pixels
             normalized_kwargs["size"] = video_size
 
         return hf_inputs._replace(hf_kwargs=normalized_kwargs)
+
+    def _pair_dummy_mm_counts(self, mm_counts: Mapping[str, int]) -> Mapping[str, int]:
+        """Add the audio items paired with dummy videos.
+
+        Args:
+            mm_counts: Requested dummy item count per modality.
+
+        Returns:
+            The counts with one audio item per video when
+            `use_audio_in_video` is in effect, since the HF processor
+            rejects a video without its paired audio track.
+
+        """
+        mm_counts = super()._pair_dummy_mm_counts(mm_counts)
+
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs({})
+        if get_use_audio_in_video(merged_kwargs):
+            num_videos = mm_counts.get("video", 0)
+            if mm_counts.get("audio", 0) < num_videos:
+                mm_counts = {**mm_counts, "audio": num_videos}
+
+        return mm_counts
 
     def _get_mm_fields_config(
         self,
@@ -930,10 +1043,11 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        processor = self.info.get_hf_processor(**merged_kwargs)
         tokenizer = self.info.get_tokenizer()
         assert isinstance(self.info, Qwen2VLProcessingInfo)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**merged_kwargs)
         vocab = tokenizer.get_vocab()
 
         audio_token = processor.audio_token
@@ -986,7 +1100,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
             token_id = image_token_id if modality == "image" else video_token_id
             return [token_id] * (int(grid_thw.prod()) // merge_length)
 
-        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = get_use_audio_in_video(merged_kwargs)
         thinker_config = self.info.get_hf_config()
 
         def get_replacement_qwen2_use_audio_in_video(item_idx: int):
@@ -997,11 +1111,14 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             audio_in_video_item_idx += 1
 
-            second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
+            # The HF processor output reflects the value it actually used;
+            # only fall back to the configured kwarg when the output lacks it.
             processed_second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
             if isinstance(processed_second_per_grid_ts, torch.Tensor):
                 video_second_per_grid_t = processed_second_per_grid_ts[item_idx].item()
-            elif second_per_grid_ts:
+            elif second_per_grid_ts := resolve_mm_processor_kwarg(
+                merged_kwargs, "second_per_grid_ts"
+            ):
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
                 video_second_per_grid_t = 1.0
@@ -1067,8 +1184,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if video_second_per_grid is not None:
             processed_data["second_per_grid_ts"] = video_second_per_grid
 
-        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
-        processed_data["use_audio_in_video"] = torch.tensor(use_audio_in_video)
+        # Record the effective flag so it reaches the prompt updates and the
+        # model through the mm kwargs instead of being re-derived per layer.
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        processed_data["use_audio_in_video"] = torch.tensor(
+            get_use_audio_in_video(merged_kwargs)
+        )
         processed_data.pop("input_ids", None)
 
         return processed_data

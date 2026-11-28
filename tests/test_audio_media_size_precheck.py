@@ -195,3 +195,36 @@ async def test_audio_connector_threads_byte_limit_to_http_reader(
     )
     with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
         await connector.fetch_audio_async("https://example.test/audio")
+
+
+@pytest.mark.asyncio
+async def test_video_audio_connector_uses_video_limits_for_http_reader(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The audio clip limits must not apply to a video's audio track.
+
+    The response is the whole video container, which only the video limits
+    may reject. A standalone audio fetch of the same URL stays capped.
+    """
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+    video_bytes = b"\x00" * (MiB_bytes + 1)
+    clip = (np.zeros(4, dtype=np.float32), 16000)
+    seen: list[tuple[int | None, float]] = []
+
+    class _Connection:
+        async def async_get_bytes(self, _url: str, **kwargs):
+            seen.append((kwargs["max_bytes"], kwargs["timeout"]))
+            return video_bytes
+
+    connector = MediaConnector(connection=_Connection())  # type: ignore[arg-type]
+    url = "https://example.test/video"
+
+    with patch("vllm.multimodal.media.audio.load_audio", return_value=clip):
+        assert await connector.fetch_audio_async(url, from_video=True) is clip
+        with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+            await connector.fetch_audio_async(url)
+
+    assert seen == [
+        (None, envs.VLLM_VIDEO_FETCH_TIMEOUT),
+        (MiB_bytes, envs.VLLM_AUDIO_FETCH_TIMEOUT),
+    ]

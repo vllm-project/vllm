@@ -108,6 +108,17 @@ def _normalize_decode_limits(
     return max_duration_s, max_decode_bytes
 
 
+class NoAudioStreamError(ValueError):
+    """The input is a valid media container but carries no audio stream.
+
+    Raised by the audio loaders when the source decodes fine as a container
+    (e.g. an MP4 video) but has no audio track, or an audio track that decodes
+    to zero frames. Decode failures (corrupt data, over duration/size limits)
+    keep raising plain `ValueError`, so callers can tell "nothing to extract"
+    apart from "unprocessable audio".
+    """
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
@@ -153,7 +164,7 @@ def load_audio_pyav(
 
     with container:
         if not container.streams.audio:
-            raise ValueError("No audio stream found.")
+            raise NoAudioStreamError("No audio stream found.")
         stream = container.streams.audio[0]
         stream.thread_type = "AUTO"
         native_sr = stream.rate
@@ -234,7 +245,7 @@ def load_audio_pyav(
             ) from e
 
     if not chunks:
-        raise ValueError("No audio found in the input.")
+        raise NoAudioStreamError("No audio found in the input.")
 
     audio = np.concatenate(chunks, axis=-1).astype(np.float32)
     if mono and audio.ndim > 1:
@@ -256,7 +267,16 @@ def load_audio_soundfile(
         max_duration_s, max_decode_bytes
     )
 
-    with soundfile.SoundFile(path) as f:
+    try:
+        f = soundfile.SoundFile(path)
+    except soundfile.LibsndfileError as exc:
+        # libsndfile cannot read video containers, so an unrecognized-format
+        # error on an otherwise decodable media file (e.g. a silent MP4) means
+        # there is no audio stream for this backend to extract.
+        if exc.code == 1:
+            raise NoAudioStreamError("No audio stream found.") from exc
+        raise
+    with f:
         native_sr = f.samplerate
         if max_duration_s is not None:
             file_duration_s = f.frames / native_sr
@@ -346,6 +366,12 @@ def load_audio_torchcodec(
         if "Could not load libtorchcodec" in str(e):
             raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from e
         raise _CorruptAudioError(_CORRUPT_AUDIO_MSG) from e
+    except ValueError as e:
+        # torchcodec reports "no audio stream in the container" (e.g. a silent
+        # video) as a ValueError about the audio stream being unknown.
+        if "best audio stream is unknown" in str(e):
+            raise NoAudioStreamError("No audio stream found.") from e
+        raise
 
     # Pre-check the memory budget from container metadata so an obviously
     # oversized stream is rejected before allocating the PCM buffer. Metadata
@@ -438,7 +464,7 @@ def load_audio_torchcodec(
     out_sr = samples.sample_rate
     audio = samples.data.numpy()  # (num_channels, num_samples), float32
     if audio.size == 0:
-        raise ValueError("No audio found in the input.")
+        raise NoAudioStreamError("No audio found in the input.")
 
     if mono and audio.ndim > 1:
         # Same reduction as load_audio_pyav, so both backends agree at the
@@ -538,6 +564,12 @@ def load_audio(
         if torchcodec_error is not None:
             raise torchcodec_error from torchcodec_error.__cause__
         logger.error("Failed to load audio via soundfile: %r", exc)
+    except NoAudioStreamError:
+        # `load_audio_soundfile` reports any container libsndfile does not
+        # recognise this way; only an FFmpeg backend can tell whether the
+        # input really lacks an audio stream.
+        if torchcodec_error is not None:
+            raise torchcodec_error from torchcodec_error.__cause__
     except soundfile.LibsndfileError as exc:
         if torchcodec_error is not None:
             raise torchcodec_error from torchcodec_error.__cause__
@@ -598,12 +630,12 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         # for flexible control.
         self.kwargs = kwargs
 
-    def get_max_bytes(self) -> int:
+    def get_max_bytes(self) -> int | None:
         return int(envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB * MiB_bytes)
 
     def _validate_encoded_size(self, size: int) -> None:
         max_bytes = self.get_max_bytes()
-        if size > max_bytes:
+        if max_bytes is not None and size > max_bytes:
             raise VLLMValidationError(
                 "Maximum file size exceeded",
                 parameter="audio_filesize_mb",
@@ -676,8 +708,8 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         media_type: str,
         data: str,
     ) -> tuple[npt.NDArray, float]:
-        max_encoded_chars = 4 * ((self.get_max_bytes() + 2) // 3)
-        if len(data) > max_encoded_chars:
+        max_bytes = self.get_max_bytes()
+        if max_bytes is not None and len(data) > 4 * ((max_bytes + 2) // 3):
             raise VLLMValidationError(
                 "Maximum file size exceeded",
                 parameter="audio_filesize_mb",
@@ -702,6 +734,18 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             data = buffer.getvalue()
 
         return pybase64.b64encode(data).decode("utf-8")
+
+
+class VideoAudioMediaIO(AudioMediaIO):
+    """Load the audio track of a video.
+
+    The encoded payload is a whole video container rather than an audio clip,
+    so `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` does not apply: like `VideoMediaIO`,
+    it has no per-file size cap. The audio decode limits still apply.
+    """
+
+    def get_max_bytes(self) -> None:
+        return None
 
 
 class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
