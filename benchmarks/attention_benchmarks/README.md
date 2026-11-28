@@ -95,6 +95,30 @@ Tests query lengths from 1-1024 across 9 batch sizes to find the crossover point
 python benchmark.py --config configs/reorder_threshold.yaml
 ```
 
+### ROCm AITER MLA Fused Prefill
+
+**Question:** For which prefill shapes with context should `ROCM_AITER_MLA` take the fused prefill instead of the unfused one (new tokens and context in two launches, then a merge)?
+
+```bash
+for h in 16 32 64; do
+    VLLM_ROCM_USE_AITER=1 python benchmark.py --num-q-heads $h \
+        --config configs/rocm_aiter_mla_fused_prefill.yaml
+done
+```
+
+### ROCm AITER MLA FP8 Prefill
+
+**Question:** For which prefills without context should `ROCM_AITER_MLA` take the FP8 assembly prefill instead of bf16?
+
+Times cover the GPU work only: the FP8 prefill's per-step plan on the host is assumed to be hidden.
+
+```bash
+for h in 16 64; do
+    VLLM_ROCM_USE_AITER=1 python benchmark.py --num-q-heads $h \
+        --config configs/rocm_aiter_mla_fp8_prefill.yaml
+done
+```
+
 ---
 
 ## Universal Benchmark
