@@ -13,7 +13,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from tests.utils import RemoteOpenAIServer
 from tests.v1.utils import check_request_balancing
 
-MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
 DP_SIZE = os.getenv("DP_SIZE", "1")
 

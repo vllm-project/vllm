@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import gc
+import weakref
 from unittest.mock import MagicMock
 
 import pytest
@@ -94,3 +96,54 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
         f"resolve_items left {len(leaked_tasks)} task(s) running after "
         f"raising: {leaked_tasks}"
     )
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_breaks_parser_reference_cycle():
+    """Resolving items clears tracked callbacks so the parser <-> tracker
+    reference cycle is freed by refcounting without cyclic GC.
+    """
+
+    async def _run() -> tuple[weakref.ref, weakref.ref]:
+        model_config = MagicMock(
+            is_multimodal_model=True,
+            allowed_local_media_path=None,
+            allowed_media_domains=None,
+            multimodal_config=None,
+        )
+        model_config.hf_config.use_unified_vision_chunk = False
+        tracker = AsyncMultiModalItemTracker(model_config)
+        tracker.__dict__["mm_processor"] = MagicMock()
+        tracker.__dict__["model_cls"] = MagicMock()
+        parser = tracker.create_parser()
+        parser.parse_video(None, uuid="video-0")
+        mm_data, mm_uuids = await tracker.resolve_items()
+        assert mm_data == {"video": [None]}
+        assert mm_uuids == {"video": ["video-0"]}
+        return weakref.ref(tracker), weakref.ref(parser)
+
+    gc.collect()
+    gc.disable()
+    try:
+        tracker_ref, parser_ref = await _run()
+        assert tracker_ref() is None
+        assert parser_ref() is None
+    finally:
+        gc.enable()
+        gc.collect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_clears_tracked_items_on_failure():
+    """Tracked callbacks are cleared even when a media fetch fails."""
+
+    async def _fail():
+        raise ValueError("simulated fetch failure")
+
+    tracker = AsyncMultiModalItemTracker(MagicMock())
+    tracker._items_by_modality["video"] = [_fail]
+
+    with pytest.raises(ValueError, match="simulated fetch failure"):
+        await tracker.resolve_items()
+
+    assert not tracker._items_by_modality

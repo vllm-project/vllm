@@ -56,7 +56,8 @@ def _resize_data(_data: ResizedData, size_factor: float) -> ResizedData:
     # Image input
     if isinstance(_data, Image.Image):
         W, H = _data.width, _data.height
-        W, H = map(lambda x: int(x * size_factor), (W, H))
+        short = int(min(W, H) * size_factor)
+        W, H = (W * short // H, short) if W >= H else (short, H * short // W)
         return _data.resize((W, H))
     # Video input with PIL Images
     elif is_list_of(_data, Image.Image):

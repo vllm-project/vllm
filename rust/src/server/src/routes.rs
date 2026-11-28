@@ -71,15 +71,20 @@ async fn disabled_scale_out() -> (StatusCode, Json<ErrorResponse>) {
 /// does not implement yet. Returning 501 instead of 404 tells clients that the
 /// endpoint exists in vLLM and how to reach it.
 async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<ErrorResponse>) {
+    not_implemented(format!(
+        "{method} {} is not supported by the Rust frontend yet. \
+         Set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend.",
+        path.as_str()
+    ))
+}
+
+/// A 501 with `message`, as Python's `NotImplementedError` responses.
+fn not_implemented(message: String) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(ErrorResponse {
             error: ErrorDetail {
-                message: format!(
-                    "{method} {} is not supported by the Rust frontend yet. \
-                     Set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend.",
-                    path.as_str()
-                ),
+                message,
                 error_type: "NotImplementedError".to_string(),
                 param: None,
                 code: 501,
@@ -139,8 +144,6 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
         .route("/v1/messages/count_tokens", post(not_supported))
         // TODO: implement batched chat completions.
         .route("/v1/chat/completions/batch", post(not_supported))
-        // TODO: implement the structured decisions API.
-        .route("/v1/systemone", post(not_supported))
         // TODO: implement elastic EP scaling.
         .route("/scale_elastic_ep", post(not_supported))
         .route("/is_scaling_elastic_ep", post(not_supported))
@@ -161,14 +164,29 @@ fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Route
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
 
-    router = router.route(
-        "/v1/decisions",
-        if state.decisions().is_some() {
-            post(decisions::decisions)
-        } else {
-            post(not_supported)
-        },
-    );
+    // Without a read strategy Python answers 501 too, so these routes give
+    // Python's messages instead of pointing at the Python frontend.
+    for (path, handler, unsupported) in [
+        (
+            "/v1/decisions",
+            post(decisions::decisions),
+            "The model does not support the Decisions API",
+        ),
+        (
+            "/v1/systemone",
+            post(decisions::systemone),
+            "The model does not support the structured decision API",
+        ),
+    ] {
+        router = router.route(
+            path,
+            if state.decisions().is_some() {
+                handler
+            } else {
+                post(move || async move { not_implemented(unsupported.to_owned()) })
+            },
+        );
+    }
 
     let scale_out_routes: [(&str, MethodRouter<Arc<AppState>>); 4] = [
         ("/inference/v1/generate", post(inference::generate)),

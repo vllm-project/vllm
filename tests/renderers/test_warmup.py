@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vllm.exceptions import ChatTemplateResolutionError
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.params import ChatParams
 
@@ -53,6 +53,9 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     mm_processor = MagicMock()
     mm_processor.info.allowed_mm_limits = mm_limits
     mm_processor.info.ctx.model_config = renderer.model_config
+    mm_processor.info.get_dummy_seq_len = MethodType(
+        BaseProcessingInfo.get_dummy_seq_len, mm_processor.info
+    )
     mm_processor.apply.return_value = {"prompt_token_ids": [1]}
     mm_processor.get_dummy_mm_inputs = MethodType(
         BaseMultiModalProcessor.get_dummy_mm_inputs, mm_processor

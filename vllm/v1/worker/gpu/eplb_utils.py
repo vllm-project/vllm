@@ -113,6 +113,8 @@ class EPLBController:
             self.suppressed = was_suppressed
 
     def prepare_load(self) -> None:
+        if self.state is not None:
+            self.state.stop_async_loop()
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:

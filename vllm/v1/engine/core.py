@@ -2238,6 +2238,7 @@ class EngineCoreProc(EngineCore):
             max_mm_embeds_per_request=getattr(
                 self.scheduler, "max_mm_embeds_per_request", None
             ),
+            device_type=self.vllm_config.device_config.device_type,
         )
 
     def process_input_sockets(

@@ -42,7 +42,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
         if not current_platform.is_rocm() and is_quant_method_supported("awq"):
             TEST_MODELS.append(
-                ("vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
+                ("vllm/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
             )
 
     if keywords is None:

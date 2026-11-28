@@ -67,6 +67,7 @@ def _setup(*, mamba=False, empty=False):
         _pending_unmapped_acks=[],
         _consumer_notification_counts={},
         _completed_consumer_notifications=set(),
+        _completed_notification_owners={},
         get_engine_name_with_dp=lambda engine, dp: f"{engine}_dp{dp}",
         _is_mamba_layer=lambda layer: mamba,
         _get_built_session=lambda engine: ([SimpleNamespace(batch_write=submit)], None),

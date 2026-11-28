@@ -97,6 +97,7 @@ class TestCohereDeltaMessage:
         assert dumped["citations"][0]["text"] == "hi"
         # Round-trip through the subclass to confirm the field validates.
         d2 = CohereDeltaMessage.model_validate(dumped)
+        assert d2.citations is not None
         assert d2.citations[0].text == "hi"
 
 
@@ -131,5 +132,6 @@ class TestCohereChatMessage:
         assert dumped["citations"][0]["sources"][0]["id"] == "d1"
         # Round-trip through the subclass to confirm the field validates.
         m2 = CohereChatMessage.model_validate(dumped)
+        assert m2.citations is not None
         assert m2.citations[0].text == "hello"
         assert m2.citations[0].sources[0].id == "d1"

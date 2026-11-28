@@ -17,6 +17,8 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader import get_model_loader_cls
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.hy_v4_flash.common.engram_ops import (
@@ -98,6 +100,11 @@ def head_range(sizes, tp, rank):
         boundaries.append(min(candidates, key=lambda i: abs(prefix[i] - target)))
     boundaries.append(len(sizes))
     return boundaries[rank], boundaries[rank + 1]
+
+
+def loads_dummy_weights(vllm_config) -> bool:
+    """Whether the weights are random rather than read from the checkpoint."""
+    return issubclass(get_model_loader_cls(vllm_config.load_config), DummyModelLoader)
 
 
 class FlashNgramHashState(nn.Module):
@@ -339,7 +346,7 @@ class FlashEngram(nn.Module):
                 "DP sharing, cross-DP sharding and disk offload are unsupported"
             )
         dtype = None
-        if vllm_config.load_config.load_format == "dummy":
+        if loads_dummy_weights(vllm_config):
             dtype = (
                 torch.float8_e4m3fn if config.engram_fp8_embedding else torch.bfloat16
             )
