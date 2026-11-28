@@ -3882,6 +3882,32 @@ def test_scheduler_stats_waiting_queues():
     assert stats.num_skipped_waiting_reqs == 2  # 2 blocked by constraints
 
 
+def test_scheduler_stats_exclude_requests_added_mid_step():
+    """A request added during a step is not waiting on capacity until a
+    schedule() call has seen it."""
+    scheduler = create_scheduler(max_num_seqs=2)
+    requests = create_requests(num_requests=5)
+    scheduler.add_request(requests[0])
+    output = scheduler.schedule()
+
+    # Added mid-step: one plain, one blocked on grammar, one aborted.
+    scheduler.add_request(requests[1])
+    requests[2].status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    scheduler.add_request(requests[2])
+    scheduler.add_request(requests[3])
+    scheduler.finish_requests(requests[3].request_id, RequestStatus.FINISHED_ABORTED)
+    _model_output(scheduler, output, [[1]])
+    stats = scheduler.make_stats()
+    assert (stats.num_waiting_reqs, stats.num_skipped_waiting_reqs) == (0, 1)
+
+    # requests[1] takes the last seat, so requests[4] waits on capacity.
+    scheduler.add_request(requests[4])
+    output = scheduler.schedule()
+    _model_output(scheduler, output, [[1], [1]])
+    stats = scheduler.make_stats()
+    assert (stats.num_running_reqs, stats.num_waiting_reqs) == (2, 1)
+
+
 def _assert_right_scheduler_output(
     output: SchedulerOutput,
     num_requests: int,

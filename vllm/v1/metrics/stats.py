@@ -229,7 +229,7 @@ class SchedulerStats:
 
     num_running_reqs: int = 0
 
-    num_waiting_reqs: int = 0  # waiting requests not deferred
+    num_waiting_reqs: int = 0  # waiting requests seen by schedule(), not deferred
     # waiting requests deferred by transient constraints or a blocked status
     num_skipped_waiting_reqs: int = 0
     # requests preempted since the previous stats, counted at preemption time

@@ -266,6 +266,8 @@ class Scheduler(SchedulerInterface):
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
+        # New, not deferred waiting requests that no schedule() call has seen.
+        self._added_since_schedule: set[Request] = set()
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -731,6 +733,7 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        self._added_since_schedule.clear()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -3230,6 +3233,8 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.collect_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+                if request not in self.deferred_waiting:
+                    self._added_since_schedule.add(request)
 
             if self.ec_connector is not None:
                 self.ec_connector.on_new_request(request)
@@ -3284,6 +3289,7 @@ class Scheduler(SchedulerInterface):
             self.kv_holding_waiting.remove_requests(waiting_requests_to_remove)
             self.async_kv_waiting.remove_requests(waiting_requests_to_remove)
             self.deferred_waiting.difference_update(waiting_requests_to_remove)
+            self._added_since_schedule.difference_update(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
         for request in valid_requests:
@@ -3587,13 +3593,14 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        num_new = len(self._added_since_schedule)
         num_preempted_reqs, self._num_preempted_reqs = self._num_preempted_reqs, 0
         queued_workload = None
         if self.queued_workload_tally is not None:
             queued_workload = self.queued_workload_tally.summary()
         return SchedulerStats(
             num_running_reqs=num_running,
-            num_waiting_reqs=num_waiting - num_deferred,
+            num_waiting_reqs=num_waiting - num_deferred - num_new,
             num_skipped_waiting_reqs=num_deferred,
             num_preempted_reqs=num_preempted_reqs,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
