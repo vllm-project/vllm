@@ -1488,9 +1488,15 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
-            # Send initial scheduler stats so that the scheduler-state gauges
-            # are exported before the first request.
+            # Send initial scheduler stats so that the scheduler-state and
+            # KV connector gauges are exported before the first request.
             if (stats := self.scheduler.make_stats()) is not None:
+                kv_connector = self.scheduler.get_kv_connector()
+                kv_connector_stats = (
+                    kv_connector.get_kv_connector_stats() if kv_connector else None
+                )
+                if kv_connector_stats is not None and not kv_connector_stats.is_empty():
+                    stats.kv_connector_stats = kv_connector_stats.to_dict()
                 self.output_queue.put_nowait(
                     (0, EngineCoreOutputs(scheduler_stats=stats))
                 )
