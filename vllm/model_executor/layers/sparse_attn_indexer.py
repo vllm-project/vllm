@@ -1117,6 +1117,7 @@ def sparse_attn_indexer(
         needs_padded_path = decode_metadata.requires_padding or (
             num_decode_tokens % decode_lens.shape[0] != 0
         )
+        padded_decode_weights: torch.Tensor | None = None
         if num_decode_tokens == 0:
             padded_q_quant_decode_tokens = q_quant[:1].reshape(1, 1, *q_quant.shape[1:])
             padded_q_scale = (
@@ -1146,6 +1147,10 @@ def sparse_attn_indexer(
                     q_quant[:num_decode_tokens], decode_lens
                 )
                 padded_q_scale = None
+            # The logits kernel checks weights against q's padded rows.
+            padded_decode_weights = pack_seq_triton(
+                weights[:num_decode_tokens], decode_lens, pad_value=0
+            )
         else:
             padded_q_quant_decode_tokens = q_quant[:num_decode_tokens].reshape(
                 decode_lens.shape[0], -1, *q_quant.shape[1:]
@@ -1160,6 +1165,11 @@ def sparse_attn_indexer(
         batch_size = padded_q_quant_decode_tokens.shape[0]
         next_n = padded_q_quant_decode_tokens.shape[1]
         num_padded_tokens = batch_size * next_n
+        padded_weights = (
+            padded_decode_weights.reshape(num_padded_tokens, -1)
+            if padded_decode_weights is not None
+            else weights[:num_padded_tokens]
+        )
         seq_lens = decode_metadata.seq_lens[:batch_size]
         # seq_lens is always 2D: (B, next_n) for native spec decode, (B, 1)
         # otherwise. deep_gemm fp8_fp4_paged_mqa_logits requires 2D context_lens;
@@ -1183,7 +1193,7 @@ def sparse_attn_indexer(
                 padded_q_scale, decode_weights = mqa_logits_mx_inputs(
                     padded_q_quant_cast,
                     padded_q_scale,
-                    weights[:num_padded_tokens],
+                    padded_weights,
                     logits_dtype,
                 )
                 for start, end in ranges:
@@ -1222,7 +1232,7 @@ def sparse_attn_indexer(
             logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
                 padded_q_quant_cast,
                 kv_cache,
-                weights[:num_padded_tokens],
+                padded_weights,
                 seq_lens_xpu,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
@@ -1232,7 +1242,7 @@ def sparse_attn_indexer(
             padded_q_scale, decode_weights = mqa_logits_mx_inputs(
                 padded_q_quant_cast,
                 padded_q_scale,
-                weights[:num_padded_tokens],
+                padded_weights,
                 logits_dtype,
             )
             logits = fp8_fp4_paged_mqa_logits(

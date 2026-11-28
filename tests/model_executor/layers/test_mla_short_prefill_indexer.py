@@ -17,6 +17,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepSeekV32IndexerDecodeMetadata,
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerPrefillChunkMetadata,
     DeepseekV32IndexerPrefillMetadata,
@@ -1733,3 +1734,108 @@ def test_sparse_mqa_logits_accuracy_vs_torch(kv_dtype: str):
     # bf16-level numerics: far below the value gaps that change top-k selection.
     assert norm_err.quantile(0.99).item() < 1e-2
     assert norm_err.max().item() < 2e-2
+
+
+def test_padded_decode_packs_weights_with_q(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The padded decode path packs q to (B, Lmax) rows for the logits kernel,
+    which checks weights against that shape; weights must be packed with the
+    same lengths instead of sliced to the unpadded token count."""
+    decode_lens = torch.tensor([1, 0, 0, 0], dtype=torch.int32)
+    heads, head_dim = 4, 8
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=torch.ones(4, 1, dtype=torch.int32),
+        max_seq_len=64,
+        slot_mapping=torch.arange(1, dtype=torch.int32),
+        num_decodes=4,
+        num_decode_tokens=1,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=DeepSeekV32IndexerDecodeMetadata(
+            block_table=torch.zeros(4, 1, dtype=torch.int32),
+            seq_lens=torch.ones(4, 1, dtype=torch.int32),
+            decode_lens=decode_lens,
+            requires_padding=True,
+            schedule_metadata=torch.zeros(1, dtype=torch.int32),
+        ),
+    )
+    monkeypatch.setattr(
+        sparse_indexer,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={INDEXER_LAYER: metadata},
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+        ),
+    )
+    monkeypatch.setattr(
+        sparse_indexer.current_platform, "fp8_dtype", lambda: torch.float16
+    )
+    monkeypatch.setattr(
+        sparse_indexer, "kv_cache_as_quant_view", lambda kv, *args, **kwargs: kv
+    )
+    monkeypatch.setattr(
+        sparse_indexer,
+        "mqa_logits_mx_inputs",
+        lambda q, q_scale, weights, dtype: (q_scale, weights),
+    )
+
+    def pack_seq(x, lengths, pad_value=0, **_kwargs):
+        # Reference layout of pack_seq_triton for this shape-only test.
+        lengths = lengths.tolist()
+        out = torch.full(
+            (len(lengths), max(lengths), *x.shape[1:]),
+            pad_value,
+            dtype=x.dtype,
+        )
+        start = 0
+        for i, num in enumerate(lengths):
+            out[i, :num] = x[start : start + num]
+            start += num
+        return out
+
+    monkeypatch.setattr(sparse_indexer, "pack_seq_triton", pack_seq)
+
+    class LogitsReached(Exception):
+        pass
+
+    observed: dict[str, tuple[int, ...]] = {}
+    observed_weights: list[torch.Tensor] = []
+
+    def record_logits(q, _kv, weights, *_args, **_kwargs):
+        observed["q"] = (q[0].shape[0] * q[0].shape[1], q[0].shape[2])
+        observed["weights"] = tuple(weights.shape)
+        observed_weights.append(weights.clone())
+        raise LogitsReached
+
+    monkeypatch.setattr(sparse_indexer, "fp8_fp4_paged_mqa_logits", record_logits)
+
+    weights = torch.arange(1, heads + 1, dtype=torch.float32).reshape(1, heads)
+    with pytest.raises(LogitsReached):
+        sparse_indexer.sparse_attn_indexer(
+            torch.empty(1, 1),
+            INDEXER_LAYER,
+            torch.empty(1, 1, 1, head_dim + 4, dtype=torch.uint8),
+            torch.empty(1, heads, head_dim, dtype=torch.float8_e4m3fn),
+            None,
+            None,
+            weights,
+            128,
+            "ue8m0",
+            8,
+            head_dim,
+            64,
+            64,
+            torch.full((1, 8), -1, dtype=torch.int32),
+            True,
+            False,
+            False,
+            MLA_LAYER,
+        )
+
+    assert observed["q"] == (4, heads)
+    assert observed["weights"] == (4, heads)
+    assert len(observed_weights) == 1
+    padded = observed_weights[0]
+    torch.testing.assert_close(padded[0], weights[0])
+    assert torch.count_nonzero(padded[1:]) == 0
