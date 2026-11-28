@@ -245,8 +245,10 @@ def _chunk_scan_fwd_kernel(
     # compiled out.
     USE_TD: tl.constexpr = False,
 ):
-    pid_c = tl.program_id(axis=1).to(tl.int64)
-    pid_h = tl.program_id(axis=2)
+    # Heads on axis 1, chunks on axis 2: all heads of a chunk run together, so
+    # the chunk's CB block (shared by every head of a group) stays in L2.
+    pid_c = tl.program_id(axis=2).to(tl.int64)
+    pid_h = tl.program_id(axis=1)
     num_pid_n = tl.cdiv(hdim, BLOCK_SIZE_N)
     pid_m = tl.program_id(axis=0) // num_pid_n
     pid_n = tl.program_id(axis=0) % num_pid_n
@@ -572,8 +574,8 @@ def _chunk_scan_fwd(
     grid = lambda META: (
         triton.cdiv(chunk_size, META["BLOCK_SIZE_M"])
         * triton.cdiv(headdim, META["BLOCK_SIZE_N"]),
-        nchunks,
         nheads,
+        nchunks,
     )
 
     # Any operand a descriptor cannot cover sends the whole launch down the
