@@ -36,7 +36,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     kNvfp4DynamicToken,
     kNvfp4Static,
@@ -162,7 +161,7 @@ class Nvfp4WeightOnlyOnlineLinearMethod(OnlineLinearBase):
 
 def _quantize_moe_weight_to_nvfp4(
     weight: torch.Tensor,
-    moe_tp_size: int = 1,
+    amax: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Quantize stacked MoE expert weights `(E, N, K)` to NVFP4.
 
@@ -172,7 +171,8 @@ def _quantize_moe_weight_to_nvfp4(
     global scale `(E,)` stored as `amax / (fp4_max * fp8_max)`.
 
     `weight` may be staged on the CPU: experts then move to the accelerator
-    one at a time, where all outputs are returned.
+    one at a time, where all outputs are returned. `amax` is the per-expert
+    amax the global scales derive from, by default that of `weight`.
     """
     assert weight.dim() == 3, f"expected 3D expert weights, got {weight.shape}"
     num_experts, n, k = weight.shape
@@ -184,10 +184,8 @@ def _quantize_moe_weight_to_nvfp4(
     )
 
     global_scale = None
-    if moe_tp_size > 1:
-        # The TP all-reduce needs every expert's amax before any is quantized.
-        amax = weight_amax(weight.flatten(1), dim=-1).to(device, torch.float32)
-        amax = amax_for_moe_weight_quant(amax, moe_tp_size).clamp_min(1e-8)
+    if amax is not None:
+        amax = amax.to(device, torch.float32).clamp_min(1e-8)
         global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
 
     # Keep the original BF16/FP16 values as the quantizer input. Folding each
@@ -281,27 +279,9 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
-        self._quantize_weights(layer, w13_weight, w2_weight)
-        self._setup_kernel(layer)
-        self.release_requantization_source_weights(layer)
-
-        layer._already_called_process_weights_after_loading = True
-
-    def _quantize_weights(
-        self,
-        layer: Module,
-        w13_weight: torch.Tensor | None = None,
-        w2_weight: torch.Tensor | None = None,
-    ) -> None:
-        w13_weight = layer.w13_weight if w13_weight is None else w13_weight
-        w2_weight = layer.w2_weight if w2_weight is None else w2_weight
-        moe_tp_size = self.moe.tp_size
-        w13, w13_scale, w13_scale_2 = _quantize_moe_weight_to_nvfp4(
-            w13_weight, moe_tp_size
+        w13, w13_scale, w13_scale_2, w2, w2_scale, w2_scale_2 = self.quantize_weights(
+            layer
         )
-        w2, w2_scale, w2_scale_2 = _quantize_moe_weight_to_nvfp4(w2_weight, moe_tp_size)
-
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
@@ -314,6 +294,30 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         ones = torch.ones(layer.num_experts, device=w13.device, dtype=torch.float32)
         replace_parameter(layer, "w13_input_scale", ones)
         replace_parameter(layer, "w2_input_scale", ones.clone())
+        self._setup_kernel(layer)
+        self.release_requantization_source_weights(layer)
+
+        layer._already_called_process_weights_after_loading = True
+
+    def expert_statistics(
+        self, w13_weight: torch.Tensor, w2_weight: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "w13_amax": weight_amax(w13_weight.flatten(1), dim=-1),
+            "w2_amax": weight_amax(w2_weight.flatten(1), dim=-1),
+        }
+
+    def quantize_experts(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        statistics: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, ...]:
+        return (
+            *_quantize_moe_weight_to_nvfp4(w13_weight, statistics["w13_amax"]),
+            *_quantize_moe_weight_to_nvfp4(w2_weight, statistics["w2_amax"]),
+        )
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         (

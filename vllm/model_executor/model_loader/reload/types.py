@@ -3,8 +3,14 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from inspect import BoundArguments
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.online.moe_streaming import (
+        ExpertWeightStream,
+    )
 
 __all__ = ["LayerTensors", "LayerReloadingInfo", "WeightReloadValidator"]
 
@@ -39,6 +45,9 @@ class LayerReloadingInfo:
 
     # used by `online_process_loader` to buffer args and tensors until ready to load
     loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
+
+    # loads the weights instead of `loaded_weights`, see `create_weight_stream`
+    weight_stream: "ExpertWeightStream | None" = None
 
     # kernel formatted tensors, copied into by `_layerwise_process` when reloading
     kernel_tensors: LayerTensors | None = None

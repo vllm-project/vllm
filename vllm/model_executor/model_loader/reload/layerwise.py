@@ -150,6 +150,11 @@ def initialize_online_processing(layer: torch.nn.Module):
     # Track loading progress to determine when to process/copy
     info.load_numel = 0
     info.load_numel_total = get_layer_size(layer)
+    create_weight_stream = getattr(
+        getattr(layer, "quant_method", None), "create_weight_stream", None
+    )
+    if create_weight_stream is not None:
+        info.weight_stream = create_weight_stream(info.restore_device)
     _wrap_parameters_weight_loader(layer)
 
 
@@ -199,6 +204,12 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         # Bind and normalize arguments
         bound_args = loader_signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
+
+        if (stream := info.weight_stream) is not None:
+            ret = stream.load(layer, param_name, original_loader, bound_args)
+            if not info.defer_processing and stream.is_complete(layer):
+                _process_streamed_layer(layer, info)
+            return ret
 
         # Buffer loaded weights, track loading progress
         info.loaded_weights.append((param_name, bound_args))
@@ -263,6 +274,12 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         info = get_layerwise_info(layer)
         if not info.can_load():
             info.reset()
+            continue
+
+        # Streamed layers not processed yet: deferred, or not fully loaded (e.g.
+        # padded biases). Without loaded weights, they fall back to the below.
+        if info.weight_stream is not None and info.weight_stream.has_loaded:
+            _process_streamed_layer(layer, info)
             continue
 
         # Deferred attention-like layers are processed after all other layers
@@ -410,6 +427,13 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     _process_loaded_layer(layer, info)
     logger.debug("%s: Processed", layer.__class__.__name__)
+
+
+def _process_streamed_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
+    """Finalize a layer whose weights were loaded by its weight stream."""
+    for param in get_layer_tensors(layer).values():
+        param.weight_loader = _get_original_loader(param)
+    _process_loaded_layer(layer, info)
 
 
 def _process_loaded_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:

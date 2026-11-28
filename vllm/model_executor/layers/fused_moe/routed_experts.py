@@ -242,6 +242,14 @@ class RoutedExperts(PluggableLayer):
         loader = self.shared_expert_online_loader
         if loader is not None and loader.stages_shared_experts:
             loader.create_staging(self, params_dtype, weight_loader=self.weight_loader)
+            from vllm.model_executor.model_loader.reload.layerwise import (
+                get_layerwise_info,
+                initialize_online_processing,
+            )
+
+            if get_layerwise_info(self).can_load():
+                # Online processing also loads the staging parameters.
+                initialize_online_processing(self)
 
         self.lora_base_layer_prefix = ""
         self._flag_padding_for_reload()

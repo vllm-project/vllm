@@ -83,18 +83,29 @@ class LutBOnlineMoEMethod(OnlineMoEMethodBase):
         # carry their codebooks and scales inline.
         return FUSED_MOE_UNQUANTIZED_CONFIG
 
-    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
-        w13, w2 = self.get_weights_for_quantization(layer)
-        self._zero_padding(layer, w13, w2)
-        for name, weight in (("w13_weight", w13), ("w2_weight", w2)):
+    def quantize_experts(
+        self,
+        layer: RoutedExperts,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        statistics: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, ...]:
+        weights = []
+        for weight in (w13, w2):
             packed, codebooks, scales = quantize_lut_b(weight)
             if self.experts_cls is LutBSm107Experts:
                 weight = lut_b_to_sm107_tiles(packed, codebooks, scales)
             else:
                 weight = dequantize_lut_b(packed, codebooks, scales, weight.dtype)
+            weights.append(weight)
+        return tuple(weights)
+
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        w13, w2 = self.quantize_weights(layer)
+        for name, weight in (("w13_weight", w13), ("w2_weight", w2)):
             replace_parameter(layer, name, weight)
         self.release_requantization_source_weights(layer)
 

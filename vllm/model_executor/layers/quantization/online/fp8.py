@@ -51,7 +51,6 @@ from vllm.model_executor.layers.quantization.online.requantization import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
-    amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     create_fp8_quant_key,
     get_fp8_min_max,
@@ -717,35 +716,46 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
             activation_key=activation_key,
         )
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-        # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
+    def expert_statistics(
+        self, w13_weight: torch.Tensor, w2_weight: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "w13_amax": weight_amax(w13_weight.flatten(1), dim=-1),
+            "w2_amax": weight_amax(w2_weight.flatten(1), dim=-1),
+        }
 
-        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
-
+    def quantize_experts(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        statistics: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, ...]:
         # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
 
-        moe_tp_size = self.moe.tp_size
-        w13_amax = weight_amax(w13_weight.flatten(1), dim=-1)
-        w13_amax = amax_for_moe_weight_quant(w13_amax, moe_tp_size)
-        w13_scale = _fp8_scale(w13_amax)
-        w2_amax = weight_amax(w2_weight.flatten(1), dim=-1)
-        w2_amax = amax_for_moe_weight_quant(w2_amax, moe_tp_size)
-        w2_scale = _fp8_scale(w2_amax)
+        w13_scale = _fp8_scale(statistics["w13_amax"])
+        w2_scale = _fp8_scale(statistics["w2_amax"])
 
-        for expert in range(layer.local_num_experts):
+        for expert in range(w13_weight.shape[0]):
             w13[expert, :, :], _ = ops.scaled_fp8_quant(
                 w13_weight[expert, :, :], scale=w13_scale[expert]
             )
             w2[expert, :, :], _ = ops.scaled_fp8_quant(
                 w2_weight[expert, :, :], scale=w2_scale[expert]
             )
+        return w13, w2, w13_scale, w2_scale
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        w13, w2, w13_scale, w2_scale = self.quantize_weights(layer)
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
@@ -797,13 +807,13 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             round_up(intermediate_size_per_partition, block_size),
         )
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
-        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
-        self._zero_padding(layer, w13_weight, w2_weight)
-
+    def quantize_experts(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        statistics: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, ...]:
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
@@ -814,7 +824,7 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
 
         # Create block-shaped scales (computed here rather than in
         # create_weights because online quant doesn't need them until now).
-        num_experts = layer.local_num_experts
+        num_experts = w13_weight.shape[0]
         _, w13_out, w13_in = w13_weight.shape
         _, w2_out, w2_in = w2_weight.shape
 
@@ -844,8 +854,14 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
                 block_size=block_size,
                 use_ue8m0=False,
             )
+        return w13, w2, w13_scale, w2_scale
 
-        layer.weight_block_size = block_size
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        w13, w2, w13_scale, w2_scale = self.quantize_weights(layer)
+        layer.weight_block_size = self.weight_block_size
 
         # Activation quantization is dynamic (including in re-quantization)
         layer.w13_input_scale = None
@@ -909,17 +925,21 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
                 "per-output-channel weight scales."
             )
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
+    def expert_statistics(
+        self, w13_weight: torch.Tensor, w2_weight: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        return {"w2_amax": weight_amax(w2_weight, dim=-1, keepdim=True)}
 
-        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
-
+    def quantize_experts(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        statistics: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, ...]:
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
 
         use_torch_w13_quant = False
         if current_platform.is_rocm():
@@ -940,11 +960,13 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
                 w13.shape[0], n_w13, 1, device=w13.device, dtype=torch.float32
             )
 
-        w2_amax = weight_amax(w2_weight, dim=-1, keepdim=True)
-        w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
+        # Zero for the rows padding the hidden size.
+        w2_amax = statistics["w2_amax"]
+        padding = w2_weight.shape[1] - w2_amax.shape[1]
+        w2_amax = torch.nn.functional.pad(w2_amax, (0, 0, 0, padding))
         w2_scale = _fp8_channel_scale(w2_amax)
 
-        for expert in range(layer.local_num_experts):
+        for expert in range(w13_weight.shape[0]):
             if use_torch_w13_quant:
                 w13[expert] = _fp8_quant_per_channel(
                     w13_weight[expert], w13_scale[expert]
@@ -956,6 +978,15 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
                     use_per_token_if_dynamic=True,
                 )
             w2[expert] = _fp8_quant_per_channel(w2_weight[expert], w2_scale[expert])
+        return w13, w2, w13_scale, w2_scale
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        w13, w2, w13_scale, w2_scale = self.quantize_weights(layer)
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
 
         self._setup_kernel(
             layer,
