@@ -297,6 +297,46 @@ async def test_empty_commit_does_not_crash_engine(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_final_commit_without_generation_is_ignored(
+    model_name, mary_had_lamb_audio_chunks
+):
+    """A final commit sent when no generation is running (here, a repeat
+    after the previous turn's transcription.done) must not end the next
+    turn before its audio is read."""
+    server_args = ["--enforce-eager", "--max-model-len", "2048"]
+
+    if model_name.startswith("mistralai"):
+        server_args += MISTRAL_FORMAT_ARGS
+
+    async def transcribe_turn(ws) -> str:
+        await send_event(ws, {"type": "input_audio_buffer.commit"})
+        for chunk in mary_had_lamb_audio_chunks:
+            await send_event(ws, {"type": "input_audio_buffer.append", "audio": chunk})
+        await send_event(ws, {"type": "input_audio_buffer.commit", "final": True})
+        while True:
+            # (ROCm) Use generous timeout for first request (aiter JIT compilation)
+            event = await receive_event(ws, timeout=360.0)
+            if event["type"] == "transcription.done":
+                return event["text"]
+            if event["type"] == "error":
+                pytest.fail(f"Received error: {event}")
+
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        async with websockets.connect(_get_websocket_url(remote_server)) as ws:
+            event = await receive_event(ws, timeout=30.0)
+            assert event["type"] == "session.created"
+            await send_event(ws, {"type": "session.update", "model": model_name})
+
+            first = await transcribe_turn(ws)
+            await send_event(ws, {"type": "input_audio_buffer.commit", "final": True})
+            second = await transcribe_turn(ws)
+
+            assert "Mary had a little lamb" in first
+            assert "Mary had a little lamb" in second
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_session_update_invalid_model_returns_error(model_name):
     """Test that session.update with an invalid model returns an error."""
     server_args = ["--enforce-eager", "--max-model-len", "2048"]

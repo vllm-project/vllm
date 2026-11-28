@@ -154,11 +154,14 @@ class RealtimeConnection:
                 return
 
             commit_event = InputAudioBufferCommit(**event)
-            # final signals that the audio is finished
-            if commit_event.final:
+            if not commit_event.final:
+                await self.start_generation()
+            elif self.generation_task is not None and not self.generation_task.done():
+                # final signals that the audio is finished
                 self.audio_queue.put_nowait(None)
             else:
-                await self.start_generation()
+                # a stray end-of-audio sentinel would end the next run at once
+                logger.debug("No generation in progress, ignoring final commit")
         else:
             await self.send_error(f"Unknown event type: {event_type}", "unknown_event")
 
