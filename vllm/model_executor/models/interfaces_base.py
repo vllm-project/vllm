@@ -60,6 +60,28 @@ class VllmModel(Protocol):
         """
         return False
 
+    def is_ranged_checkpoint_weight(self, name: str) -> bool:
+        """Return True for checkpoint weights this model loads by row range.
+
+        Loaders must not stream these tensors in full. Instead they pass the
+        tensors and their shards to `load_ranged_checkpoint_weights`, which
+        fills only the rows this rank keeps. Defining this method is optional.
+        """
+        return False
+
+    def load_ranged_checkpoint_weights(
+        self, checkpoint_files: dict[str, str], source: str
+    ) -> list[tuple[str, torch.Tensor]]:
+        """Fill the parameters of row-ranged checkpoint tensors in place.
+
+        `checkpoint_files` maps every tensor found in the excluded safetensors
+        shards to its shard, and `source` is the model location the shards
+        belong to. Tensors accepted by `is_ranged_checkpoint_weight` are filled
+        in place; the method returns the other tensors of those shards so the
+        loader can pass them to `load_weights` as usual.
+        """
+        return []
+
 
 def _check_vllm_model_init(model: type[object] | object) -> bool:
     model_init = getattr(model, "__init__")  # noqa: B009
