@@ -824,6 +824,36 @@ def test_gfx942_copies_dense_linears_at_load(monkeypatch, make, copied):
         assert linear.mono942 == ("copy", linear.weight, linear.weight_scale)
 
 
+def test_gfx942_copies_the_checkpoint_before_online_requantization(monkeypatch):
+    """With `--quantization-config`, an online method requantizes the MXFP8
+    checkpoint at load and replaces its weights. The kernels read the MXFP8
+    weights, so the copy is made from the checkpoint before the method runs.
+    The layerwise loader runs the method as each layer loads and the model
+    loader calls it again at the end, which keeps the first copies."""
+    _deployment(monkeypatch, cdna=3, tp=4)
+    weights942 = ModuleType("vllm.models.deepseek_v41.amd.mono.weights942")
+    weights942.linear_copy = lambda w, s: ("copy", w, s)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, weights942.__name__, weights942)
+
+    def requantize(layer):
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+        layer.weight, layer.weight_scale = object(), object()
+        layer._already_called_process_weights_after_loading = True
+
+    layer = _decoder_layer()
+    linear = layer.attn.wq_b
+    linear.quant_method = SimpleNamespace(
+        requantization_source=object(), process_weights_after_loading=requantize
+    )
+    assert md.MonoDecodeLayer.create(layer, _config()) is not None
+    checkpoint = (linear.weight, linear.weight_scale)
+    for _ in range(2):
+        linear.quant_method.process_weights_after_loading(linear)
+        assert linear.weight is not checkpoint[0]
+        assert linear.mono942 == ("copy", *checkpoint)
+
+
 def test_gfx942_reload_writes_the_copies_in_place(monkeypatch):
     """A reload of the weights (reload_weights, or a weight update in RL) runs
     process_weights_after_loading again. The kernels and captured CUDA graphs
@@ -950,6 +980,78 @@ def test_rocm_attention_takes_the_gfx942_indexer_with_the_flag(
     )
     assert indexer_cls is expected
     assert rocm.DeepseekV41Gfx942Indexer.attn_cls is Gfx942SparseAttnIndexer
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm attention")
+@pytest.mark.parametrize("cdna_version", [3, 4, 5])
+def test_rocm_attention_wo_a_with_online_quant(
+    default_vllm_config, dist_init, monkeypatch, cdna_version
+):
+    """With online quantization (`--quantization-config`) of the MXFP8
+    checkpoint, CDNA3 builds wo_a on the checkpoint's method, since its
+    einsum path reads the MXFP8 weight itself; the other layers keep the
+    online quantization. The other CDNA versions read the MXFP8 block scales
+    too, so a requantized wo_a is refused."""
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.config.model import ModelConfig
+    from vllm.config.quantization import _ONLINE_SHORTHANDS
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
+    from vllm.models.deepseek_v41.amd import rocm
+    from vllm.models.deepseek_v41.quant_config import (
+        DeepseekV4FP8Config,
+        _mxfp8_linear_method_cls,
+    )
+
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna_version)
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    quant_config = DeepseekV4FP8Config.from_config(
+        {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [32, 32],
+            "scale_fmt": "ue8m0",
+            "expert_dtype": "fp4",
+        }
+    )
+    online_config = OnlineQuantizationConfig(_ONLINE_SHORTHANDS["fp8_per_channel"])
+    quant_config.online_quantization_config = online_config
+    attn_cls = rocm.DeepseekV41ROCMAiterMLAAttention
+
+    wo_a = DeepseekV4GroupedWoA(
+        512,
+        512,
+        n_groups=2,
+        bias=False,
+        quant_config=attn_cls._wo_a_quant_config(
+            attn_cls.__new__(attn_cls), quant_config
+        ),
+        return_bias=False,
+        prefix="model.layers.0.attn.wo_a",
+    )
+
+    assert quant_config.online_quantization_config is online_config
+    if cdna_version == 3:
+        assert type(wo_a.quant_method) is _mxfp8_linear_method_cls()
+    else:
+        with pytest.raises(ValueError, match="only supported on CDNA3"):
+            rocm._refuse_requantized_wo_a(wo_a)
+
+
+def test_cdna4_monokernel_refuses_requantized_linears():
+    """With wo_a in the online config's `ignore`, the other linears the CDNA4
+    kernels read as MXFP8 are still requantized, so --monokernel refuses."""
+    requant = SimpleNamespace(
+        quant_method=SimpleNamespace(requantization_source=object()),
+        prefix="model.layers.0.ffn.shared_experts.gate_up_proj",
+    )
+    plain = SimpleNamespace(quant_method=SimpleNamespace(), prefix="down_proj")
+    shared = SimpleNamespace(gate_up_proj=requant, down_proj=plain)
+    layer = SimpleNamespace(ffn=SimpleNamespace(shared_experts=shared))
+    with pytest.raises(ValueError, match="gate_up_proj on CDNA4"):
+        md._keep_row_major_at_load(layer, ffn_only=True)
 
 
 @pytest.mark.parametrize("monokernel", [True, False])

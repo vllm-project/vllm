@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepseekV4 MLA Attention Layer"""
 
+import copy
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -374,6 +375,27 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         backend. A platform subclass returns one with its own builder."""
         return DeepseekV4IndexerCache
 
+    def _wo_a_keeps_checkpoint_quant(self) -> bool:
+        """True when the subclass computes wo_a from its checkpoint weights
+        itself, so online quantization (`--quantization-config`) must leave
+        it alone."""
+        return False
+
+    def _wo_a_quant_config(
+        self, quant_config: QuantizationConfig | None
+    ) -> QuantizationConfig | None:
+        """`quant_config` without its online quantization when
+        `_wo_a_keeps_checkpoint_quant`, else `quant_config` itself."""
+        if (
+            quant_config is None
+            or quant_config.online_quantization_config is None
+            or not self._wo_a_keeps_checkpoint_quant()
+        ):
+            return quant_config
+        wo_a_quant_config = copy.copy(quant_config)
+        wo_a_quant_config.online_quantization_config = None
+        return wo_a_quant_config
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -487,7 +509,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.n_groups * self.o_lora_rank,
             n_groups=self.n_groups,
             bias=False,
-            quant_config=quant_config,
+            quant_config=self._wo_a_quant_config(quant_config),
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )
