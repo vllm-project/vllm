@@ -899,6 +899,13 @@ def _rocm_aiter_w8a8_gemm_impl(
     bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
+    from vllm.platforms.rocm import on_gfx1250
+
+    if on_gfx1250():
+        from aiter.ops.triton.gemm.basic.gemm_a8w8 import gemm_a8w8
+
+        return gemm_a8w8(A, B, As, Bs, bias, dtype=output_dtype)
+
     from aiter import gemm_a8w8_CK
 
     # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
