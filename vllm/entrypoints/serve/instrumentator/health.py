@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -63,7 +63,10 @@ async def ready(raw_request: Request) -> Response:
     response_class=Response,
     responses={
         503: {
-            "description": "Engine is not ready to serve generation requests.",
+            "description": (
+                "Engine is not ready to serve generation requests, or the "
+                "server is draining."
+            ),
             "content": {"application/json": {"schema": {"type": "object"}}},
         }
     },
@@ -71,17 +74,21 @@ async def ready(raw_request: Request) -> Response:
 async def health_generate(
     raw_request: Request, timeout_s: Annotated[float, Query(gt=0)] = 20.0
 ) -> Response:
-    """Generation readiness check: 503 when an engine rank cannot run the model.
+    """Generation readiness check: 503 when an engine rank cannot run the model
+    or this API server is draining.
 
     `timeout_s` is how long to wait for each engine rank before reporting
     `probe_timeout`.
     """
+    state = raw_request.app.state
+    if getattr(state, "draining", False):
+        return _draining_response()
     client = engine_client(raw_request)
     if client is None:
         return Response(status_code=200)
+    content: dict[str, Any] | None = None
     try:
         await client.check_health_generate(timeout_s)
-        return Response(status_code=200)
     except EngineDeadError:
         content = {"status": "not_ready", "reason": "engine_dead"}
     except EngineUnhealthyError as e:
@@ -91,4 +98,19 @@ async def health_generate(
             "message": str(e),
             **e.details,
         }
+    except Exception:
+        # Draining may begin during the probe.
+        if getattr(state, "draining", False):
+            return _draining_response()
+        raise
+    if getattr(state, "draining", False):
+        return _draining_response()
+    if content is None:
+        return Response(status_code=200)
     return JSONResponse(status_code=503, content=content)
+
+
+def _draining_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=503, content={"status": "not_ready", "reason": "draining"}
+    )

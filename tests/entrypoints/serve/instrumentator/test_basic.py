@@ -253,8 +253,66 @@ async def test_health_generate_response(error, expected_body):
     mock_engine_client = AsyncMock()
     mock_engine_client.check_health_generate.side_effect = error
     mock_request.app.state.engine_client = mock_engine_client
+    mock_request.app.state.draining = False
 
     response = await health_generate(mock_request, timeout_s=20.0)
 
     assert response.status_code == 503
     assert json.loads(response.body) == expected_body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("draining_before", "probe_result", "probe_calls"),
+    [
+        pytest.param(True, None, 0, id="draining-before-probe"),
+        pytest.param(False, None, 1, id="draining-during-passing-probe"),
+        pytest.param(
+            False,
+            EngineUnhealthyError("timed out", reason="probe_timeout"),
+            1,
+            id="draining-during-failing-probe",
+        ),
+        pytest.param(False, RuntimeError("probe"), 1, id="draining-during-probe-error"),
+    ],
+)
+async def test_health_generate_reports_draining(
+    draining_before, probe_result, probe_calls
+):
+    """A draining server fails `/health_generate`, including when draining
+    begins while the probe runs."""
+    from vllm.entrypoints.serve.instrumentator.health import health_generate
+
+    mock_request = Mock(spec=Request)
+    state = mock_request.app.state
+    state.draining = draining_before
+
+    async def probe(timeout_s: float) -> None:
+        state.draining = True
+        if probe_result is not None:
+            raise probe_result
+
+    mock_engine_client = AsyncMock()
+    mock_engine_client.check_health_generate.side_effect = probe
+    state.engine_client = mock_engine_client
+
+    response = await health_generate(mock_request, timeout_s=20.0)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {"status": "not_ready", "reason": "draining"}
+    assert mock_engine_client.check_health_generate.await_count == probe_calls
+
+
+@pytest.mark.asyncio
+async def test_health_generate_render_server_reports_draining():
+    from vllm.entrypoints.serve.instrumentator.health import health_generate
+
+    mock_request = Mock(spec=Request)
+    mock_request.app.state.engine_client = None
+    mock_request.app.state.draining = False
+    assert (await health_generate(mock_request, timeout_s=20.0)).status_code == 200
+
+    mock_request.app.state.draining = True
+    response = await health_generate(mock_request, timeout_s=20.0)
+    assert response.status_code == 503
+    assert json.loads(response.body) == {"status": "not_ready", "reason": "draining"}
