@@ -1315,9 +1315,10 @@ def test_sparse_decode_bf16_num_splits_floor_and_tile_clamp(monkeypatch) -> None
 @pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8])
 @pytest.mark.parametrize("with_extra", [True, False])
 @pytest.mark.parametrize("with_sink", [True, False])
+@pytest.mark.parametrize("num_heads", [3, 32, 64])
 @torch.inference_mode()
 def test_sparse_attn_decode_split_k_kernel(
-    monkeypatch, num_splits: int, with_extra: bool, with_sink: bool
+    monkeypatch, num_splits: int, with_extra: bool, with_sink: bool, num_heads: int
 ) -> None:
     """Flash-decode split-K decode path (partial + reduce kernels).
 
@@ -1325,14 +1326,13 @@ def test_sparse_attn_decode_split_k_kernel(
     those architectures. The split count is pinned so the partial/reduce kernels are
     exercised across split counts. `num_splits=8` drives splits past the
     shortest segment length, covering the empty-split edge case handled by the
-    reduce kernel.
+    reduce kernel. 32 and 64 heads take gfx942's 32-head workgroups.
     """
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     device = torch.device("cuda")
     torch.manual_seed(7)
     block_size = 4
-    num_heads = 3
     main_use_fnuz = current_platform.is_fp8_fnuz()
 
     main_rows = [[0, 2, 4, 6, 1, 3, 7, 5], [4, 1, 6, 0, 2]]
@@ -1352,14 +1352,16 @@ def test_sparse_attn_decode_split_k_kernel(
     extra_indices: torch.Tensor | None = None
     extra_indptr: torch.Tensor | None = None
     if with_extra:
-        rows = [[1, 3, 0, 5, 2, 4], [3, 0, 6]]
+        # 70 entries reach the paired-tile loop of the extra segment; runs of
+        # one slot make a dropped tile change the result.
+        rows = [[(i // 10) % 7 for i in range(70)], [3, 0, 6]]
         extra_kv = torch.randn(7, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
         extra_rows = rows
         extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
         extra_indices, extra_indptr = _ragged_from_rows(rows, device)
 
     attn_sink = (
-        torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
+        torch.linspace(-0.1, 0.1, num_heads, dtype=torch.float32, device=device)
         if with_sink
         else None
     )
