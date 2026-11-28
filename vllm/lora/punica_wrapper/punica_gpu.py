@@ -11,7 +11,9 @@ from typing import Any, final
 import torch
 
 from vllm.lora.layers import LoRAMapping
+from vllm.lora.ops.torch_ops import lora_grouped_linear as lora_grouped_linear_torch
 from vllm.lora.utils import get_captured_lora_counts
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
@@ -21,6 +23,7 @@ if HAS_TRITON:
         LoRAKernelMeta,
         fused_moe_lora,
         lora_expand,
+        lora_grouped_linear,
         lora_shrink,
     )
 
@@ -272,6 +275,31 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_inputs=add_inputs,
             **kwargs,
         )
+
+    def add_lora_grouped_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+    ) -> None:
+        if not (
+            HAS_TRITON
+            and current_platform.is_cuda()
+            and x.dtype in (torch.bfloat16, torch.float16)
+            and x.dtype == lora_a_stacked.dtype == lora_b_stacked.dtype == y.dtype
+        ):
+            lora_grouped_linear_torch(
+                y, x, lora_a_stacked, lora_b_stacked, self.token_lora_indices
+            )
+            return
+
+        # Adapter offsets index the full sorted token buffer.
+        _, *kernel_meta = self.token_mapping_meta.meta_args(
+            token_nums=None,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
+        )
+        lora_grouped_linear(y, x, lora_a_stacked, lora_b_stacked, *kernel_meta)
 
     def add_lora_logits(
         self,

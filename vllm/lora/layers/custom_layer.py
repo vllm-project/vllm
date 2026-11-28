@@ -273,18 +273,20 @@ class MLAKVBProjWithLoRA(ColumnParallelLinearWithLoRA):
             lora_a = tensor_model_parallel_all_gather(lora_a, dim=2)
         if gather_dcp:
             lora_b = get_dcp_group().all_gather(lora_b, dim=2)
-        # MQA may consume only the decode prefix of the mapped batch.
-        indices = self.punica_wrapper.token_lora_indices[: x.shape[1]]
-        for slot in range(lora_a.shape[0]):
-            a = lora_a[slot, 0]
-            b = lora_b[slot, 0].view(x.shape[0], -1, lora_b.shape[-1])
-            if is_query:
-                delta = torch.matmul(x, b[:, :qk_nope_head_dim]) @ a
-            else:
-                delta = torch.matmul(x @ a.T, b[:, qk_nope_head_dim:].transpose(1, 2))
-            out.add_(
-                torch.where((indices == slot)[:, None, None], delta.transpose(0, 1), 0)
-            )
+
+        num_heads = x.shape[0]
+        lora_a_by_head = lora_a.expand(-1, num_heads, -1, -1)
+        lora_b_by_head = lora_b[:, 0].unflatten(1, (num_heads, -1))
+        if is_query:
+            # The transposed key projection applies the adapter's B_K before A.
+            lora_a_stacked = lora_b_by_head[:, :, :qk_nope_head_dim].transpose(-2, -1)
+            lora_b_stacked = lora_a_by_head.transpose(-2, -1)
+        else:
+            lora_a_stacked = lora_a_by_head
+            lora_b_stacked = lora_b_by_head[:, :, qk_nope_head_dim:]
+        self.punica_wrapper.add_lora_grouped_linear(
+            out, x.transpose(0, 1), lora_a_stacked, lora_b_stacked
+        )
 
     @classmethod
     def can_replace_layer(

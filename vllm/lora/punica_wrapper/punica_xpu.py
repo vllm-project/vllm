@@ -13,6 +13,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.lora.layers import LoRAMapping
+from vllm.lora.ops.torch_ops import lora_grouped_linear
 from vllm.lora.ops.xpu_ops import (
     bgmv_expand,
     bgmv_expand_slice,
@@ -330,6 +331,17 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             add_inputs,
             allow_gemm,
             gemm_min_tokens,
+        )
+
+    def add_lora_grouped_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+    ) -> None:
+        lora_grouped_linear(
+            y, x, lora_a_stacked, lora_b_stacked, self.token_lora_indices
         )
 
     @property

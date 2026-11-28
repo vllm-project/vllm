@@ -408,6 +408,30 @@ class PunicaWrapperBase(PunicaWrapperABC):
         # TODO: implement it based on torch ops
         raise NotImplementedError
 
+    def add_lora_grouped_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+    ) -> None:
+        """Add LoRA to independent projection groups with shared token routing.
+
+        A and B name the factors in application order. Weights shared across
+        groups can use a zero-stride group axis.
+
+        Args:
+            y: Output of shape `[token, group, out_features]`, updated in place.
+            x: Input of shape `[token, group, in_features]`, corresponding to
+                the first `x.shape[0]` tokens in the batch mapping.
+            lora_a_stacked: Shrink weights of shape
+                `[slot, group, rank, in_features]`.
+            lora_b_stacked: Expand weights of shape
+                `[slot, group, out_features, rank]`.
+
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def add_lora_logits(
         self,

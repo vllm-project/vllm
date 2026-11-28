@@ -4,6 +4,24 @@
 import torch
 
 
+def lora_grouped_linear(
+    output_tensor: torch.Tensor,
+    inputs: torch.Tensor,
+    lora_a_stacked: torch.Tensor,
+    lora_b_stacked: torch.Tensor,
+    token_lora_mapping: torch.Tensor,
+) -> None:
+    """Add grouped LoRA updates in place using the batch's token mapping."""
+    token_lora_indices = token_lora_mapping[: inputs.shape[0]]
+    inputs_by_group = inputs.transpose(0, 1)
+    output_by_group = output_tensor.transpose(0, 1)
+    for slot in range(lora_a_stacked.shape[0]):
+        buffer = inputs_by_group @ lora_a_stacked[slot].transpose(-2, -1)
+        delta = buffer @ lora_b_stacked[slot].transpose(-2, -1)
+        mask = (token_lora_indices == slot)[None, :, None]
+        output_by_group.add_(torch.where(mask, delta, 0))
+
+
 def sgmv_expand(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
