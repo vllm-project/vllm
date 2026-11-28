@@ -45,6 +45,7 @@ Stages, with TP4's task counts:
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
+from aiter.ops.flydsl.kernels.kernels_common import create_llvm_ptr
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
@@ -160,6 +161,19 @@ DSH_UNITS = 2 * (DOWN_TASKS - BLOCKS)
 # the CTAs it needs: arrival ranks 0 .. DSH_RANKS - 1 (two-task CTAs, then the
 # units' CTAs and the helpers they wait on)
 DSH_RANKS = 3 * (DOWN_TASKS - BLOCKS)
+MID_DMA = 16  # bytes a lane an LDS DMA (gfx950 dwordx4)
+# past one token tile: a down wave's MID rows / MIDS codes of a round's slots,
+# MID_STG rows at most, staged in LDS by DMA (the distinct bytes once, ~a
+# row an instruction) instead of 16 lanes' operand loads (18 + 3 VMEM
+# instructions a pick tile, most re-reading 1 .. 3 rows); a slot that does
+# not fit loads as before. The rows alias the shared expert's x tile (dead
+# past `down_shared`)
+MID_STG = 4
+# the staged MID rows (`stg_dma`) through the per-XCD L2: the CTAs of an XCD
+# read every pick's rows once from memory, not once a CTA. Safe: a row's
+# lines are read only after every ug flag of its slot is seen (the launch's
+# first read of them; the launch begins with the L2s clean)
+MID_CM = 0
 # a reduce task's columns: at 128 a thread polled 6 pairs at 48 rows, each
 # pass a round trip in series (32: 1-2 passes, S=48 -1 us)
 RED_COLS = 32
@@ -245,7 +259,15 @@ def scratch_layout(key: MoeBuild) -> dict[str, tuple[int, int]]:
         # each two-task CTA's own tile by its rank (``dsh_offload``)
         pairs["sdx"] = DSH_UNITS * tokens * ROWS
         pairs["dpb"] = DOWN_TASKS - BLOCKS
-    return pair_layout(pairs.items())
+    out = pair_layout(pairs.items())
+    if not mid_stage(rs):
+        return out
+    # MID's rows on whole 128-byte lines (a row 9 of them at TP2): a line holds
+    # one pick's row, which a down round reads only once its slot's ug flags
+    # are seen (`stg_dma`'s `MID_CM`)
+    pad = -out["mid"][0] % 256
+    at = out["mid"][0]
+    return {n: (o + pad if o >= at else o, b) for n, (o, b) in out.items()}
 
 
 def peer_bytes(tokens: int, tp: int) -> int:
@@ -844,6 +866,25 @@ def wsl_words(d) -> int:
     """A wave's LDS scale words: an ug batch's 256, or a down round's blocks --
     a (task, slot) each, `DOWN_R_MAX` at most (`stage_down`)."""
     return max(256, DOWN_R_MAX * down_scale_words(d))
+
+
+def mid_stage(rs) -> bool:
+    """Past one token tile: a down round stages its slots' rows in LDS by DMA
+    (`stg_round`; `MID_STG` a wave), the MFMAs reading them from LDS instead of
+    each lane's operand loads from MID. Only the multi-tile gfx950 builds that
+    are not `MonoBuild.tuned`."""
+    return rs.multi and not rs.tuned and not GFX942 and MID_STG > 0
+
+
+def stg_n(rs) -> int:
+    """A down wave's staged rows (`mid_stage`)."""
+    return MID_STG
+
+
+def stg_words(rs) -> int:
+    """A wave's staged rows' LDS words: `stg_n` MID rows, then their codes."""
+    d = rs.dims
+    return stg_n(rs) * (d.mid_words + d.inter // 32)
 
 
 def scale_block_store(c, svs, sl):
@@ -1690,6 +1731,13 @@ def stage_down(c, tasks, dsh_rank=None):
         down_rounds_pipe(c, tasks, nu, sl, sw, slots, per_round)
         down_sums(c, tasks, dsh_rank)
         return
+    if const_expr(mid_stage(c["rs"])):
+        # the same rounds, each slot's picks staged in LDS by DMA and the
+        # MFMAs reading them from there (`stg_round`)
+        for rnd in range(0, (nu + per_round - 1) // per_round, 1):
+            down_round_staged(c, tasks, rnd, slots, nu, sl, sw)
+        down_sums(c, tasks, dsh_rank)
+        return
     for rnd in range(0, (nu + per_round - 1) // per_round, 1):
         # the round's slots of U (wave, wave + WAVES, ...), every load of them
         # and of every task in flight before the first wait: the weights and
@@ -2085,6 +2133,174 @@ def mid_code_index(d, row, group, unsigned=False):
     )
 
 
+@traced
+def down_round_staged(c, tasks, rnd, slots, nu, sl, sw):
+    """`stage_down`'s round `rnd` for `mid_stage`: the same weights, scale
+    blocks and ug-flag poll, then the slots' picks staged in LDS and the MFMAs
+    reading them from there (`stg_round`)."""
+    wave, tab = c["wave"], c["tab"]
+    us = [wave + WAVES * (slots * rnd + i) for i in range(slots)]
+    ucs = [fx.min(u, nu - 1) for u in us]
+    firsts = [c["rs"].slot_first(tab, u) for u in ucs]
+    svs, avs = down_weights(c, tasks, rnd, slots, nu)
+    # this round's slots' ug tasks done, not every slot of the wave: the
+    # round starts while later slots' ug run
+    c["poll"]([(c["ugf"], f, 1) for f in down_ug_flags(c, ucs)])
+    counts = [c["rs"].slot_first(tab, u + 1) - f for u, f in zip(ucs, firsts)]
+    for q in range_constexpr(len(svs)):
+        scale_block_store(c, svs[q], sl + q * sw)
+    stg_round(c, tasks, us, nu, firsts, counts, avs, sl, sw, slots)
+
+
+def lds_llvm_ptr(p):
+    """An LDS pointer as the LLVM pointer an LDS DMA takes."""
+    return create_llvm_ptr(fx.Int64(fx.Uint32(fx.ptrtoint(p))), address_space=3)
+
+
+@traced
+def stg_round(c, tasks, us, nu, firsts, counts, avs, sl, sw, slots):
+    """`down_round_staged`'s MFMAs (`mid_stage`): the slots whose picks fit the
+    wave's `stg_n` staged rows (in slot order, packed) are DMA'd to LDS and
+    read from there; a slot that does not fit loads straight from MID as the
+    non-staged round does."""
+    s, d = c["S"], c["d"]
+    n = len(tasks)
+    rw = d.mid_words
+    nst = stg_n(c["rs"])
+    stg = c["wave"] * stg_words(c["rs"])
+    offs, oks = [], []
+    off = fx.Int32(0)
+    for i in range_constexpr(slots):
+        ok = (us[i] < nu) & (off + counts[i] <= nst)
+        offs.append(off)
+        oks.append(ok)
+        off = ok.select(off + counts[i], off)
+    for i in range_constexpr(slots):
+        if oks[i]:
+            stg_dma(
+                c,
+                firsts[i],
+                counts[i],
+                stg + offs[i] * rw,
+                stg + nst * rw + offs[i] * (d.inter // 32),
+            )
+    rocdl.s_waitcnt(vmcnt=0)
+    for i in range_constexpr(slots):
+        if oks[i]:
+            mid = stg_operands(
+                c,
+                stg + offs[i] * rw,
+                stg + nst * rw + offs[i] * (d.inter // 32),
+                counts[i],
+            )
+            for j in range_constexpr(n):
+                down_mfma(
+                    c,
+                    j,
+                    tasks[j],
+                    sl + (j * slots + i) * sw,
+                    mid,
+                    firsts[i],
+                    counts[i],
+                    avs[j * slots + i],
+                    True,
+                )
+        else:
+            mid = mid_operands(c, firsts[i], counts[i])
+            for j in range_constexpr(n):
+                down_mfma(
+                    c,
+                    j,
+                    tasks[j],
+                    sl + (j * slots + i) * sw,
+                    mid,
+                    firsts[i],
+                    counts[i],
+                    avs[j * slots + i],
+                    us[i] < nu,
+                )
+            if const_expr(s > TILE):
+                for j0 in range_constexpr(TILE, s, TILE):
+                    if j0 < counts[i]:
+                        more = mid_operands(c, firsts[i] + j0, counts[i] - j0)
+                        for j in range_constexpr(n):
+                            down_mfma(
+                                c,
+                                j,
+                                tasks[j],
+                                sl + (j * slots + i) * sw,
+                                more,
+                                firsts[i] + j0,
+                                counts[i] - j0,
+                                avs[j * slots + i],
+                                us[i] < nu,
+                            )
+
+
+@traced
+def stg_dma(c, first, count, mw, cw):
+    """This wave's DMA of MID rows first .. first + count (<= `stg_n`) and
+    their MIDS codes to its staged rows at words `mw` / `cw` of `mstg`; a lane
+    past the rows writes nothing."""
+    lane, d = c["lane"], c["d"]
+    lane_off = fresh(lane * MID_DMA)
+    for region, w0, row_b, cm in (
+        ("mid", mw, d.mid_words * 4, MID_CM),
+        ("mids", cw, d.inter // 32 * 4, CM_DEV),
+    ):
+        span = MID_DMA * 64
+        base = uniform(first * row_b)
+        nbytes = count * row_b
+        dst0 = lds_llvm_ptr(c["mstg"] + uniform(w0))
+        for q in range_constexpr(-(-stg_n(c["rs"]) * row_b // span)):
+            dst = bo.get_element_ptr(dst0, fx.Int64(q * span))
+            if lane_off < nbytes - q * span:
+                rocdl.raw_ptr_buffer_load_lds(
+                    rsrc(c[region].value),
+                    dst,
+                    fx.Int32(MID_DMA),
+                    lane_off,
+                    base + q * span,
+                    fx.Int32(0),
+                    cm,
+                )
+
+
+def stg_operands(c, mw, cw, count):
+    """`mid_operands` from a slot's staged rows (`stg_dma`) at words `mw` / `cw`
+    of `mstg`."""
+    lane, d = c["lane"], c["d"]
+    j = lane // 16
+    row = fx.min(lane % 16, count - 1)
+    # in 16-byte units through the opaque move, then x 4 words: the reads'
+    # alignment known (ds_read_b128, not ds_read2_b32 pairs)
+    lane_word = fresh(mw // 4 + row * (d.mid_words // 4) + j) * 4
+    code_word = fresh(cw + mid_code_index(d, row, j))
+    bvs, sbs = [], []
+    for st in range_constexpr(d.inter // 128):
+        halves = []
+        for h in range_constexpr(2):
+            v = fx.Vector(
+                fx.ptr_load(
+                    c["mstg"] + (lane_word + (st * 32 + 16 * h)),
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            )
+            if const_expr(st * 128 + 64 * h + 48 >= d.inter_real):
+                past = st * 128 + 64 * h + 16 * j >= d.inter_real
+                v = fx.Vector.from_elements(
+                    [past.select(fx.Int32(0), v[q]) for q in range(4)], fx.Int32
+                )
+            halves.append(v)
+        sb = fx.Int32(fx.ptr_load(c["mstg"] + (code_word + st)))
+        if const_expr((st + 1) * 128 > d.inter_real):
+            past = (4 * st + j) * 32 >= d.inter_real
+            sb = past.select(fx.Int32(UNIT_SCALE), sb)
+        bvs.append(fp8_operand(halves))
+        sbs.append(sb)
+    return bvs, sbs
+
+
 def down_ug_flags(c, ucs):
     """This lane's ug flags of a down round's slots `ucs`: flag f a (slot,
     pick tile past one token tile, part), a tile past the slot's repeating its
@@ -2426,6 +2642,16 @@ def stage_lds(s, rs):
         "down": wsl + shared_xl + shared_xsl + contrib + 2 * s * ROWS,
     }
     if not rs.tuned:
+        if mid_stage(rs):
+            # a down wave's staged MID rows (`stg_round`) alias the shared
+            # expert's x tile (dead past `down_shared`); the contributions and
+            # shared rows follow whichever is larger
+            stg = WAVES * stg_words(rs)
+            offsets["mstg"] = wsl
+            c0 = wsl + max(shared_xl + shared_xsl, stg)
+            offsets["contrib"] = c0
+            offsets["sdl"] = c0 + contrib
+            words["down"] = c0 + contrib + 2 * s * ROWS
         return {"offsets": offsets, "words": {"all": max(words.values())}}
     # tuned, the down stage: the contributions and shared rows, then the shared
     # intermediate tile, whose words a pipelined round's MID block takes over
