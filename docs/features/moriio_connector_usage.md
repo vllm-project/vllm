@@ -78,7 +78,9 @@ vllm serve Qwen/Qwen3-235B-A22B-FP8 \
 
 ### Proxy server
 
-The proxy fronts the producer and consumer instances and routes incoming requests to them. `vllm-router` is the recommended proxy; it can be installed manually or run as a Docker container. Note that the port `36367` below is the `proxy_ping_port` configured on each vLLM instance.
+The proxy fronts the producer and consumer instances and routes incoming requests to them. `vllm-router` is the recommended proxy and can be installed manually or run as a Docker container.
+
+The commands below bind worker discovery to `127.0.0.1:36367` to match `proxy_ip` and `proxy_ping_port` on both workers. Run the proxy and both workers in the same network namespace. The Docker command uses host networking to share the host's loopback interface.
 
 **Docker:**
 
@@ -89,7 +91,7 @@ docker run \
   vllm-router \
   --vllm-pd-disaggregation \
   --kv-connector moriio \
-  --vllm-discovery-address "0.0.0.0:36367"
+  --vllm-discovery-address "127.0.0.1:36367"
 ```
 
 **Manual install:**
@@ -99,10 +101,10 @@ pip install vllm-router
 vllm-router \
   --vllm-pd-disaggregation \
   --kv-connector moriio \
-  --vllm-discovery-address "0.0.0.0:36367"
+  --vllm-discovery-address "127.0.0.1:36367"
 ```
 
-Alternatively, you can use the reference implementation proxy shipped with vLLM:
+For local testing, you can also use the reference proxy shipped with vLLM. Its worker discovery listener binds to all interfaces. Run it on an isolated network and restrict access to TCP port `36367` to the prefill and decode workers. See the [firewall guidance](../usage/security.md#firewall-configuration-guidance).
 
 ```bash
 cd <path_to>/vllm
@@ -210,7 +212,7 @@ Use xGMI when the prefiller and decoder run on the same physical host so transfe
 
 ## Multi-node deployment
 
-The example below shows how to run a 1P1D deployment on two nodes. We run the proxy on the same node as the prefill instance.
+The example below shows how to run a 1P1D deployment on two nodes. The router runs on the prefill node. Use private worker-network addresses for both nodes and restrict access to the router's discovery port to the prefill and decode hosts. See the [firewall guidance](../usage/security.md#firewall-configuration-guidance).
 
 ### On both nodes
 
@@ -222,7 +224,7 @@ export DECODE_IP=<node2-ip>
 
 ### On node 1
 
-Start the proxy first as described in [Proxy server](#proxy-server), then start the prefill instance:
+Start `vllm-router` using either command in [Proxy server](#proxy-server) with `--vllm-discovery-address "${PREFILL_IP}:36367"` so both workers can reach discovery. Then start the prefill instance:
 
 ```bash
 docker run \
