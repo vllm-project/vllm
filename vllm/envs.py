@@ -174,6 +174,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ROCM_ENGRAM_HIP_VMM: bool = False
     VLLM_ROCM_PARALLEL_INDEX_TOPK: bool = False
+    VLLM_ROCM_AITER_NVFP4_INDEX_SCORE: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1549,6 +1550,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # select the recipe's parallel_topk feature or set this variable explicitly.
     "VLLM_ROCM_PARALLEL_INDEX_TOPK": lambda: (
         os.getenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0") == "1"
+    ),
+    # Score the MiniMax-M3.1 NVFP4 indexer's keys with AITER's nvfp4 kernels
+    # (AITER >= v0.1.30) instead of the FlyDSL ones on ROCm gfx950 (MI355X).
+    # Set to 1 to enable; disabled by default. Decode context parallelism
+    # (indexer_decode_cp) keeps its FlyDSL scorer. Falls back to FlyDSL with a
+    # warning when the installed AITER lacks the nvfp4 scorers.
+    "VLLM_ROCM_AITER_NVFP4_INDEX_SCORE": lambda: (
+        os.getenv("VLLM_ROCM_AITER_NVFP4_INDEX_SCORE", "0") == "1"
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(

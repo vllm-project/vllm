@@ -7,10 +7,17 @@ sentinels; the top-k writes logical block ids for the NVFP4 attend, no page
 table. With `indexer_decode_cp` at TP4, decode steps 4/8 rows
 per request (DSpark 3/7) and at most 256 4-row requests score
 context-parallel (`ops/index_cp`).
+
+`VLLM_ROCM_AITER_NVFP4_INDEX_SCORE=1` scores the rows that do not go through
+decode CP with AITER's nvfp4 scorers (the same scores); the top-k stays FlyDSL.
 """
+
+import functools
+from collections.abc import Callable
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -112,8 +119,33 @@ def init_rocm_nvfp4_indexer_decode_cp(max_model_len: int) -> bool:
     return True
 
 
+@functools.cache
+def use_aiter_nvfp4_index_score() -> bool:
+    """Whether AITER scores the NVFP4 index keys: requested and supported by
+    the installed AITER (v0.1.30+)."""
+    if not envs.VLLM_ROCM_AITER_NVFP4_INDEX_SCORE:
+        return False
+    try:
+        from aiter.ops.msa_block_select import NVFP4_INDEX_HEADS  # noqa: F401
+    except ImportError:
+        logger.warning_once(
+            "VLLM_ROCM_AITER_NVFP4_INDEX_SCORE=1 needs AITER with nvfp4 index "
+            "scorers (v0.1.30+); scoring with FlyDSL."
+        )
+        return False
+    logger.info_once("MiniMax M3 NVFP4 indexer: AITER index scores")
+    return True
+
+
+def aiter_nvfp4_pages(kv: torch.Tensor) -> torch.Tensor:
+    """The `[num_blocks, 128, 72]` index cache as AITER's nvfp4 key cache:
+    contiguous `[num_blocks, page_stride]` uint8 rows, a page at each start."""
+    return kv.as_strided((kv.shape[0], kv.stride(0)), (kv.stride(0), 1))
+
+
 class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
-    """FlyDSL NVFP4 index scores + top-k block ids for prefill and decode."""
+    """FlyDSL (or AITER) NVFP4 index scores + FlyDSL top-k block ids for
+    prefill and decode."""
 
     # Its builder materializes the prefill rows' block counts.
     indexer_backend_cls = MiniMaxM3IndexerMSABackend
@@ -134,6 +166,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
         )
         if reason is not None:
             raise ValueError(f"MiniMax M3 NVFP4 indexer on ROCm {reason}")
+        self.aiter_score = use_aiter_nvfp4_index_score()
 
     def _new_score(self, rows: int, max_seq_len: int) -> torch.Tensor:
         """Uninitialized: the scorer writes every block the top-k reads."""
@@ -177,6 +210,17 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             minimax_m3_nvfp4_index_score_prefill,
         )
 
+        score_decode: Callable[..., None] = minimax_m3_nvfp4_index_score_decode
+        score_prefill: Callable[..., None] = minimax_m3_nvfp4_index_score_prefill
+        if self.aiter_score:
+            from aiter.ops.msa_attention import (
+                pa_sparse_block_score_decode,
+                pa_sparse_block_score_prefill,
+            )
+
+            score_decode = pa_sparse_block_score_decode
+            score_prefill = pa_sparse_block_score_prefill
+
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
             return None, None  # profiling run; caches unbound
@@ -188,6 +232,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             -1, self.num_index_heads, self.index_head_dim
         )
         kv = self.index_cache.kv_cache
+        score_kv = aiter_nvfp4_pages(kv) if self.aiter_score else kv
         buf = self.topk_indices_buffer
         if buf is None:
             buf = torch.empty(
@@ -217,9 +262,9 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
                 )
             else:
                 score = self._new_score(nd, d.max_seq_len)
-                minimax_m3_nvfp4_index_score_decode(
+                score_decode(
                     iq[:nd],
-                    kv,
+                    score_kv,
                     score,
                     d.block_table,
                     d.seq_lens,
@@ -241,9 +286,9 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             p = md.prefill
             assert p is not None and md.prefill_num_valid_pages is not None
             score = self._new_score(num_tokens - nd, p.max_seq_len)
-            minimax_m3_nvfp4_index_score_prefill(
+            score_prefill(
                 iq[nd:],
-                kv,
+                score_kv,
                 score,
                 p.block_table,
                 p.cu_seqlens_q,
