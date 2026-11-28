@@ -9,3 +9,5 @@ class LiLiCorrSpeculatorConfig(DFlashSpeculatorConfig):
     )
     # Draft-side watermarking doesn't cover candidate-head drafting yet.
     supports_watermarking = False
+    # The speculator reinstalls the unquantized target lm_head for candidates.
+    supported_options = frozenset()
