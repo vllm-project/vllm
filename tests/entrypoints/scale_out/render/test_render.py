@@ -532,6 +532,64 @@ async def client(server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["chat/completions", "responses"])
+async def test_render_tool_results_follow_call_order(client, endpoint):
+    template = (
+        "{% for message in messages %}"
+        "{% if message.role == 'tool' %}{{ message.content }} {% endif %}"
+        "{% endfor %}"
+    )
+    if endpoint == "chat/completions":
+        history = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": f"call_{label}",
+                            "type": "function",
+                            "function": {"name": "echo", "arguments": "{}"},
+                        }
+                        for label in ("A", "B")
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_B", "content": "blue"},
+                {"role": "tool", "tool_call_id": "call_A", "content": "red"},
+            ]
+        }
+    else:
+        history = {
+            "input": [
+                *(
+                    {
+                        "type": "function_call",
+                        "call_id": f"call_{label}",
+                        "name": "echo",
+                        "arguments": "{}",
+                    }
+                    for label in ("A", "B")
+                ),
+                {"type": "function_call_output", "call_id": "call_B", "output": "blue"},
+                {"type": "function_call_output", "call_id": "call_A", "output": "red"},
+            ]
+        }
+    response = await client.post(
+        f"/v1/{endpoint}/render",
+        json={
+            "model": MODEL_NAME,
+            "chat_template_kwargs": {"chat_template": template},
+            **history,
+        },
+    )
+    assert response.status_code == 200, response.text
+    decoded = await client.post(
+        "/detokenize", json={"tokens": response.json()["token_ids"]}
+    )
+    assert decoded.status_code == 200, decoded.text
+    assert decoded.json()["prompt"].removeprefix("<s>").strip() == "red blue"
+
+
+@pytest.mark.asyncio
 async def test_responses_render_basic(client):
     response = await client.post(
         "/v1/responses/render",

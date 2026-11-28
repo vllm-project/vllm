@@ -548,8 +548,8 @@ class TestConversationToMelody:
         assert "citations" not in out[0]
 
     def test_tool_message_v2_content_replaces_default_content(self):
-        # When ``tool_message_v2_content`` has an entry for a message
-        # index, the renderer maps those v2 blocks through
+        # When ``tool_message_v2_content`` has an entry for a tool call
+        # ID, the renderer maps those v2 blocks through
         # :func:`_v2_tool_content_to_melody_block` and uses the result
         # instead of the block list ``_content_blocks`` would derive
         # from ``msg["content"]``.
@@ -567,11 +567,13 @@ class TestConversationToMelody:
             },
         ]
         v2_content = {
-            1: [
-                {
-                    "type": "document",
-                    "document": {"id": "d1", "data": {"result": "K2"}},
-                }
+            "c1": [
+                [
+                    {
+                        "type": "document",
+                        "document": {"id": "d1", "data": {"result": "K2"}},
+                    }
+                ]
             ]
         }
         out = _conversation_to_melody_messages(
@@ -591,9 +593,11 @@ class TestConversationToMelody:
         # rather than let a ``None`` reach melody.
         conv = [{"role": "tool", "tool_call_id": "c", "content": "ignored"}]
         v2_content = {
-            0: [
-                {"type": "text", "text": "keep me"},
-                {"type": "mystery", "unexpected": True},
+            "c": [
+                [
+                    {"type": "text", "text": "keep me"},
+                    {"type": "mystery", "unexpected": True},
+                ]
             ]
         }
         out = _conversation_to_melody_messages(
@@ -937,11 +941,13 @@ class TestBuildRenderConfig:
         ]
         kwargs = {
             TOOL_MESSAGE_V2_CONTENT_KEY: {
-                1: [
-                    {
-                        "type": "document",
-                        "document": {"id": "d1", "data": {"r": "k"}},
-                    }
+                "c1": [
+                    [
+                        {
+                            "type": "document",
+                            "document": {"id": "d1", "data": {"r": "k"}},
+                        }
+                    ]
                 ]
             }
         }

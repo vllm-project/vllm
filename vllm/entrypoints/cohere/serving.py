@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import defaultdict
 from collections.abc import AsyncGenerator
 from enum import StrEnum
 from http import HTTPStatus
@@ -1368,45 +1369,25 @@ class CohereServingChatV2(OpenAIServingChat):
     @classmethod
     def _collect_v2_tool_message_content(
         cls, request: CohereChatV2Request
-    ) -> dict[int, list[dict[str, Any]]]:
-        """Collect the original v2 tool-message content blocks so the
-        renderer can apply its v2 → melody mapping.
+    ) -> dict[str, list[list[dict[str, Any]] | None]]:
+        """Forward original v2 blocks by tool call ID and occurrence.
 
-        Builds the map that
-        `_apply_cohere_template_kwargs` stashes under
-        `TOOL_MESSAGE_V2_CONTENT_KEY` for the renderer to
-        consume (see the constant definition in
-        `vllm.renderers.cohere` for why the map exists). Walks
-        `request.messages` -- not the OpenAI-shape messages built by
-        `_convert_messages` -- because that flattening step
-        already threw away the structural distinction between text and
-        document blocks. Each surviving block is
-        `model_dump`'d to a plain dict so the
-        forwarded map carries no Pydantic instances (msgpack- /
-        general-serialization-safe on principle even though internal
-        underscore-prefixed keys are filtered before crossing the
-        engine-core boundary).
-
-        Only emits an entry for a tool message whose content is a
-        non-empty list of blocks; a bare-string tool message renders
-        fine through the default text-block path in
-        `vllm.renderers.cohere._content_blocks`, so no forwarded
-        blocks are needed there. Returns an empty dict when there is
-        nothing to forward, so the caller can use truthiness to decide
-        whether to stash the key at all.
+        Keep placeholders for plain text so repeated IDs stay aligned. When
+        there are no structured blocks, omit the metadata entirely.
         """
-        blocks_by_index: dict[int, list[dict[str, Any]]] = {}
-        for i, msg in enumerate(request.messages):
+        blocks_by_id: dict[str, list[list[dict[str, Any]] | None]] = defaultdict(list)
+        for msg in request.messages:
             if not isinstance(msg, ToolChatMessageV2):
                 continue
-            if isinstance(msg.content, str) or not msg.content:
-                continue
-            v2_blocks: list[dict[str, Any]] = []
-            for block in msg.content:
-                v2_blocks.append(block.model_dump(exclude_none=True))
-            if v2_blocks:
-                blocks_by_index[i] = v2_blocks
-        return blocks_by_index
+            blocks = None
+            if isinstance(msg.content, list) and msg.content:
+                blocks = [block.model_dump(exclude_none=True) for block in msg.content]
+            blocks_by_id[msg.tool_call_id].append(blocks)
+        return {
+            call_id: occurrences
+            for call_id, occurrences in blocks_by_id.items()
+            if any(occurrences)
+        }
 
     @staticmethod
     def _build_usage(response: ChatCompletionResponse) -> CohereUsage | None:

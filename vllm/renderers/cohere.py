@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections import deque
 from enum import StrEnum
 from typing import Any
 
@@ -155,7 +156,7 @@ POSITION_TO_SOURCE_KEY = "_position_to_source"
 
 
 # Reserved ``chat_template_kwargs`` key carrying the original Cohere v2
-# tool-message content, keyed by request-message index. Populated by
+# tool-message content. Populated by
 # :meth:`CohereServingChatV2._apply_cohere_template_kwargs` and consumed
 # by :func:`_conversation_to_melody_messages`, which runs each block
 # through :func:`_v2_tool_content_to_melody_block` to produce the
@@ -175,16 +176,9 @@ POSITION_TO_SOURCE_KEY = "_position_to_source"
 # original v2 content blocks verbatim (as plain dicts) under this key,
 # and the renderer owns the v2-shape → melody-shape mapping.
 #
-# Value type: ``dict[int, list[dict[str, Any]]]``. Each list entry is a
-# ``model_dump``'d ``TextToolContent`` / ``DocumentToolContent`` block
-# (e.g. ``{"type": "text", "text": ...}`` or ``{"type": "document",
-# "document": {"id": ..., "data": {...}}}``). Index is the position of
-# the tool message in the request's ``messages`` list, which -- since
-# ``_convert_messages`` is 1-to-1 -- also matches its position in the
-# ``ConversationMessage`` list handed to the renderer. Leading
-# underscore signals "internal, not part of the public
-# ``chat_template_kwargs`` surface" -- clients should not set this key
-# directly.
+# The map is keyed by tool call ID. Values contain the original block list
+# (or None for plain text) for each occurrence of that ID in request order.
+# The underscore marks this as an internal chat_template_kwargs entry.
 TOOL_MESSAGE_V2_CONTENT_KEY = "_tool_message_v2_content"
 
 
@@ -516,7 +510,7 @@ def _tool_to_melody(tool: Any) -> dict[str, Any]:
 def _conversation_to_melody_messages(
     conversation: list[ConversationMessage],
     messages_citations: dict[int, list[dict[str, Any]]] | None = None,
-    tool_message_v2_content: dict[int, list[dict[str, Any]]] | None = None,
+    tool_message_v2_content: dict[str, list[list[dict[str, Any]] | None]] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert vLLM `ConversationMessage`s into melody's message dict shape.
 
@@ -527,33 +521,27 @@ def _conversation_to_melody_messages(
     must already be in melody's `FilterCitation` dict shape (see
     `CohereServingChatV2._sdk_citation_to_melody`).
 
-    `tool_message_v2_content` is an optional index-keyed lookup of
-    the original Cohere v2 tool-message content blocks (as plain
-    dicts), populated by `CohereServingChatV2` under the
-    `TOOL_MESSAGE_V2_CONTENT_KEY` entry. When set for a given
-    index, its blocks -- run through
-    `_v2_tool_content_to_melody_block` to apply the v2 → melody
-    mapping -- replace the block list this function would otherwise
-    derive from `msg["content"]`. This lets the renderer own the
-    v2-shape → melody-shape conversion for the structured `document`
-    blocks cohere v2 allows on tool messages (which don't survive
-    OpenAI's content-parts validator on the way in, so
-    `_convert_tool_message` rewrites them into `text` parts).
-
-    Both index lookups key by position in the *input* `conversation`
-    list, which currently maps 1-to-1 with
-    `CohereChatV2Request.messages` for text-only Cohere requests.
-    This mapping breaks silently if `parse_chat_messages` ever
-    expands a single input message into multiple entries (e.g.
-    multi-modal splitting), which is not the case today.
+    `tool_message_v2_content` carries original Cohere v2 tool blocks by call ID.
+    Reordering complete tool-result batches preserves the relative order of
+    results sharing an ID, so consume those results in occurrence order.
+    Citations still use message indices because only tool messages move.
     """
+    pending_blocks = {
+        call_id: deque(occurrences)
+        for call_id, occurrences in (tool_message_v2_content or {}).items()
+    }
     out: list[dict[str, Any]] = []
     for i, msg in enumerate(conversation):
         role = _role_to_melody(msg.get("role", "user"))
+        tool_call_id = msg.get("tool_call_id")
+        v2_blocks = None
         if (
-            tool_message_v2_content is not None
-            and (v2_blocks := tool_message_v2_content.get(i)) is not None
+            role == "tool"
+            and tool_call_id is not None
+            and (blocks := pending_blocks.get(tool_call_id))
         ):
+            v2_blocks = blocks.popleft()
+        if v2_blocks is not None:
             content_blocks = []
             for v2_block in v2_blocks:
                 mapped = _v2_tool_content_to_melody_block(v2_block)
@@ -586,7 +574,6 @@ def _conversation_to_melody_messages(
             "content": content_blocks,
             "tool_calls": tool_calls,
         }
-        tool_call_id = msg.get("tool_call_id")
         if tool_call_id:
             out_msg["tool_call_id"] = tool_call_id
         if messages_citations and (cites := messages_citations.get(i)):
