@@ -10,7 +10,7 @@ from ...utils import create_new_process_for_each_test
 @create_new_process_for_each_test()
 def test_model_inspection_requires_explicit_call(vllm_runner):
     """Object display shows a summary; explicit inspection returns the model tree."""
-    model_name = "vllm-project/tiny-random-LlamaForCausalLM"
+    model_name = "vllm/tiny-random-LlamaForCausalLM"
     with vllm_runner(
         model_name,
         enforce_eager=True,
@@ -22,7 +22,7 @@ def test_model_inspection_requires_explicit_call(vllm_runner):
         assert repr(llm) == f"LLM(model={model_name!r})"
 
         inspection = llm.get_model_inspection()
-        assert "LlamaForCausalLM" in inspection
+        assert "TransformersForCausalLM" in inspection
         assert "(embed_tokens):" in inspection
 
 
@@ -44,7 +44,7 @@ def test_collective_rpc(tp_size, backend, monkeypatch, vllm_runner):
 
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
-        "vllm-project/tiny-random-LlamaForCausalLM",
+        "vllm/tiny-random-LlamaForCausalLM",
         enforce_eager=True,
         load_format="dummy",
         tensor_parallel_size=tp_size,

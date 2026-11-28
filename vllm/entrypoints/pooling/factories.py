@@ -155,6 +155,7 @@ def init_pooling_state(
     if model_config is None:
         return
 
+    from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
     from vllm.renderers.chat_utils import load_chat_template
     from vllm.tasks import POOLING_TASKS
 
@@ -172,6 +173,7 @@ def init_pooling_state(
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
         trust_request_mm_kwargs=args.trust_request_mm_kwargs,
+        default_chat_template_kwargs=resolve_default_chat_template_kwargs(args),
     )
 
     state.serving_pooling = (

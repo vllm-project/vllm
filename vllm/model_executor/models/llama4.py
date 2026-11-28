@@ -55,8 +55,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
@@ -207,7 +205,6 @@ class Llama4Attention(nn.Module):
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
         self.max_position_embeddings = max_position_embeddings
-        self.n_rep = self.num_heads // self.num_kv_heads
         self.qk_norm = (
             RMSNorm(
                 hidden_size=self.head_dim,
@@ -321,7 +318,6 @@ class Llama4DecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.layer_idx = extract_layer_index(prefix)
-        self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
         max_position_embeddings = config.max_position_embeddings
 
@@ -498,25 +494,7 @@ class Llama4Model(LlamaModel):
                         .flatten()
                         .to(new_loaded_weight.device)
                     )
-                    # Workaround for FP8 CPU indexing on older PyTorch:
-                    # https://github.com/vllm-project/vllm/issues/32862
-                    is_fp8_dtype = new_loaded_weight.dtype == (
-                        current_platform.fp8_dtype()
-                    ) or (
-                        new_loaded_weight.dtype.is_floating_point
-                        and new_loaded_weight.element_size() == 1
-                    )
-                    if (
-                        new_loaded_weight.device.type == "cpu"
-                        and is_fp8_dtype
-                        and not is_torch_equal_or_newer("2.11.0")
-                    ):
-                        # PyTorch < 2.11 doesn't support CPU float8 indexing.
-                        new_loaded_weight = new_loaded_weight.to(torch.float16)[
-                            local_expert_indices
-                        ].to(new_loaded_weight.dtype)
-                    else:
-                        new_loaded_weight = new_loaded_weight[local_expert_indices]
+                    new_loaded_weight = new_loaded_weight[local_expert_indices]
                     expert_id = local_expert_indices[0].item()
             else:
                 # TODO: add EP support for non fused weights

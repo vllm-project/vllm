@@ -652,11 +652,11 @@ def hopper_selection():
 
 @blackwell_only
 @pytest.mark.parametrize("use_hisparse", [False, True])
-def test_hopper_sparse_mla_skips_backends_without_hisparse(
+def test_hopper_sparse_mla_selects_flashinfer_with_hisparse(
     use_hisparse, hopper_selection
 ):
-    """Head-512 sparse MLA prefers FlashInfer on Hopper, which has no HiSparse
-    path; with HiSparse the selector must pass over it."""
+    """Head-512 sparse MLA prefers FlashInfer on Hopper, which supports
+    HiSparse, so HiSparse keeps it."""
     vllm_config = VllmConfig()
     if use_hisparse:
         vllm_config.attention_config.hisparse_config = HiSparseConfig()
@@ -664,7 +664,7 @@ def test_hopper_sparse_mla_skips_backends_without_hisparse(
         backend = get_attn_backend(
             512, torch.bfloat16, None, use_mla=True, use_sparse=True
         )
-    assert (backend.get_name() == "FLASHINFER_MLA_SPARSE_SM90") is not use_hisparse
+    assert backend.get_name() == "FLASHINFER_MLA_SPARSE_SM90"
 
 
 @pytest.fixture
@@ -835,3 +835,35 @@ def test_rswa_selection_does_not_reuse_causal_result(blackwell_selection):
             get_attn_backend(256, torch.bfloat16, None)
         config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         assert get_attn_backend(256, torch.bfloat16, None).get_name() == "TRITON_ATTN"
+
+
+@blackwell_only
+@pytest.mark.parametrize(
+    ("architecture", "kv_cache_dtype", "expected"),
+    [
+        ("Gemma4ForConditionalGeneration", "nvfp4", "FLASHINFER"),
+        ("Gemma4ForConditionalGeneration", "nvfp4_4over6", "TRITON_ATTN"),
+        ("Gemma4ForConditionalGeneration", "auto", "TRITON_ATTN"),
+        ("DiffusionGemmaForBlockDiffusion", "nvfp4", "TRITON_ATTN"),
+        ("EmbeddingGemma2Model", "nvfp4", "TRITON_ATTN"),
+    ],
+)
+def test_gemma4_without_fa4_backend(architecture, kv_cache_dtype, expected):
+    from vllm.config import ModelConfig
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.models.config import Gemma4Config
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it", language_model_only=True
+    ).create_engine_config()
+    config.attention_config.backend = None
+    config.cache_config.cache_dtype = kv_cache_dtype
+    with (
+        patch(
+            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            return_value=False,
+        ),
+        patch.object(ModelConfig, "architecture", architecture),
+    ):
+        Gemma4Config.verify_and_update_config(config)
+    assert config.attention_config.backend == AttentionBackendEnum[expected]

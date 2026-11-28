@@ -76,7 +76,7 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
     return args
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class RangeEntry:
     compile_range: Range
     compiled: bool = False

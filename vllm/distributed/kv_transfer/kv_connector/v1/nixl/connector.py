@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         NixlBaseConnectorWorker,
     )
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -139,6 +139,21 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
                 "NixlConnector PCP producers do not support bidirectional KV transfer."
             )
 
+        if parallel_config.pipeline_parallel_size > 1:
+            if kv_role != "kv_producer":
+                raise NotImplementedError(
+                    "NIXL connectors support pipeline_parallel_size > 1 only for "
+                    "kv_producer. Use pipeline_parallel_size=1 for kv_consumer "
+                    "or kv_both."
+                )
+            if vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            ):
+                raise NotImplementedError(
+                    "NIXL connectors do not support bidirectional KV transfer with PP. "
+                    "Set pipeline_parallel_size=1 or disable bidirectional_kv_xfer."
+                )
+
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
@@ -206,6 +221,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        super().bind_kv_cache_manager(kv_cache_manager)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
 
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None

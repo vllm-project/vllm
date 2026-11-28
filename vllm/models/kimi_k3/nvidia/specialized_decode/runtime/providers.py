@@ -22,8 +22,8 @@ from ..cutedsl.mla.dcp import DcpBox, resolve_partials
 from ..cutedsl.mla.prepared import PreparedMla
 from ..cutedsl.oproj.prepared import PreparedOproj
 
-# Decode batches (tokens) served by the prepared providers: every batch up to 8, the
-# padded CUDA-graph batches and each further captured size; others run stock.
+# Decode batches (tokens) prepared when the CUDA-graph capture sizes are unknown;
+# otherwise the captured sizes up to PREPARED_MAX are (`runtime.decode`).
 BATCHES = (*range(1, 9), 16, 32, 64)
 PREPARED_MAX = BATCHES[-1]
 # Rows the attention cores (MLA, DSA, their DCP mailboxes and scratch) can prepare:

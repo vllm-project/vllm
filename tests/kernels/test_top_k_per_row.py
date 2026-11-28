@@ -667,6 +667,42 @@ def test_top_k_per_row_decode_gfx950_k512_masked_graph_replay() -> None:
     _assert_exact_topk(logits, indices, lengths)
 
 
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_decode_split_work_short_rows(top_k: int) -> None:
+    """In a graph, rows no longer than k skip the split as lengths change."""
+    set_random_seed(0)
+    # Wider than kSplitWorkThreshold. With 8 rows, gfx950 sends k = 1024 to its
+    # own split launch, which takes at most 64 rows.
+    next_n, width = 2, 262_144
+    steps = [[0, top_k, 3 * top_k, width], [top_k + 1, 1, width - 1, top_k - 1]]
+    lengths = torch.tensor(steps[0], dtype=torch.int32, device="cuda")
+    rows = lengths.numel() * next_n
+    logits = torch.randn(rows, width, device="cuda").bfloat16().float()
+    indices = torch.empty((rows, top_k), dtype=torch.int32, device="cuda")
+    offsets = torch.arange(next_n, dtype=torch.int32, device="cuda")
+
+    def run() -> None:
+        _run_topk_backend(
+            "top_k_per_row_decode", logits, lengths, indices, top_k, width, next_n
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for step in steps:
+        lengths.copy_(torch.tensor(step, dtype=torch.int32))
+        indices.fill_(-777)
+        graph.replay()
+        row_ends = (lengths[:, None] - next_n + offsets + 1).clamp_min(0)
+        _assert_exact_topk(logits, indices, row_ends)
+        _assert_leading_topk(indices, row_ends)
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
 def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
@@ -1984,9 +2020,26 @@ NAN_ORDERING_CASES = [
 @pytest.mark.parametrize("backend,num_rows,dtype", NAN_ORDERING_CASES)
 @pytest.mark.parametrize("seq_len", [65536, 262144])
 @pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize(
+    "nan_sign",
+    [
+        1,
+        pytest.param(
+            -1,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(), reason="ROCm keys a sign-set NaN below -inf"
+            ),
+        ),
+    ],
+)
 @torch.inference_mode()
 def test_topk_nan_ordering_matches_torch(
-    backend: str, num_rows: int, seq_len: int, top_k: int, dtype: torch.dtype
+    backend: str,
+    num_rows: int,
+    seq_len: int,
+    top_k: int,
+    dtype: torch.dtype,
+    nan_sign: int,
 ) -> None:
     # Fewer NaNs than top_k, mixed with +inf and the largest finite values:
     # every kernel's ordered key must rank NaN above +inf, as torch.topk does.
@@ -2001,6 +2054,10 @@ def test_topk_nan_ordering_matches_torch(
     logits.scatter_(1, pos[:, n_nan + n_big : n_nan + 2 * n_big], fmax)
     logits.scatter_(1, pos[:, n_nan + 2 * n_big :], 1e30)
     logits = logits.to(dtype)
+    if nan_sign < 0:
+        # The bf16 cast drops a NaN's sign: set the bits after it.
+        bits = logits.view(torch.int16 if dtype == torch.bfloat16 else torch.int32)
+        bits.scatter_(1, pos[:, :n_nan], -1)
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 

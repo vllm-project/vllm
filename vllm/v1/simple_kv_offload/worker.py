@@ -22,7 +22,7 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
-from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
+from vllm.v1.simple_kv_offload.sizing import num_offload_blocks
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -67,6 +67,7 @@ class SimpleCPUOffloadWorker:
         self.store_stream: torch.cuda.Stream | None = None
 
         self._backend: DmaCopyBackend | DiskBackend | None = None
+        self._pinned_host_ranges: list[torch.Tensor] = []
 
         # Ordered (event_idx, Event). Events pre-allocated on main thread.
         self._load_events: list[tuple[int, torch.Event]] = []
@@ -164,7 +165,7 @@ class SimpleCPUOffloadWorker:
                 unique_gpu_caches[key_name] = region
 
         # Compute per-tensor bytes_per_block. Tensors may have different
-        # page_size_bytes (e.g., UniformTypeKVCacheSpecs with varying head_size).
+        # page_size_bytes (e.g., layers of one group with varying head_size).
         per_tensor_bpb = [
             t.stride(0) * t.element_size() for t in unique_gpu_caches.values()
         ]
@@ -191,7 +192,10 @@ class SimpleCPUOffloadWorker:
         local_capacity = capacity_bytes // bytes_per_block
         requested = self._num_cpu_blocks_override
         if requested is None:
-            return sync_num_offload_blocks_across_workers(max(1, local_capacity))
+            assert self.kv_cache_config is not None
+            return num_offload_blocks(
+                self.kv_cache_config, capacity_bytes, bytes_per_block
+            )
         if type(requested) is not int or not 0 < requested <= local_capacity:
             raise ValueError(
                 f"num_cpu_blocks={requested!r} must be between 1 and "
@@ -289,7 +293,25 @@ class SimpleCPUOffloadWorker:
                 for tensor in reversed(registered):
                     unpin_tensor(tensor)
                 raise
+            self._pinned_host_ranges = registered
         return cpu_kv_caches
+
+    def shutdown(self) -> None:
+        """Stop the copy thread and unregister the pinned CPU caches.
+
+        An in-process engine frees the host mapping without exiting, so a
+        later registration can land on the same addresses. Never raises: it
+        runs on the worker teardown path.
+        """
+        if self._backend is not None:
+            self._backend.shutdown()
+        self._flush_and_sync_all()
+        for tensor in reversed(self._pinned_host_ranges):
+            try:
+                unpin_tensor(tensor)
+            except RuntimeError as e:
+                logger.warning("Failed to unpin a CPU KV cache range: %s", e)
+        self._pinned_host_ranges = []
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata

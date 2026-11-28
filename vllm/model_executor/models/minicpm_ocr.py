@@ -12,8 +12,7 @@ too; what differs is the image geometry:
   through one 2x2 merge (downsample MLP) rather than two (ViT insert merger as
   well).
 * An image small enough not to be sliced may be resized to a target picked from
-  its own pixels (`adaptive_small_image_upsize`) or kept at its native
-  resolution (`disable_small_image_upsize`).
+  its own pixels or kept at its native resolution.
 
 The second point is why the image placeholder here is measured from the
 `target_sizes` the image processor actually returned rather than recomputed
@@ -24,13 +23,18 @@ reimplementation cannot reproduce. This mirrors
 """
 
 import copy
+import math
 from collections.abc import Mapping
 from dataclasses import replace as dataclass_replace
+from functools import cached_property
+from typing import Any
 
 import torch
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize
+from vllm.multimodal.processing import ProcessorInputs
+from vllm.multimodal.processing.dummy_inputs import MultiModalDummyOptions
 from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
     cached_encode,
@@ -38,6 +42,7 @@ from vllm.multimodal.processing.processor import (
 
 from .minicpmv import MiniCPMVDummyInputsBuilder, MiniCPMVImageEmbeddingItems
 from .minicpmv4_6 import (
+    _MAX_ASPECT_RATIO,
     MiniCPMV4_6ForConditionalGeneration,
     MiniCPMV4_6MultiModalProcessor,
     MiniCPMV4_6ProcessingInfo,
@@ -48,28 +53,18 @@ from .minicpmv4_6 import (
 # `MiniCPMOcrVideoProcessorKwargs` deliberately declares none of them: in
 # transformers videos go through `MiniCPMOcrVideoProcessor`, which has no
 # small-image upsize logic at all.
-_OCR_IMAGE_UPSIZE_KWARGS = (
-    "disable_small_image_upsize",
-    "adaptive_small_image_upsize",
-    "adaptive_upsize_font_px",
-    "adaptive_upsize_dense_per_kpx",
-    "adaptive_upsize_tiny_pixels",
-    "adaptive_upsize_tiny_target_resolution",
-    "adaptive_tile_upsize",
-)
+_OCR_IMAGE_UPSIZE_KWARGS = ("small_image_upsize",)
 
 # Pinned for video frames: `_compute_visual_tokens` counts an unsliced frame as
 # upscaled to `scale_resolution` with uniform tiles, but `process_videos` runs
 # the image processor, whose own defaults are not visible to that count.
-_VIDEO_PINNED_UPSIZE_KWARGS = {
-    "disable_small_image_upsize": False,
-    "adaptive_small_image_upsize": False,
-    "adaptive_tile_upsize": False,
-}
+_VIDEO_PINNED_UPSIZE_KWARGS = {"small_image_upsize": "always"}
 
 
 class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
-    def _pinned_image_processor(self, downsample_mode: str | None = None):
+    def _pinned_image_processor(
+        self, downsample_mode: str | None = None, image_processor: Any = None
+    ):
         """Image processor view pinned to the mode resolved for this request.
 
         `MiniCPMOcrImageProcessor.find_best_resize` reads `downsample_mode`
@@ -78,7 +73,8 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         the token count on a copy pinned the same way, otherwise the pixels are
         aligned to one grid and the placeholder is counted on another.
         """
-        image_processor = self.get_image_processor()
+        if image_processor is None:
+            image_processor = self.get_image_processor()
         resolved = self._get_downsample_mode(downsample_mode)
         if getattr(image_processor, "downsample_mode", None) == resolved:
             return image_processor
@@ -87,30 +83,12 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         pinned.downsample_mode = resolved
         return pinned
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        # OCR-only override: source the dummy-input dimension from the image
-        # processor's `scale_resolution` (the slice resize target) rather than the
-        # top-level `config.image_size`. The top-level field is dropped from
-        # `MiniCPMOcrConfig`, and the existing default of 448 was always equal to
-        # `scale_resolution` here. `vision_config.image_size` is the ViT patch grid
-        # (980 for this checkpoint), not the preprocessed image dimension, so it is
-        # not the right value for dummy-input sizing.
-        image_size = self.get_image_processor().scale_resolution
-        max_slice_num = self.get_image_max_slice_num()
-        return ImageSize(width=image_size, height=image_size * max_slice_num)
-
-    def get_video_frame_size_with_most_features(self) -> ImageSize:
-        # See `get_image_size_with_most_features` for why OCR sources from
-        # `scale_resolution` instead of the (now-removed) top-level `config.image_size`.
-        image_size = self.get_image_processor().scale_resolution
-        max_slice_num = self.get_video_max_slice_num()
-        return ImageSize(width=image_size, height=image_size * max_slice_num)
-
     def _compute_visual_tokens(
         self,
         image_size: ImageSize,
         max_slice_nums: int | None = None,
         downsample_mode: str | None = None,
+        image_processor: Any = None,
     ) -> tuple[list[int], int, int]:
         """Grid, source tokens and per-slice tokens for one image.
 
@@ -120,11 +98,11 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         The unsliced branch upscales to `scale_resolution`, which is what
         `MiniCPMOcrImageProcessor._preprocess` does for the default options
         and what the video path does unconditionally. The remaining
-        `*_small_image_upsize` combinations depend on the pixels, so for
+        combinations depend on the pixels, so for
         images the placeholder is taken from `target_sizes` instead; see
         `MiniCPMOcrMultiModalProcessor._ocr_image_prompt_text`.
         """
-        image_processor = self._pinned_image_processor(downsample_mode)
+        image_processor = self._pinned_image_processor(downsample_mode, image_processor)
         if max_slice_nums is None:
             max_slice_nums = image_processor.max_slice_nums
 
@@ -173,6 +151,91 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         patch_w = refine_size[1] // grids[1]
         patch_tokens = patch_h * patch_w // tokens_per_patch
         return grids, source_tokens, patch_tokens
+
+    def _get_tiny_upsize_tokens(self, size: ImageSize, modality: str) -> int:
+        from transformers.models.minicpm_ocr.image_processing_minicpm_ocr import (
+            TINY_PIXELS,
+            TINY_RESOLUTION,
+        )
+
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs(modality)
+        image_processor = self._pinned_image_processor(downsample_mode)
+        hf_image_size = (size.height, size.width)
+        if (
+            modality != "image"
+            or image_processor.scale_resolution >= TINY_RESOLUTION
+            or size.width * size.height >= TINY_PIXELS
+            or image_processor.get_sliced_grid(
+                hf_image_size, max_slice_nums, image_processor.scale_resolution
+            )
+            is not None
+        ):
+            return 0
+        height, width = image_processor.find_best_resize(
+            hf_image_size,
+            TINY_RESOLUTION,
+            image_processor.patch_size,
+            downsample_mode=image_processor.downsample_mode,
+            allow_upscale=True,
+        )
+        token_divisor = 4 if image_processor.downsample_mode == "4x" else 16
+        return height * width // (image_processor.patch_size**2 * token_divisor)
+
+    @cached_property
+    def _tiny_upsize_image_sizes(self) -> list[ImageSize]:
+        from transformers.models.minicpm_ocr.image_processing_minicpm_ocr import (
+            TINY_PIXELS,
+            TINY_RESOLUTION,
+        )
+
+        if self.get_image_processor().scale_resolution >= TINY_RESOLUTION:
+            return []
+        max_ratio = _MAX_ASPECT_RATIO["image"]
+        sizes = [
+            size
+            for short in range(1, math.isqrt(TINY_PIXELS) + 1)
+            for long in range(
+                short, min(max_ratio * short, (TINY_PIXELS - 1) // short) + 1
+            )
+            for size in (ImageSize(long, short), ImageSize(short, long))
+        ]
+        tokens = {size: self._get_tiny_upsize_tokens(size, "image") for size in sizes}
+        most = max(tokens.values(), default=0)
+        return [size for size, num in tokens.items() if num == most and num > 0]
+
+    def _get_frame_tokens(self, size: ImageSize, modality: str) -> int:
+        return max(
+            super()._get_frame_tokens(size, modality),
+            self._get_tiny_upsize_tokens(size, modality),
+        )
+
+    def _get_padded_tokens(self, size: ImageSize, modality: str) -> int:
+        return max(
+            super()._get_padded_tokens(size, modality),
+            self._get_tiny_upsize_tokens(size, modality),
+        )
+
+    def _get_unhinted_dummy_sizes(self, modality: str) -> list[ImageSize]:
+        sizes = super()._get_unhinted_dummy_sizes(modality)
+        if modality == "image":
+            sizes += self._tiny_upsize_image_sizes
+        return sizes
+
+    def get_max_image_tokens(self) -> int:
+        return max(
+            [
+                super().get_max_image_tokens(),
+                *(
+                    self._get_tiny_upsize_tokens(size, "image")
+                    for size in self._tiny_upsize_image_sizes
+                ),
+            ]
+        )
+
+    def _uses_tiny_upsize(self, size: ImageSize) -> bool:
+        return self._get_tiny_upsize_tokens(size, "image") > super()._get_frame_tokens(
+            size, "image"
+        )
 
 
 class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
@@ -245,6 +308,27 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
             },
         )
 
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        inputs = super().get_dummy_inputs(seq_len, mm_counts, mm_options)
+        info = self.info
+        assert isinstance(info, MiniCPMOcrProcessingInfo)
+        upsize = "always"
+        if mm_counts.get("image", 0) and info._uses_tiny_upsize(
+            info.get_image_size_with_most_features()
+        ):
+            upsize = "adaptive"
+        return dataclass_replace(
+            inputs,
+            hf_processor_mm_kwargs={
+                "images_kwargs": {"small_image_upsize": upsize},
+            },
+        )
+
     def _ocr_image_prompt_text(
         self,
         tgt_sizes: torch.Tensor,
@@ -257,9 +341,7 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
 
         `MiniCPMOcrProcessor.replace_image_token` counts
         `target_sizes.prod(-1) // token_divisor` per patch, row 0 being the
-        source image and row 1 a slice. Doing the same here keeps the count
-        correct for `adaptive_small_image_upsize`, whose resize target is
-        decided from the pixels and cannot be recovered from `image_size`.
+        source image and row 1 a slice.
 
         `target_sizes` is already in *patch* units -- the image processor
         stores `source_h // patch_size` -- so the divisor here is the bare
@@ -314,8 +396,6 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
         )
 
         if num_rows > 0 and num_cols > 0:
-            # `adaptive_tile_upsize` classifies each tile on its own crop, so
-            # slices in one grid can differ; emit one placeholder per tile.
             tile_tokens = [int(t) for t in patch_tokens_per_slice[1:]]
             if len(set(tile_tokens)) <= 1:
                 slice_tokens = tile_tokens[0] if tile_tokens else 0

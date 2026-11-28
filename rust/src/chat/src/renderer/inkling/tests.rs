@@ -18,10 +18,10 @@ use super::{
     MESSAGE_TOOL, MESSAGE_USER,
 };
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode};
+use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
 use crate::{ChatRenderer, Error};
 
-struct FixtureTokenizer;
+pub(super) struct FixtureTokenizer;
 
 impl Tokenizer for FixtureTokenizer {
     fn encode(
@@ -125,7 +125,7 @@ fn assert_fixture(input_name: &str, expected: ExpectFile) {
     expected.assert_eq(&rendered);
 }
 
-fn render_symbolic_tokens(token_ids: &[u32]) -> String {
+pub(super) fn render_symbolic_tokens(token_ids: &[u32]) -> String {
     let mut out = String::new();
     let mut text_bytes = Vec::new();
     for token_id in token_ids {
@@ -193,6 +193,31 @@ fn renders_reasoning_text_tool_call_and_tool_response() {
     assert_fixture(
         "tool_round_trip_input.json",
         expect_file!["fixtures/tool_round_trip_output.txt"],
+    );
+}
+
+#[test]
+fn renders_tool_response_media_and_coalesces_text_parts() {
+    assert_fixture(
+        "tool_media_input.json",
+        expect_file!["fixtures/tool_media_output.txt"],
+    );
+}
+
+#[test]
+fn rejects_tool_response_video() {
+    let request = ChatRequest {
+        messages: vec![ChatMessage::tool_response(
+            vec![ChatContentPart::video_url("data:video/mp4;base64,")],
+            "call_1",
+        )],
+        ..ChatRequest::for_test()
+    };
+    let error = renderer().render(&request).unwrap_err();
+    assert!(
+        matches!(error, Error::UnsupportedMultimodalContent("video_url")),
+        "{}",
+        error.as_report()
     );
 }
 
@@ -378,7 +403,16 @@ fn rejects_continue_final_message() {
     };
 
     let error = renderer().render(&request).unwrap_err();
-    assert!(matches!(error, Error::ChatTemplate(_)));
+    assert!(matches!(
+        error,
+        Error::UnsupportedContinueFinalMessage {
+            renderer: "Inkling"
+        }
+    ));
+    assert_eq!(
+        error.kind(),
+        crate::ErrorKind::invalid_param("continue_final_message")
+    );
     assert!(error.as_report().to_string().contains("continue_final_message"));
 }
 

@@ -102,7 +102,7 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
         if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for CompressedTensorsW4A8Int", kernel_type.__name__)
+            logger.debug("Using %s for CompressedTensorsW4A8Int", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         scales_and_zp_size = input_size_per_partition // effective_group_size

@@ -33,7 +33,8 @@ class DummyWorkerMeta(KVConnectorWorkerMetadata):
     def __init__(self, tags: set[str]):
         self.tags = set(tags)
 
-    def aggregate(self, other: "DummyWorkerMeta") -> "DummyWorkerMeta":
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> "DummyWorkerMeta":
+        assert isinstance(other, DummyWorkerMeta)
         return DummyWorkerMeta(self.tags | other.tags)
 
 
@@ -235,13 +236,16 @@ def test_replay_preserves_get_and_clear_fields():
         finished_recving={"req2", "req3"},
     )
     aggregated = aggregator.aggregate([output0, output1])
+    assert aggregated is not None
     kv = aggregated.kv_connector_output
+    assert kv is not None
 
     assert kv.expected_finished_count == 2
     assert kv.finished_sending == {"req1"}
     assert kv.finished_recving == {"req2", "req3"}
     assert kv.failed_recving == {"req3"}
     assert kv.invalid_block_ids == {7}
+    assert isinstance(kv.kv_connector_worker_meta, DummyWorkerMeta)
     assert kv.kv_connector_worker_meta.tags == {"salvaged", "recovered"}
     assert kv.kv_cache_events is not None
     all_token_ids = sorted(
@@ -267,7 +271,9 @@ def test_replay_completes_finished_recving_votes():
     aggregated = aggregator.aggregate(
         [DummyModelRunnerOutput(), DummyModelRunnerOutput()]
     )
+    assert aggregated is not None
     kv = aggregated.kv_connector_output
+    assert kv is not None
     assert kv.finished_recving == {"req1"}
     assert kv.failed_recving == {"req1"}
 
@@ -285,7 +291,9 @@ def test_salvaged_kv_cache_events_do_not_raise_quorum():
     output0 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(5, 6, 7, 8))
     output1 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(5, 6, 7, 8))
     aggregated = aggregator.aggregate([output0, output1])
+    assert aggregated is not None
 
+    assert aggregated.kv_connector_output is not None
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
     assert events.get_number_of_workers() == 2
@@ -308,7 +316,9 @@ def test_salvaged_votes_dropped_live_votes_unaffected_lmcache_exact_quorum():
     output0 = DummyModelRunnerOutput()
     output1 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(1, 2, 3, 4))
     aggregated = aggregator.aggregate([output0, output1])
+    assert aggregated is not None
 
+    assert aggregated.kv_connector_output is not None
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
     assert len(events.get_all_events()) == 1
@@ -328,9 +338,12 @@ def test_salvaged_votes_dropped_live_votes_unaffected_mooncake_quorum():
     output0 = DummyModelRunnerOutput()
     output1 = DummyModelRunnerOutput(kv_cache_events=make_mooncake_events(1, 2, 3, 4))
     aggregated = aggregator.aggregate([output0, output1])
+    assert aggregated is not None
 
+    assert aggregated.kv_connector_output is not None
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
+    assert isinstance(events, MooncakeStoreKVEvents)
     # Mirror the MooncakeStore consumer (take_events -> pop_common_events).
     published = events.pop_common_events()
     assert [e.token_ids for e in published] == [[1, 2, 3, 4]]
@@ -349,6 +362,8 @@ def test_salvaged_event_votes_are_one_shot():
     aggregated = aggregator.aggregate(
         [DummyModelRunnerOutput(), DummyModelRunnerOutput()]
     )
+    assert aggregated is not None
+    assert aggregated.kv_connector_output is not None
     assert aggregated.kv_connector_output.kv_cache_events is None
 
     # A later step reports a different event: the salvaged votes must not
@@ -356,7 +371,9 @@ def test_salvaged_event_votes_are_one_shot():
     output0 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(5, 6, 7, 8))
     output1 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(5, 6, 7, 8))
     aggregated = aggregator.aggregate([output0, output1])
+    assert aggregated is not None
 
+    assert aggregated.kv_connector_output is not None
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
     assert [e.token_ids for e in lmcache_published(events)] == [[5, 6, 7, 8]]
@@ -383,12 +400,15 @@ def test_aggregate_load_failure_reports_from_all_ranks():
     report_rank1 = make_load_failure_report("req-2")
     output1 = DummyModelRunnerOutput(load_failure_reports=[report_rank0])
     output2 = DummyModelRunnerOutput(load_failure_reports=[report_rank1])
+    output1.kv_connector_output.mrope_position_deltas = {"req-1": 17}
+    output2.kv_connector_output.mrope_position_deltas = {"req-2": 23}
 
     aggregated = aggregator.aggregate([output1, output2])
 
     assert aggregated is output1
     kv_output = aggregated.kv_connector_output
     assert kv_output.load_failure_reports == [report_rank0, report_rank1]
+    assert kv_output.mrope_position_deltas == {"req-1": 17, "req-2": 23}
     assert {r.request_id for r in kv_output.load_failure_reports} == {
         "req-1",
         "req-2",

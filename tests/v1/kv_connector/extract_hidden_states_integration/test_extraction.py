@@ -3,15 +3,25 @@
 
 import os
 import tempfile
+from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import torch
 
+from tests.models.multimodal.generation.test_nemotron_parse_35 import (
+    MODEL as NEMOTRON_PARSE_MODEL,
+)
+from tests.models.multimodal.generation.test_nemotron_parse_35 import (
+    PROMPT as NEMOTRON_PARSE_PROMPT,
+)
 from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
+from vllm.inputs import TextPrompt
 from vllm.platforms import current_platform
 
 
@@ -44,7 +54,7 @@ def predictable_llama_config_path(tmp_path_factory):
 
     # Create a minimal Llama config with small dimensions
     config = LlamaConfig(
-        vocab_size=1000,
+        vocab_size=32000,  # Covers the TinyLlama tokenizer below.
         hidden_size=256,
         intermediate_size=512,
         num_hidden_layers=24,  # Enough layers to test various layer_ids
@@ -77,7 +87,7 @@ PREDICTABLE_LLAMA_MODEL_CLS = (
 
 @create_new_process_for_each_test()
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path, monkeypatch
+    predictable_llama_config_path, tmp_path
 ):
     """Test hidden-state extraction with a predictable dummy model.
 
@@ -93,8 +103,6 @@ def test_extract_hidden_states_with_predictable_dummy_model(
        include_output_tokens — verifies per-request kv_transfer_params
        plumbing.
     """
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-
     layer_ids = [5, 2, 10]
     expected_layer_ids = sorted(layer_ids)
     num_layers = len(layer_ids)
@@ -252,6 +260,138 @@ def test_extract_hidden_states_with_predictable_dummy_model(
             atol=1e-5,
         )
     example_hidden_states_connector.cleanup_hidden_states(custom_path)
+
+
+@dataclass(frozen=True)
+class _VLMExtractionCase:
+    model: str
+    prompt: str
+    images: tuple[tuple[ImageAsset, str], ...]
+    layer_ids: tuple[int, ...]
+    engine_kwargs: dict[str, Any]
+    chunk_size: int | None = None
+
+
+def _run_vlm_extraction(vllm_runner, tmp_path, case, prompt, *, chunk_size=None):
+    engine_kwargs = case.engine_kwargs.copy()
+    if chunk_size is not None:
+        engine_kwargs.update(
+            enable_chunked_prefill=True,
+            disable_chunked_mm_input=True,
+            max_num_batched_tokens=chunk_size,
+        )
+
+    with vllm_runner(
+        case.model,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.5,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": list(case.layer_ids)}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+        **engine_kwargs,
+    ) as runner:
+        (rendered,) = runner.llm.renderer.render_cmpl([prompt], skip_mm_cache=True)
+        assert rendered["type"] == "multimodal"
+        image_spans = rendered["mm_placeholders"]["image"]
+        assert len(image_spans) == len(case.images)
+        assert all(span.get_num_embeds() > 100 for span in image_spans)
+        prompt_token_ids = rendered["prompt_token_ids"]
+
+        if chunk_size is not None:
+            scheduler_config = runner.llm.llm_engine.vllm_config.scheduler_config
+            assert scheduler_config.max_num_scheduled_tokens == chunk_size
+            first, second = image_spans
+            # Each image fits alone, but the first step cannot fit both images.
+            assert first.offset + first.length <= chunk_size
+            assert second.length <= chunk_size < second.offset + second.length
+
+        (output,) = runner.llm.generate(
+            prompt, SamplingParams(max_tokens=1, temperature=0)
+        )
+        assert output.prompt_token_ids == prompt_token_ids
+        hidden_size = runner.llm.model_config.get_hidden_size()
+        expected_shape = (len(prompt_token_ids), len(case.layer_ids), hidden_size)
+        return get_and_check_output(output, expected_shape)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            _VLMExtractionCase(
+                model=NEMOTRON_PARSE_MODEL,
+                prompt=f"<pad>{NEMOTRON_PARSE_PROMPT}",
+                images=((ImageAsset("paper-11"), "png"),),
+                layer_ids=(2, 5, 9, 10),
+                engine_kwargs={"trust_remote_code": True, "max_model_len": 4096},
+            ),
+            id="nemotron-parse",
+        ),
+        pytest.param(
+            _VLMExtractionCase(
+                model="Qwen/Qwen3-VL-2B-Instruct",
+                prompt=(
+                    "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+                    "<|vision_start|><|image_pad|><|vision_end|>"
+                    "Describe both images.<|im_end|>\n<|im_start|>assistant\n"
+                ),
+                images=(
+                    (ImageAsset("stop_sign"), "jpg"),
+                    (ImageAsset("cherry_blossom"), "jpg"),
+                ),
+                layer_ids=(0, 2, 5, 9),
+                engine_kwargs={
+                    "max_model_len": 2048,
+                    "max_num_batched_tokens": 2048,
+                    "limit_mm_per_prompt": {"image": 2, "video": 0},
+                    "mm_processor_kwargs": {"max_pixels": 768 * 1024},
+                },
+                chunk_size=1024,
+            ),
+            id="qwen3-vl",
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Qwen3-VL hidden states differ across prefill modes on ROCm",
+            ),
+        ),
+    ],
+)
+@create_new_process_for_each_test()
+def test_extract_hidden_states_vision_language_model(
+    vllm_runner, tmp_path, case: _VLMExtractionCase
+):
+    images = []
+    for asset, ext in case.images:
+        with asset.pil_image_ext(ext=ext) as image:
+            images.append(image.convert("RGB"))
+    prompt = TextPrompt(prompt=case.prompt, multi_modal_data={"image": images})
+
+    token_ids, hidden_states = _run_vlm_extraction(
+        vllm_runner, tmp_path / "full", case, prompt
+    )
+    if case.chunk_size is None:
+        return
+
+    chunked_token_ids, chunked_hidden_states = _run_vlm_extraction(
+        vllm_runner, tmp_path / "chunked", case, prompt, chunk_size=case.chunk_size
+    )
+    assert torch.equal(chunked_token_ids, token_ids)
+    similarity = torch.nn.functional.cosine_similarity(
+        chunked_hidden_states.float(), hidden_states.float(), dim=-1
+    )
+    torch.testing.assert_close(
+        similarity, torch.ones_like(similarity), rtol=0, atol=1e-3
+    )
 
 
 @create_new_process_for_each_test()

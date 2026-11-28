@@ -265,6 +265,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     tcp_store_group,
                     device_group=self.device_group,
                 )
+            elif self.all2all_backend == "mooncake_ep":
+                from .mooncake_ep import MooncakeEPAll2AllManager
+
+                self.all2all_manager = MooncakeEPAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif self.all2all_backend == "nixl_ep":
                 from .all2all import NixlEPAll2AllManager
 
@@ -552,7 +558,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None
+        if pynccl_comm is None or pynccl_comm.disabled:
+            # Fall back when pynccl is unavailable, e.g. an old NCCL version.
+            return super().reduce_scatter(input_, dim)
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
