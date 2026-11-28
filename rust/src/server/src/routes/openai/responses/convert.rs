@@ -17,6 +17,7 @@ use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
     ChatOptions, ChatRequest, ChatToolChoice, GenerationPromptMode, ResolvedToolContext,
 };
+use vllm_metrics::RenderRequestType;
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
@@ -267,6 +268,7 @@ pub(crate) fn prepare_responses_request(
         session_id,
         lora_request: lora_resolution.lora_request.clone(),
         return_prompt_text: false,
+        render_request_type: RenderRequestType::Responses,
     };
 
     let meta = ResponseMeta {
