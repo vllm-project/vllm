@@ -245,15 +245,33 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
         # TODO: init_fp8_linear_kernel should support activation_quant_key=None
         assert self.activation_quant_key is not None
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=self.activation_quant_key,
-            weight_quant_key=self.weight_quant_key,
-            weight_shape=layer.weight.shape,
-            input_dtype=self.input_dtype,
-            out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__,
+        if current_platform.is_cuda() and not current_platform.supports_fp8():
+            # No FP8 GEMM on this GPU, so every kernel runs the weights W8A16.
+            # Choose from the weight-only table, as `activation: null` and
+            # compressed-tensors W8A16 already do.
+            self.fp8_linear = init_wfp8_a16_linear_kernel(
+                weight_quant_key=self.weight_quant_key,
+                activation_quant_key=self.activation_quant_key,
+                weight_shape=layer.weight.shape,
+                input_dtype=self.input_dtype,
+                out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__,
+            )
+        else:
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=self.weight_quant_key,
+                weight_shape=layer.weight.shape,
+                input_dtype=self.input_dtype,
+                out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__,
+            )
+        # Both repack the weight, so `get_and_maybe_dequant_weights` cannot
+        # rescale it in place.
+        self.use_marlin = isinstance(
+            self.fp8_linear,
+            (MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
         )
-        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if is_weights_pre_processed():
