@@ -7,7 +7,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
-from vllm.v1.attention.ops.common import pack_ue8m0_x4
+from vllm.v1.attention.ops.common import f32_to_e4m3_uint8, pack_ue8m0_x4
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
@@ -61,17 +61,28 @@ def _get_cos_sin(
 
 
 @triton.jit
-def _fp8_ue8m0_quantize(vals, FP8_MAX: tl.constexpr, USE_FNUZ: tl.constexpr):
+def _fp8_ue8m0_quantize(
+    vals,
+    FP8_MAX: tl.constexpr,
+    USE_FNUZ: tl.constexpr,
+    EMULATE_FP8: tl.constexpr = False,
+):
     """Quantize float32 values to FP8 E4M3 with a ue8m0 (power-of-2) scale.
 
     Returns (fp8_vals, scale) so the caller can store them or reuse the scale.
+    When `EMULATE_FP8` is True (CUDA SM < 8.9), returns `uint8` E4M3FN bytes
+    without emitting `tl.float8e4nv` instructions.
     """
     vals = vals.to(tl.float32)
     amax = tl.max(tl.abs(vals))
     scale = tl.div_rn(tl.maximum(amax, 1e-4), FP8_MAX)
     scale = tl.math.exp2(tl.math.ceil(tl.math.log2(scale)))
-    fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
-    fp8_vals = tl.div_rn(vals, scale).to(fp8_dtype)
+    scaled = tl.div_rn(vals, scale)
+    if EMULATE_FP8:
+        fp8_vals = f32_to_e4m3_uint8(scaled)
+    else:
+        fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
+        fp8_vals = scaled.to(fp8_dtype)
     return fp8_vals, scale
 
 
@@ -92,8 +103,9 @@ def _fp8_quant_and_cache_write(
     MX_SCALE: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
+    EMULATE_FP8: tl.constexpr = False,
 ):
-    k_fp8, scale = _fp8_ue8m0_quantize(vals, FP8_MAX, USE_FNUZ)
+    k_fp8, scale = _fp8_ue8m0_quantize(vals, FP8_MAX, USE_FNUZ, EMULATE_FP8)
 
     block_idx = slot_idx // cache_block_size
     block_offset = slot_idx % cache_block_size
@@ -200,13 +212,13 @@ def _fused_norm_rope_kernel(
     USE_PDL: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
+    EMULATE_FP8: tl.constexpr = False,
 ):
     tok_idx = tl.program_id(0).to(tl.int64)
     pid = tl.program_id(1)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
-    fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
     if pid == 3:
         if not HAS_INDEXER:
             # Shared layer: reuse the previous indexer layer's top-k; do not
@@ -371,6 +383,7 @@ def _fused_norm_rope_kernel(
                 # concat_and_cache_ds_mla kernel; floored to FLT_MIN.
                 tile_scale = tl.maximum(tile_amax * (1.0 / FP8_MAX), 1e-4)
                 tile_scale = tl.math.exp2(tl.math.ceil(tl.math.log2(tile_scale)))
+                fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
                 kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(fp8_dtype), (KV_DIM,))
                 tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
                 tile_off = tl.arange(0, MLA_NUM_TILES)
@@ -390,6 +403,7 @@ def _fused_norm_rope_kernel(
             )
             # kv_c_normed (KV_DIM elements)
             if MLA_CACHE_FP8:
+                fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
                 scale = 1.0
                 if not SKIP_MLA_SCALE:
                     scale = tl.load(mla_cache_scale_ptr)
@@ -401,6 +415,7 @@ def _fused_norm_rope_kernel(
                 tl.store(dst + kv_block, kv_c)
             # k_pe_roped (from registers, interleaved layout)
             if MLA_CACHE_FP8:
+                fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
                 tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(fp8_dtype))
                 tl.store(dst + KV_DIM + dim_off * 2 + 1, (r2 / scale).to(fp8_dtype))
             else:
@@ -512,6 +527,7 @@ def _fused_norm_rope_kernel(
                 INDEXER_CACHE_MX_SCALE,
                 FP8_MAX,
                 USE_FNUZ,
+                EMULATE_FP8,
             )
 
 
@@ -577,6 +593,9 @@ def fused_norm_rope(
         slot_mapping = None
 
     # --- Indexer K cache setup ---
+    emulate_fp8 = current_platform.is_cuda() and not (
+        current_platform.has_device_capability(89)
+    )
     if indexer_k_cache is not None:
         assert slot_mapping is not None
         if indexer_slot_mapping is None:
@@ -596,7 +615,7 @@ def fused_norm_rope(
                 f"multiple of {_INDEXER_CACHE_BLOCK_TILE} for the shuffled layout"
             )
         idx_cache_stride = indexer_k_cache.stride(0)
-        if indexer_k_cache.dtype == torch.uint8:
+        if indexer_k_cache.dtype == torch.uint8 and not emulate_fp8:
             indexer_k_cache = indexer_k_cache.view(_FP8_DTYPE)
         # The head tile is a byte count; the kernel indexes the cache in elements.
         idx_cache_head_tile = (
@@ -741,6 +760,7 @@ def fused_norm_rope(
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         FP8_MAX=_FP8_MAX,
         USE_FNUZ=_USE_FNUZ,
+        EMULATE_FP8=emulate_fp8,
         **pdl_kwargs,
     )
     return q_c_out
@@ -798,6 +818,7 @@ def _fused_q_kernel(
     USE_PDL: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
+    EMULATE_FP8: tl.constexpr = False,
 ):
     tok_idx = tl.program_id(0).to(tl.int64)
     pid = tl.program_id(1)
@@ -805,13 +826,13 @@ def _fused_q_kernel(
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
-    fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
 
     if pid == 2:
         # ql_nope quantize + pack into the front of mqa_q_fp8. On the bf16
         # query path ql_nope is consumed as-is (no pack), so skip entirely.
         if not QUANTIZE_MQA:
             return
+        fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
         if 2 * head_idx >= NUM_Q_HEADS:
             return
 
@@ -872,6 +893,7 @@ def _fused_q_kernel(
                 r1 = x1 * cos - x2 * sin
                 r2 = x2 * cos + x1 * sin
                 if QUANTIZE_MQA:
+                    fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
                     tl.store(
                         mqa_q_fp8_ptr
                         + tok_idx * mqa_q_fp8_stride0
@@ -945,7 +967,9 @@ def _fused_q_kernel(
         index_q = tl.where(in_rope, roped, index_q)
 
         # Index Q Quantize (from registers)
-        index_q_fp8, index_q_scale = _fp8_ue8m0_quantize(index_q, FP8_MAX, USE_FNUZ)
+        index_q_fp8, index_q_scale = _fp8_ue8m0_quantize(
+            index_q, FP8_MAX, USE_FNUZ, EMULATE_FP8
+        )
         tl.store(
             index_q_fp8_ptr
             + tok_idx * index_q_fp8_stride0
@@ -1078,6 +1102,10 @@ def fused_q(
     pdl_kwargs = (
         {"USE_PDL": use_pdl, "launch_pdl": True} if use_pdl else {"USE_PDL": use_pdl}
     )
+    emulate_fp8 = current_platform.is_cuda() and not (
+        current_platform.has_device_capability(89)
+    )
+    index_q_fp8_arg = index_q_fp8.view(torch.uint8) if emulate_fp8 else index_q_fp8
     _fused_q_kernel[(num_tokens, 3, grid_heads)](
         positions,
         q_pe,
@@ -1094,9 +1122,9 @@ def fused_q(
         index_q_cos_sin_cache,
         index_q_cos_sin_cache.stride(0),
         index_q_cos_sin_cache.shape[-1] // 2,
-        index_q_fp8,
-        index_q_fp8.stride(0),
-        index_q_fp8.stride(1),
+        index_q_fp8_arg,
+        index_q_fp8_arg.stride(0),
+        index_q_fp8_arg.stride(1),
         index_q_head_dim,
         ql_nope,
         ql_nope.stride(0),
@@ -1121,6 +1149,7 @@ def fused_q(
         QUANTIZE_MQA=quantize_mqa,
         FP8_MAX=_FP8_MAX,
         USE_FNUZ=_USE_FNUZ,
+        EMULATE_FP8=emulate_fp8,
         **pdl_kwargs,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not

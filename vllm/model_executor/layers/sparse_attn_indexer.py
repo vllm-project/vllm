@@ -64,7 +64,7 @@ from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
     get_paged_mqa_logits_metadata,
-    has_deep_gemm,
+    is_deep_gemm_supported,
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
 )
@@ -84,7 +84,15 @@ from vllm.v1.attention.backends.mla.indexer import (
     dense_logits_rows,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
-from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.common import (
+    f32_to_e4m3_uint8,
+    pack_seq_triton,
+    unpack_seq_triton,
+)
+from vllm.v1.attention.ops.mqa_logits_triton import (
+    fp8_mqa_logits_triton,
+    fp8_paged_mqa_logits_triton,
+)
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -278,6 +286,7 @@ def _fused_indexer_q_rope_quant_kernel(
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     is_neox: tl.constexpr,
+    EMULATE_FP8: tl.constexpr,
 ):
     token = tl.program_id(0)
     head = tl.program_id(1)
@@ -309,28 +318,25 @@ def _fused_indexer_q_rope_quant_kernel(
     # e8m0 format
     q_scale = tl.math.exp2(tl.ceil(tl.log2(scale_raw)))
 
-    if is_neox:
-        tl.store(
-            out_base + offs32,
-            tl.clamp(r0 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
-        )
-        tl.store(
-            out_base + 32 + offs32,
-            tl.clamp(r1 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
-        )
+    r0_scaled = tl.clamp(r0 / q_scale, fp8_min, fp8_max)
+    r1_scaled = tl.clamp(r1 / q_scale, fp8_min, fp8_max)
+    q_nope_scaled = tl.clamp(q_nope / q_scale, fp8_min, fp8_max)
+    if EMULATE_FP8:
+        r0_out = f32_to_e4m3_uint8(r0_scaled)
+        r1_out = f32_to_e4m3_uint8(r1_scaled)
+        q_nope_out = f32_to_e4m3_uint8(q_nope_scaled)
     else:
-        tl.store(
-            out_base + offs32 * 2,
-            tl.clamp(r0 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
-        )
-        tl.store(
-            out_base + offs32 * 2 + 1,
-            tl.clamp(r1 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
-        )
-    tl.store(
-        out_base + 64 + offs64,
-        tl.clamp(q_nope / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
-    )
+        r0_out = r0_scaled.to(q_fp8.dtype.element_ty)
+        r1_out = r1_scaled.to(q_fp8.dtype.element_ty)
+        q_nope_out = q_nope_scaled.to(q_fp8.dtype.element_ty)
+
+    if is_neox:
+        tl.store(out_base + offs32, r0_out)
+        tl.store(out_base + 32 + offs32, r1_out)
+    else:
+        tl.store(out_base + offs32 * 2, r0_out)
+        tl.store(out_base + offs32 * 2 + 1, r1_out)
+    tl.store(out_base + 64 + offs64, q_nope_out)
 
     weight = tl.load(weights + token * weights_s0 + head * weights_s1).to(tl.float32)
     tl.store(
@@ -357,6 +363,8 @@ def fused_indexer_q_rope_quant(
     q_fp8 = torch.empty_like(q, dtype=current_platform.fp8_dtype())
     weights_out = torch.empty_like(weights, dtype=torch.float32)
     fp8_min, fp8_max = get_fp8_min_max()
+    emulate_fp8 = not current_platform.has_device_capability(89)
+    q_fp8_arg = q_fp8.view(torch.uint8) if emulate_fp8 else q_fp8
     _fused_indexer_q_rope_quant_kernel[(q.shape[0], q.shape[1])](
         positions,
         q,
@@ -364,9 +372,9 @@ def fused_indexer_q_rope_quant(
         q.stride(1),
         cos_sin_cache,
         cos_sin_cache.stride(0),
-        q_fp8,
-        q_fp8.stride(0),
-        q_fp8.stride(1),
+        q_fp8_arg,
+        q_fp8_arg.stride(0),
+        q_fp8_arg.stride(1),
         weights,
         weights.stride(0),
         weights.stride(1),
@@ -378,6 +386,7 @@ def fused_indexer_q_rope_quant(
         fp8_min=fp8_min,
         fp8_max=fp8_max,
         is_neox=is_neox,
+        EMULATE_FP8=emulate_fp8,
         num_warps=1,
     )
     return q_fp8, weights_out
@@ -1015,6 +1024,21 @@ def sparse_attn_indexer(
                         )
                         row_starts = cu_seqlen_ks[rows]
                         row_ends = cu_seqlen_ke[rows]
+                    elif not is_deep_gemm_supported():
+                        if use_fp4_cache or q_scale_slice is not None:
+                            raise RuntimeError(
+                                "Triton fp8_mqa_logits fallback does not support "
+                                "FP4 indexer caches; DeepGEMM is required."
+                            )
+                        row_ends = cu_seqlen_ke[rows] - cu_seqlen_ks[rows]
+                        logits = fp8_mqa_logits_triton(
+                            q_slice_cast[rows],
+                            (k_quant_cast, k_scale_cast),
+                            prefill_weights[tokens],
+                            cu_seqlen_ks[rows],
+                            cu_seqlen_ke[rows],
+                            chunk.max_seqlen_k,
+                        )
                     else:
                         q_scale_rows, chunk_weights = mqa_logits_mx_inputs(
                             q_slice_cast[rows],
@@ -1141,6 +1165,18 @@ def sparse_attn_indexer(
                 padded_q_scale = pack_seq_triton(
                     q_scale[:num_decode_tokens], decode_lens, pad_value=0
                 )
+            elif (
+                current_platform.is_cuda()
+                and not current_platform.has_device_capability(89)
+            ):
+                # SM < 8.9 cannot compile Triton float8e4nv stores; pack raw
+                # uint8 bytes with 0x00 (+0.0 in E4M3FN).
+                padded_q_quant_decode_tokens = pack_seq_triton(
+                    q_quant[:num_decode_tokens].view(torch.uint8),
+                    decode_lens,
+                    pad_value=0,
+                ).view(q_quant.dtype)
+                padded_q_scale = None
             else:
                 padded_q_quant_decode_tokens = pack_seq_triton(
                     q_quant[:num_decode_tokens], decode_lens
@@ -1227,6 +1263,21 @@ def sparse_attn_indexer(
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
                 decode_width,
+            )
+        elif not is_deep_gemm_supported():
+            if use_fp4_cache or padded_q_scale is not None:
+                raise RuntimeError(
+                    "Triton fp8_paged_mqa_logits fallback does not support "
+                    "FP4 indexer caches; DeepGEMM is required."
+                )
+            logits = fp8_paged_mqa_logits_triton(
+                padded_q_quant_cast,
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                max_model_len=max_model_len,
+                indices=decode_metadata.indices,
             )
         else:
             padded_q_scale, decode_weights = mqa_logits_mx_inputs(
@@ -1460,10 +1511,14 @@ class SparseAttnIndexer(CustomOp):
             )
             if workspace is not None:
                 self.dcp_direct_topk_max_rows = max_rows
-        if current_platform.is_cuda() and not has_deep_gemm():
+        if (
+            current_platform.is_cuda()
+            and use_fp4_cache
+            and not is_deep_gemm_supported()
+        ):
             raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
-                "the current vLLM environment."
+                "Sparse Attention Indexer with FP4 cache requires DeepGEMM "
+                "support in the current vLLM environment."
             )
 
         if vllm_config.kernel_config.enable_jit_warmup:
@@ -1472,10 +1527,14 @@ class SparseAttnIndexer(CustomOp):
                 _UNPACK_SEQ_TRITON_KERNEL,
             )
 
-            pack_dtype = torch.uint8 if use_fp4_cache else current_platform.fp8_dtype()
+            pack_as_uint8 = use_fp4_cache or (
+                current_platform.is_cuda()
+                and not current_platform.has_device_capability(89)
+            )
+            pack_dtype = torch.uint8 if pack_as_uint8 else current_platform.fp8_dtype()
             _PACK_SEQ_TRITON_KERNEL.register_warmup(
                 dtype=pack_dtype,
-                pad_value=0 if use_fp4_cache else -float("inf"),
+                pad_value=0 if pack_as_uint8 else -float("inf"),
             )
             _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
 

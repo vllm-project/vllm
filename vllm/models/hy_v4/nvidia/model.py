@@ -117,6 +117,7 @@ class HYV4DecoderLayer(nn.Module):
     """
 
     feed_forward_cls = HYV4FeedForward
+    attention_cls = HYV4MLAAttention
 
     def __init__(
         self,
@@ -137,7 +138,7 @@ class HYV4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        self.self_attn = HYV4MLAAttention(
+        self.self_attn = self.attention_cls(
             vllm_config=vllm_config,
             config=config,
             hidden_size=self.hidden_size,

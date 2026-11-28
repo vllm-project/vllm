@@ -683,6 +683,39 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
     `HYV4FlashForConditionalGeneration`, which vLLM maps to
     `HYV4FlashVLForConditionalGeneration`.
 
+    To opt into experimental NVIDIA Ada (SM89) attention, set
+    `--attention-backend TRITON_MLA_SPARSE`. This leaves the default
+    Hopper and data-center Blackwell paths unchanged. The sparse and
+    sliding-window layers use unquantized BF16 attention KV in the
+    configuration below; IndexPool still uses its FP8 cache.
+
+    Text-only TP4+EP example for `tencent/Hy4-flash-FP8` on four NVIDIA L40 GPUs
+    in the same PCIe/NUMA group. Replace the model path with your local
+    checkpoint, and make only the four intended GPUs visible to vLLM.
+
+    ```bash
+    vllm serve /path/to/Hy4-flash-FP8 \
+        --host 127.0.0.1 --port 8000 --served-model-name hy4-flash \
+        --tensor-parallel-size 4 --enable-expert-parallel \
+        --distributed-executor-backend mp --disable-custom-all-reduce \
+        --attention-backend TRITON_MLA_SPARSE --dtype bfloat16 \
+        --kv-cache-dtype auto --enforce-eager --language-model-only \
+        --engram-config '{"cpu_offload":true}' --disable-dbo --ubatch-size 0 \
+        --block-size 64 --max-model-len 4096 \
+        --max-num-batched-tokens 1024 --max-num-seqs 1 \
+        --disable-prefix-caching --kv-cache-memory-bytes 1073741824
+    ```
+
+    [Engram CPU offload](../features/engram.md#cpu-offload) places roughly
+    118 GiB of this checkpoint's embedding tables in host memory. Leave
+    additional host memory for loading and serving. The 1 GiB per-GPU
+    attention KV budget and 4096-token context are settings for this
+    example, not general capacity limits.
+
+    Speculative decoding, HiSparse, context parallelism, and FP8 attention
+    KV are not supported by the Ada path. Multimodal serving and engine
+    CUDA Graph execution were not validated for this configuration.
+
 On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
 varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.
 Select the DASH path explicitly with

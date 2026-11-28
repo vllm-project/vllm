@@ -56,6 +56,13 @@ DFly currently rejects LoRA, microbatching, other KV connectors,
 heterogeneous vocabularies, adaptive verification, and a separate draft
 attention backend.
 
+On NVIDIA Ada (SM89), HY4 Flash DFly requires
+`--attention-backend TRITON_MLA_SPARSE --kv-cache-dtype auto --enforce-eager`
+with BF16 computation. Add `--speculative-config
+'{"method":"dfly","num_speculative_tokens":5}'` to the
+[HY4 Flash text-only Ada launch example](../../models/supported_models.md).
+Quantized KV, CUDA graphs, and HiSparse are not supported for DFly on Ada.
+
 On ROCm, DFly is validated with HY4 FP8 (`tencent/Hy4-FP8`), HY4 Flash FP8
 (`tencent/Hy4-flash-FP8`) and HY4 Flash BF16 (`tencent/Hy4-flash`) on eight
 MI355X GPUs with TP8. Other targets, such as HY4 BF16, NVFP4 experts, or
