@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
 import multiprocessing
+import sys
 from collections.abc import Sequence
 from concurrent.futures.process import ProcessPoolExecutor
 from functools import cache
@@ -16,6 +18,27 @@ def cuda_is_initialized() -> bool:
     if not torch.cuda._is_compiled():
         return False
     return torch.cuda.is_initialized()
+
+
+def cuda_driver_is_initialized() -> bool:
+    """Check if the CUDA driver was initialized in this process outside torch.
+
+    ``torch.cuda.is_initialized()`` only knows about torch's own lazy
+    initialization. The host process (an embedding application, a C extension,
+    another library) may have called ``cuInit`` directly; a child forked after
+    that cannot initialize CUDA and fails with "CUDA driver initialization
+    failed". ``cuDeviceGetCount`` is a side-effect-free probe for that state: it
+    returns ``CUDA_ERROR_NOT_INITIALIZED`` until ``cuInit`` has run in this
+    process and ``CUDA_SUCCESS`` afterwards.
+    """
+    if sys.platform != "linux":
+        return False
+    try:
+        libcuda = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return False
+    count = ctypes.c_int(0)
+    return libcuda.cuDeviceGetCount(ctypes.byref(count)) == 0  # CUDA_SUCCESS
 
 
 def xpu_is_initialized() -> bool:

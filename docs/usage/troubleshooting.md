@@ -284,6 +284,16 @@ if __name__ == '__main__':
     llm = vllm.LLM(...)
 ```
 
+### CUDA initialized before vLLM was imported
+
+vLLM starts its engine process with `fork` by default and switches to `spawn`
+automatically when CUDA has already been initialized in the parent process. The
+switch covers both torch's own initialization and a driver initialized outside
+torch (another library or extension calling `cuInit` first). If an engine
+process still fails with `CUDA driver initialization failed, you might not have
+a CUDA gpu` although the GPU works, set `VLLM_WORKER_MULTIPROC_METHOD=spawn`
+before creating the engine.
+
 ## `torch.compile` Error
 
 vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:

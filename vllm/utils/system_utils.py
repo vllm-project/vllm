@@ -21,7 +21,11 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import in_wsl
 from vllm.ray.lazy_utils import is_in_ray_actor
 
-from .platform_utils import cuda_is_initialized, xpu_is_initialized
+from .platform_utils import (
+    cuda_driver_is_initialized,
+    cuda_is_initialized,
+    xpu_is_initialized,
+)
 
 logger = init_logger(__name__)
 
@@ -147,6 +151,8 @@ def _maybe_force_spawn():
 
     if cuda_is_initialized():
         reasons.append("CUDA is initialized")
+    elif cuda_driver_is_initialized():
+        reasons.append("CUDA driver is initialized outside torch (cuInit was called)")
     elif xpu_is_initialized():
         reasons.append("XPU is initialized")
 
