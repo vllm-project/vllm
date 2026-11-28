@@ -68,6 +68,44 @@ def _create_vllm_config() -> MagicMock:
     return vllm_config
 
 
+def test_width9_graph_selection_uses_active_lengths_and_padded_shape(monkeypatch):
+    config = _create_vllm_config()
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    manager = gpu_cudagraph_utils.ModelCudaGraphManager(
+        config, torch.device("cpu"), CUDAGraphMode.FULL, {9: 6}
+    )
+    short = BatchExecutionDescriptor(CUDAGraphMode.FULL, 45, 5, uniform_token_count=9)
+    over = BatchExecutionDescriptor(CUDAGraphMode.FULL, 54, 6, uniform_token_count=9)
+    other = BatchExecutionDescriptor(CUDAGraphMode.FULL, 40, 5, uniform_token_count=8)
+    manager._capture_descs[CUDAGraphMode.FULL] = [over, short, other]
+    manager.max_num_reqs = 6
+    target = MagicMock(layer_names=["target"])
+    target.backend.get_name.return_value = "TRITON_ATTN"
+    target.get_metadata_builder.return_value.width9_split_k_max_reqs = 16 // 3
+    draft = MagicMock(layer_names=["draft"])
+    manager.add_width9_graphs([[target, draft]], {"target"})
+    assert list(manager.long_kv_graphs) == [short]
+    long = manager.long_kv_graphs[short]
+    assert long.long_kv
+    assert manager._capture_descs[CUDAGraphMode.FULL] == [over, short, long, other]
+    assert manager.width9_layer_names == {"target"}
+
+    batch = MagicMock(num_reqs=2)
+    batch.seq_lens_cpu_upper_bound = torch.tensor([256, 2047, 4096, 0, 0])
+    assert manager.select_kv_length_graph(short, batch) == short
+    batch.seq_lens_cpu_upper_bound[1] = 2048
+    assert manager.select_kv_length_graph(short, batch) == long
+    assert manager.select_kv_length_graph(over, batch) == over
+    assert manager.select_kv_length_graph(other, batch) == other
+
+
 def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     """FULL capture must set graph_pool_id before entering torch.cuda.graph().
 

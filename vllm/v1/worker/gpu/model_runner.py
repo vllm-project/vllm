@@ -834,6 +834,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             varlen_decode=self.adaptive_verification is not None,
             ubatch_runner=self.ubatch_runner,
         )
+        self.cudagraph_manager.add_width9_graphs(
+            self.attn_groups, target_attn_layer_names
+        )
         if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
             self.fast_prefill = FastPrefillHelper(
                 self.cudagraph_manager, self.max_num_tokens
@@ -2177,7 +2180,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.pre_forward(
                 scheduler_output, input_batch, attn_metadata=attn_metadata
             )
-            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            replay_desc = batch_desc
+            if self.cudagraph_manager.long_kv_graphs and not dummy_run:
+                replay_desc = self.cudagraph_manager.select_kv_length_graph(
+                    batch_desc, input_batch
+                )
+            model_output = self.cudagraph_manager.run_fullgraph(replay_desc)
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(

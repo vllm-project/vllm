@@ -87,6 +87,7 @@ class BatchExecutionDescriptor:
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
     num_ubatches: int = 1
+    long_kv: bool = False
 
 
 def make_cudagraph_stats(
@@ -664,6 +665,58 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+        self.long_kv_graphs: dict[
+            BatchExecutionDescriptor, BatchExecutionDescriptor
+        ] = {}
+        self.width9_layer_names: set[str] = set()
+
+    def add_width9_graphs(
+        self, attn_groups: list[list[AttentionGroup]], target_layers: set[str] | None
+    ) -> None:
+        """Capture an alternative graph for eligible fixed-width target verification."""
+        descs = self._capture_descs.get(CUDAGraphMode.FULL)
+        if not descs or 9 not in self.decode_max_reqs or self.varlen_decode:
+            return
+
+        limit = self.max_num_reqs
+        layers: set[str] = set()
+        for group in itertools.chain.from_iterable(attn_groups):
+            names = set(group.layer_names)
+            if target_layers is not None:
+                names.intersection_update(target_layers)
+            if not names:
+                continue
+            if group.backend.get_name() != "TRITON_ATTN":
+                return
+            builder = group.get_metadata_builder(0)
+            limit = min(limit, getattr(builder, "width9_split_k_max_reqs", 0))
+            layers.update(names)
+        if not layers or not limit:
+            return
+
+        self.width9_layer_names = layers
+        for desc in descs:
+            if (
+                desc.uniform_token_count == 9
+                and desc.num_reqs is not None
+                and desc.num_reqs <= limit
+                and desc.num_ubatches == 1
+                and desc.num_active_loras == 0
+            ):
+                self.long_kv_graphs[desc] = replace(desc, long_kv=True)
+        descs.extend(self.long_kv_graphs.values())
+        descs.sort(key=lambda desc: desc.num_tokens, reverse=True)
+
+    def select_kv_length_graph(
+        self, desc: BatchExecutionDescriptor, batch: InputBatch
+    ) -> BatchExecutionDescriptor:
+        long_graph = self.long_kv_graphs.get(desc)
+        if long_graph is not None:
+            # Host upper bounds include this step's tokens and require no device sync.
+            lengths = batch.seq_lens_cpu_upper_bound.numpy()[: batch.num_reqs]
+            if lengths.size and lengths.max() >= 2048:
+                return long_graph
+        return desc
 
     def capture(
         self,
@@ -828,6 +881,10 @@ class ModelCudaGraphManager(CudaGraphManager):
                 max_query_len=desc.max_query_len or desc.uniform_token_count,
                 pcp_manager=pcp_manager,
             )
+            if desc.long_kv:
+                assert attn_metadata is not None
+                for name in self.width9_layer_names:
+                    attn_metadata[name].allow_width9_split_k = True
 
             # Capture with dummy rows marked as padding.
             input_buffers.is_padding.fill_(True)

@@ -23,6 +23,13 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [FLy Verification (Lossy)](fly.md)
 - [Per-Request Acceptance Metrics](acceptance_metrics.md)
 
+On single-GPU Hopper deployments with BF16 Triton attention, fixed eight-token
+speculation can use split-KV attention during target verification. For the tested
+32-query-head, 8-KV-head, head-size-128 configuration, eligible full decode
+graphs have a second capture for batches whose longest KV length (host upper
+bound) reaches 2048 tokens. Short batches replay the original graph. Each
+width-nine request costs three Q blocks against the existing kernel budget.
+
 ## Method Selection at a Glance
 
 Use this qualitative table as a starting point for method selection. Real gains

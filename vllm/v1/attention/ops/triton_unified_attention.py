@@ -34,7 +34,7 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
-# Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
+# Longest per-request query admitted by default. Long-KV graphs opt into width 9.
 MAX_3D_QUERY_LEN = 8
 
 # RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
@@ -1039,6 +1039,7 @@ def unified_attention(
     # WINDOW_SEGMENTS). Takes effect only for plain causal sliding windows;
     # False forces the whole-sequence split (for testing and A/B runs).
     window_aware_segments: bool = True,
+    allow_width9_split_k: bool = False,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -1274,11 +1275,14 @@ def unified_attention(
     # Launch the 2D kernel if
     # 1. No split-K threshold or scratch buffers, or the scratch has fewer
     #    rows than query tokens, or
-    # 2. max_seqlen_q > 1 and either it exceeds MAX_3D_QUERY_LEN, masking is
+    # 2. max_seqlen_q > 1 and either its width is not admitted, masking is
     #    non-causal, per-sequence causal, or mm-prefix, or the tuned
     #    large-head path applies, or
     # 3. The number of Q blocks exceeds seq_threshold_3D, or
     # 4. Batch invariance is enabled
+    width9_split_k = (
+        allow_width9_split_k and max_seqlen_q == 9 and not sliding_window_val
+    )
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
@@ -1288,7 +1292,7 @@ def unified_attention(
         or (
             max_seqlen_q > 1
             and (
-                max_seqlen_q > MAX_3D_QUERY_LEN
+                (max_seqlen_q > MAX_3D_QUERY_LEN and not width9_split_k)
                 or not use_causal
                 or use_per_seq_causal
                 or use_mm_prefix

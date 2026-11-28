@@ -91,6 +91,7 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    allow_width9_split_k: bool = False
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -178,6 +179,28 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs
         )
         max_num_tokens_3d = max_num_seqs_3d * max_query_len_3d
+        self.width9_split_k_max_reqs = 0
+        if (
+            self.decode_cudagraph_enabled
+            and type(self) is TritonAttentionMetadataBuilder
+            and speculative_config is not None
+            and speculative_config.num_speculative_tokens == 8
+            and (self.num_heads_q, self.num_heads_kv, self.headdim) == (32, 8, 128)
+            and model_config.dtype == kv_cache_spec.dtype == torch.bfloat16
+            and kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and model_config.max_model_len >= 2048
+            and model_config.get_sliding_window() is None
+            and model_config.rswa_window is None
+            and vllm_config.parallel_config.world_size_across_dp == 1
+            and not envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability((9, 0))
+        ):
+            # For this GQA shape BLOCK_Q is 4. Keep the launcher's Q-block budget.
+            self.width9_split_k_max_reqs = min(
+                max_num_seqs_3d, self.seq_threshold_3D // cdiv(9, 4)
+            )
+            max_num_tokens_3d = max(max_num_tokens_3d, 9 * self.width9_split_k_max_reqs)
         if self.max_seqs_64_segments > 0:
             self.num_par_softmax_segments = 64
             # build() reuses this scratch at 16 segments with proportionally more rows.
@@ -744,6 +767,7 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
+            allow_width9_split_k=attn_metadata.allow_width9_split_k,
             use_td=self.use_td,
             mm_prefix_clamp_sliding_window=getattr(
                 layer, "mm_prefix_clamp_sliding_window", False
