@@ -106,6 +106,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
     FlashInferMLASparseSM120Impl,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
@@ -795,7 +796,7 @@ def _quantize_dequantize_nvfp4_ds_mla(
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", SPARSE_KV_CACHE_DTYPES)
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("block_size", SPARSE_BLOCK_SIZES)
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize(
@@ -1224,6 +1225,27 @@ def test_sparse_backend_decode_correctness(
             metadata,
             out_buffer,
         )
+
+        # Below 32 heads the quantized-cache path concatenates the query straight
+        # into a head-padded buffer; padding per call must give the same output.
+        uses_padded_query = (
+            backend_cls == FlashMLASparseBackend
+            and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+            and num_heads < 32
+            and qk_rope_head_dim > 0
+        )
+        assert (getattr(impl, "fp8_q_padded", None) is not None) == uses_padded_query
+        if uses_padded_query:
+            impl.fp8_q_padded = None
+            unpadded_output = mock_layer.forward_impl(
+                query_vllm,
+                kv_c_vllm,
+                k_pe_vllm,
+                kv_cache,
+                metadata,
+                torch.empty_like(out_buffer),
+            )
+            torch.testing.assert_close(backend_output, unpadded_output, rtol=0, atol=0)
 
     if block_stride_rows is not None and kv_cache_dtype == "auto":
         expected_row = torch.cat((kv_c_vllm[-1], k_pe_vllm[-1, 0]))
@@ -6257,3 +6279,230 @@ def test_rocm_fused_v32_dense_prefill_matches_mqa(
                 rtol=0.01,
                 atol=0.01,
             )
+
+
+@pytest.mark.parametrize("qk_nope_head_dim", [64, 128, 192, 96])
+def test_flashinfer_sparse_mla_absorbed_query_dimensions(qk_nope_head_dim):
+    """Select the unpadded eight-head backend, retaining unsupported-shape guards."""
+    from vllm.config import VllmConfig
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major != 10:
+        pytest.skip("TRTLLM-GEN sparse MLA requires SM10")
+
+    config = VllmConfig()
+    config.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=64,
+            kv_lora_rank=512,
+            index_topk=2048,
+        ),
+        get_num_attention_heads=lambda parallel_config: 8,
+    )
+    selector = AttentionSelectorConfig(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=64,
+        use_mla=True,
+        use_sparse=True,
+    )
+    with set_current_vllm_config(config):
+        if qk_nope_head_dim == 96:
+            with pytest.raises(ValueError, match="qk_nope_head_dim"):
+                current_platform.get_attn_backend_cls(
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE, selector, num_heads=8
+                )
+        else:
+            backend = current_platform.get_attn_backend_cls(
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE, selector, num_heads=8
+            )
+            assert backend.endswith(".FlashInferMLASparseTRTLLMBackend")
+            assert current_platform.get_attn_backend_cls(
+                None, selector, num_heads=8
+            ).endswith(
+                (".FlashInferMLASparseTRTLLMBackend", ".FlashAttnMLASparseFA4Backend")
+            )
+
+
+def test_flashmla_padded_query_buffer_has_model_lifetime():
+    """Layers share one buffer, but its cache must not retain unloaded models."""
+    import gc
+    import weakref
+
+    from vllm.v1.attention.backends.mla.flashmla_sparse import _shared_fp8_q_padded
+
+    first = _shared_fp8_q_padded(7, 64, 576)
+    second = _shared_fp8_q_padded(7, 64, 576)
+    assert first is second
+    assert first.device == torch.device(
+        "cuda", torch.accelerator.current_device_index()
+    )
+    assert torch.count_nonzero(first).item() == 0
+    reference = weakref.ref(first)
+    del first, second
+    gc.collect()
+    assert reference() is None
+    reloaded = _shared_fp8_q_padded(7, 64, 576)
+    assert torch.count_nonzero(reloaded).item() == 0
+
+
+@pytest.mark.parametrize("num_heads", [8, 16])
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "nvfp4_ds_mla"])
+def test_flashmla_persistent_query_cuda_graph_matches_per_call_padding(
+    num_heads, kv_cache_dtype
+):
+    """Replaying real native attention must observe updated persistent query rows."""
+    from vllm.v1.attention.backends.mla.flashmla_sparse import _shared_fp8_q_padded
+    from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
+
+    supported, reason = flashmla.is_flashmla_sparse_supported()
+    if not supported:
+        pytest.skip(reason)
+    if kv_cache_dtype == "nvfp4_ds_mla" and not (
+        current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("NVFP4 DS-MLA cache requires SM100-family native kernels")
+    device = torch.device(DEVICE_TYPE)
+    dtype = torch.bfloat16
+    generator = torch.Generator(device=device).manual_seed(42)
+    tokens, block_size, context = 4, 64, 256
+    nope = torch.randn(
+        tokens, num_heads, 512, dtype=dtype, device=device, generator=generator
+    )
+    rope = torch.randn(
+        tokens, num_heads, 64, dtype=dtype, device=device, generator=generator
+    )
+    cache = torch.zeros(
+        context // block_size,
+        block_size,
+        DS_MLA_STATE_CONTENT_BYTES[kv_cache_dtype],
+        dtype=torch.uint8,
+        device=device,
+    )
+    kv = torch.randn(context, 512, dtype=dtype, device=device, generator=generator)
+    k_pe = torch.randn(context, 64, dtype=dtype, device=device, generator=generator)
+    ops.concat_and_cache_mla(
+        kv,
+        k_pe,
+        cache,
+        torch.arange(context, dtype=torch.int64, device=device),
+        kv_cache_dtype=kv_cache_dtype,
+        scale=torch.ones(1, dtype=torch.float32, device=device),
+    )
+    indices = torch.arange(128, dtype=torch.int32, device=device)
+    indices = indices.view(1, 1, -1).expand(1, tokens, -1).contiguous()
+    cache_lens = torch.full((1,), context, dtype=torch.int32, device=device)
+    block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
+    persistent = _shared_fp8_q_padded(tokens, 64, 576)
+    scheduler, _ = flashmla.get_mla_metadata()
+
+    def attend(query):
+        return flashmla.flash_mla_with_kvcache(
+            q=query.unsqueeze(0),
+            k_cache=cache.unsqueeze(-2),
+            block_table=block_table,
+            head_dim_v=512,
+            cache_seqlens=cache_lens,
+            tile_scheduler_metadata=scheduler,
+            is_fp8_kvcache=True,
+            indices=indices,
+            softmax_scale=576**-0.5,
+        )[0][:, :, :num_heads]
+
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        ops.concat_mla_q(nope, rope, persistent[:, :num_heads])
+        attend(persistent)
+    torch.cuda.current_stream(device).wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        ops.concat_mla_q(nope, rope, persistent[:, :num_heads])
+        actual = attend(persistent)
+
+    previous = None
+    for _ in range(3):
+        nope.copy_(
+            torch.randn(nope.shape, dtype=dtype, device=device, generator=generator)
+        )
+        rope.copy_(
+            torch.randn(rope.shape, dtype=dtype, device=device, generator=generator)
+        )
+        per_call = torch.zeros_like(persistent)
+        ops.concat_mla_q(nope, rope, per_call[:, :num_heads])
+        expected = attend(per_call)
+        graph.replay()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert torch.isfinite(actual).all()
+        assert torch.count_nonzero(persistent[:, num_heads:]).item() == 0
+        if previous is not None:
+            assert not torch.equal(actual, previous)
+        previous = actual.clone()
+
+
+@pytest.mark.parametrize(
+    ("rope_dim", "capacity", "expected_tokens"),
+    [(64, 8, 8), (64, 16384, 8192), (0, 8, None)],
+    ids=["decode", "chunk-bound", "nope-fallback"],
+)
+def test_flashmla_persistent_query_allocation_guards(
+    dist_init, workspace_init, rope_dim, capacity, expected_tokens
+):
+    """Persistent scratch respects graph capacity, chunk bounds and query geometry."""
+    from vllm.config import (
+        CompilationConfig,
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
+
+    config = VllmConfig(
+        model_config=ModelConfig(
+            "deepseek-ai/DeepSeek-V2-Lite-Chat", max_model_len=1024
+        ),
+        cache_config=CacheConfig(block_size=64, cache_dtype="fp8_ds_mla"),
+        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=capacity,
+            max_num_batched_tokens=capacity,
+            max_model_len=1024,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            cudagraph_capture_sizes=[1, capacity],
+            max_cudagraph_capture_size=capacity,
+        ),
+    )
+    num_heads = 16
+    with set_current_vllm_config(config):
+        impl = FlashMLASparseImpl(
+            num_heads=num_heads,
+            head_size=512 + rope_dim,
+            scale=(128 + rope_dim) ** -0.5,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8_ds_mla",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=rope_dim,
+            qk_head_dim=128 + rope_dim,
+            v_head_dim=128,
+            kv_b_proj=ColumnParallelLinear(512, num_heads * 256, bias=False),
+        )
+    if expected_tokens is None:
+        assert impl.fp8_q_padded is None
+    else:
+        assert impl.fp8_q_padded is not None
+        assert impl.fp8_q_padded.shape == (expected_tokens, 64, 576)
+        assert torch.count_nonzero(impl.fp8_q_padded).item() == 0

@@ -38,6 +38,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.prims_ts_moe_warmup import prims_ts_moe_warmup
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
 )
@@ -344,6 +345,9 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         # https://github.com/vllm-project/vllm/pull/47451
         _warmup_skinny_gemm(worker.get_model())
         cutedsl_warmup()
+
+    if enable_jit_warmup:
+        prims_ts_moe_warmup(worker.get_model())
 
     if process_local_only:
         return

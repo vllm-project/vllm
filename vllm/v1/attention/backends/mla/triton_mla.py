@@ -6,11 +6,7 @@ from typing import ClassVar
 import torch
 
 import vllm.envs as envs
-from vllm.config import (
-    VllmConfig,
-    get_current_vllm_config,
-    get_layers_from_vllm_config,
-)
+from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -38,6 +34,7 @@ from vllm.v1.attention.ops.triton_decode_attention import (
 )
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.workspace import (
+    current_workspace_lane,
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
@@ -59,16 +56,17 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
     return min(ideal_splits, max_splits)
 
 
+def _attended_kv_len(seq_len: int, sliding_window: int | None) -> int:
+    # A windowed layer reads only the last `sliding_window` keys.
+    return seq_len if sliding_window is None else min(seq_len, sliding_window)
+
+
 def _reserve_attn_logits_workspace(
-    vllm_config: VllmConfig,
-    max_decode_rows: int,
-    q_num_heads: int,
-    kv_lora_rank: int,
-    sliding_window: int | None = None,
+    max_kv_len: int, max_decode_rows: int, q_num_heads: int, kv_lora_rank: int
 ) -> None:
     """Pre-size the shared workspace for the decode split-KV attn logits.
 
-    Reserving at the worst case (max KV length -> max num_kv_splits,
+    Reserving at the worst case (longest attended KV -> max num_kv_splits,
     max_decode_rows) before warmup/cudagraph capture means the per-call
     `get_simultaneous` in `forward_mqa` never has to grow the buffer at
     runtime (which would raise once the workspace is locked). Like
@@ -76,12 +74,8 @@ def _reserve_attn_logits_workspace(
     """
     if not is_workspace_manager_initialized():
         return
-    max_kv_len = vllm_config.model_config.max_model_len
-    if sliding_window is not None:
-        max_kv_len = min(max_kv_len, sliding_window)
     max_splits = _compute_num_kv_splits(
-        max_kv_len,
-        current_platform.num_compute_units(),
+        max_kv_len, current_platform.num_compute_units()
     )
     current_workspace_manager().get_simultaneous(
         ((max_decode_rows, q_num_heads, max_splits, kv_lora_rank + 1), torch.float32),
@@ -110,24 +104,32 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        ctx = vllm_config.compilation_config.static_forward_context
+        layers: list[MLAAttention] = []
+        for name in layer_names:
+            layer = ctx[name]
+            assert isinstance(layer, MLAAttention), (
+                f"Triton MLA layer {name!r} must be an MLAAttention, "
+                f"got {type(layer).__name__}."
+            )
+            layers.append(layer)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # DCP local sequence lengths are not advanced between draft steps.
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
-        windows = {
-            layer.sliding_window
-            for layer in get_layers_from_vllm_config(
-                vllm_config, MLAAttention, layer_names
-            ).values()
-        }
         # forward_mqa flattens each request's block to query_len decode rows,
         # and query_len is bounded by the reorder threshold. DCP all-gathers
         # the query heads before forward_mqa.
         _reserve_attn_logits_workspace(
-            vllm_config,
+            max(
+                _attended_kv_len(
+                    self.model_config.max_model_len,
+                    layer.sliding_window,
+                )
+                for layer in layers
+            ),
             vllm_config.scheduler_config.max_num_seqs * self.reorder_batch_threshold,
             self.num_heads * self.dcp_world_size,
             self.mla_dims.kv_lora_rank,
-            windows.pop() if len(windows) == 1 else None,
         )
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:
@@ -286,12 +288,13 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # here so the KV cache is sized around it.
         vllm_config = self._vllm_config
         _reserve_attn_logits_workspace(
-            vllm_config,
+            _attended_kv_len(
+                vllm_config.model_config.max_model_len, self.decode_sliding_window
+            ),
             vllm_config.scheduler_config.max_num_seqs
             * max_decode_query_len(vllm_config),
             self.num_heads * self.dcp_world_size,
             self.kv_lora_rank,
-            self.decode_sliding_window,
         )
 
     def forward_mha(self, *args, **kwargs) -> None:
@@ -373,9 +376,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
-            max_kv_len = attn_metadata.max_seq_len
-            if self.decode_sliding_window is not None:
-                max_kv_len = min(max_kv_len, self.decode_sliding_window)
+            max_kv_len = _attended_kv_len(
+                attn_metadata.max_seq_len, self.decode_sliding_window
+            )
             num_kv_splits = _compute_num_kv_splits(max_kv_len, self._sm_count)
 
         # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
@@ -385,11 +388,16 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # direct allocation when the workspace manager is not initialized (e.g.
         # unit tests without a GPUModelRunner).
         logits_shape = (B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1)
+        attn_logits: torch.Tensor | None = None
         if is_workspace_manager_initialized():
-            (attn_logits,) = current_workspace_manager().get_simultaneous(
-                (logits_shape, torch.float32),
-            )
-        else:
+            manager = current_workspace_manager()
+            if current_workspace_lane() == 0 or manager.can_allocate(
+                (logits_shape, torch.float32)
+            ):
+                (attn_logits,) = manager.get_simultaneous(
+                    (logits_shape, torch.float32),
+                )
+        if attn_logits is None:
             attn_logits = torch.empty(
                 logits_shape, dtype=torch.float32, device=q.device
             )

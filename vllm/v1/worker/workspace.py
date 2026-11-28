@@ -50,6 +50,11 @@ def use_workspace_lane(lane: int) -> Generator[None]:
         _workspace_lane.reset(token)
 
 
+def current_workspace_lane() -> int:
+    """Return the workspace lane selected for this execution context."""
+    return _workspace_lane.get()
+
+
 class WorkspaceManager:
     """Manager for workspace allocation.
 
@@ -189,6 +194,24 @@ class WorkspaceManager:
                 f"dtype={workspace.dtype}; requested shape={shape}, dtype={dtype}."
             )
         return workspace
+
+    def can_allocate(
+        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+    ) -> bool:
+        """Whether this slot can serve a scratch request under the current lock.
+
+        An unlocked workspace may grow. A locked workspace must already cover
+        every aligned view, using the same layout as `get_simultaneous`.
+        This check does not allocate or invalidate retained scratch.
+        """
+        workspace = self._current_workspaces[self._get_workspace_id()]
+        required_bytes = sum(
+            round_up(_compute_bytes(shape, dtype), _VIEW_ALIGNMENT)
+            for shape, dtype in shapes_and_dtypes
+        )
+        return not self._locked or required_bytes <= self._workspace_size_bytes(
+            workspace
+        )
 
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]

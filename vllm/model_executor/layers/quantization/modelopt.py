@@ -58,6 +58,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    TRTLLM_LAYOUT_NVFP4_MOE_BACKENDS,
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
@@ -949,12 +950,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         # NONE: requantization source, which has no compute backend.
         if self.per_token_activation and self.nvfp4_backend not in (
-            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            *TRTLLM_LAYOUT_NVFP4_MOE_BACKENDS,
             NvFp4MoeBackend.NONE,
         ):
             raise ValueError(
                 "Per-token NVFP4 activation for pre-quantized weights "
-                "requires the FlashInfer TRTLLM MoE backend."
+                "requires the FlashInfer TRTLLM or Prims-TS MoE backend."
             )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
@@ -1121,11 +1122,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
             if self.nvfp4_backend not in (
-                NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                *TRTLLM_LAYOUT_NVFP4_MOE_BACKENDS,
                 NvFp4MoeBackend.VLLM_CUTLASS,
             ):
                 raise RuntimeError(
-                    "pre-processed weights require FLASHINFER_TRTLLM or "
+                    "pre-processed weights require TRTLLM-layout or "
                     f"VLLM_CUTLASS MoE backend, got {self.nvfp4_backend}"
                 )
             self._restore_padded_moe_dims(layer)

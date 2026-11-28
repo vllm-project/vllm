@@ -734,6 +734,28 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_prims_ts_fused_moe() -> bool:
+    """Return `True` if FlashInfer's Prims-TS NVFP4 MoE and its CuTe DSL
+    dependencies are available."""
+    if not has_flashinfer_trtllm_fused_moe():
+        return False
+    mod = _get_submodule("flashinfer.fused_moe")
+    if mod is None or not hasattr(mod, "prims_ts_fp4_block_scale_routed_moe"):
+        return False
+    utils = _get_submodule("flashinfer.prims_ts.utils")
+    return utils is not None and utils.is_prims_ts_available()
+
+
+@functools.cache
+def has_flashinfer_prims_ts_moe_precompile() -> bool:
+    """Return `True` if FlashInfer can precompile the untuned Prims-TS MoE."""
+    mod = _get_submodule("flashinfer.fused_moe")
+    return mod is not None and hasattr(
+        mod, "prims_ts_fp4_block_scale_routed_moe_precompile"
+    )
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():

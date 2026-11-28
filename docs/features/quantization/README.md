@@ -31,6 +31,12 @@ To choose the kernel backend of quantized linear layers, for all of them with
 `--linear-backend` or per quantization type with `linear_backend_per_quant`,
 see [Kernel Backends](kernels.md#selecting-a-backend).
 
+## Selecting NVFP4 MoE Backends
+
+For the opt-in `--moe-backend flashinfer_prims_ts` expert GEMMs on Blackwell
+and Vera Rubin, including compilation and autotuning behavior, see
+[NVFP4 MoE with FlashInfer Prims-TS](nvfp4_moe.md).
+
 ## Hadamard Input Transforms (QuIP)
 
 Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform (`transform_config` with `type: hadamard` and `head_dim` of 16, 32, 64, or 128) run on the Humming backend by default on compute capability 10.0 and newer. The Hadamard is fused with input quantization, and the activation dtype declared by the checkpoint is used, with no fallback to 16-bit activations.

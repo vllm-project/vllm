@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
 
 import torch
 
@@ -354,9 +355,16 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
-    def _invoke_kernel(
+    @staticmethod
+    def _routed_moe(**kwargs):
+        """The FlashInfer routed NVFP4 MoE op; kernels sharing its arguments
+        and weight layout override it."""
+        import flashinfer
+
+        return flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(**kwargs)
+
+    def _routed_moe_kwargs(
         self,
-        output: torch.Tensor | None,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -365,10 +373,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         activation: MoEActivation,
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
-    ) -> UnfinalizedMoEOutput | None:
-        """Finalize into `output`, or stop after GEMM2 when it is None."""
-        import flashinfer
-
+    ) -> dict[str, Any]:
+        """The routed op's arguments, apart from its output handling."""
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
 
@@ -380,12 +386,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
-        output1_scale_gate_scalar = self.quant_config.g1_alphas
-        # With output=None the caller consumes the UnfinalizedMoEOutput itself.
-        defer = output is not None and self._uses_post_gemm2_hook(topk_ids.shape[0])
 
-        # Invoke kernel.
-        flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+        return dict(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=hidden_states,
@@ -402,7 +404,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
             output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=output1_scale_gate_scalar,
+            output1_scale_gate_scalar=self.quant_config.g1_alphas,
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
@@ -413,9 +415,36 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
-            do_finalize=output is not None and not defer,
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
+        )
+
+    def _invoke_kernel(
+        self,
+        output: torch.Tensor | None,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        a1q_scale: torch.Tensor | None,
+    ) -> UnfinalizedMoEOutput | None:
+        """Finalize into `output`, or stop after GEMM2 when it is None."""
+        defer = output is not None and self._uses_post_gemm2_hook(topk_ids.shape[0])
+        flashinfer_output = self._routed_moe(
+            **self._routed_moe_kwargs(
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                activation,
+                global_num_experts,
+                a1q_scale,
+            ),
+            do_finalize=output is not None and not defer,
             output=None if defer else output,
             tune_max_num_tokens=min(
                 fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
