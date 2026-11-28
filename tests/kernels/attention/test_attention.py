@@ -9,8 +9,13 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
+from vllm.config.cache import CacheConfig
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed
 
@@ -345,6 +350,88 @@ def test_num_heads_not_divisible_by_num_kv_heads(attention_cls: type) -> None:
             scale=scale,
             num_kv_heads=num_kv_heads,
         )
+
+
+def _compressed_tensors_config_with_fp8_kv_scheme() -> CompressedTensorsConfig:
+    return CompressedTensorsConfig(
+        target_scheme_map={},
+        ignore=[],
+        quant_format="pack-quantized",
+        kv_cache_scheme={
+            "type": "float",
+            "num_bits": 8,
+            "strategy": "tensor",
+            "symmetric": True,
+        },
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires a CUDA GPU")
+@pytest.mark.parametrize(
+    ("device_capability", "cache_dtype", "expected_dtype", "expect_warning"),
+    [
+        # SM89 (L4, RTX 4090): the auto-override is skipped and the KV
+        # cache falls back to the model dtype instead of crashing MTP
+        # speculative decoding with an illegal memory access.
+        (DeviceCapability(8, 9), "auto", "auto", True),
+        # SM90+ (H100): the auto-override still applies.
+        (DeviceCapability(9, 0), "auto", "fp8", False),
+        # An explicit --kv-cache-dtype fp8 is never gated by the guard.
+        (DeviceCapability(8, 9), "fp8", "fp8", False),
+    ],
+)
+def test_compressed_tensors_fp8_kv_override_guarded_by_sm90(
+    default_vllm_config,
+    monkeypatch,
+    caplog_vllm,
+    device_capability: DeviceCapability,
+    cache_dtype: str,
+    expected_dtype: str,
+    expect_warning: bool,
+) -> None:
+    """The compressed-tensors kv_cache_scheme auto-override of
+    kv_cache_dtype to fp8 must only fire on SM90+ CUDA GPUs.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/44879.
+    """
+    # Simulate the target GPU: the guard keys off has_device_capability,
+    # while the warning message reads get_device_capability, so mock both
+    # to present one consistent device. (Mocking the instance attributes
+    # shadows the Platform classmethods for access via current_platform.)
+    sm90_or_newer = device_capability >= DeviceCapability(9, 0)
+    monkeypatch.setattr(
+        current_platform,
+        "has_device_capability",
+        lambda capability, device_id=0: sm90_or_newer,
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda device_id=0: device_capability,
+    )
+    cache_config = CacheConfig(cache_dtype=cache_dtype)
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    try:
+        attn = Attention(
+            num_heads=8,
+            head_size=64,
+            scale=float(1.0 / (64**0.5)),
+            num_kv_heads=8,
+            cache_config=cache_config,
+            quant_config=_compressed_tensors_config_with_fp8_kv_scheme(),
+            prefix="model.layers.0.self_attn.attn",
+        )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+    assert attn.kv_cache_dtype == expected_dtype
+    assert cache_config.cache_dtype == expected_dtype
+    warning = (
+        "no FP8 attention kernel is available for the selected backend" in caplog_vllm.text
+    )
+    assert warning == expect_warning
 
 
 UNSUPPORTED_HEAD_SIZES = [32, 80, 96, 160, 192, 224, 256]
