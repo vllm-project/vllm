@@ -23,14 +23,16 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
     KVCacheBlock,
     get_request_block_hasher,
     init_none_hash,
@@ -61,7 +63,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
@@ -278,19 +280,22 @@ def test_lookahead_store_retries_block_when_hash_becomes_available(finish):
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "num_lookahead, prompt_len, boundary",
-    [(1, 44, 40), (5, 44, 36)],
-)
-def test_lookahead_mamba_partial_tail_survives_finish(
-    num_lookahead, prompt_len, boundary
+def _make_lookahead_mamba_partial_tail_setup(
+    num_lookahead: int,
+    prompt_len: int,
+    *,
+    enable_kv_cache_events: bool = False,
 ):
-    """Core's checkpoint and partial FA block must remain reusable from CPU."""
+    """Build a sparse-retention hybrid Mamba scheduler and offload one prompt."""
     config = _make_lookahead_config(num_lookahead)
     config.scheduler_config.async_scheduling = False
     config.cache_config.prefix_match_unit = 4
     config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_cache_retention_interval = 0
+    if enable_kv_cache_events:
+        config.kv_events_config = KVEventsConfig(
+            enable_kv_cache_events=True, publisher="null"
+        )
     assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_connector_extra_config = {"num_cpu_blocks": 32}
     kv_config = _make_kv_cache_config(32)
@@ -352,6 +357,20 @@ def test_lookahead_mamba_partial_tail_survives_finish(
     assert final.store_event >= 0
     simulate_store_completion(sched, final.store_event)
     assert all(b.ref_cnt == 0 for b in engine.kv_cache_manager.block_pool.blocks)
+    return engine, sched, req
+
+
+@pytest.mark.parametrize(
+    "num_lookahead, prompt_len, boundary",
+    [(1, 44, 40), (5, 44, 36)],
+)
+def test_lookahead_mamba_partial_tail_survives_finish(
+    num_lookahead, prompt_len, boundary
+):
+    """Core's checkpoint and partial FA block must remain reusable from CPU."""
+    engine, sched, req = _make_lookahead_mamba_partial_tail_setup(
+        num_lookahead, prompt_len
+    )
     query = Request(
         "partial-reload",
         list(range(prompt_len)),
@@ -1545,10 +1564,15 @@ def test_touched_blocks_survive_eviction() -> None:
         assert cached is not None, f"req_a block {i} should survive (was touched/MRU)"
 
 
-def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
+@pytest.mark.parametrize("joint_lookup", [False, True])
+def test_gpu_prefix_hit_refreshes_cpu_lru(joint_lookup: bool) -> None:
     """Eager mode: a prefix that hits on GPU keeps its CPU copy at the MRU end."""
     fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
+    manager = KVCacheManager(fix.kv_cache_config, 10000, BLOCK_SIZE, BLOCK_SIZE)
+    if joint_lookup:
+        fix.gpu_block_pool = manager.block_pool
+        sched.bind_gpu_block_pool(manager.block_pool)
 
     # Fill all 4 usable CPU blocks: req_a is LRU, req_b is MRU.
     req_a = make_request(num_blocks=2)
@@ -1577,7 +1601,12 @@ def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
         mm_features=None,
         block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
     )
-    assert sched.get_num_new_matched_tokens(req_a2, 2 * BLOCK_SIZE) == (0, False)
+    if joint_lookup:
+        hit = sched.get_joint_cache_hit(req_a2, manager.coordinator)
+        assert hit.num_computed_tokens == 2 * BLOCK_SIZE
+        assert not hit.needs_load
+    else:
+        assert sched.get_num_new_matched_tokens(req_a2, 2 * BLOCK_SIZE) == (0, False)
     sched.update_state_after_alloc(
         req_a2, KVCacheBlocks(blocks=([],)), num_external_tokens=0
     )
@@ -3888,3 +3917,622 @@ def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
         without_ring, max_batched
     )
     assert target_with == target_without
+
+
+def _seed_pool_block(
+    pool: BlockPool, block_hash: BlockHash, group_id: int, num_tokens: int
+) -> KVCacheBlock:
+    block = pool.get_new_blocks(1)[0]
+    pool._insert_block_hash(
+        make_block_hash_with_group_id(block_hash, group_id),
+        block,
+        num_tokens=num_tokens,
+    )
+    pool.free_blocks([block])
+    return block
+
+
+def _make_joint_prefix_case(
+    locations,
+    *,
+    num_gpu_blocks=16,
+    enable_events=False,
+    request=None,
+    needs_kv_cache_zeroing=False,
+):
+    fix = make_scheduler(
+        num_cpu_blocks=16, num_gpu_blocks=num_gpu_blocks, num_groups=len(locations)
+    )
+    fix.kv_cache_config.needs_kv_cache_zeroing = needs_kv_cache_zeroing
+    manager = KVCacheManager(
+        fix.kv_cache_config,
+        1024,
+        BLOCK_SIZE,
+        BLOCK_SIZE,
+        enable_kv_cache_events=enable_events,
+    )
+    fix.scheduler.bind_gpu_block_pool(manager.block_pool)
+    if request is None:
+        request = make_request(num_blocks=4)
+    if enable_events:
+        request.kv_cache_report_mode = "full"
+    sources = {}
+    for group, layout in enumerate(locations):
+        for index, location in enumerate(layout):
+            for device, pool in (
+                ("g", manager.block_pool),
+                ("c", fix.scheduler.cpu_block_pool),
+            ):
+                if location == device or location == "b":
+                    sources[group, index, device] = _seed_pool_block(
+                        pool,
+                        request.block_hashes[index],
+                        group,
+                        (index + 1) * BLOCK_SIZE,
+                    )
+    return fix.scheduler, manager, request, sources
+
+
+def _assert_pools_clean(*pools: BlockPool) -> None:
+    for pool in pools:
+        assert all(b.ref_cnt == 0 for b in pool.blocks if not b.is_null)
+
+
+def _attach_simple_cpu_offload(scheduler) -> SimpleCPUOffloadScheduler:
+    """Attach a SimpleCPUOffloadConnector to a core scheduler fixture."""
+    kv_config = scheduler.kv_cache_config
+    total_bytes = (
+        sum(g.page_size_bytes for g in kv_config.kv_cache_groups) * kv_config.num_blocks
+    )
+    kv_config.kv_cache_tensors = [
+        KVCacheTensor(
+            size=total_bytes,
+            layers=list(g.layer_names),
+            layer_stride=g.page_size_bytes * kv_config.num_blocks,
+            block_stride=g.page_size_bytes,
+        )
+        for g in kv_config.kv_cache_groups
+    ]
+    scheduler.vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 20},
+    )
+    connector = SimpleCPUOffloadConnector(
+        scheduler.vllm_config, KVConnectorRole.SCHEDULER, kv_config
+    )
+    scheduler.connector = connector
+    connector.bind_gpu_block_pool(scheduler.kv_cache_manager.block_pool)
+    assert connector.scheduler_manager is not None
+    return connector.scheduler_manager
+
+
+@pytest.mark.parametrize(
+    ("locations", "needs_kv_cache_zeroing"),
+    [
+        (("mmmm",), False),
+        (("gggg",), True),
+        (("cccc",), True),
+        (("gbcg",), False),
+        (("cgcg", "gcgc"), True),
+        (("gmgg", "cmcc"), False),
+    ],
+)
+def test_joint_prefix_reuses_gpu_and_loads_only_cpu(locations, needs_kv_cache_zeroing):
+    """Residency determines source selection, pinning, and transfer positions."""
+    offload, manager, request, sources = _make_joint_prefix_case(
+        locations, needs_kv_cache_zeroing=needs_kv_cache_zeroing
+    )
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    expected_length = min(
+        layout.index("m") if "m" in layout else 4 for layout in locations
+    )
+    assert hit.num_computed_tokens == expected_length * BLOCK_SIZE
+    assert hit.pinned == (expected_length > 0)
+    assert (request.request_id in offload._pending_joint_hits) == (expected_length > 0)
+    assert [len(group) for group in hit.blocks] == [expected_length] * len(locations)
+    cpu_positions = []
+    for group in range(len(locations)):
+        for index in range(expected_length):
+            device = "g" if (group, index, "g") in sources else "c"
+            assert hit.blocks[group][index].block is sources[group, index, device]
+            assert hit.blocks[group][index].is_cpu == (device == "c")
+            if device == "c":
+                cpu_positions.append((group, index))
+    needs_load = bool(cpu_positions)
+    assert hit.needs_load == needs_load
+    assert (
+        manager.allocate_slots(
+            request,
+            0 if needs_load else 1,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
+            delay_cache_blocks=needs_load,
+            joint_cache_hit=hit if expected_length else None,
+        )
+        is not None
+    )
+    blocks = manager.get_blocks(request.request_id)
+    zeroed = manager.take_new_block_ids()
+    # Only newly computed blocks may be zeroed, never CPU targets or reused GPU blocks.
+    assert zeroed == (
+        [group[-1].block_id for group in blocks.blocks]
+        if needs_kv_cache_zeroing and not needs_load
+        else []
+    )
+    for group in range(len(locations)):
+        for index in range(expected_length):
+            target = blocks.blocks[group][index]
+            if (group, index) in cpu_positions:
+                assert target.block_hash is None
+            else:
+                assert target is sources[group, index, "g"]
+    offload.update_state_after_alloc(request, blocks, hit.num_cpu_tokens)
+    assert not hit.pinned
+    metadata = offload.build_connector_meta(make_scheduler_output({}))
+    assert list(zip(metadata.load_gpu_blocks, metadata.load_cpu_blocks)) == [
+        (blocks.blocks[group][index].block_id, sources[group, index, "c"].block_id)
+        for group, index in cpu_positions
+    ]
+    if needs_load:
+        offload.update_connector_output(
+            KVConnectorOutput(finished_recving={request.request_id})
+        )
+        manager.cache_blocks(request, hit.num_computed_tokens)
+        for group, index in cpu_positions:
+            assert manager.block_pool.get_cached_block(
+                request.block_hashes[index], [group]
+            ) == [blocks.blocks[group][index]]
+    offload.request_finished(request, [])
+    manager.free(request)
+    _assert_pools_clean(manager.block_pool, offload.cpu_block_pool)
+
+
+@pytest.mark.parametrize("attention", ["swa", "mamba", "mixed_sizes"])
+def test_joint_sparse_prefix_allocates_reachable_states(attention):
+    """Sparse groups load reachable states without materializing null padding."""
+    num_blocks = 4
+    config = _make_kv_cache_config(48, 2)
+    if attention == "mamba":
+        config.kv_cache_groups[1] = make_kv_cache_group(
+            ["layer_1"],
+            MambaSpec(block_size=BLOCK_SIZE, shapes=((1, 1),), dtypes=(DTYPE,)),
+            manager_config=MambaManager.config(enable_prefix_caching=True),
+        )
+    else:
+        config.kv_cache_groups[1] = make_kv_cache_group(
+            ["layer_1"],
+            AttentionSpec(
+                block_size=BLOCK_SIZE * (2 if attention == "mixed_sizes" else 1),
+                num_kv_heads=NUM_KV_HEADS,
+                head_size=HEAD_SIZE,
+                dtype=DTYPE,
+            ),
+            SlidingWindowManager,
+            SlidingWindowManager.config(sliding_window=BLOCK_SIZE * 2),
+        )
+    block_size = BLOCK_SIZE * (2 if attention == "mixed_sizes" else 1)
+    offload = SimpleCPUOffloadScheduler(
+        _make_vllm_config(), config, _BYTES_PER_BLOCK * 48, block_size, BLOCK_SIZE
+    )
+    manager = KVCacheManager(config, 1024, block_size, BLOCK_SIZE)
+    offload.bind_gpu_block_pool(manager.block_pool)
+    request = make_request(num_blocks=num_blocks)
+    for group_idx, group in enumerate(config.kv_cache_groups):
+        group_size = group.block_size
+        for end in range(group_size, num_blocks * BLOCK_SIZE + 1, group_size):
+            pool = (
+                offload.cpu_block_pool
+                if end % (2 * group_size) == 0
+                else manager.block_pool
+            )
+            _seed_pool_block(
+                pool, request.block_hashes[end // BLOCK_SIZE - 1], group_idx, end
+            )
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    assert hit.num_computed_tokens == num_blocks * BLOCK_SIZE
+    retained = {id(source.block) for group in hit.blocks for source in group}
+    for pool in (manager.block_pool, offload.cpu_block_pool):
+        for block in pool.blocks:
+            if not block.is_null:
+                assert block.ref_cnt == int(id(block) in retained)
+    assert hit.blocks[1][-1].block.block_hash == make_block_hash_with_group_id(
+        request.block_hashes[num_blocks - 1], 1
+    )
+    assert (
+        manager.allocate_slots(
+            request,
+            0,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
+            delay_cache_blocks=True,
+            joint_cache_hit=hit,
+        )
+        is not None
+    )
+    offload.update_state_after_alloc(
+        request, manager.get_blocks(request.request_id), hit.num_cpu_tokens
+    )
+    offload.update_connector_output(
+        KVConnectorOutput(finished_recving={request.request_id})
+    )
+    manager.cache_blocks(request, hit.num_computed_tokens)
+    offload.request_finished(request, [])
+    manager.free(request)
+    _assert_pools_clean(manager.block_pool, offload.cpu_block_pool)
+
+
+@pytest.mark.parametrize("cleanup", ["cancel", "reset", "retry"])
+def test_joint_prefix_allocation_failure_preserves_caches(cleanup):
+    """Insufficient capacity does not materialize any CPU holes or lose GPU hits."""
+    offload, manager, request, _ = _make_joint_prefix_case(
+        ("gcgc",), num_gpu_blocks=4, enable_events=True
+    )
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    free_before = manager.block_pool.get_num_free_blocks()
+    assert (
+        manager.allocate_slots(
+            request,
+            0,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
+            delay_cache_blocks=True,
+            joint_cache_hit=hit,
+        )
+        is None
+    )
+    assert manager.block_pool.take_events() == []
+    assert manager.block_pool.get_num_free_blocks() == free_before
+    assert not manager.get_blocks(request.request_id).blocks[0]
+    if cleanup == "cancel":
+        offload.request_finished(request, [])
+    elif cleanup == "reset":
+        assert offload.reset()
+    else:
+        retry = offload.get_joint_cache_hit(request, manager.coordinator)
+        assert not hit.pinned and retry.pinned
+        assert all(
+            source.block.ref_cnt == 1 for group in retry.blocks for source in group
+        )
+        offload.build_connector_meta(make_scheduler_output({}))
+        assert not retry.pinned
+    assert not hit.pinned
+    assert manager.block_pool.get_num_free_blocks() == 3
+    _assert_pools_clean(offload.cpu_block_pool)
+
+
+@pytest.mark.parametrize(
+    "num_gpu_blocks, num_spec_tokens, admitted",
+    [(4, 0, False), (32, 0, True), (5, 1, False), (6, 1, True)],
+)
+def test_scheduler_admits_or_defers_joint_prefix(
+    num_gpu_blocks, num_spec_tokens, admitted
+):
+    """The scheduler admits a whole joint match or defers it without partial loads."""
+    from tests.v1.core.utils import create_scheduler as create_core_scheduler
+
+    scheduler = create_core_scheduler(
+        enable_prefix_caching=True,
+        num_blocks=num_gpu_blocks,
+        num_speculative_tokens=num_spec_tokens or None,
+    )
+    offload = _attach_simple_cpu_offload(scheduler)
+    request = make_request(num_blocks=4)
+    for index in range(4):
+        pool = (
+            offload.cpu_block_pool
+            if index == 1
+            else scheduler.kv_cache_manager.block_pool
+        )
+        _seed_pool_block(pool, request.block_hashes[index], 0, (index + 1) * BLOCK_SIZE)
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, SimpleCPUOffloadMetadata)
+    if not admitted:
+        assert request.status == RequestStatus.WAITING
+        assert request.num_computed_tokens == 0
+        assert not metadata.load_gpu_blocks
+        assert not scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0]
+        assert not offload._pending_joint_hits
+        _assert_pools_clean(
+            scheduler.kv_cache_manager.block_pool, offload.cpu_block_pool
+        )
+        return
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_computed_tokens == 4 * BLOCK_SIZE
+    assert len(metadata.load_gpu_blocks) == 1
+    assert request.prefill_stats is not None
+    assert request.prefill_stats.num_local_cached_tokens == 3 * BLOCK_SIZE
+    assert request.prefill_stats.num_external_cached_tokens == BLOCK_SIZE
+
+
+@pytest.mark.parametrize("locations", ["gc", "gcgg"])
+def test_joint_prefix_respects_bounded_replay(locations):
+    """Discard short hits without retaining pins; replay longer hits after loading."""
+    from tests.v1.core.test_prefix_replay import WINDOW, _replay_scheduler
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = _replay_scheduler()
+    offload = _attach_simple_cpu_offload(scheduler)
+    manager = scheduler.kv_cache_manager
+    request = make_request(num_blocks=4)
+    for index, location in enumerate(locations):
+        pool = manager.block_pool if location == "g" else offload.cpu_block_pool
+        _seed_pool_block(pool, request.block_hashes[index], 0, (index + 1) * BLOCK_SIZE)
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, SimpleCPUOffloadMetadata)
+    matched_tokens = len(locations) * BLOCK_SIZE
+    if matched_tokens <= WINDOW:
+        assert request.status == RequestStatus.RUNNING
+        assert not metadata.load_gpu_blocks
+        assert request.prefill_stats is not None
+        assert request.prefill_stats.num_local_cached_tokens == 0
+        assert request.prefill_stats.num_external_cached_tokens == 0
+    else:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert len(metadata.load_gpu_blocks) == 1
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output([], finished_recving={request.request_id}),
+        )
+        output = scheduler.schedule()
+    expected_start = max(0, matched_tokens - WINDOW)
+    assert output.scheduled_new_reqs[0].num_computed_tokens == expected_start
+    assert output.scheduled_new_reqs[0].replay_start == expected_start
+    assert not offload._pending_joint_hits
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    end_meta = offload.build_connector_meta(make_scheduler_output({}))
+    for meta in (output.kv_connector_metadata, end_meta):
+        if isinstance(meta, SimpleCPUOffloadMetadata) and meta.store_event >= 0:
+            simulate_store_completion(offload, meta.store_event)
+    _assert_pools_clean(manager.block_pool, offload.cpu_block_pool)
+
+
+@pytest.mark.parametrize("extra_tokens", [1, 2])
+def test_joint_prefix_preserves_dcp_lookahead_and_events(extra_tokens):
+    """Joint lookup respects DCP effective block size and lookahead bounds."""
+    size = BLOCK_SIZE * 2
+    lookahead = 2
+    kv_cache_config = _make_kv_cache_config(16)
+    vllm_config = _make_cp_vllm_config(dcp_world_size=2)
+    set_mtp_config(vllm_config, lookahead)
+    offload = SimpleCPUOffloadScheduler(
+        vllm_config, kv_cache_config, _BYTES_PER_BLOCK * 8, size, size
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        1024,
+        size,
+        size,
+        dcp_world_size=2,
+        enable_kv_cache_events=True,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    offload.bind_gpu_block_pool(manager.block_pool)
+    hasher = get_request_block_hasher(size, sha256, lookahead)
+    full_tokens = list(range(4 * size + lookahead))
+    seed = Request(
+        "cp-seed", full_tokens, SamplingParams(max_tokens=1), None, block_hasher=hasher
+    )
+    for index in range(4):
+        pool = manager.block_pool if index % 2 == 0 else offload.cpu_block_pool
+        _seed_pool_block(pool, seed.block_hashes[index], 0, (index + 1) * size)
+    request = Request(
+        "cp-query",
+        full_tokens[: 4 * size + extra_tokens],
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=hasher,
+    )
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    expected_blocks = 3 if extra_tokens < lookahead else 4
+    assert hit.num_computed_tokens == expected_blocks * size
+    manager.coordinator.emit_joint_cached_block_events(request, hit)
+    events = manager.block_pool.take_events()
+    assert len(events) == 2
+    assert all(
+        isinstance(e, BlockStored)
+        and e.block_size == size
+        and len(e.token_ids) == len(e.block_hashes) * size
+        for e in events
+    )
+    offload.request_finished(request, [])
+    assert not hit.pinned
+
+
+@pytest.mark.parametrize("tail_on_cpu", [True, False])
+def test_joint_scheduler_loads_fine_grained_mamba_partial_tail(tail_on_cpu: bool):
+    """Joint lookup preserves fine-grained partial tails across GPU/CPU mixes."""
+    prompt_len, boundary = 44, 40
+    engine, sched, producer = _make_lookahead_mamba_partial_tail_setup(
+        num_lookahead=1, prompt_len=prompt_len, enable_kv_cache_events=True
+    )
+    if tail_on_cpu:
+        assert engine.kv_cache_manager.reset_prefix_cache()
+    else:
+        fa_block_0 = engine.kv_cache_manager.block_pool.get_cached_block(
+            producer.block_hashes[3], [0]
+        )
+        assert fa_block_0 is not None
+        engine.kv_cache_manager.block_pool._maybe_evict_cached_block(fa_block_0[0])
+    engine.kv_cache_manager.take_events()
+
+    consumer = Request(
+        "partial-consumer",
+        list(range(prompt_len)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=producer._block_hasher,
+    )
+    consumer.kv_cache_report_mode = "full"
+    engine.add_request(consumer)
+    load_step = engine.schedule()
+    load_meta = load_step.kv_connector_metadata
+    assert isinstance(load_meta, SimpleCPUOffloadMetadata)
+    assert consumer.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert consumer.num_computed_tokens == boundary
+    if tail_on_cpu:
+        assert len(load_meta.load_gpu_blocks) == 4
+        assert load_step.kv_cache_block_copies is None
+    else:
+        assert len(load_meta.load_gpu_blocks) == 1
+        assert load_step.kv_cache_block_copies is not None
+        assert len(load_step.kv_cache_block_copies) == 2
+        fa_manager = engine.kv_cache_manager.coordinator.single_type_managers[0]
+        assert 2 not in fa_manager._joint_cache_reused_blocks[consumer.request_id]
+    engine.kv_cache_manager.take_events()
+
+    engine.update_from_output(
+        load_step,
+        ModelRunnerOutput(
+            req_ids=[],
+            sampled_token_ids=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_recving={consumer.request_id}
+            ),
+        ),
+    )
+    resume_step = engine.schedule()
+    assert consumer.status == RequestStatus.RUNNING
+    assert resume_step.num_scheduled_tokens == {consumer.request_id: 4}
+    if tail_on_cpu:
+        assert resume_step.kv_cache_block_copies is not None
+        assert len(resume_step.kv_cache_block_copies) == 1
+    else:
+        assert resume_step.kv_cache_block_copies is None
+        post_load_events = [
+            e
+            for e in (engine.kv_cache_manager.take_events() or ())
+            if isinstance(e, BlockStored)
+        ]
+        assert any(e.group_idx == 0 and e.block_size == 16 for e in post_load_events)
+        assert not any(e.group_idx == 1 for e in post_load_events)
+
+    engine.update_from_output(
+        resume_step,
+        ModelRunnerOutput(req_ids=[consumer.request_id], sampled_token_ids=[[77]]),
+    )
+    assert consumer.is_finished()
+    end_meta = engine.schedule().kv_connector_metadata
+    for meta in (resume_step.kv_connector_metadata, end_meta):
+        if isinstance(meta, SimpleCPUOffloadMetadata) and meta.store_event >= 0:
+            simulate_store_completion(sched, meta.store_event)
+    _assert_pools_clean(engine.kv_cache_manager.block_pool, sched.cpu_block_pool)
+
+
+def test_joint_failed_load_before_reused_gpu_block_frees_request():
+    """A load failure before a reused GPU block frees instead of overwriting it."""
+    from tests.v1.core.utils import create_scheduler as create_core_scheduler
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = create_core_scheduler(enable_prefix_caching=True, num_blocks=16)
+    offload = _attach_simple_cpu_offload(scheduler)
+    request = make_request(num_blocks=4)
+    gpu_blocks = {}
+    for index, loc in enumerate("gcgc"):
+        pool = (
+            scheduler.kv_cache_manager.block_pool
+            if loc == "g"
+            else offload.cpu_block_pool
+        )
+        block = _seed_pool_block(
+            pool, request.block_hashes[index], 0, (index + 1) * BLOCK_SIZE
+        )
+        if loc == "g":
+            gpu_blocks[index] = block
+
+    scheduler.add_request(request)
+    step1 = scheduler.schedule()
+    req_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0]
+    assert req_blocks[2] is gpu_blocks[2]
+    scheduler.update_from_output(
+        step1,
+        create_model_runner_output(
+            [],
+            finished_recving={request.request_id},
+            invalid_block_ids={req_blocks[1].block_id},
+        ),
+    )
+    assert offload.cpu_block_pool.reset_prefix_cache()
+    step2 = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    retry_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0]
+    assert retry_blocks[0] is gpu_blocks[0]
+    assert retry_blocks[2] is not gpu_blocks[2]
+    assert scheduler.kv_cache_manager.block_pool.get_cached_block(
+        request.block_hashes[2], [0]
+    ) == [gpu_blocks[2]]
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    end_meta = offload.build_connector_meta(make_scheduler_output({}))
+    for meta in (step2.kv_connector_metadata, end_meta):
+        if isinstance(meta, SimpleCPUOffloadMetadata) and meta.store_event >= 0:
+            simulate_store_completion(offload, meta.store_event)
+    _assert_pools_clean(scheduler.kv_cache_manager.block_pool, offload.cpu_block_pool)
+
+
+def test_joint_dcp_mixed_cache_loads_fine_grained_partial_tail():
+    """DCP hybrid joint lookup keeps fine-grained CPU partial tails intact."""
+    hash_bs, mamba_bs = BLOCK_SIZE, 4 * BLOCK_SIZE
+    local_tokens, ext_tokens = 4 * BLOCK_SIZE, 6 * BLOCK_SIZE
+    total_tokens = local_tokens + ext_tokens
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=32,
+        num_gpu_blocks=32,
+        block_size=mamba_bs,
+        hash_block_size=hash_bs,
+        dcp_world_size=2,
+    )
+    offload = fix.scheduler
+    manager = KVCacheManager(
+        fix.kv_cache_config, 1024, mamba_bs, hash_bs, dcp_world_size=2
+    )
+    offload.bind_gpu_block_pool(manager.block_pool)
+    request = _make_cp_request(num_blocks=10, virtual_block_size=hash_bs)
+    for idx in range(5):
+        pool = manager.block_pool if idx < 2 else offload.cpu_block_pool
+        end = (idx + 1) * 2 * BLOCK_SIZE
+        _seed_pool_block(pool, request.block_hashes[end // hash_bs - 1], 0, end)
+    _seed_pool_block(
+        offload.cpu_block_pool,
+        request.block_hashes[total_tokens // hash_bs - 1],
+        1,
+        total_tokens,
+    )
+
+    hit = offload.get_joint_cache_hit(request, manager.coordinator)
+    assert (hit.num_computed_tokens, hit.num_gpu_tokens, hit.num_cpu_tokens) == (
+        total_tokens,
+        local_tokens,
+        ext_tokens,
+    )
+    assert (
+        manager.allocate_slots(
+            request,
+            0,
+            num_new_computed_tokens=hit.num_gpu_tokens,
+            num_external_computed_tokens=hit.num_cpu_tokens,
+            delay_cache_blocks=True,
+            joint_cache_hit=hit,
+        )
+        is not None
+    )
+    blocks = manager.get_blocks(request.request_id)
+    offload.update_state_after_alloc(request, blocks, hit.num_cpu_tokens)
+    meta = offload.build_connector_meta(make_scheduler_output({}))
+    assert meta.load_gpu_blocks == [
+        *(block.block_id for block in blocks.blocks[0][2:5]),
+        blocks.blocks[1][2].block_id,
+    ]
+    assert len(meta.load_cpu_blocks) == 4
+    offload.update_connector_output(
+        KVConnectorOutput(finished_recving={request.request_id})
+    )
+    manager.cache_blocks(request, total_tokens)
+    offload.request_finished(request, [])
+    manager.free(request)
+    _assert_pools_clean(manager.block_pool, offload.cpu_block_pool)

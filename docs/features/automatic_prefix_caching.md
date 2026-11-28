@@ -89,6 +89,16 @@ The replay rings add 8–9% of an FP32 SSM state to each request's state with th
 
 With `--prefix-match-unit`, a request can resume inside a Mamba block, so ReplaySSM also flushes its exact state at every prefix match unit. A unit that is a multiple of the buffer length adds no flushes.
 
+## Prefix caching with CPU offload
+
+When `SimpleCPUOffloadConnector` is configured directly, a reusable prefix can contain interleaved GPU and CPU cache blocks. GPU blocks are reused in place, and only CPU-resident blocks are loaded into newly allocated GPU blocks. If both pools contain a required block, the GPU copy is preferred.
+
+CPU loads finish before generation resumes; when fine-grained partial prefix matching is enabled in eager offload mode, a CPU-resident partial tail block is also loaded and reused. If the GPU cannot accommodate the complete matched prefix, the request waits for capacity. This lookup is enabled automatically with prefix caching; `MultiConnector` and HiSparse configurations with separate host pools retain their existing lookup behavior.
+
+With KV cache events enabled, joint lookup emits each `BlockStored` event for one contiguous span, with matching hashes, token IDs, and extra keys. In `full` report mode, the joint path reports reused GPU spans after successful allocation; CPU load targets are reported after loading completes. The non-joint path currently reports reuse during lookup.
+
+Each span names its logical predecessor as `parent_block_hash`. If block 0 is on CPU, the initial GPU reuse reports have no event with a null parent, and a later GPU span can reference a parent whose store event arrives after loading. A reused partial GPU tail is reported separately with its actual token length.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

@@ -11,6 +11,7 @@ from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.gc_utils import untracked_list
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_lookup import CacheHitBlock, CacheLookup, iter_true_runs
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -243,6 +244,11 @@ class SingleTypeKVCacheManager(ABC):
         # This is only used to track the RUNNING requests, we do not track the
         # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
+        # An empty set still marks a joint load for dense event emission.
+        self._joint_cache_reused_blocks: dict[str, set[int]] = {}
+        # Prefix length of a GPU partial tail already CoW-copied on joint alloc,
+        # so async load completion does not re-cache it before compute resumes.
+        self._joint_cache_reused_partial_tail: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
@@ -274,11 +280,21 @@ class SingleTypeKVCacheManager(ABC):
         num_local_computed_tokens: int,
     ) -> bool:
         # The local prefix-cache hit ends inside one of this manager's
-        # blocks: the shared tail block needs CoW.
+        # blocks: a shared local tail needs CoW, whereas a synthetic CPU
+        # load placeholder (`block_id < 0`) is allocated privately.
         return (
             len(new_computed_blocks) > 0
             and num_local_computed_tokens % self.block_size != 0
+            and new_computed_blocks[-1].block_id >= 0
         )
+
+    def _is_reused_partial_tail(self, request_id: str, num_tokens: int) -> bool:
+        if (reused := self._joint_cache_reused_partial_tail.get(request_id)) is None:
+            return False
+        if num_tokens <= reused:
+            return True
+        del self._joint_cache_reused_partial_tail[request_id]
+        return False
 
     def get_num_blocks_to_reserve(self, request_id: str, num_tokens: int) -> int | None:
         """Return a reservation, or None to use the allocation-based admission check."""
@@ -437,6 +453,51 @@ class SingleTypeKVCacheManager(ABC):
             block_idx = num_local_computed_tokens // self.block_size
             self._partial_hit_reqs[request_id] = (block_idx, new_computed_blocks[-1])
             self.num_cached_block[request_id] = block_idx
+
+    def add_joint_computed_blocks(
+        self,
+        request_id: str,
+        hits: Sequence[CacheHitBlock],
+        num_computed_tokens: int,
+    ) -> None:
+        """Adopt pinned GPU hits and allocate CPU load targets by position.
+
+        All groups' source blocks must be pinned before allocating targets.
+        CPU targets remain uncached until their transfer completes.
+        """
+        skipped_blocks = (
+            self.get_num_skipped_tokens(num_computed_tokens) // self.block_size
+        )
+        blocks = [self._null_block if hit.block.is_null else hit.block for hit in hits]
+        cpu_positions = [
+            index
+            for index, hit in enumerate(hits[skipped_blocks:], start=skipped_blocks)
+            if hit.is_cpu and not hit.block.is_null
+        ]
+        # Allocate directly so async load targets bypass worker-side zeroing.
+        targets = self.block_pool.get_new_blocks(len(cpu_positions))
+        for index, target in zip(cpu_positions, targets, strict=True):
+            blocks[index] = target
+
+        self.add_local_computed_blocks(request_id, blocks, num_computed_tokens, 0)
+        # The request now owns the targets; drop their allocation references.
+        self.block_pool.free_blocks(targets)
+        if hits and hits[-1].is_cpu:
+            # A CPU partial tail lands in a fresh private target block: no CoW.
+            self._partial_hit_reqs.pop(request_id, None)
+        elif request_id in self._partial_hit_reqs:
+            self._joint_cache_reused_partial_tail[request_id] = num_computed_tokens
+        if cpu_positions:
+            first_cpu = cpu_positions[0]
+            num_full_blocks = num_computed_tokens // self.block_size
+            self.num_cached_block[request_id] = first_cpu
+            self._joint_cache_reused_blocks[request_id] = {
+                index
+                for index, hit in enumerate(
+                    hits[first_cpu + 1 : num_full_blocks], start=first_cpu + 1
+                )
+                if not hit.is_cpu and not hit.block.is_null
+            }
 
     def allocate_external_computed_blocks(
         self,
@@ -658,16 +719,49 @@ class SingleTypeKVCacheManager(ABC):
         block_mask = self._refine_block_mask(
             request, num_cached_blocks, num_full_blocks, block_mask
         )
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=self.req_to_blocks[request.request_id],
-            num_cached_blocks=num_cached_blocks,
-            num_full_blocks=num_full_blocks,
-            block_size=self.block_size,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_mask=block_mask,
-        )
+        reused_gpu_blocks = self._joint_cache_reused_blocks.get(request.request_id)
+        if reused_gpu_blocks:
+            block_mask = [
+                (block_mask is None or block_mask[i - num_cached_blocks])
+                and i not in reused_gpu_blocks
+                for i in range(num_cached_blocks, num_full_blocks)
+            ]
 
+        blocks = self.req_to_blocks[request.request_id]
+        if reused_gpu_blocks is not None and self.block_pool.enable_kv_cache_events:
+            for run_start, run_end in iter_true_runs(
+                (
+                    not blocks[i].is_null
+                    and (block_mask is None or block_mask[i - num_cached_blocks])
+                    for i in range(num_cached_blocks, num_full_blocks)
+                ),
+                start=num_cached_blocks,
+            ):
+                self.block_pool.cache_full_blocks(
+                    request=request,
+                    blocks=blocks,
+                    num_cached_blocks=run_start,
+                    num_full_blocks=run_end,
+                    block_size=self.block_size,
+                    kv_cache_group_id=self.kv_cache_group_id,
+                )
+        else:
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=blocks,
+                num_cached_blocks=num_cached_blocks,
+                num_full_blocks=num_full_blocks,
+                block_size=self.block_size,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_mask=block_mask,
+            )
+
+        if reused_gpu_blocks is not None:
+            reused_gpu_blocks.difference_update(
+                range(num_cached_blocks, num_full_blocks)
+            )
+            if not reused_gpu_blocks:
+                self._joint_cache_reused_blocks.pop(request.request_id, None)
         self.num_cached_block[request.request_id] = num_full_blocks
 
     def _refine_block_mask(
@@ -726,6 +820,8 @@ class SingleTypeKVCacheManager(ABC):
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
+        self._joint_cache_reused_blocks.pop(request_id, None)
+        self._joint_cache_reused_partial_tail.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
         return trim_null_head(req_blocks)
 
@@ -754,7 +850,7 @@ class SingleTypeKVCacheManager(ABC):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
@@ -885,7 +981,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
@@ -977,6 +1073,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
+            return
+        if self._is_reused_partial_tail(request.request_id, num_tokens):
             return
         self._cache_partial_tail_block(request, num_tokens)
 
@@ -1161,7 +1259,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
@@ -1471,7 +1569,7 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
@@ -1641,7 +1739,7 @@ class CircularBufferManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
@@ -1715,7 +1813,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
@@ -1996,7 +2094,7 @@ class MambaManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
@@ -2523,7 +2621,9 @@ class MambaManager(SingleTypeKVCacheManager):
             replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
-        if self.prefix_caching:
+        if self.prefix_caching and not self._is_reused_partial_tail(
+            request.request_id, num_tokens
+        ):
             partial_hash = self._cache_partial_tail_block(
                 request, num_tokens, retention_interval=retention_interval
             )
@@ -2892,7 +2992,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
@@ -3106,7 +3206,7 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         block_size: int,
         manager_config: ManagerConfig,
         alignment_tokens: int,
