@@ -61,5 +61,35 @@ def test_gather_cache_oob():
     assert True
 
 
+@pytest.mark.skipif(torch.accelerator.device_count() < 1, reason="Need CUDA device")
+def test_convert_fp8_strided():
+    """convert_fp8 must honor row strides and leave padding untouched (#70382)."""
+    dtype = torch.bfloat16
+    src_base = torch.full((4, 96), 99.0, dtype=dtype, device="cuda")
+    dst_base = torch.full((4, 96), 77, dtype=torch.uint8, device="cuda")
+    src = src_base[:, :64]
+    dst = dst_base[:, :64]
+    torch.manual_seed(0)
+    src.copy_(torch.randn(4, 64, dtype=dtype, device="cuda"))
+
+    ops.convert_fp8(dst, src, 1.0, "auto")
+    torch.accelerator.synchronize()
+
+    ref = torch.empty((4, 64), dtype=torch.uint8, device="cuda")
+    ops.convert_fp8(ref, src.contiguous(), 1.0, "auto")
+
+    assert torch.equal(dst, ref)
+    assert torch.equal(dst_base[:, 64:], torch.full_like(dst_base[:, 64:], 77))
+
+
+@pytest.mark.skipif(torch.accelerator.device_count() < 1, reason="Need CUDA device")
+def test_convert_fp8_empty():
+    """An empty cache must return instead of launching a zero-block grid (#70382)."""
+    src = torch.empty((0, 64), dtype=torch.bfloat16, device="cuda")
+    dst = torch.empty((0, 64), dtype=torch.uint8, device="cuda")
+    ops.convert_fp8(dst, src, 1.0, "auto")
+    torch.accelerator.synchronize()
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
