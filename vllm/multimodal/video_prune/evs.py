@@ -151,6 +151,40 @@ def compute_mrope_for_media(
     return positions
 
 
+def _recompute_media_only_positions(
+    positions: torch.LongTensor,
+    media_mask: torch.Tensor,
+    multimodal_positions: list[torch.Tensor],
+    num_computed_tokens: int,
+) -> tuple[torch.LongTensor, int]:
+    """Place 4-channel entries, which describe media tokens only.
+
+    Each entry is the part of one media item inside the current chunk, so it
+    starts at the first media token at or after the previous entry. Its
+    positions are relative to the text token that precedes the media item.
+    """
+    N = positions.shape[1]
+    text_mask = ~media_mask
+    media_indices = media_mask.nonzero(as_tuple=True)[0]
+    text_indices = text_mask.nonzero(as_tuple=True)[0]
+
+    cursor = num_computed_tokens
+    for mm_pos in multimodal_positions:
+        local_start = media_indices[media_indices >= cursor][0]
+        local_end = local_start + mm_pos.shape[1]
+        preceding_text = text_indices[text_indices < local_start]
+        base = positions[-1, preceding_text[-1]] + 1 if len(preceding_text) else 0
+        positions[:, local_start:local_end] = mm_pos[0:3] + base
+
+        # mm_pos[3, 0] is the max width.
+        text_pos_sum = torch.cumsum(text_mask[local_end:].long(), dim=0)
+        positions[:, local_end:N] = text_pos_sum + mm_pos[3, 0] + base - 1
+        cursor = local_end
+
+    mrope_positions_delta = (positions.max() + 1 - N).item()
+    return positions, mrope_positions_delta
+
+
 def recompute_mrope_positions(
     input_ids: torch.LongTensor,
     multimodal_positions: list[torch.Tensor],
@@ -229,6 +263,11 @@ def recompute_mrope_positions(
     if seen_mm_tokens == total_mm_tokens:
         delta = int((positions.max().item() + 1) - N) if positions.numel() else -N
         return positions, delta
+
+    if all(mm_pos.shape[0] == 4 for mm_pos in multimodal_positions):
+        return _recompute_media_only_positions(
+            positions, media_mask, multimodal_positions, num_computed_tokens
+        )
 
     vision_start_indices = (input_ids == vision_start_token_id).nonzero(as_tuple=True)[
         0
