@@ -147,6 +147,11 @@ Costs and limits:
   `instanttensor`, or `--safetensors-load-strategy eager`);
   `--load-format dummy` serves zeros.
 
+For Qwen4Exp PLE tables, use `--engram-config.cpu_offload`; the legacy
+`VLLM_PLE_CPU_OFFLOAD` environment variable is not read by vLLM. CPU-offloaded
+FP8 PLE lookups also require a compatible Triton lookup path; UVA support alone
+is not sufficient.
+
 ## Data-parallel topologies (DeepSeek V4.1)
 
 By default (`embedding_across_dp: false`), each DP replica keeps its own
