@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.config import VllmConfig
+    from vllm.sampling_params import StructuredOutputsParams
     from vllm.tokenizers import TokenizerLike
 else:
     VllmConfig = object
@@ -26,6 +27,30 @@ class StructuredOutputOptions(enum.Enum):
 
 
 StructuredOutputKey = tuple[StructuredOutputOptions, str]
+
+
+@dataclass(frozen=True)
+class GrammarCompileOptions:
+    """Request-level options that change how a grammar is compiled.
+
+    Values are passed through unresolved: None means the backend uses
+    its server-level setting.
+    """
+
+    disable_any_whitespace: bool | None = None
+
+    @classmethod
+    def from_params(cls, params: "StructuredOutputsParams") -> "GrammarCompileOptions":
+        return cls(disable_any_whitespace=params.disable_any_whitespace)
+
+
+def resolve_disable_any_whitespace(
+    options: GrammarCompileOptions | None, server_value: bool
+) -> bool:
+    """The request-level value when set, otherwise the server-level one."""
+    if options is None or options.disable_any_whitespace is None:
+        return server_value
+    return options.disable_any_whitespace
 
 
 class StructuredOutputGrammar(ABC):
@@ -109,6 +134,7 @@ class StructuredOutputBackend(ABC):
         request_type: StructuredOutputOptions,
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
+        options: GrammarCompileOptions | None = None,
     ) -> StructuredOutputGrammar:
         """Compiles a grammar specification into a structured output grammar.
 
@@ -119,6 +145,8 @@ class StructuredOutputBackend(ABC):
             stop_token_ids (set[int] | None): The request's EOS and user
                 stop-token ids (`SamplingParams.all_stop_token_ids`), masked
                 until the grammar terminates.
+            options (GrammarCompileOptions | None): Request-level compile
+                options. None, or a None field, uses the server-level setting.
 
         Returns:
             StructuredOutputGrammar: The compiled structured output grammar.
