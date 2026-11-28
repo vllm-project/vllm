@@ -106,7 +106,14 @@ def get_eagle3_aux_layers_from_config(
         for config_name in ("dflash_config", "eagle_config"):
             drafter_config = getattr(hf_config, config_name, None)
             if drafter_config and isinstance(drafter_config, dict):
-                layer_ids = drafter_config.get("layer_ids")
+                # Checkpoints converted from the EAGLE-3 reference
+                # implementation store the ids under
+                # "eagle_aux_hidden_state_layer_ids"; "layer_ids" covers
+                # drafter-style configs.
+                for key in ("layer_ids", "eagle_aux_hidden_state_layer_ids"):
+                    layer_ids = drafter_config.get(key)
+                    if layer_ids:
+                        break
                 if layer_ids:
                     break
     if layer_ids and isinstance(layer_ids, (list, tuple)):
