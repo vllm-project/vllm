@@ -80,6 +80,8 @@ pub(crate) enum JsonToolCallEvent {
 struct JsonToolCallParser {
     config: JsonToolCallConfig,
     buffer: String,
+    /// Markers consumed since the last committed event, returned by `reset()`.
+    uncommitted_markers: String,
     mode: JsonToolCallMode,
     active_tool_index: Option<usize>,
     emitted_tool_count: usize,
@@ -91,6 +93,7 @@ impl JsonToolCallParser {
         Self {
             config,
             buffer: String::new(),
+            uncommitted_markers: String::new(),
             mode: JsonToolCallMode::Text,
             active_tool_index: None,
             emitted_tool_count: 0,
@@ -104,7 +107,16 @@ impl JsonToolCallParser {
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_json_tool_call_event(input, &mut self.mode, config)
         })? {
+            let is_marker = matches!(
+                event,
+                JsonToolCallEvent::ToolCallStart | JsonToolCallEvent::ToolCallDelimiter
+            );
             self.apply_event(event, output)?;
+            if is_marker {
+                self.uncommitted_markers.push_str(&self.buffer[..consumed_len]);
+            } else {
+                self.uncommitted_markers.clear();
+            }
             self.buffer.drain(..consumed_len);
         }
 
@@ -178,7 +190,9 @@ impl JsonToolCallParser {
         self.mode = JsonToolCallMode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
+        let mut text = std::mem::take(&mut self.uncommitted_markers);
+        text.push_str(&std::mem::take(&mut self.buffer));
+        text
     }
 }
 
@@ -528,6 +542,21 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&output);
+    }
+
+    #[test]
+    fn json_tool_call_reset_returns_delimiter_after_parse_error() {
+        let mut parser = JsonToolCallParser::new(DELIMITED_CONFIG);
+        let mut output = ToolParserOutput::default();
+        let input = format!(
+            "<tool_calls>{} <\n{{oops}}",
+            build_tool_call("add", r#"{"x":1}"#)
+        );
+
+        parser.parse_into(DecodedText::unattributed(input), &mut output).unwrap_err();
+
+        assert_eq!(output.coalesce().calls().len(), 1);
+        assert_eq!(parser.reset(), "} <\n{oops}");
     }
 
     #[test]

@@ -11086,6 +11086,65 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn malformed_tool_call_falls_back_to_the_full_text() {
+    let content = "Wrap calls in <tool_call>\nJSON </tool_call> tags.";
+    for stream in [false, true] {
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            vec![
+                (bytes_to_token_ids(b"Wrap calls in <tool_call>\n"), None),
+                (bytes_to_token_ids(b"JSON </tool_call> tags."), None),
+                (vec![b'!' as u32], Some(EngineCoreFinishReason::Stop)),
+            ],
+        )
+        .await;
+
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "stream": stream,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "tools": [{
+                                "type": "function",
+                                "function": {"name": "get_weather", "parameters": {"type": "object"}}
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        assert!(!text.contains("\"tool_calls\":[{"), "{text}");
+        if stream {
+            let contents: Vec<_> = sse_json_payloads(&text)
+                .iter()
+                .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str())
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(contents.concat(), content, "{text}");
+        } else {
+            let json: serde_json::Value = serde_json::from_str(&text).expect("json body");
+            assert_eq!(json["choices"][0]["message"]["content"], content, "{text}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn named_tool_choice_uses_stop_finish_reason() {
     for stream in [false, true] {
         let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
