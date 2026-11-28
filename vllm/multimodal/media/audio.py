@@ -188,21 +188,32 @@ def load_audio_pyav(
             abs_tol=1e-6,
         )
         resampler = (
-            av.AudioResampler(format="fltp", layout="mono", rate=sr)
+            av.AudioResampler(
+                format="fltp",
+                layout="mono" if mono else None,
+                rate=sr,
+            )
             if needs_resampling
             else None
         )
+        format_converter: av.AudioResampler | None = None
         try:
             for frame in container.decode(stream):
                 if needs_resampling:
                     assert resampler is not None
-                    for out_frame in resampler.resample(frame):
-                        arr = out_frame.to_ndarray()
-                        total_samples += arr.shape[-1]
-                        total_decode_bytes += arr.nbytes
-                        chunks.append(arr)
+                    out_frames = resampler.resample(frame)
+                elif frame.format.name != "fltp":
+                    if format_converter is None:
+                        # Convert integer PCM and packed layouts (e.g. s16, u8, s32,
+                        # packed flt) to normalized planar float32 (channels, samples)
+                        # without changing sample rate or channel layout.
+                        format_converter = av.AudioResampler(format="fltp")
+                    out_frames = format_converter.resample(frame)
                 else:
-                    arr = frame.to_ndarray()
+                    out_frames = [frame]
+
+                for out_frame in out_frames:
+                    arr = out_frame.to_ndarray()
                     total_samples += arr.shape[-1]
                     total_decode_bytes += arr.nbytes
                     chunks.append(arr)
