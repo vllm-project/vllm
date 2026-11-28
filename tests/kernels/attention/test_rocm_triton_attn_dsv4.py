@@ -2815,6 +2815,44 @@ def test_paged_mqa_logits_gate_v41_shuffle_vs_c4a_flat() -> None:
     )
 
 
+def test_paged_mqa_logits_gate_c4a_uses_triton_on_gfx1151(monkeypatch) -> None:
+    """gfx1151 C4A decode should stay on the in-tree Triton path."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    sentinel = object()
+    calls = SimpleNamespace(triton=0)
+
+    def fake_triton(*args, **kwargs):
+        calls.triton += 1
+        return sentinel
+
+    monkeypatch.setattr(mod, "_ON_GFX942", False)
+    monkeypatch.setattr(mod, "_ON_GFX950", False)
+    monkeypatch.setattr(mod, "_ON_GFX1151", True)
+    monkeypatch.setattr(mod, "rocm_fp8_paged_mqa_logits_triton", fake_triton)
+
+    q = torch.empty((1, 1, 1, 128), dtype=torch.float32)
+    kv_cache = torch.empty((1, 64, 1, 132), dtype=torch.uint8)
+    weights = torch.empty((1, 1), dtype=torch.float32)
+    context_lens = torch.tensor([64], dtype=torch.int32)
+    block_tables = torch.tensor([[0]], dtype=torch.int32)
+    schedule_metadata = torch.zeros((1, 2), dtype=torch.int32)
+
+    got = mod.rocm_fp8_paged_mqa_logits(
+        q,
+        kv_cache,
+        weights,
+        context_lens,
+        block_tables,
+        schedule_metadata,
+        256,
+        compress_ratio=4,
+    )
+
+    assert calls.triton == 1
+    assert got is sentinel
+
+
 def _combine_topk_swa_indices_torch(
     topk_indices,
     query_start_loc,
