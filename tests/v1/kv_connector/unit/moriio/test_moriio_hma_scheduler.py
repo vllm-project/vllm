@@ -101,6 +101,7 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
+            transfer_group_ids=(0, 1),
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
             hash_block_size=16,
         )
@@ -489,9 +490,12 @@ def test_glm5_next_mtp_read_pairs_every_group(external_tokens):
         assert local == [[], [], []]
 
     output = SchedulerOutput.make_empty()
-    output.new_block_ids_to_zero = [100, 101, 102, 300]
+    # Block 100 in another group is not an attention READ destination.
+    output.new_block_ids_to_zero = [[100], [100, 101, 102], [300]]
     consumer.build_connector_meta(output)
-    expected_zero = [102] if external_tokens else [100, 101, 102, 300]
+    expected_zero = (
+        [[100], [102], []] if external_tokens else [[100], [100, 101, 102], [300]]
+    )
     assert output.new_block_ids_to_zero == expected_zero
 
 
@@ -1197,21 +1201,25 @@ def test_update_state_drops_decode_recompute_tail_block(
     assert sched._req_kv_params["req"]["remote_block_ids"] == remote_blocks
 
     output = SchedulerOutput.make_empty()
-    output.new_block_ids_to_zero = None if zero_ids is None else list(zero_ids)
+    if zero_ids is not None:
+        output.new_block_ids_to_zero = [list(zero_ids)]
+        if has_mamba:
+            output.new_block_ids_to_zero.append([])
     before = asdict(output)
     meta = sched.build_connector_meta(output)
     assert meta.reqs_to_recv["req"].local_block_ids == expected_blocks
     if external_tokens and zero_ids:
-        before["new_block_ids_to_zero"] = [
+        before["new_block_ids_to_zero"][0] = [
             b for b in zero_ids if b not in expected_blocks[0]
         ]
     assert asdict(output) == before
 
     # A later local allocation of the same pages must still be zeroed.
-    output.new_block_ids_to_zero = [100, 101, 102]
+    zero_ids_by_group = [[100, 101, 102], []] if has_mamba else [[100, 101, 102]]
+    output.new_block_ids_to_zero = zero_ids_by_group
     meta = sched.build_connector_meta(output)
     assert not meta.reqs_to_recv
-    assert output.new_block_ids_to_zero == [100, 101, 102]
+    assert output.new_block_ids_to_zero == zero_ids_by_group
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
@@ -1250,7 +1258,7 @@ def test_read_meta_orders_reads_after_stream_work(
     )
     output = SchedulerOutput.make_empty()
     output.has_sync_kv_loads = num_external_tokens > 0
-    output.new_block_ids_to_zero = zero_ids
+    output.new_block_ids_to_zero = None if zero_ids is None else [zero_ids]
     output.kv_cache_block_copies = copies
 
     meta = scheduler.build_connector_meta(output)
@@ -1285,7 +1293,7 @@ def test_hybrid_read_waits_only_when_state_is_copied_into_its_destination(
     output = SchedulerOutput.make_empty()
     output.has_sync_kv_loads = True
     output.num_scheduled_tokens = {"req": num_scheduled_tokens}
-    output.new_block_ids_to_zero = [100, 101, 102]
+    output.new_block_ids_to_zero = [[], [100, 101, 102], []]
 
     meta = scheduler.build_connector_meta(output)
 
@@ -1300,7 +1308,7 @@ def _mixed_precision_read_step(scheduler, local_block_ids):
     )
     step = SchedulerOutput.make_empty()
     step.has_sync_kv_loads = True
-    step.new_block_ids_to_zero = list(local_block_ids)
+    step.new_block_ids_to_zero = [list(local_block_ids)]
     return step, scheduler.build_connector_meta(step)
 
 
@@ -1326,11 +1334,15 @@ def _report_read_result(scheduler, meta, dst_block_ids, read_failed):
 
 @pytest.mark.usefixtures("restore_moriio_role")
 @pytest.mark.parametrize(
-    ("read_failed", "expected_zero_ids"),
-    [(True, [300, 100, 101]), (False, [300])],
+    ("read_failed", "next_zero_ids", "expected_zero_ids"),
+    [
+        (True, [[300]], [[300, 100, 101]]),
+        (True, None, [[100, 101]]),
+        (False, [[300]], [[300]]),
+    ],
 )
 def test_failed_read_destinations_are_zeroed_in_the_next_step(
-    read_failed, expected_zero_ids
+    read_failed, next_zero_ids, expected_zero_ids
 ):
     scheduler = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(block_size=64),
@@ -1338,10 +1350,10 @@ def test_failed_read_destinations_are_zeroed_in_the_next_step(
         _mixed_precision_mla_kv_cache_config(block_size=64),
     )
     read_step, meta = _mixed_precision_read_step(scheduler, [100, 101, 102])
-    assert read_step.new_block_ids_to_zero == [102]
+    assert read_step.new_block_ids_to_zero == [[102]]
     _report_read_result(scheduler, meta, [100, 101], read_failed)
     next_step = SchedulerOutput.make_empty()
-    next_step.new_block_ids_to_zero = [300]
+    next_step.new_block_ids_to_zero = next_zero_ids
 
     scheduler.build_connector_meta(next_step)
 
@@ -1360,7 +1372,7 @@ def test_failed_read_destination_reused_by_a_read_is_not_zeroed():
 
     next_step, next_meta = _mixed_precision_read_step(scheduler, [100, 300, 301])
 
-    assert next_step.new_block_ids_to_zero == [301, 101]
+    assert next_step.new_block_ids_to_zero == [[301, 101]]
     assert next_meta.unzeroed_read_block_ids == {100, 300}
 
 
