@@ -64,6 +64,8 @@ In the response, `usage.prompt_tokens_details` is copied from `generate_response
     --8<-- "vllm/entrypoints/scale_out/token_in_token_out/protocol.py:derender-completion-request"
     ```
 
+In the response, `usage.prompt_tokens_details` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` over the `generate_responses` usages, one per prompt, as on `/v1/chat/completions/batch`; a cache count that any prompt left out makes that total `null`.
+
 Streaming requests set `stream: true` and carry one generate chunk (`generate_chunk`) plus `stream_state` instead of a complete response.
 
 `/v1/chat/completions/derender` with `stream: true`:

@@ -15,7 +15,11 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    ErrorResponse,
+    UsageInfo,
+    sum_prompt_tokens_details,
+)
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
@@ -276,6 +280,12 @@ class ServingDerender(BaseServing):
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
+            prompt_tokens_details=sum_prompt_tokens_details(
+                [
+                    r.usage.prompt_tokens_details if r.usage else None
+                    for r in request.generate_responses
+                ]
+            ),
         )
 
         model_name = request.model or self.models.model_name()

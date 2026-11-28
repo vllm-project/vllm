@@ -2510,7 +2510,8 @@ async def test_streaming_derender_non_object_body_returns_400(client):
 
 @pytest.mark.asyncio
 async def test_streaming_usage_chunk(client):
-    """Usage only final chunk is forwarded with correct token counts."""
+    """Usage only final chunk is forwarded with correct token counts and the
+    generate usage's `prompt_tokens_details`, as on `/v1/completions`."""
     gen_req = await _render_chat(client)
     token_ids: list[int] = gen_req["token_ids"][:6]
     state: dict = {}
@@ -2546,6 +2547,7 @@ async def test_streaming_usage_chunk(client):
                     "prompt_tokens": 10,
                     "completion_tokens": len(token_ids),
                     "total_tokens": 10 + len(token_ids),
+                    "prompt_tokens_details": {"cached_tokens": 4},
                 },
             },
             "stream_state": state,
@@ -2556,6 +2558,7 @@ async def test_streaming_usage_chunk(client):
     d2 = r2.json()
     assert d2["chunk"]["choices"] == []
     assert d2["chunk"]["usage"]["prompt_tokens"] == 10
+    assert d2["chunk"]["usage"]["prompt_tokens_details"]["cached_tokens"] == 4
     assert d2["chunk"]["usage"]["completion_tokens"] == len(token_ids)
 
 

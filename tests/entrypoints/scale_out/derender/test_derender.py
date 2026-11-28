@@ -669,6 +669,8 @@ async def test_derender_completion_usage_aggregation(client):
     assert usage["prompt_tokens"] == 15
     assert usage["completion_tokens"] == len(ids1) + len(ids2)
     assert usage["total_tokens"] == 15 + len(ids1) + len(ids2)
+    # No generate usage carries details, so the null field is omitted.
+    assert "prompt_tokens_details" not in usage
 
 
 @pytest.mark.asyncio
@@ -793,6 +795,97 @@ async def test_derender_completion_usage_prompt_tokens_beats_generate_usage(
     usage = response.json()["usage"]
     assert usage["prompt_tokens"] == sum(prompt_tokens)
     assert usage["total_tokens"] == sum(prompt_tokens) + len(ids1) + len(ids2)
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_usage_prompt_tokens_details(client):
+    """For one prompt, `prompt_tokens_details` reports the generate usage's
+    counts, as on `/v1/completions`."""
+    gr = await _render_completion(client, "Hello")
+    ids = gr["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    ids,
+                    gr["request_id"],
+                    usage={
+                        "prompt_tokens": 5,
+                        "completion_tokens": len(ids),
+                        "total_tokens": 5 + len(ids),
+                        "prompt_tokens_details": {"cached_tokens": 4},
+                    },
+                ),
+            ],
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("per_prompt", "expected"),
+    [
+        (
+            [
+                {
+                    "cached_tokens": 4,
+                    "created_cache_tokens": 1,
+                    "multimodal_tokens": {"image": 2},
+                },
+                {
+                    "cached_tokens": 2,
+                    "created_cache_tokens": 3,
+                    "multimodal_tokens": {"image": 3, "audio": 1},
+                },
+            ],
+            {
+                "cached_tokens": 6,
+                "created_cache_tokens": 4,
+                "multimodal_tokens": {"image": 5, "audio": 1},
+            },
+        ),
+        (
+            [{"cached_tokens": 4, "created_cache_tokens": 1}, {"cached_tokens": 2}],
+            {
+                "cached_tokens": 6,
+                "created_cache_tokens": None,
+                "multimodal_tokens": None,
+            },
+        ),
+        ([{"cached_tokens": 4}, None], None),
+    ],
+)
+async def test_derender_completion_usage_prompt_tokens_details_summed(
+    client, per_prompt, expected
+):
+    """With several prompts, `prompt_tokens_details` is summed as on
+    `/v1/chat/completions/batch`: a cache count any prompt left out is null."""
+    responses = []
+    for prompt, details in zip(["Hello", "World"], per_prompt):
+        gr = await _render_completion(client, prompt)
+        ids = gr["token_ids"][:3]
+        usage = {
+            "prompt_tokens": 5,
+            "completion_tokens": len(ids),
+            "total_tokens": 5 + len(ids),
+            "prompt_tokens_details": details,
+        }
+        responses.append(
+            _make_completion_generate_response(ids, gr["request_id"], usage=usage)
+        )
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={"model": MODEL_NAME, "generate_responses": responses},
+    )
+    assert response.status_code == 200
+    assert response.json()["usage"].get("prompt_tokens_details") == expected
 
 
 @pytest.mark.asyncio
