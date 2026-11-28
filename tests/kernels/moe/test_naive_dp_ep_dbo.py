@@ -11,6 +11,8 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
     MoEPrepareAndFinalizeNaiveDPEPModular,
     make_moe_prepare_and_finalize_naive_dp_ep,
 )
+from vllm.v1.worker import ubatching
+from vllm.v1.worker.ubatching import dbo_comm_region
 
 
 class _RegionProbe(MoEPrepareAndFinalizeNaiveDPEPModular):
@@ -19,7 +21,7 @@ class _RegionProbe(MoEPrepareAndFinalizeNaiveDPEPModular):
         self.body_ran = False
 
     def run_comm(self) -> None:
-        with self._comm_region():
+        with dbo_comm_region():
             self.body_ran = True
 
 
@@ -29,16 +31,16 @@ def dbo_mocks():
     switch_back = MagicMock()
     with (
         patch.object(
-            naive_dp_ep, "dbo_yield_and_switch_from_compute_to_comm", yield_switch
+            ubatching, "dbo_yield_and_switch_from_compute_to_comm", yield_switch
         ),
-        patch.object(naive_dp_ep, "dbo_switch_to_compute_sync", switch_back),
+        patch.object(ubatching, "dbo_switch_to_compute_sync", switch_back),
     ):
         yield {"yield_switch": yield_switch, "switch_back": switch_back}
 
 
 def _dbo_state(dbo_active: bool, capturing: bool):
     return (
-        patch.object(naive_dp_ep, "dbo_enabled", return_value=dbo_active),
+        patch.object(ubatching, "dbo_enabled", return_value=dbo_active),
         patch.object(torch.cuda, "is_current_stream_capturing", return_value=capturing),
     )
 
@@ -74,13 +76,12 @@ def test_comm_region_skipped_during_graph_capture(dbo_mocks):
 
 
 def test_comm_region_restores_compute_stream_on_error(dbo_mocks):
-    probe = _RegionProbe()
     dbo, capturing = _dbo_state(dbo_active=True, capturing=False)
     with (
         dbo,
         capturing,
         pytest.raises(RuntimeError, match="collective failed"),
-        probe._comm_region(),
+        dbo_comm_region(),
     ):
         raise RuntimeError("collective failed")
     dbo_mocks["yield_switch"].assert_called_once_with()
