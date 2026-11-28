@@ -1381,7 +1381,10 @@ class Glm5NextForConditionalGeneration(
     is_hybrid: ClassVar[Literal[True]] = True
     supports_mm_device_do_normalize = False
 
-    # Fused projections for LoRA
+    # Fused projections for LoRA, and for per-layer quant-scheme resolution:
+    # unmapped, a fused module is looked up under its own name, which the
+    # checkpoints do not use. The text model and the MTP draft define no
+    # mapping and resolve with this one.
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvbfg_a": [

@@ -176,6 +176,9 @@ steps:
       pytest -v -s
       models/quantization
       quantization/test_fp8_dequant.py
+      quantization/test_quark.py::test_glm5next_gate_up_proj_mapping_is_genuine_fusion
+      quantization/test_quark.py::test_glm5next_genuine_fusion_resolves_gate_up_to_block_fp8
+      quantization/test_quark.py::test_glm5next_fused_qkv_a_proj_resolves_to_block_fp8
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Quantized Models"

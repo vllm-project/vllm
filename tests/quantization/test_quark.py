@@ -2592,8 +2592,8 @@ _GLM5_BLOCK_FP8_INPUT = {
 _GLM5_GATE_UP = "language_model.model.layers.0.mlp.gate_up_proj"
 
 
-def _glm5_mixed_precision_config() -> QuarkConfig:
-    """Global MXFP4 with the dense-MLP gate/up shards marked block-FP8."""
+def _glm5_mixed_precision_config(*block_fp8_layers: str) -> QuarkConfig:
+    """Global MXFP4 with the given layer-name patterns marked block-FP8."""
     fp8 = {"weight": _GLM5_BLOCK_FP8_WEIGHT, "input_tensors": _GLM5_BLOCK_FP8_INPUT}
     return QuarkConfig(
         {
@@ -2602,7 +2602,7 @@ def _glm5_mixed_precision_config() -> QuarkConfig:
                 "input_tensors": None,
             },
             "layer_type_quant_config": {},
-            "layer_quant_config": {"*mlp.gate_proj": fp8, "*mlp.up_proj": fp8},
+            "layer_quant_config": dict.fromkeys(block_fp8_layers, fp8),
             "exclude": [],
         }
     )
@@ -2618,10 +2618,42 @@ def test_glm5next_gate_up_proj_mapping_is_genuine_fusion():
 def test_glm5next_genuine_fusion_resolves_gate_up_to_block_fp8():
     # The fused module must expand to its real shard names so each resolves to
     # the per-layer block-FP8 entry (rather than the global MXFP4 scheme).
-    config = _glm5_mixed_precision_config()
+    config = _glm5_mixed_precision_config("*mlp.gate_proj", "*mlp.up_proj")
     config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     _, _, scheme_cls = config.get_scheme_cls(LinearBase, _GLM5_GATE_UP)
     assert scheme_cls is QuarkW8A8Fp8PerBlock
+
+
+def test_glm5next_fused_qkv_a_proj_resolves_to_block_fp8():
+    # The MLA q_a/kv_a shards are block-FP8 under global MXFP4, named as in the
+    # checkpoint (layer 11 is an MLA layer, layer 45 the MTP layer). The text
+    # model and the MTP draft build with the quant config the multimodal
+    # wrapper configured, so their fused projection must resolve to the shards.
+    from vllm.model_executor.model_loader.utils import configure_quant_config
+    from vllm.models.glm5next import Glm5NextMTP
+    from vllm.models.glm5next.common.model import (
+        Glm5NextForCausalLM,
+        Glm5NextForConditionalGeneration,
+    )
+
+    config = _glm5_mixed_precision_config(
+        *(
+            f"model.language_model.layers.{layer}.self_attn.{shard}"
+            for layer in (11, 45)
+            for shard in ("q_a_proj", "kv_a_proj_with_mqa")
+        )
+    )
+    configure_quant_config(config, Glm5NextForConditionalGeneration)
+    # Serving then builds the text model and, later, the MTP draft; each first
+    # configures the shared quant config with its own class.
+    for model_class, layer in (
+        (Glm5NextForCausalLM, "language_model.model.layers.11"),
+        (Glm5NextMTP, "model.layers.45"),
+    ):
+        configure_quant_config(config, model_class)
+        fused = f"{layer}.self_attn.fused_qkv_a_proj"
+        _, _, scheme_cls = config.get_scheme_cls(LinearBase, fused)
+        assert scheme_cls is QuarkW8A8Fp8PerBlock, fused
 
 
 _REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
