@@ -327,3 +327,45 @@ def test_eagle3_acceptance_length(
             print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
             if expected_per_pos:
                 print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
+
+
+@large_gpu_mark(min_gb=30)
+@pytest.mark.slow_test
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is only supported on CUDA-alike platforms.",
+)
+def test_eagle3_draft_context_window_keeps_long_context_acceptance():
+    """This drafter's acceptance length falls to about 1.05 at 14k tokens of
+    context, and a 2048-token draft_context_window keeps it above 1.5."""
+    from datasets import load_dataset
+
+    with VllmRunner(
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        speculative_config={
+            "method": "eagle3",
+            "model": "nebius/EAGLE3-Llama-3.1-8B-Instruct",
+            "num_speculative_tokens": DEFAULT_NUM_SPEC_TOKENS,
+            "draft_context_window": 2048,
+        },
+        gpu_memory_utilization=0.7,
+        disable_log_stats=False,
+        max_model_len=20480,
+        max_num_seqs=1,
+    ) as vllm_runner:
+        text = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+        ids = vllm_runner.llm.get_tokenizer().encode(
+            "".join(text["text"]), add_special_tokens=False
+        )
+        vllm_runner.llm.generate(
+            [
+                TokensPrompt(prompt_token_ids=ids[i * 14000 : (i + 1) * 14000])
+                for i in range(4)
+            ],
+            sampling_params=SamplingParams(temperature=0, max_tokens=128),
+        )
+        metrics = vllm_runner.llm.get_metrics()
+        results = extract_acceptance_metrics(metrics, DEFAULT_NUM_SPEC_TOKENS)
+
+    print(f"\nacceptance_length={results['acceptance_length']:.3f}")
+    assert results["acceptance_length"] >= 1.5, results
