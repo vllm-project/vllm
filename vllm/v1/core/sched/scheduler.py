@@ -3844,6 +3844,8 @@ class Scheduler(SchedulerInterface):
             request.num_computed_tokens -= num_replay_tokens
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
+            if not load_failed and request.prefill_stats is not None:
+                request.prefill_stats.record_full_external_hit_recompute()
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:

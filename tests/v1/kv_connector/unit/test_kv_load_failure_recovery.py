@@ -70,6 +70,68 @@ def test_failed_receive_completion_honors_failure_policy(policy):
 
 
 @pytest.mark.parametrize(
+    "local_blocks,remote_blocks,full_hit",
+    [(0, 4, True), (1, 3, True), (1, 2, False)],
+    ids=["remote-full", "mixed-full", "partial"],
+)
+def test_async_kv_hit_prefill_stats(scheduler, local_blocks, remote_blocks, full_hit):
+    """A full async hit still recomputes one token, but creates no new cache KV."""
+    block_size = scheduler.block_size
+    local_tokens = local_blocks * block_size
+    remote_tokens = remote_blocks * block_size
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    if local_tokens:
+        warmup = create_request(
+            num_tokens=local_tokens,
+            common_prefix_len=local_tokens,
+            block_size=block_size,
+            max_tokens=1,
+        )
+        scheduler.add_request(warmup)
+        scheduler.update_from_output(
+            scheduler.schedule(), create_model_runner_output([warmup])
+        )
+
+    request = create_request(
+        num_tokens=4 * block_size, common_prefix_len=local_tokens, block_size=block_size
+    )
+    scheduler.connector.get_num_new_matched_tokens.return_value = (remote_tokens, True)
+    scheduler.add_request(request)
+    load = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    completion = scheduler.update_from_output(
+        load, create_model_runner_output([], finished_recving={request.request_id})
+    )
+    admission = completion[0].scheduler_stats
+    assert admission is not None
+    assert admission.prefix_cache_stats.hits == local_tokens
+    assert admission.connector_prefix_cache_stats is not None
+    assert admission.connector_prefix_cache_stats.hits == remote_tokens
+    assert sum(admission.connector_prefix_cache_stats.hits_by_source.values()) == (
+        remote_tokens
+    )
+
+    prefill = scheduler.schedule()
+    expected_computed = 1 if full_hit else block_size
+    assert prefill.num_scheduled_tokens[request.request_id] == expected_computed
+    output = scheduler.update_from_output(
+        prefill, create_model_runner_output([request])
+    )
+    stats = output[0].outputs[0].prefill_stats
+    assert stats is not None
+    assert stats.num_computed_tokens == expected_computed
+    assert stats.num_cached_tokens == request.num_prompt_tokens - expected_computed
+    assert stats.num_local_cached_tokens == local_tokens
+    assert stats.num_external_cached_tokens == remote_tokens - int(full_hit)
+    assert stats.num_cache_creation_tokens == (0 if full_hit else block_size)
+
+
+@pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [
         (100, 99, {0, 98}),
