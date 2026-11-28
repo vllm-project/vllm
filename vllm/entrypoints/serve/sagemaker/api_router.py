@@ -9,7 +9,7 @@ from http import HTTPStatus
 from typing import Any
 
 import pydantic
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
@@ -98,8 +98,6 @@ def _attach_router(
     app."""
     import model_hosting_container_standards.sagemaker as sagemaker_standards
 
-    router = APIRouter()
-
     # NOTE: Construct the TypeAdapters only once
     INVOCATION_TYPES = get_generate_invocation_types(
         supported_tasks, model_config
@@ -114,14 +112,15 @@ def _attach_router(
         for request_type, (get_handler, endpoint) in INVOCATION_TYPES
     ]
 
-    @router.post("/ping", response_class=Response)
-    @router.get("/ping", response_class=Response)
+    # SageMaker bootstrap replaces handlers by inspecting the app's top-level routes.
+    @app.post("/ping", response_class=Response)
+    @app.get("/ping", response_class=Response)
     @sagemaker_standards.register_ping_handler
     async def ping(raw_request: Request) -> Response:
         """Ping check. Endpoint required for SageMaker."""
         return await health(raw_request)
 
-    @router.post(
+    @app.post(
         "/invocations",
         dependencies=[Depends(validate_json_request)],
         responses={
@@ -188,8 +187,6 @@ def _attach_router(
         msg = f"Cannot find suitable handler for request. Expected one of: {type_names}"
         res = base(raw_request).create_error_response(message=msg)
         return JSONResponse(content=res.model_dump(), status_code=res.error.code)
-
-    app.include_router(router)
 
 
 def sagemaker_standards_bootstrap(app: FastAPI) -> FastAPI:
