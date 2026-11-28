@@ -7,6 +7,7 @@ import time
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -80,6 +81,51 @@ def local_media_server() -> Generator[str, None, None]:
         server.shutdown()
         thread.join()
         server.server_close()
+
+
+def test_download_file_writes_before_response_finishes(
+    monkeypatch: pytest.MonkeyPatch, local_media_server: str, tmp_path: Path
+) -> None:
+    """Downloading an asset must not buffer its entire body before writing."""
+    first_chunk_sent = threading.Event()
+    finish_response = threading.Event()
+
+    def serve_response(handler: _MediaHandler) -> None:
+        handler.send_response(200)
+        handler.send_header("Content-Length", str(len(_SMALL_BODY)))
+        handler.end_headers()
+        handler.wfile.write(_SMALL_BODY[:_CHUNK_SIZE])
+        handler.wfile.flush()
+        first_chunk_sent.set()
+        if finish_response.wait(timeout=10):
+            handler.wfile.write(_SMALL_BODY[_CHUNK_SIZE:])
+
+    monkeypatch.setattr(_MediaHandler, "do_GET", serve_response)
+    connection = HTTPConnection()
+    target = tmp_path / "asset.bin"
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            download = executor.submit(
+                connection.download_file,
+                f"{local_media_server}/asset",
+                target,
+                chunk_size=_CHUNK_SIZE,
+                timeout=10,
+            )
+            try:
+                assert first_chunk_sent.wait(timeout=5)
+                deadline = time.monotonic() + 5
+                while not (target.exists() and target.stat().st_size >= _CHUNK_SIZE):
+                    assert time.monotonic() < deadline, (
+                        "The first chunk was not written before the response finished"
+                    )
+                    finish_response.wait(timeout=0.01)
+            finally:
+                finish_response.set()
+            assert download.result(timeout=5) == target
+        assert target.read_bytes() == _SMALL_BODY
+    finally:
+        connection.get_sync_client().close()
 
 
 class _SyncResponse:
@@ -380,11 +426,14 @@ async def test_get_bytes_allows_body_within_limit(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("always_incomplete", [False, True], ids=["recover", "exhaust"])
+@pytest.mark.parametrize("to_file", [False, True], ids=["bytes", "file"])
 async def test_get_bytes_retries_incomplete_response(
     monkeypatch: pytest.MonkeyPatch,
     local_media_server: str,
     use_async: bool,
     always_incomplete: bool,
+    to_file: bool,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(envs, "VLLM_MEDIA_FETCH_MAX_RETRIES", 2)
     monkeypatch.setattr("vllm.connections.time.sleep", lambda _: None)
@@ -407,8 +456,15 @@ async def test_get_bytes_retries_incomplete_response(
     monkeypatch.setattr(_MediaHandler, "do_GET", serve_response)
     connection = HTTPConnection()
     url = f"{local_media_server}/small"
+    target = tmp_path / "asset.bin"
 
     async def download() -> bytes:
+        if to_file:
+            if use_async:
+                await connection.async_download_file(url, target, timeout=2)
+            else:
+                connection.download_file(url, target, timeout=2)
+            return target.read_bytes()
         if use_async:
             return await connection.async_get_bytes(url, timeout=2)
         return connection.get_bytes(url, timeout=2, deadline=time.monotonic() + 10)
@@ -422,6 +478,8 @@ async def test_get_bytes_retries_incomplete_response(
             )
             with pytest.raises(error_type):
                 await download()
+            if to_file:
+                assert not target.exists()
         else:
             assert await download() == _SMALL_BODY
         assert attempts == 2

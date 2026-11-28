@@ -639,7 +639,7 @@ class HTTPConnection:
         chunk_size: int = 128,
     ) -> Path:
         try:
-            with self.get_response(url, timeout=timeout) as r:
+            with self.get_response(url, stream=True, timeout=timeout) as r:
                 r.raise_for_status()
 
                 with save_path.open("wb") as f:
