@@ -196,11 +196,9 @@ def test_head_size_falls_back_when_head_dim_is_zero():
     ("kv_lora_rank", "qk_rope_head_dim", "is_mla", "head_size"),
     [(512, 64, True, 576), (256, 32, False, 64)],
 )
-def test_transformers_backend_mla_from_kv_lora_rank(
-    kv_lora_rank, qk_rope_head_dim, is_mla, head_size
-):
-    """On the Transformers backend, any model type with a `kv_lora_rank` uses MLA,
-    unless no MLA kernel supports its latent size (e.g. MiniCPM3's 288)."""
+def test_mla_from_kv_lora_rank(kv_lora_rank, qk_rope_head_dim, is_mla, head_size):
+    """Any model type with a `kv_lora_rank` uses MLA, unless no MLA kernel supports
+    its latent size (e.g. MiniCPM3's 288)."""
     hf_config = PreTrainedConfig(
         model_type="unlisted_mla",
         head_dim=64,
@@ -208,7 +206,6 @@ def test_transformers_backend_mla_from_kv_lora_rank(
         qk_rope_head_dim=qk_rope_head_dim,
     )
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
-    convertor.transformers_backend = True
     assert convertor.is_deepseek_mla() == is_mla
     assert convertor.get_head_size() == head_size
 

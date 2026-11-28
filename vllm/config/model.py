@@ -787,11 +787,6 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
-        self._transformers_backend = self.using_transformers_backend()
-        if self._transformers_backend:
-            # MLA detection depends on the model implementation
-            self.model_arch_config = self.get_model_arch_config()
-
         # Backend pooling classes wrap encoders and decoders, so default per model
         if (
             model_info.is_pooling_model
@@ -1111,7 +1106,6 @@ class ModelConfig:
             self.hf_text_config,
             revision=getattr(self, "revision", None),
         )
-        convertor.transformers_backend = getattr(self, "_transformers_backend", False)
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
