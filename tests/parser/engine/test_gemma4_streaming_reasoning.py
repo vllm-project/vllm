@@ -265,6 +265,53 @@ class TestGemma4StreamingReasoningThenToolCall:
         )
 
 
+# ── Tool call end and a partial thought prefix in one step ───────────
+
+TOOL_END_THEN_THOUGHT_SEQUENCE: list[tuple[int, str]] = [
+    (TOOL_CALL_START_ID, "<|tool_call>"),
+    (8000, "call"),
+    (8001, ":"),
+    (8002, "save_note"),
+    (8003, "{"),
+    (8004, "text"),
+    (8005, ":"),
+    (QUOTED_ID, '<|"|>'),
+    (8006, "Hello"),
+    (8007, " world."),
+    (QUOTED_ID, '<|"|>'),
+    (8008, "}"),
+    (TOOL_CALL_END_ID, "<tool_call|>"),
+    (CHANNEL_START_ID, "<|channel>"),
+    (3000, "thought"),
+    (3001, "\n"),
+    (CHANNEL_END_ID, "<channel|>"),
+    (8009, "\n"),
+]
+
+
+class TestGemma4ToolEndBesidePartialThoughtPrefix:
+    """A step holding the call's end and ``<|channel>thought`` without the
+    ``\\n`` must keep the argument tail flushed at the end of the call."""
+
+    def test_tool_arguments_are_complete(self, request_obj):
+        tokenizer = _make_tokenizer(TOOL_END_THEN_THOUGHT_SEQUENCE)
+        parser = Gemma4Parser(tokenizer)
+
+        # Batches of 5 put the closing quote, ``}``, ``<tool_call|>``,
+        # ``<|channel>`` and ``thought`` in one step.
+        results = _stream_tokens_batched(
+            parser, tokenizer, request_obj, batch_size=5, prompt_token_ids=[]
+        )
+
+        _, _, tool_calls = _collect_fields(results)
+        args_text = "".join(
+            tc.function.arguments
+            for tc in tool_calls
+            if tc.function and tc.function.arguments
+        )
+        assert json.loads(args_text) == {"text": "Hello world."}
+
+
 # ── Prompt ends inside an open <|channel>thought\n block ─────────────
 
 _OPEN_REASONING_GEN_SEQUENCE: list[tuple[int, str]] = [
