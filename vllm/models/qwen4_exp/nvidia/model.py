@@ -1110,6 +1110,8 @@ class Qwen4ExpForConditionalGeneration(
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Reset the previous batch's scratch outside CUDA graph replay.
+        self._clear_deepstack_input_embeds()
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
@@ -1163,7 +1165,7 @@ class Qwen4ExpForConditionalGeneration(
         else:
             deepstack_input_embeds = None
 
-        hidden_states = self.language_model.model(
+        return self.language_model.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
@@ -1172,9 +1174,6 @@ class Qwen4ExpForConditionalGeneration(
             ngram_context=kwargs.get("ngram_context"),
             deepstack_input_embeds=deepstack_input_embeds,
         )
-        if inputs_embeds is not None and get_pp_group().is_first_rank:
-            self._clear_deepstack_input_embeds(inputs_embeds.size(0))
-        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         mapper = self.hf_to_vllm_mapper | WeightsMapper(

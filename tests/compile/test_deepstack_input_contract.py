@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
+
+import pytest
 import torch
 from torch import nn
 
@@ -11,11 +14,18 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import (
+    create_forward_context,
+    override_forward_context,
+    set_forward_context,
+)
 from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLForConditionalGeneration,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import current_stream
+from vllm.v1.worker.ubatching import make_ubatch_contexts
 
 
 @support_torch_compile(
@@ -69,3 +79,56 @@ def test_qwen3_vl_deepstack_payload_after_empty_compile(monkeypatch):
     x, first, second = _run_contract(deepstack_buffer)
     torch.testing.assert_close(first, x)
     torch.testing.assert_close(second, x + 7)
+
+
+@torch.inference_mode()
+def _check_deepstack_microbatch_rows(model: nn.Module) -> None:
+    assert isinstance(model, Qwen3VLForConditionalGeneration)
+    assert model.deepstack_num_level == 1
+    parameter = next(model.parameters())
+    rows = torch.arange(1, 5, device=parameter.device, dtype=parameter.dtype)
+    payload = rows.view(1, 4, 1).expand(1, 4, model.config.text_config.hidden_size)
+    model._set_deepstack_input_embeds(payload)
+
+    config = VllmConfig()
+    stream = current_stream()
+    contexts = make_ubatch_contexts(
+        num_micro_batches=2,
+        compute_stream=stream,
+        comm_stream=stream,
+        forward_contexts=[create_forward_context(None, config) for _ in range(2)],
+        ready_barrier=threading.Barrier(1, timeout=5),
+        token_offsets=[0, 2],
+    )
+    with override_forward_context(None):
+        contexts[0].cpu_wait_event.set()
+        for context, expected in zip(contexts, payload[0].split(2), strict=True):
+            assert context.cpu_wait_event.is_set()
+            with context:
+                scratch = model._get_deepstack_input_embeds(num_tokens=2)
+                assert scratch is not None
+                torch.testing.assert_close(
+                    scratch["deepstack_input_embeds_0"], expected, atol=0, rtol=0
+                )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Microbatching needs CUDA or ROCm"
+)
+@pytest.mark.usefixtures("enable_pickle")
+def test_qwen3_vl_deepstack_reads_microbatch_rows(vllm_runner):
+    with vllm_runner(
+        "Qwen/Qwen3-VL-2B-Instruct",
+        dtype="bfloat16",
+        enforce_eager=True,
+        load_format="dummy",
+        hf_overrides={
+            "text_config": {"num_hidden_layers": 2},
+            "vision_config": {"depth": 1, "deepstack_visual_indexes": [0]},
+        },
+        max_model_len=1024,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+        skip_mm_profiling=True,
+    ) as model:
+        model.apply_model(_check_deepstack_microbatch_rows)
