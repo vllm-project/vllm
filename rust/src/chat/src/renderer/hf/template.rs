@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::error::Error as _;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::fs;
 use std::iter;
 use std::path::Path;
@@ -76,7 +77,11 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.add_filter("count", length);
     env.add_function("__hf_generation", render_generation);
     env.add_function("strftime_now", |format: String| {
-        chrono::Local::now().format(&format).to_string()
+        let mut output = String::new();
+        write!(&mut output, "{}", chrono::Local::now().format(&format)).map_err(|_| {
+            MinijinjaError::new(ErrorKind::InvalidOperation, "invalid strftime format")
+        })?;
+        Ok::<_, MinijinjaError>(output)
     });
     env.add_function("raise_exception", raise_exception);
 
@@ -351,6 +356,23 @@ mod tests {
             date.len() == 10 && is_digit_at(0..4) && is_digit_at(5..7) && is_digit_at(8..10),
             "expected %Y-%m-%d date, got: {date}"
         );
+    }
+
+    #[test]
+    fn test_strftime_now_rejects_invalid_format() {
+        for format in ["%Q", "%"] {
+            let template = compile(
+                format!("{{{{ strftime_now('{format}') }}}}"),
+                ChatTemplateContentFormatOption::Auto,
+            )
+            .unwrap();
+            let error = template.apply(TemplateContext::default()).unwrap_err();
+            let TemplateError::Jinja(error) = error else {
+                panic!("expected a Jinja error");
+            };
+            assert_eq!(error.kind(), ErrorKind::InvalidOperation);
+            assert!(error.to_string().contains("invalid strftime format"));
+        }
     }
 
     #[test]

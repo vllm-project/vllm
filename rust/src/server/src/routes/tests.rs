@@ -3194,6 +3194,70 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn render_chat_rejects_invalid_strftime_format() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+    fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+    let files = vllm_text::backend::hf::ResolvedModelFiles::new(dir.path().to_str().unwrap(), None)
+        .await
+        .unwrap();
+    let backend = Arc::new(
+        vllm_chat::HfChatBackend::from_resolved_model_files(
+            files,
+            "format-test".into(),
+            vllm_chat::LoadModelBackendsOptions {
+                renderer: vllm_chat::RendererSelection::Hf,
+                language_model_only: true,
+                chat_template: Some("{{ messages[0].content }}".into()),
+                trust_request_chat_template: true,
+                ..Default::default()
+            },
+            Arc::new(fake_chat_tokenizer()),
+        )
+        .unwrap(),
+    );
+    let mut app = build_render_router(Arc::new(RenderState {
+        model: "format-test".into(),
+        served_model_names: ServedModelNames::new(vec!["format-test".into()]),
+        max_model_len: Some(4096),
+        text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
+        chat: ChatRequestProcessor::new(backend, None, None),
+        lora_modules: Vec::new(),
+    }));
+
+    for format in ["%Q", "%"] {
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "format-test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "chat_template": format!("{{{{ strftime_now('{format}') }}}}"),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.to_string().contains("invalid strftime format"),
+            "{body}"
+        );
+    }
+
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/chat/completions/render",
+        json!({
+            "model": "format-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template": "{{ messages[0].content }}",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
     let mut render_app = test_render_app();
     let render_response = render_app
