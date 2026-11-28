@@ -13,6 +13,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
 @triton.jit(do_not_specialize_on_alignment=["indices_ptr"])
@@ -26,6 +27,7 @@ def _scatter_states_kernel(
     row_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
+    NULL_BLOCK_ID: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
     batch_idx = tl.program_id(1)
@@ -37,6 +39,10 @@ def _scatter_states_kernel(
         tl.extra.cuda.gdc_launch_dependents()
 
     state_idx = tl.load(indices_ptr + batch_idx * stride_indices).to(tl.int64)
+    # Padded and dummy rows point at the null block, which every KV cache group
+    # shares: sliding-window attention reads it under mask in place of evicted
+    # blocks, so it must not receive state.
+    mask = mask & (state_idx != NULL_BLOCK_ID)
     values = tl.load(src_ptr + batch_idx * stride_src_batch + offsets, mask=mask)
     tl.store(state_ptr + state_idx * stride_state_batch + offsets, values, mask=mask)
 
@@ -78,8 +84,9 @@ def scatter_states(
     """Scatter `src` rows into `state` at `indices` (in place).
 
     Equivalent to `state[indices] = src` but non-atomic and bandwidth-bound,
-    since mamba cache slots are unique per sequence. `gather_initial_states`
-    is the read-side counterpart.
+    since mamba cache slots are unique per sequence. Rows indexed
+    `NULL_BLOCK_ID` (padded or dummy requests) are skipped, leaving the null
+    block untouched. `gather_initial_states` is the read-side counterpart.
     """
     assert state.ndim >= 2
     assert state.is_cuda or state.is_xpu
@@ -103,4 +110,5 @@ def scatter_states(
         BLOCK_SIZE=block_size,
         num_warps=8,
         launch_pdl=current_platform.is_arch_support_pdl(),
+        NULL_BLOCK_ID=NULL_BLOCK_ID,
     )

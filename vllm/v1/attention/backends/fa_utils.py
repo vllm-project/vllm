@@ -6,8 +6,13 @@ from typing import Any
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
 
 logger = init_logger(__name__)
+
+# Equal Q/K/V head sizes that FA4 runs natively in FP8 on SM90. SM90 FA4 also
+# reads an FP8 KV cache with head size 512, with a BF16/FP16 query.
+FA4_SM90_FP8_HEAD_SIZES = (64, 96, 128, 192, 256)
 
 # Track whether upstream flash-attn is available on ROCm.
 # Set during module initialization and never modified afterwards.
@@ -72,6 +77,8 @@ def get_flash_attn_version(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
+    requires_softcap: bool = False,
+    fp8_kv_cache: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -151,6 +158,18 @@ def get_flash_attn_version(
                 and vllm_config.model_config.is_diffusion
             ):
                 upgrade_reason = "Per-sequence causal (dynamic_causal) requires FA4"
+            elif (
+                fp8_kv_cache
+                and (
+                    vllm_config is None
+                    or vllm_config.attention_config.flash_attn_version is None
+                )
+                and head_size in FA4_SM90_FP8_HEAD_SIZES
+                and head_size_v in (None, head_size)
+                and not requires_softcap
+                and not envs.VLLM_BATCH_INVARIANT
+            ):
+                upgrade_reason = "FA4 runs FP8 KV cache natively on SM90"
             if upgrade_reason:
                 logger.info_once(
                     "%s: upgrading FlashAttention 3 -> 4",
@@ -227,10 +246,13 @@ def flash_attn_supports_kv_cache_dtype(
         head_size=head_size,
         head_size_v=head_size_v,
         has_sinks=has_sinks,
+        fp8_kv_cache=get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.FP8_PER_TENSOR,
     )
     is_sm90 = current_platform.is_device_capability_family(90)
     sm90_fp8_kv_supported = fa_version == 3 or (
-        fa_version == 4 and head_size in (None, 512) and head_size_v in (None, 512)
+        fa_version == 4
+        and head_size in (None, *FA4_SM90_FP8_HEAD_SIZES, 512)
+        and head_size_v in (None, head_size)
     )
     return (sm90_fp8_kv_supported and is_sm90) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)
