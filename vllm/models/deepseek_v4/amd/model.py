@@ -192,6 +192,27 @@ class DeepseekV4MLP(nn.Module):
         # after the weights are processed.
         self._down_takes_mxfp8: bool | None = None
 
+        self._swiglu_limit = 0.0 if swiglu_limit is None else float(swiglu_limit)
+        self._reduce_results = reduce_results
+        # Set once at weight prep by prepare_fused_quant_down().
+        self._fused_quant_down = False
+
+    def prepare_fused_quant_down(self) -> bool:
+        """Decide once whether forward fuses clamp + SiLU-mul + FP8 quant
+        ahead of down_proj: gfx1250 only, where down_proj runs the Gluon
+        preshuffled block-scale GEMM that reads the fused kernel's M-major
+        scales, and only without the all-reduce that GEMM skips."""
+        fp8_linear = getattr(
+            getattr(self.down_proj, "quant_method", None), "fp8_linear", None
+        )
+        self._fused_quant_down = bool(
+            on_gfx1250()
+            and not self._reduce_results
+            and fp8_linear is not None
+            and getattr(fp8_linear, "use_bpreshuffle", False)
+        )
+        return self._fused_quant_down
+
     def prepare_gateup_preshuffle(self) -> None:
         # B-preshuffle the gate_up_proj weight in place (single weight).
         if not self._gateup:
@@ -244,6 +265,10 @@ class DeepseekV4MLP(nn.Module):
             # The fused mHC seam may hand over x already quantized to MXFP8.
             qa = mxfp8_input(x)
             gate_up, _ = self.gate_up_proj(x if qa is None else qa)
+        # gfx1250 FP8 block-scale down_proj: fused clamp + SiLU-mul + FP8 quant.
+        fused = self._try_fused_quant_down(gate_up)
+        if fused is not None:
+            return fused
         if self._down_takes_mxfp8 is None:
             self._down_takes_mxfp8 = (
                 self.down_proj.input_is_parallel
@@ -261,6 +286,24 @@ class DeepseekV4MLP(nn.Module):
             x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+    def _try_fused_quant_down(self, gate_up: torch.Tensor) -> torch.Tensor | None:
+        if not self._fused_quant_down:
+            return None
+        if gate_up.dim() != 2 or not gate_up.is_contiguous():
+            return None
+        n_half = gate_up.shape[-1] // 2
+        if n_half < 128 or n_half % 128 != 0:
+            return None
+
+        from vllm.models.deepseek_v4.amd.rocm import (
+            apply_pre_quantized_block_scaled_mm,
+        )
+
+        x_fp8, x_scale = rocm_aiter_ops.fused_clamp_silu_mul_group_fp8_quant(
+            gate_up, self._swiglu_limit
+        )
+        return apply_pre_quantized_block_scaled_mm(self.down_proj, x_fp8, x_scale)
 
 
 def _use_heterogeneous_fhmoe(num_tokens: int) -> bool:
@@ -1675,12 +1718,14 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         finalize_mega_moe_weights(self)
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
         fused_compressor_layers = 0
+        fused_quant_down_layers = 0
         for module in self.modules():
             if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
                 fused_compressor_layers += module.prepare_compressor_gemm_fusion()
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
+                fused_quant_down_layers += module.prepare_fused_quant_down()
         for module in self.modules():
             if isinstance(module, DeepseekV4DecoderLayer) and module.mono is not None:
                 module.mono.prepare(module)
@@ -1688,6 +1733,12 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             logger.info(
                 "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",
                 fused_compressor_layers,
+            )
+        if fused_quant_down_layers:
+            logger.info(
+                "Fused clamp + SiLU-mul + FP8 quant ahead of down_proj in %d "
+                "DeepSeek V4 MLPs",
+                fused_quant_down_layers,
             )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
