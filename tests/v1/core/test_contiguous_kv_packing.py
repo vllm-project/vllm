@@ -135,6 +135,29 @@ def _bind(config, layout: str):
     return allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout[layout], None)
 
 
+def _assert_groups_isolated(views, g1, g2) -> None:
+    """A block is owned by one group at a time: writes to group-owned blocks
+    never disturb the other group's blocks, and layers within a group are
+    disjoint."""
+    assert len({views[name].data_ptr() for name in g1}) == len(g1)
+    for i, name in enumerate(g1):
+        views[name][0].fill_(i + 1)
+        views[name][2].fill_(i + 1)
+    for i, name in enumerate(g2):
+        views[name][1].fill_(100 + i)
+        views[name][3].fill_(100 + i)
+    for i, name in enumerate(g1):
+        assert (views[name][0].to(torch.int32) == i + 1).all()
+        assert (views[name][2].to(torch.int32) == i + 1).all()
+    for i, name in enumerate(g2):
+        assert (views[name][1].to(torch.int32) == 100 + i).all()
+        assert (views[name][3].to(torch.int32) == 100 + i).all()
+    # Layers within a group are disjoint.
+    views["mla.0"][0].fill_(77)
+    for i, name in enumerate(list(g1)[1:], start=1):
+        assert (views[name][0].to(torch.int32) == i + 1).all()
+
+
 class _MambaLayer(MambaBase):
     def __init__(self, spec: MambaSpec):
         self.spec = spec
@@ -723,37 +746,26 @@ class TestDensePacking:
         assert set(views) == set(g1) | set(g2)
         for i in range(3):
             assert views[f"swa.{i}"].data_ptr() == views[f"mla.{i}"].data_ptr()
-        assert len({views[name].data_ptr() for name in g1}) == len(g1)
+        _assert_groups_isolated(views, g1, g2)
 
-        # A block is owned by one group at a time: writes to group-owned
-        # blocks never disturb the other group's blocks.
-        for i, name in enumerate(g1):
-            views[name][0].fill_(i + 1)
-            views[name][2].fill_(i + 1)
-        for i, name in enumerate(g2):
-            views[name][1].fill_(100 + i)
-            views[name][3].fill_(100 + i)
-        for i, name in enumerate(g1):
-            assert (views[name][0].to(torch.int32) == i + 1).all()
-            assert (views[name][2].to(torch.int32) == i + 1).all()
-        for i, name in enumerate(g2):
-            assert (views[name][1].to(torch.int32) == 100 + i).all()
-            assert (views[name][3].to(torch.int32) == 100 + i).all()
-        # Layers within a group are disjoint.
-        views["mla.0"][0].fill_(77)
-        for i, name in enumerate(list(g1)[1:], start=1):
-            assert (views[name][0].to(torch.int32) == i + 1).all()
+    def test_layer_compact_gives_unmatched_layers_regions_of_their_own(self):
+        # swa.3 and swa.4 cannot share the idx layers' regions, whose block
+        # stride differs, so they get regions after them. A pipeline stage of a
+        # model gets such groups when it has fewer layers of one group than of
+        # another (Nemotron Shortcut's SDSA cores and its GDP layers).
+        groups, g1, g2 = _mixed_page_groups(n_swa=5)
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("LBNHC"), groups, NUM_BLOCKS
+        )
+        mla, idx = _mla(512).page_size_bytes, _mla(128).page_size_bytes
+        assert {t.size for t in config.kv_cache_tensors} == {
+            (5 * mla + 3 * idx) * NUM_BLOCKS
+        }
 
-    def test_layer_compact_layout_rejected_for_overlaid_groups(self):
-        # swa.3 and swa.4 would share the regions of the idx layers, whose block
-        # stride differs, so a layer-compact layout is refused.
-        groups, _, _ = _mixed_page_groups(n_swa=5)
-        with pytest.raises(
-            ValueError, match="cannot express this model's mixed page sizes"
-        ):
-            get_kv_cache_config_from_groups(
-                _mock_vllm_config("LBNHC"), groups, NUM_BLOCKS
-            )
+        views = _bind(config, "LBNHC")
+        for i in range(3):
+            assert views[f"swa.{i}"].data_ptr() == views[f"mla.{i}"].data_ptr()
+        _assert_groups_isolated(views, g1, g2)
 
     def test_layer_compact_overlay_follows_the_placement_order(self):
         # Layers with the same spec are placed together, so mla.0, idx.0, mla.1,
