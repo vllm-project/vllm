@@ -17,6 +17,7 @@ from vllm.model_executor.models.adapters import (
     _load_st_projector,
     _resolve_num_labels,
 )
+from vllm.model_executor.models.mistral import MistralForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     StageMissingLayer,
@@ -312,6 +313,76 @@ def test_pooling_prefix_probe_uses_hf_to_vllm_mapper(monkeypatch):
         "language_model.model.embed.weight",
         "language_model.model.layer0.weight",
     }
+
+
+class _MistralLikeLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = torch.nn.Module()
+        self.self_attn.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+
+class _MistralLikeInner(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = torch.nn.Linear(4, 8, bias=False)
+        self.layers = torch.nn.ModuleList([_MistralLikeLayer()])
+        self.norm = torch.nn.Linear(8, 4, bias=False)
+
+
+class MistralLikeModel(torch.nn.Module):
+    """Remaps names after the probe, like `MistralForCausalLM.load_weights`."""
+
+    mistral_mapping = MistralForCausalLM.mistral_mapping
+    remap_mistral_name = MistralForCausalLM.remap_mistral_name
+
+    def __init__(self):
+        super().__init__()
+        self.model = _MistralLikeInner()
+        self.lm_head = torch.nn.Linear(8, 16, bias=False)
+
+    def load_weights(self, weights):
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            (self.remap_mistral_name(name), w) for name, w in weights
+        )
+
+
+_MISTRAL_FORMAT = {
+    "layers.0.attention.wo.weight": "model.layers.0.self_attn.o_proj.weight",
+    "norm.weight": "model.norm.weight",
+    "tok_embeddings.weight": "model.embed_tokens.weight",
+}
+_HF_HEADLESS = {
+    "layers.0.self_attn.o_proj.weight": "model.layers.0.self_attn.o_proj.weight",
+    "norm.weight": "model.norm.weight",
+    "embed_tokens.weight": "model.embed_tokens.weight",
+}
+
+
+@pytest.mark.parametrize(
+    "name_map",
+    [_MISTRAL_FORMAT, _HF_HEADLESS],
+    ids=["mistral_format", "hf_headless"],
+)
+@pytest.mark.parametrize("norm_first", [False, True])
+def test_pooling_prefix_probe_uses_remap_mistral_name(name_map, norm_first):
+    """Mistral-format names resolve to `""`; headless HF names keep `model.`.
+
+    `norm.weight` fits both formats, so the result must not depend on whether
+    it comes first (the eager safetensors reader yields keys unordered).
+    """
+    model = _make_pooling_model(MistralLikeModel)
+    params = dict(model.named_parameters())
+    names = list(name_map)
+    if norm_first:
+        names.sort(key=lambda n: n != "norm.weight")
+    ref = {n: torch.randn(params[name_map[n]].shape) for n in names}
+
+    model.load_weights(iter(ref.items()))
+
+    for name in names:
+        assert torch.equal(params[name_map[name]], ref[name]), name
 
 
 def test_pooling_load_weights_skips_clone_for_owned_tensor_formats(monkeypatch):

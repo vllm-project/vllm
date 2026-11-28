@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -208,10 +208,20 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
             # so the "" / "model." scan can early-exit. Forwarded names stay
             # unmapped to avoid double-applying the mapper in the parent loader.
             hf_to_vllm_mapper = getattr(self, "hf_to_vllm_mapper", None)
+            # Mistral-format names only match after the parent loader's remap.
+            remap_mistral_name = getattr(self, "remap_mistral_name", None)
 
             # We support loading from both `*ForCausalLM` and `*Model`
             candidate_prefixes = ["", "model."]
             target_prefix = ""
+
+            def match_prefix(
+                name: str, remap: Callable[[str], str] = lambda n: n
+            ) -> str | None:
+                return next(
+                    (p for p in candidate_prefixes if remap(p + name) in params_dict),
+                    None,
+                )
 
             seen_weights = list[tuple[str, torch.Tensor]]()
             owned = (
@@ -230,17 +240,19 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
                         continue
                     lookup_name = mapped
 
-                try:
-                    target_prefix = next(
-                        prefix
-                        for prefix in candidate_prefixes
-                        if prefix + lookup_name in params_dict
-                    )
+                prefix = match_prefix(lookup_name)
+                if remap_mistral_name is not None:
+                    remapped = match_prefix(lookup_name, remap_mistral_name)
+                    if prefix is not None and remapped not in (None, prefix):
+                        # e.g. `norm.weight` fits both formats; wait for a key
+                        # that tells them apart
+                        continue
+                    prefix = prefix if prefix is not None else remapped
+                if prefix is not None:
+                    target_prefix = prefix
                     break
-                except StopIteration:
-                    # The weight might not exist on the model
-                    # (to be handled by AutoWeightsLoader)
-                    pass
+                # Otherwise the weight might not exist on the model
+                # (to be handled by AutoWeightsLoader)
 
             if target_prefix:
                 target_model = self

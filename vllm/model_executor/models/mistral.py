@@ -303,7 +303,6 @@ class MistralForCausalLM(LlamaForCausalLM):
                 .reshape(attn_in, attn_out)
             )
 
-        mapping = self.mistral_mapping
         modules = name.split(".")
 
         # rotary embeds should be sliced
@@ -330,6 +329,12 @@ class MistralForCausalLM(LlamaForCausalLM):
         ):
             loaded_weight = permute(loaded_weight, self.config.num_attention_heads, 1)
 
+        return self.remap_mistral_name(name), loaded_weight
+
+    def remap_mistral_name(self, name: str) -> str:
+        """Map a Mistral-format checkpoint weight name to its vLLM name."""
+        mapping = self.mistral_mapping
+        modules = name.split(".")
         num_modules = len(modules)
         for i in range(num_modules):
             item = modules[i]
@@ -342,4 +347,4 @@ class MistralForCausalLM(LlamaForCausalLM):
             elif item in mapping and mapping[item] not in name:
                 name = name.replace(item, mapping[item])
 
-        return name, loaded_weight
+        return name
