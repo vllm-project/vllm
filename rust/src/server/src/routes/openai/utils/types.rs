@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::fmt;
+use std::marker::PhantomData;
 use std::slice;
 
 use indexmap::IndexMap;
+use itertools::Either;
+use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
-use vllm_chat::{AllowedToolsMode, ChatTool};
+use serde_json::{Map, Value};
+use vllm_chat::{AllowedToolsMode, ChatTool, InputAudioFormat};
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
@@ -101,7 +105,31 @@ impl StringOrArray {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatMessage, ImageDetail, ImageUrl};
+    use serde_json::{Value, json};
+    use vllm_chat::ChatTool;
+
+    use super::{ChatMessage, Function, ImageDetail, ImageUrl};
+
+    /// An omitted or `null` schema means none, and is echoed back as `null`.
+    #[test]
+    fn function_parameters_accept_object_null_and_omitted() {
+        for (function, parameters) in [
+            (json!({"name": "f"}), Value::Null),
+            (json!({"name": "f", "parameters": null}), Value::Null),
+            (json!({"name": "f", "parameters": {}}), json!({})),
+            (
+                json!({"name": "f", "parameters": {"type": "object"}}),
+                json!({"type": "object"}),
+            ),
+        ] {
+            let function: Function = serde_json::from_value(function).unwrap();
+            assert_eq!(
+                serde_json::to_value(&function).unwrap().get("parameters"),
+                Some(&parameters)
+            );
+            assert_eq!(ChatTool::from(function).parameters, parameters);
+        }
+    }
 
     /// OpenAI accepts `"detail": null` as omitted, and `original` as its own value.
     #[test]
@@ -252,11 +280,10 @@ pub struct AudioUrl {
 }
 
 /// Base64-encoded audio bytes in OpenAI `input_audio` form.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct InputAudio {
     pub data: String,
-    pub format: Option<String>,
+    pub format: InputAudioFormat,
 }
 
 // ============================================================================
@@ -332,8 +359,10 @@ fn default_function_tool_type() -> String {
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
-    #[serde(default)]
-    pub parameters: Value,
+    /// The JSON Schema of the arguments. Python and OpenAI accept only an
+    /// object here, or `null` and omitted for no schema.
+    #[serialize_always]
+    pub parameters: Option<Map<String, Value>>,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
     /// Whether the schema is loaded on demand via tool search (vLLM extension,
@@ -353,7 +382,7 @@ impl From<Function> for ChatTool {
         Self {
             name,
             description,
-            parameters,
+            parameters: parameters.map_or(Value::Null, Value::Object),
             strict,
             defer_loading,
         }
@@ -647,11 +676,59 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum MessageContent {
     Text(String),
     Parts(Vec<ContentPart>),
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match deserialize_text_or_list(deserializer)? {
+            Either::Left(text) => Self::Text(text),
+            Either::Right(parts) => Self::Parts(parts),
+        })
+    }
+}
+
+/// Deserialize a string-or-list field by its JSON type rather than
+/// `#[serde(untagged)]`, which would replace a list element's precise error
+/// with a generic one.
+pub(crate) fn deserialize_text_or_list<'de, D, T>(
+    deserializer: D,
+) -> Result<Either<String, Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct TextOrList<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for TextOrList<T> {
+        type Value = Either<String, Vec<T>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a string or a list")
+        }
+
+        fn visit_str<E: de::Error>(self, text: &str) -> Result<Self::Value, E> {
+            Ok(Either::Left(text.to_owned()))
+        }
+
+        fn visit_string<E: de::Error>(self, text: String) -> Result<Self::Value, E> {
+            Ok(Either::Left(text))
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut items = Vec::with_capacity(seq.size_hint().unwrap_or_default());
+            while let Some(item) = seq.next_element()? {
+                items.push(item);
+            }
+            Ok(Either::Right(items))
+        }
+    }
+
+    deserializer.deserialize_any(TextOrList(PhantomData))
 }
 
 // ============================================================================

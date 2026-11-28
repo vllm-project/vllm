@@ -30,8 +30,8 @@ from .utils import _run_eagle_correctness
         (
             (
                 "eagle",
-                "vllm-project/deepseek-v3-random",
-                "vllm-project/eagle-deepseek-v3-random",
+                "vllm/deepseek-v3-random",
+                "vllm/eagle-deepseek-v3-random",
                 1,
             ),
             False,
@@ -107,7 +107,7 @@ def test_eagle_correctness_light(
             (
                 "eagle3",
                 "Qwen/Qwen2.5-VL-7B-Instruct",
-                "vllm-project/qwen2.5-vl-7b-eagle3-sgl",
+                "vllm/qwen2.5-vl-7b-eagle3-sgl",
                 1,
             ),
             False,
@@ -125,7 +125,7 @@ def test_eagle_correctness_light(
             (
                 "eagle3",
                 "meta-llama/Llama-3.1-8B-Instruct",
-                "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B",
+                "vllm/EAGLE3-LLaMA3.1-Instruct-8B",
                 1,
             ),
             False,

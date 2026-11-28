@@ -101,7 +101,7 @@ steps:
     depends_on: []
     optional: true
     commands:
-    - .buildkite/image_build/image_build_cpu_arm64.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    - .buildkite/image_build/image_build_cpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT arm64
     env:
       DOCKER_BUILDKIT: "1"
     retry:

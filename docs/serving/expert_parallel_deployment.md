@@ -39,10 +39,32 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `allgather_reducescatter` | General purpose | Standard all2all using allgather/reducescatter primitives | Works with any EP+DP configuration |
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
+| `mooncake_ep` | CUDA decode | Mooncake EP low-latency kernels, elastic buffers, BF16 and blockwise FP8 dispatch | Decode workloads on NVLink or RDMA |
 | `flashinfer_nvlink_one_sided` | MNNVL systems, single-node NVSwitch | FlashInfer's one-sided A2A strategy over NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
+
+### Mooncake EP
+
+Install a Mooncake package built with EP support, including the elastic legacy
+`Buffer.create_elastic()` API (Mooncake 0.3.14 or later). For CUDA 13:
+
+```bash
+uv pip install mooncake-transfer-engine-cuda13
+```
+
+Select `--all2all-backend mooncake_ep` with `--enable-expert-parallel` and
+`--data-parallel-size`. The backend uses elastic buffers for both fixed-size and
+elastic deployments, with native NVLink peer access within a node and IBGDA for
+RDMA peers. Dispatch supports BF16 and blockwise FP8 activations. The existing
+vLLM elastic EP lifecycle stages connections before activating new ranks and
+reserves capacity using `--elastic-ep-max-dp-size`.
+
+For elastic scaling, also set `--enable-elastic-ep`, `--enable-eplb`,
+`--data-parallel-backend ray`, and `--elastic-ep-max-dp-size` to the largest
+intended DP size. See [Elastic Expert Parallelism](online_serving/README.md#elastic-expert-parallelism-eep)
+for the scaling API.
 
 ## Single Node Deployment
 
@@ -267,9 +289,11 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
 | `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
-| `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
+| `use_async` | Use non-blocking EPLB with policy computation in a persistent CPU subprocess per worker | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
+
+Async EPLB (`"use_async": true`, the default) runs policy computation in one persistent CPU subprocess per worker to isolate it from the inference worker's Python GIL. The policy and its CPU inputs must be serializable. Load collection, device-to-host copies, and expert migration retain their existing execution paths. The child limits native CPU thread pools to one thread; CPU core contention still depends on the deployment's CPU allocation. A failed or timed-out child reports an async worker error. Policy state is copied at startup and subsequently owned by the child; synchronous EPLB (`"use_async": false`) and profiling calls continue using the original policy instance in the inference worker. The 60-second IPC timeout covers the handshake or a planning request from sending through the complete response. Engine shutdown explicitly stops and reaps the planner. Custom policies holding locks or other process-local resources need [serialization support](../design/plugin_system.md); existing plugins may require adaptation to this default. There is no separate planner-process switch or automatic thread fallback.
 
 For example:
 
