@@ -1,0 +1,342 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""MoRI-IO data-plane transport for ECCPUConnector.
+
+MoRI-IO has no NIXL-style notification that rides on the transfer, so a
+finished READ is signalled to the producer over a ZMQ PUSH/PULL pair, which
+the producer drains through get_new_notifs().
+"""
+
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any
+
+import msgspec
+import torch
+import zmq
+
+from vllm.distributed.ec_transfer.ec_connector.cpu.data.base import (
+    DataTransport,
+)
+from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
+    build_block_descs,
+    deserialize_mem_descriptor,
+    serialize_mem_descriptor,
+)
+from vllm.logger import init_logger
+from vllm.utils.network_utils import (
+    get_open_port,
+    make_zmq_path,
+    make_zmq_socket,
+)
+
+logger = init_logger(__name__)
+
+try:
+    from mori import io as mori_io
+except ImportError:
+    mori_io = None
+
+# How long deregister() lets released, still in-flight READs finish.
+_SHUTDOWN_SETTLE_MS = 2000
+# Transports whose READs did not settle in deregister(). MoRI-IO holds their
+# statuses and sessions by raw pointer and the NIC may still write into their
+# region, so they, and through them the region, live until the process exits.
+_UNSETTLED: list["MoRIIODataTransport"] = []
+
+
+class _PeerMetadata(msgspec.Struct):
+    engine_desc: bytes
+    mem_desc: bytes
+    notify_path: str
+
+
+@dataclass
+class _Peer:
+    engine_desc: Any
+    session: Any
+    notify: zmq.Socket
+
+
+@dataclass
+class _MoriXfer:
+    status: Any
+    notify: zmq.Socket
+    notif_msg: bytes
+    # Keeps the session alive while the transfer can still touch it.
+    session: Any
+    notified: bool = field(default=False)
+
+
+def _merge_segments(
+    local_offsets: list[int], remote_offsets: list[int], block_size: int
+) -> tuple[list[int], list[int], list[int]]:
+    """Coalesce block pairs that are contiguous on both sides."""
+    out_local: list[int] = []
+    out_remote: list[int] = []
+    sizes: list[int] = []
+    for local, remote in zip(local_offsets, remote_offsets, strict=True):
+        if (
+            sizes
+            and out_local[-1] + sizes[-1] == local
+            and out_remote[-1] + sizes[-1] == remote
+        ):
+            sizes[-1] += block_size
+        else:
+            out_local.append(local)
+            out_remote.append(remote)
+            sizes.append(block_size)
+    return out_local, out_remote, sizes
+
+
+class MoRIIODataTransport(DataTransport):
+    """Adapts a MoRI-IO IOEngine to the DataTransport interface.
+
+    Runs on the scheduler thread only. MoRI-IO holds a transfer's status and
+    session by raw pointer, so a released in-flight handle is parked until the
+    transfer finishes.
+    """
+
+    def __init__(
+        self,
+        agent_name: str,
+        region: torch.Tensor,
+        block_size_bytes: int,
+        host: str,
+    ) -> None:
+        if mori_io is None:
+            raise RuntimeError(
+                "ec_transport=moriio requires MoRI-IO; install `amd-mori` or "
+                "set a different ec_transport."
+            )
+        self._block_size = block_size_bytes
+        # The memory READs write into. Held so that it outlives the scheduler
+        # when a READ cannot be settled (see _UNSETTLED).
+        self._region = region
+        self._peers: dict[str, _Peer] = {}
+        self._parked: list[_MoriXfer] = []
+        self._local_mem: Any = None
+        self._ctx = zmq.Context()
+        self._pull: zmq.Socket | None = None
+
+        try:
+            # The random suffix makes a restarted peer's metadata differ, so the
+            # consumer re-registers it instead of keeping a session to the dead
+            # engine. Ports are OS-assigned and travel in the agent metadata.
+            self._engine = mori_io.IOEngine(
+                f"ec:{agent_name}:{uuid.uuid4().hex[:8]}",
+                mori_io.IOEngineConfig(host, get_open_port()),
+            )
+            self._engine.create_backend(
+                mori_io.BackendType.RDMA,
+                # Completion is signalled over ZMQ; MoRI-IO's own notification is
+                # left off as in MoRIIOConnector, where it poisoned TransferStatus
+                # under load.
+                mori_io.RdmaBackendConfig(
+                    1, -1, 1, mori_io.PollCqMode.POLLING, enable_notification=False
+                ),
+            )
+            self._pull = make_zmq_socket(
+                ctx=self._ctx,
+                path=make_zmq_path("tcp", host, 0),
+                socket_type=zmq.PULL,
+                bind=True,
+            )
+            notify_path = self._pull.getsockopt_string(zmq.LAST_ENDPOINT)
+            self._local_mem = self._engine.register_torch_tensor(region)
+        except Exception:
+            self.deregister()
+            raise
+        self._base = region.data_ptr()
+        self._agent_metadata = msgspec.msgpack.encode(
+            _PeerMetadata(
+                engine_desc=self._engine.get_engine_desc().pack(),
+                mem_desc=self._local_mem.pack(),
+                notify_path=notify_path,
+            )
+        )
+        # Only the first block: READs address blocks by offset from the region
+        # start, and the descriptor travels in every XferAck, so a per-block
+        # list would grow with ec_cpu_bytes (about 60 MB for 40 GiB).
+        self._mem_descriptor_bytes = serialize_mem_descriptor(
+            build_block_descs(self._base, 1, block_size_bytes)
+        )
+
+    def get_agent_metadata(self) -> bytes:
+        return self._agent_metadata
+
+    def get_mem_descriptor(self) -> bytes:
+        return self._mem_descriptor_bytes
+
+    def add_remote_peer(self, metadata: bytes, mem_descriptor: bytes) -> str:
+        meta = msgspec.msgpack.decode(metadata, type=_PeerMetadata)
+        engine_desc = mori_io.EngineDesc.unpack(meta.engine_desc)
+        remote_mem = mori_io.MemoryDesc.unpack(meta.mem_desc)
+        agent_name = engine_desc.key
+        if agent_name in self._peers:
+            self.remove_remote_peer(agent_name)
+        remote_blocks = deserialize_mem_descriptor(mem_descriptor)
+        # post_read addresses remote block i at i * block_size from the start
+        # of the producer's registered region.
+        if remote_blocks and remote_blocks[0][0] != remote_mem.data:
+            raise ValueError(
+                f"EC: producer {agent_name} block descriptors do not start at "
+                "its registered region"
+            )
+        self._engine.register_remote_engine(engine_desc)
+        try:
+            session = self._engine.create_session(self._local_mem, remote_mem)
+            if session is None:
+                raise RuntimeError(f"MoRI-IO could not open a session to {agent_name}")
+        except Exception:
+            self._deregister_remote_engine(engine_desc)
+            raise
+        self._peers[agent_name] = _Peer(
+            engine_desc=engine_desc,
+            session=session,
+            notify=make_zmq_socket(
+                ctx=self._ctx,
+                path=meta.notify_path,
+                socket_type=zmq.PUSH,
+                bind=False,
+                linger=0,
+            ),
+        )
+        return agent_name
+
+    def _deregister_remote_engine(self, engine_desc: Any) -> None:
+        try:
+            self._engine.deregister_remote_engine(engine_desc)
+        except Exception:
+            logger.warning(
+                "EC: deregister_remote_engine failed for %s",
+                engine_desc.key,
+                exc_info=True,
+            )
+
+    def remove_remote_peer(self, agent_name: str) -> None:
+        peer = self._peers.pop(agent_name, None)
+        if peer is None:
+            return
+        # TODO: this only drops the control-plane entry; the peer's RDMA endpoints
+        # (one QP per producer restart) stay open until the process exits. Release
+        # them here once MoRI-IO supports per-peer teardown.
+        self._deregister_remote_engine(peer.engine_desc)
+        # A READ still in flight to this peer keeps its own reference; sending
+        # on the closed socket raises ZMQError, which check_xfer_state handles.
+        peer.notify.close(linger=0)
+
+    def post_read(
+        self,
+        local_indices: list[int],
+        agent_name: str,
+        remote_indices: list[int],
+        notif_msg: bytes,
+    ) -> Any:
+        peer = self._peers[agent_name]
+        bs = self._block_size
+        local_offsets, remote_offsets, sizes = _merge_segments(
+            [i * bs for i in local_indices],
+            [i * bs for i in remote_indices],
+            bs,
+        )
+        status = peer.session.batch_read(
+            local_offsets,
+            remote_offsets,
+            sizes,
+            self._engine.allocate_transfer_uid(),
+        )
+        return _MoriXfer(
+            status=status,
+            notify=peer.notify,
+            notif_msg=notif_msg,
+            session=peer.session,
+        )
+
+    def get_new_notifs(self) -> dict[str, list[bytes]]:
+        self._reap_parked()
+        msgs: list[bytes] = []
+        while self._pull is not None:
+            try:
+                msgs.append(self._pull.recv(flags=zmq.NOBLOCK))
+            except zmq.Again:
+                break
+        return {"moriio": msgs} if msgs else {}
+
+    def check_xfer_state(self, handle: Any) -> str:
+        status = handle.status
+        if status.Succeeded():
+            if not handle.notified:
+                handle.notified = True
+                try:
+                    handle.notify.send(handle.notif_msg, flags=zmq.NOBLOCK)
+                except zmq.ZMQError:
+                    # The producer's pin lease releases the blocks instead.
+                    logger.warning("EC: completion notification not sent")
+            return "DONE"
+        if status.Failed():
+            return f"ERR: {status.Message()} (code={status.Code()})"
+        return "PROC"
+
+    def release_xfer_handle(self, handle: Any) -> None:
+        if handle.status.InProgress():
+            self._parked.append(handle)
+        self._reap_parked()
+
+    def xfer_in_flight(self, handle: Any) -> bool:
+        # MoRI-IO cannot cancel a READ, so a released one runs to completion.
+        return handle.status.InProgress()
+
+    def _reap_parked(self) -> None:
+        if self._parked:
+            self._parked = [h for h in self._parked if h.status.InProgress()]
+
+    def deregister(self) -> None:
+        """Release the transport.
+
+        MoRI-IO cannot abort a READ and deregister_memory() does not wait for
+        one, so the region is only deregistered once no released transfer still
+        targets it. If a READ is still in flight after the settle period, the
+        transport keeps the registration and moves itself, with its parked
+        handles, engine and region, into _UNSETTLED until the process exits,
+        and region_in_use() tells the owner not to unmap the region.
+        """
+        for peer in self._peers.values():
+            peer.notify.close(linger=0)
+        self._peers.clear()
+        if self._local_mem is not None:
+            if self._settle_parked():
+                try:
+                    self._engine.deregister_memory(self._local_mem)
+                except Exception:
+                    logger.warning("EC: deregister failed", exc_info=True)
+                self._local_mem = None
+            else:
+                logger.warning(
+                    "EC: %d MoRI-IO READ(s) still in flight after %d ms; keeping "
+                    "the region registered and mapped until the process exits",
+                    len(self._parked),
+                    _SHUTDOWN_SETTLE_MS,
+                )
+                _UNSETTLED.append(self)
+        if self._pull is not None:
+            self._pull.close(linger=0)
+            self._pull = None
+        if not self._ctx.closed:
+            self._ctx.term()
+
+    def region_in_use(self) -> bool:
+        self._reap_parked()
+        return bool(self._parked)
+
+    def _settle_parked(self) -> bool:
+        """Wait up to the settle budget for parked READs; True if none remain."""
+        deadline = time.monotonic() + _SHUTDOWN_SETTLE_MS / 1000
+        for handle in self._parked:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+            handle.status.WaitFor(remaining_ms)
+        self._reap_parked()
+        return not self._parked

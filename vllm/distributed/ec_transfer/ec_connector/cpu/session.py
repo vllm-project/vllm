@@ -117,6 +117,9 @@ class ConsumerXfer:
 
     transfer_handle: Any | None = field(default=None)
     _quarantined: bool = field(default=False, init=False)
+    # Released at the quarantine deadline but not ended by the release: the
+    # transfer may still write into this xfer's blocks until it finishes.
+    _released_handle: Any | None = field(default=None, init=False)
 
     def handle_ack(self, ack: XferAck, agent_name: str) -> bool:
         """Issue the NIXL READ on an OK XferAck. Returns False on any NACK."""
@@ -169,8 +172,7 @@ class ConsumerXfer:
             return XferState.DONE
         if state == "PROC":
             if now > self.deadline:
-                self._quarantined = True
-                self.deadline = now + _CONSUMER_QUARANTINE_TIMEOUT_S
+                self.quarantine(now)
                 logger.warning(
                     "EC Connector: READ for mm_hash=%s from %s:%d timed out; "
                     "quarantining",
@@ -189,13 +191,34 @@ class ConsumerXfer:
         self.transfer_handle = None
         return XferState.READ_FAILED
 
+    def quarantine(self, now: float) -> None:
+        """Stop waiting for this READ; its blocks stay held until it settles."""
+        self._quarantined = True
+        self.deadline = now + _CONSUMER_QUARANTINE_TIMEOUT_S
+
     def _poll_quarantined(self, now: float) -> XferState:
         if self.transfer_handle is None:
+            if self._released_handle is not None:
+                if self.data.xfer_in_flight(self._released_handle):
+                    return XferState.QUARANTINED
+                self._released_handle = None
             return XferState.SETTLED
         # If quarantine has been too long, assume NIXL is stuck and evict blocks.
         if now > self.deadline:
-            self.data.release_xfer_handle(self.transfer_handle)
+            handle = self.transfer_handle
+            self.data.release_xfer_handle(handle)
             self.transfer_handle = None
+            if self.data.xfer_in_flight(handle):
+                # The release did not end the transfer: keep the blocks.
+                self._released_handle = handle
+                logger.warning(
+                    "EC Connector: quarantined mm_hash=%s from %s:%d timed out; "
+                    "keeping its blocks until the transfer ends",
+                    self.mm_hash,
+                    self.addr[0],
+                    self.addr[1],
+                )
+                return XferState.QUARANTINED
             logger.warning(
                 "EC Connector: quarantined mm_hash=%s from %s:%d timed out; "
                 "evicting blocks",
@@ -597,11 +620,13 @@ class ConsumerSession:
 
     def on_peer_down(self) -> None:
         """WAITING_ACK xfers → cancel (retry allowed); READING xfers → quarantine."""
+        now = time.monotonic()
         for mm_hash, xfer in list(self._xfers.items()):
             if xfer.transfer_handle is None:
                 xfer.cancel()
                 self._retryable.add(mm_hash)
             else:
+                xfer.quarantine(now)
                 self._quarantined.append(xfer)
                 self._newly_quarantined.add(mm_hash)
         self._xfers.clear()
@@ -624,6 +649,14 @@ class ConsumerSession:
 
     def has_in_flight(self) -> bool:
         return bool(self._xfers) or bool(self._quarantined)
+
+    def take_quarantined(self) -> list[ConsumerXfer]:
+        """Hand over the quarantined xfers, so they outlive close().
+
+        Their blocks stay held until each one's poll() reports SETTLED.
+        """
+        xfers, self._quarantined = self._quarantined, []
+        return xfers
 
     def close(self) -> None:
         """Release all transfer handles, deregister NIXL peer, close connection.

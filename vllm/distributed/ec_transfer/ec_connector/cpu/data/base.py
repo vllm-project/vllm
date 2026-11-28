@@ -62,6 +62,26 @@ class DataTransport(ABC):
     def release_xfer_handle(self, handle: Any) -> None:
         """Release a transfer handle returned by post_read."""
 
+    def xfer_in_flight(self, handle: Any) -> bool:
+        """True while a transfer passed to release_xfer_handle() may still
+        write into local memory.
+
+        The caller must not reuse the transfer's local blocks until this is
+        False. Transports whose release_xfer_handle() ends the transfer keep
+        this default.
+        """
+        return False
+
     @abstractmethod
     def deregister(self) -> None:
         """Deregister all memory and tear down the NIXL agent."""
+
+    def region_in_use(self) -> bool:
+        """True if, after deregister(), a transfer the transport could not
+        cancel may still write into its registered memory.
+
+        The owner of that memory must then keep it mapped until the process
+        exits. Transports whose deregister() leaves nothing in flight keep
+        this default.
+        """
+        return False
