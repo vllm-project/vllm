@@ -25,6 +25,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.utils import may_open_object_array
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -39,6 +40,7 @@ class xLAMToolParser(ToolParser):
         self.current_tool_id = -1
         self.current_tool_name_sent = False
         self.streamed_args: list[str] = []  # Track arguments sent for each tool
+        self._sent_content_idx: int = 0
 
         # For backward compatibility with tests
         self.current_tools_sent: list[bool] = []
@@ -105,7 +107,7 @@ class xLAMToolParser(ToolParser):
                         continue
 
         # If the entire output is a valid JSON array or looks like one, treat it as tool calls
-        if model_output.strip().startswith("["):
+        if may_open_object_array(model_output.strip()):
             try:
                 json.loads(model_output)
                 return None, model_output
@@ -185,6 +187,22 @@ class xLAMToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+    @staticmethod
+    def _may_open_tool_array(text: str) -> bool:
+        """Return whether `text` can still start a tool-call array.
+
+        This includes a partial `[TOOL_CALLS]` prefix such as `[T`.
+        """
+        return may_open_object_array(text) or (
+            text.startswith("[") and "[TOOL_CALLS]".startswith(text)
+        )
+
+    def _flush_content(self, current_text: str) -> DeltaMessage:
+        """Return all text not yet sent as content, including withheld text."""
+        content = current_text[self._sent_content_idx :]
+        self._sent_content_idx = len(current_text)
+        return DeltaMessage(content=content)
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -214,7 +232,7 @@ class xLAMToolParser(ToolParser):
         )
 
         is_tool_call_block = (
-            stripped_text.startswith("[")
+            self._may_open_tool_array(stripped_text)
             or stripped_text.startswith("<tool_call>")
             or stripped_text.startswith("[TOOL_CALLS]")
             or
@@ -233,7 +251,7 @@ class xLAMToolParser(ToolParser):
         )
 
         if not is_tool_call_block:
-            return DeltaMessage(content=delta_text)
+            return self._flush_content(current_text)
 
         try:
             # Initialize streaming state if not exists
@@ -342,6 +360,9 @@ class xLAMToolParser(ToolParser):
                 else:
                     # No tools found at all
                     return None
+
+            # The text so far belongs to tool calls, so never flush it as content.
+            self._sent_content_idx = len(current_text)
 
             # Ensure our state arrays are large enough
             while len(self.streaming_state["sent_tools"]) < tool_count:
@@ -557,5 +578,4 @@ class xLAMToolParser(ToolParser):
 
         except Exception as e:
             logger.exception(f"Error in streaming tool calls: {e}")
-            # If we encounter an error, just return the delta text as regular content
-            return DeltaMessage(content=delta_text)
+            return self._flush_content(current_text)

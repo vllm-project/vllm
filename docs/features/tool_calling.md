@@ -376,7 +376,7 @@ Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_ch
 
 The xLAM tool parser is designed to support models that generate tool calls in various JSON formats. It detects function calls in several different output styles:
 
-1. Direct JSON arrays: Output strings that are JSON arrays starting with `[` and ending with `]`
+1. Direct JSON arrays: Output strings that are JSON arrays of objects, such as `[{"name": ...}]`. Other text that starts with `[`, such as `[1] ...`, is returned as content
 2. Thinking tags: Using `<think>...</think>` tags containing JSON arrays
 3. Code blocks: JSON in code blocks (```json ...```)
 4. Tool calls tags: Using `[TOOL_CALLS]` or `<tool_call>...</tool_call>` tags

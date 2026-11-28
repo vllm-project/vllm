@@ -25,7 +25,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import consume_space
+from vllm.tool_parsers.utils import (
+    JSON_WHITESPACE,
+    consume_space,
+    may_open_object_array,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -39,6 +43,8 @@ class HunyuanA13BToolParser(ToolParser):
         self.prev_tool_calls: list[dict] = []
         self.current_tool_id = -1
         self.streamed_args: list[str] = []  # Track arguments sent for each tool
+        self._sent_content_idx: int = 0
+        self._opens_tool_array: bool | None = None
 
         # For backward compatibility with tests
         self.current_tools_sent: list[bool] = []
@@ -165,6 +171,25 @@ class HunyuanA13BToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+    def _opens_tool_array_cached(self, text: str, start_idx: int) -> bool:
+        """Return whether `text[start_idx:]` can still start a tool-call array.
+
+        The streamed text only grows, and each choice has its own parser, so the
+        answer is cached once it is final: when the "[" is present and the text
+        after it ends in a character that is not JSON whitespace. Without the
+        "[" check, a partial `<tool_calls>` would cache `False`.
+        """
+        if self._opens_tool_array is not None:
+            return self._opens_tool_array
+        opens = may_open_object_array(text, start_idx)
+        if (
+            text.startswith("[", start_idx)
+            and len(text) > start_idx + 1
+            and text[-1] not in JSON_WHITESPACE
+        ):
+            self._opens_tool_array = opens
+        return opens
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -179,12 +204,11 @@ class HunyuanA13BToolParser(ToolParser):
         start_idx = consume_space(0, current_text)
         if current_text[start_idx:].startswith(self.bot_string):
             start_idx = consume_space(start_idx + len(self.bot_string), current_text)
-        if (
-            not current_text
-            or start_idx >= len(current_text)
-            or current_text[start_idx] != "["
-        ):
-            return DeltaMessage(content=delta_text)
+        if not self._opens_tool_array_cached(current_text, start_idx):
+            # Also send text that earlier deltas withheld as a possible tool call.
+            content = current_text[self._sent_content_idx :]
+            self._sent_content_idx = len(current_text)
+            return DeltaMessage(content=content)
 
         self._try_parse_json_tools(current_text[start_idx:])
 

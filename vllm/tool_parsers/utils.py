@@ -196,6 +196,22 @@ def consume_space(i: int, s: str) -> int:
     return i
 
 
+# Narrower than `str.isspace()`: JSON allows only these four characters
+# between tokens, so a "[" followed by e.g. a no-break space is plain text.
+JSON_WHITESPACE = " \t\n\r"
+
+
+def may_open_object_array(s: str, i: int = 0) -> bool:
+    """Return whether `s[i:]` can still be the start of a JSON array of objects.
+
+    Streaming tool parsers use this to tell a tool-call array such as
+    `[{"name": ...` from plain text such as `[1] Paris ...`.
+    """
+    if not s.startswith("[", i):
+        return False
+    return s[i + 1 :].lstrip(JSON_WHITESPACE)[:1] in ("{", "")
+
+
 _NAMESPACE_TOOL_SEPARATOR = "__"
 
 
