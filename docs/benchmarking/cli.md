@@ -1073,6 +1073,9 @@ python3 benchmarks/benchmark_serving_structured_output.py \
 
 #### Regex-based Generation Benchmark
 
+For the regex dataset, `correct_rate(%)` is the percentage of responses whose
+entire generated text matches the requested pattern.
+
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
   --backend vllm \
