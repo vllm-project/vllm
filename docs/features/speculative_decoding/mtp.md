@@ -83,3 +83,28 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
   for it.
+
+## Tuning Speculative Depth
+
+`num_speculative_tokens` sets the maximum number of tokens drafted per step.
+Values greater than `1` are supported. When additional steps reuse MTP prediction
+layers, vLLM logs an informational tuning message; this is not a configuration
+error. More draft tokens can increase the number accepted per step, but also add
+drafting and verification work. The best depth depends on the model, hardware,
+prompts, and request concurrency.
+
+Start with the relevant [vLLM recipe](https://recipes.vllm.ai/), when available,
+and compare several depths on the same workload. Measure end-to-end latency or
+throughput against both a smaller depth and a run without speculative decoding.
+Choose the setting that improves the metric your deployment needs.
+
+The `/metrics` endpoint exposes `vllm:spec_decode_num_accepted_tokens_total` and
+`vllm:spec_decode_num_draft_tokens_total`. Divide their increases over the same
+measurement interval to obtain the draft-token acceptance rate. Use
+`vllm:spec_decode_num_drafts_total` to compare accepted tokens per verification
+step. The [per-request acceptance metrics](acceptance_metrics.md) provide the same
+information for individual requests.
+
+Acceptance rate alone does not measure speedup: a smaller depth can have a higher
+acceptance rate while producing fewer accepted tokens per step. There is no
+universal target acceptance percentage or depth that is optimal for all models.

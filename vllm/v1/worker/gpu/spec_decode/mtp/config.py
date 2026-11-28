@@ -86,10 +86,14 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
             and spec.draft_model_config.hf_config.model_type
             not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
         ):
-            logger.warning(
-                "Enabling num_speculative_tokens > 1 will run "
-                "multiple times of forward on same MTP layer"
-                ",which may result in lower acceptance rate"
+            logger.info(
+                "MTP with num_speculative_tokens=%d reuses prediction "
+                "layers for additional draft steps. Tune speculative "
+                "depth using accepted tokens and end-to-end latency "
+                "or throughput on your workload. See "
+                "https://docs.vllm.ai/en/latest/features/"
+                "speculative_decoding/mtp/#tuning-speculative-depth",
+                spec.num_speculative_tokens,
             )
 
     @classmethod
