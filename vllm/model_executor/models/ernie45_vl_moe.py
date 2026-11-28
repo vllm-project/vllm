@@ -382,6 +382,19 @@ class Ernie4_5_VLMoeMoE(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
+class _VisualTokenMaskState:
+    def __init__(self, mask: torch.Tensor):
+        self.mask: torch.Tensor | None = mask
+        self.resolved = False
+
+    def resolve(self) -> torch.Tensor | None:
+        if not self.resolved:
+            if self.mask is not None and not self.mask.any():
+                self.mask = None
+            self.resolved = True
+        return self.mask
+
+
 class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -459,6 +472,7 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         visual_token_mask: torch.Tensor | None,
+        visual_token_mask_state: _VisualTokenMaskState | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # Self Attention
@@ -477,6 +491,8 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         if isinstance(self.mlp, Ernie4_5_VLMoeMoE):
+            if visual_token_mask_state is not None:
+                visual_token_mask = visual_token_mask_state.resolve()
             hidden_states = self.mlp(hidden_states, visual_token_mask, **kwargs)
         else:
             hidden_states = self.mlp(hidden_states)
@@ -507,7 +523,9 @@ class Ernie4_5_VLMoeModel(nn.Module):
 
         self.im_patch_id = config.im_patch_id
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or (
+            config.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -534,7 +552,9 @@ class Ernie4_5_VLMoeModel(nn.Module):
             self.norm = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states", "residual"],
+            config.hidden_size,
+            buffers={"visual_token_mask": torch.empty((0, 1), dtype=torch.uint8)},
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -549,6 +569,7 @@ class Ernie4_5_VLMoeModel(nn.Module):
         visual_token_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        visual_token_mask_state = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -559,15 +580,36 @@ class Ernie4_5_VLMoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+            visual_token_mask = intermediate_tensors["visual_token_mask"].bool()
+            visual_token_mask_state = _VisualTokenMaskState(visual_token_mask)
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
-                positions, hidden_states, residual, visual_token_mask, **kwargs
+                positions,
+                hidden_states,
+                residual,
+                visual_token_mask,
+                visual_token_mask_state=visual_token_mask_state,
+                **kwargs,
             )
 
+        if visual_token_mask_state is not None:
+            visual_token_mask = visual_token_mask_state.mask
         if not get_pp_group().is_last_rank:
+            if visual_token_mask is None:
+                visual_token_mask = torch.zeros(
+                    (hidden_states.shape[0], 1),
+                    dtype=torch.uint8,
+                    device=hidden_states.device,
+                )
+            else:
+                visual_token_mask = visual_token_mask.to(torch.uint8)
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    "visual_token_mask": visual_token_mask,
+                }
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -608,11 +650,10 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
+            if self.config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
-
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
