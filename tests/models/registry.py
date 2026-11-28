@@ -445,6 +445,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
+    "MiniCPM5MoeForCausalLM": _HfExamplesInfo(
+        "openbmb/MiniCPM5-15B-A2.5B", is_available_online=False
+    ),
     "MiniMaxM2ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-M2"),
     "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",

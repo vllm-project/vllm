@@ -443,6 +443,7 @@ th {
 | `MiMoV2ForCausalLM` | MiMoV2Pro | `XiaomiMiMo/MiMo-V2.5-Pro`, etc. | | ✅︎ |
 | `MiniCPMForCausalLM` | MiniCPM | `openbmb/MiniCPM-2B-sft-bf16`, `openbmb/MiniCPM-2B-dpo-bf16`, `openbmb/MiniCPM-S-1B-sft`, etc. | ✅︎ | ✅︎ |
 | `MiniCPM3ForCausalLM` | MiniCPM3 | `openbmb/MiniCPM3-4B`, etc. | ✅︎ | ✅︎ |
+| `MiniCPM5MoEForCausalLM`, `MiniCPM5MoeForCausalLM` | MiniCPM5-15B-A2.5B[^minicpm5-eager] | TBA | | ✅︎ |
 | `MiniMaxM2ForCausalLM` | MiniMax-M2, MiniMax-M2.1 | `MiniMaxAI/MiniMax-M2`, etc. | ✅︎ | ✅︎ |
 | `MiniMaxM3SparseForCausalLM` | MiniMax-M3 | `MiniMaxAI/MiniMax-M3`, `MiniMaxAI/MiniMax-M3-MXFP8`, etc. | | ✅︎ |
 | `MistralForCausalLM` | Ministral-3, Mistral, Mistral-Instruct | `mistralai/Ministral-3-3B-Instruct-2512`, `mistralai/Mistral-7B-v0.1`, `mistralai/Mistral-7B-Instruct-v0.1`, etc. | ✅︎ | ✅︎ |
@@ -918,3 +919,5 @@ We have the following levels of testing for models:
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
 3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to [functionality tests](../../tests) and [examples](../../examples) for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
+
+[^minicpm5-eager]: MiniCPM5 MoE runs without model-level `torch.compile`. AMD/ROCm is not yet supported. On NVIDIA GPUs, Breakable CUDA Graphs (BCG) are enabled by default, with `FULL_AND_PIECEWISE` graphs for decode and prefill and compilation disabled. Attention output gating uses a fused kernel that preserves the reference sigmoid rounding, and standard RoPE reads the interleaved query directly without a separate copy. Routing reuses the standard `GateLinear` with `params_dtype=torch.float32` and `out_dtype=torch.float32`. Checkpoint router weights load directly into FP32 parameters. `--enforce-eager` disables both compilation and CUDA graphs.
