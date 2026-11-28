@@ -67,6 +67,23 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 ]
 
 
+def _get_forward_input(
+    args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> torch.Tensor:
+    if args:
+        return args[0]
+    return next(iter(kwargs.values()))
+
+
+def _replace_forward_input(
+    args: tuple[Any, ...], kwargs: dict[str, Any], x: torch.Tensor
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    if args:
+        return (x, *args[1:]), kwargs
+    input_name = next(iter(kwargs))
+    return args, {**kwargs, input_name: x}
+
+
 def register_weight_loader_v2_supported_method(cls):
     """Decorator to register a LinearMethod as supporting weight_loader_v2."""
     WEIGHT_LOADER_V2_SUPPORTED.append(cls.__name__)
@@ -269,6 +286,15 @@ class LinearBase(PluggableLayer):
     """
 
     requires_unquantized_input = False
+
+    def supports_sp_fusion(self) -> bool:
+        """Whether an SP hook may bypass this layer's GEMM."""
+        return True
+
+    def _consume_sp_fusion_output(self) -> Any | None:
+        output = getattr(self, "_sp_fusion_output", None)
+        self._sp_fusion_output = None
+        return output
 
     def __init__(
         self,
@@ -624,15 +650,46 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
+    def register_sp_hooks(
+        self,
+        agmm: Any,
+        sp_num_tokens: Callable[[], int | None],
+    ) -> None:
+        """Install the SP exit-boundary hooks for this linear."""
+        from vllm.models.common.ops.sequence_parallel import sp_all_gather
+
+        def pre_hook(
+            module: LinearBase, args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
+            num_tokens = sp_num_tokens()
+            if num_tokens is None:
+                return None
+            x = _get_forward_input(args, kwargs)
+            if module.supports_sp_fusion() and agmm.can_fuse(x):
+                module._sp_fusion_output = agmm.fused(x, num_tokens)
+                return None
+            return _replace_forward_input(
+                args, kwargs, sp_all_gather(x)[:num_tokens]
+            )
+
+        def post_hook(module: LinearBase, args: tuple[Any, ...], output: Any) -> Any:
+            module._sp_fusion_output = None
+            return output
+
+        self.register_forward_pre_hook(pre_hook, with_kwargs=True)
+        self.register_forward_hook(post_hook)
+
     def forward(
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        bias = self.bias if not self.skip_bias_add else None
+        output_parallel = self._consume_sp_fusion_output()
+        if output_parallel is None:
+            bias = self.bias if not self.skip_bias_add else None
 
-        # Matrix multiply.
-        apply = partial(self.quant_method.apply, self, bias=bias)
-        output_parallel = apply_flattened(apply, input_)
+            # Matrix multiply.
+            apply = partial(self.quant_method.apply, self, bias=bias)
+            output_parallel = apply_flattened(apply, input_)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -1865,10 +1922,69 @@ class RowParallelLinear(LinearBase):
 
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
+    def register_sp_hooks(
+        self,
+        mmrs: Any,
+        sp_num_tokens: Callable[[], int | None],
+    ) -> None:
+        """Install the SP entry-boundary hooks for this linear."""
+        from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
+
+        sp_active = False
+        run_fused = False
+        fused_input: torch.Tensor | None = None
+        num_tokens: int | None = None
+
+        def pre_hook(
+            module: LinearBase, args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> None:
+            nonlocal fused_input, num_tokens, run_fused, sp_active
+            num_tokens = sp_num_tokens()
+            sp_active = num_tokens is not None
+            module._sp_skip_tp_reduce = sp_active
+            module._sp_skip_gemm = False
+            run_fused = False
+            fused_input = None
+            if not sp_active:
+                return
+            x = _get_forward_input(args, kwargs)
+            if module.supports_sp_fusion() and mmrs.can_fuse(x):
+                fused_input = x
+                run_fused = True
+                module._sp_skip_gemm = True
+
+        def post_hook(module: LinearBase, args: tuple[Any, ...], output: Any) -> Any:
+            nonlocal fused_input, num_tokens, run_fused, sp_active
+            module._sp_skip_tp_reduce = False
+            module._sp_skip_gemm = False
+            if not sp_active:
+                return output
+            if run_fused:
+                assert fused_input is not None
+                assert num_tokens is not None
+                output = mmrs.fused(fused_input, num_tokens)
+                if module.return_bias:
+                    output = (
+                        output,
+                        module.bias if module.skip_bias_add else None,
+                    )
+                fused_input = None
+                run_fused = sp_active = False
+                return output
+            sp_active = False
+            if isinstance(output, tuple):
+                return sp_reduce_scatter(output[0]), output[1]
+            return sp_reduce_scatter(output)
+
+        self.register_forward_pre_hook(pre_hook, with_kwargs=True)
+        self.register_forward_hook(post_hook)
+
     def forward(
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        if getattr(self, "_sp_skip_gemm", False):
+            return input_
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1884,7 +2000,11 @@ class RowParallelLinear(LinearBase):
         apply = partial(self.quant_method.apply, self, bias=bias_)
         output_parallel = apply_flattened(apply, input_parallel)
 
-        if self.reduce_results and self.tp_size > 1:
+        if (
+            self.reduce_results
+            and self.tp_size > 1
+            and not getattr(self, "_sp_skip_tp_reduce", False)
+        ):
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel

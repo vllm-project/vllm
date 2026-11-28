@@ -9,10 +9,53 @@ from torch import nn
 from tests.models.registry import _HfExamplesInfo
 from tests.models.utils import check_logprobs_close
 from tests.utils import create_new_process_for_each_test
+from vllm.models.common.ops import sp_linear
 from vllm.models.qwen3_5.common import sequence_parallel as qwen3_5_sp
 from vllm.platforms import current_platform
 
 MODEL_ID = "vllm-project/Qwen3.5-0.8B-text-only"
+
+
+class _RewrittenLinear(sp_linear.ColumnParallelLinear):
+    def __init__(self, supports_fusion: bool = True):
+        super().__init__(4, 4, bias=False, return_bias=False, disable_tp=True)
+        self.weight.data.copy_(torch.eye(4))
+        self._supports_fusion = supports_fusion
+        self.forward_calls = 0
+
+    def supports_sp_fusion(self) -> bool:
+        return self._supports_fusion
+
+    def forward(self, x):
+        self.forward_calls += 1
+        return super().forward(x) + 1
+
+
+class _TestAGMM(sp_linear.AGMM):
+    def can_fuse(self, x):
+        return True
+
+    def fused(self, x, num_tokens):
+        return x * 2
+
+
+@pytest.mark.parametrize("supports_fusion", [True, False])
+def test_sp_hooks_preserve_rewritten_forward(
+    monkeypatch: pytest.MonkeyPatch, supports_fusion: bool
+):
+    """A downstream forward remains installed and can opt out of GEMM fusion."""
+    layer = _RewrittenLinear(supports_fusion)
+    boundary = _TestAGMM(layer)
+    layer.register_sp_hooks(boundary, lambda: 3)
+    monkeypatch.setattr(sp_linear, "sp_all_gather", lambda x: torch.cat([x, x]))
+
+    output = layer(torch.ones(2, 4))
+
+    assert layer.forward_calls == 1
+    if supports_fusion:
+        assert torch.equal(output, torch.full((2, 4), 3.0))
+    else:
+        assert torch.equal(output, torch.full((3, 4), 2.0))
 
 
 @pytest.mark.parametrize(("sp_active", "expected_gathers"), [(True, 1), (False, 0)])

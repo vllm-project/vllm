@@ -59,10 +59,16 @@ def _has_fused_all_gather_matmul() -> bool:
     return hasattr(torch.ops.symm_mem, "fused_all_gather_matmul")
 
 
-def can_sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> bool:
+def can_sp_all_gather_matmul(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    min_tokens: int | float = _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK,
+    max_tokens: int | None = None,
+) -> bool:
     """Whether `sp_all_gather_matmul` applies to this shard and weight."""
     return (
-        x.shape[0] >= _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK
+        x.shape[0] >= min_tokens
+        and (max_tokens is None or x.shape[0] <= max_tokens)
         and x.dtype == weight.dtype == torch.bfloat16
         and weight.ndim == 2
         and not torch.cuda.is_current_stream_capturing()
@@ -90,11 +96,17 @@ def _has_fused_matmul_reduce_scatter() -> bool:
     return hasattr(torch.ops.symm_mem, "fused_matmul_reduce_scatter")
 
 
-def can_sp_matmul_reduce_scatter(x: torch.Tensor, weight: torch.Tensor) -> bool:
+def can_sp_matmul_reduce_scatter(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    min_tokens: int | float = _FUSED_MATMUL_RS_MIN_TOKENS_PER_RANK,
+    max_tokens: int | None = None,
+) -> bool:
     """Whether `sp_matmul_reduce_scatter` applies to this input and weight."""
     tokens_per_rank = cdiv(x.shape[0], get_tensor_model_parallel_world_size())
     return (
-        tokens_per_rank >= _FUSED_MATMUL_RS_MIN_TOKENS_PER_RANK
+        tokens_per_rank >= min_tokens
+        and (max_tokens is None or tokens_per_rank <= max_tokens)
         and x.dtype == weight.dtype == torch.bfloat16
         and weight.ndim == 2
         and not torch.cuda.is_current_stream_capturing()
