@@ -454,6 +454,10 @@ class CommonAttentionMetadata:
     whole request, identical on every PCP rank, so the sparse backends pad
     their KV gather to it."""
 
+    dcp_request_context_starts_cpu: torch.Tensor | None = None
+    """(batch_size,) CPU tokens of each row's whole request computed before this
+    step. Only set under PCP+DCP."""
+
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
     has positions available so that builders can pre-compute position-dependent
@@ -553,6 +557,9 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu_upper_bound=maybe_slice_reqs(
                 self.dcp_local_seq_lens_cpu_upper_bound
+            ),
+            dcp_request_context_starts_cpu=maybe_slice_reqs(
+                self.dcp_request_context_starts_cpu
             ),
             seq_lens_cpu_upper_bound=maybe_slice_reqs(self.seq_lens_cpu_upper_bound),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),

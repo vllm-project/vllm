@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_ACTIVE_PCP_MANAGER: "PCPManager | None" = None
+
+
+def active_pcp_manager() -> "PCPManager | None":
+    """The manager of this worker process, if PCP is enabled."""
+    return _ACTIVE_PCP_MANAGER
+
 
 @dataclass(frozen=True, slots=True)
 class PCPBatchMetadata:
@@ -38,6 +45,9 @@ class PCPBatchMetadata:
     global_seq_lens_cpu_upper_bound_np: np.ndarray
     # [num_reqs_after_padding], set only under PCP+DCP.
     dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    # [num_reqs_after_padding], tokens of each row's whole request computed before
+    # this step, set only under PCP+DCP.
+    dcp_request_context_starts_cpu: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +93,10 @@ class PCPManager:
         self.shard_decode_requests = shard_decode_requests
 
         self._global_batch: InputBatch | None = None
+        # The batch in the input buffers was partitioned by `partition_batch`. A
+        # capture, warmup or profile batch bypasses it and leaves the layout of
+        # the last scheduled batch behind.
+        self._scheduled_batch = False
         self._local_batch: InputBatch | None = None
         self._local_gather_idx: torch.Tensor | None = None
         self.draft_prefill_batch: InputBatch | None = None
@@ -450,6 +464,46 @@ class PCPManager:
         return padded_num_reqs
 
     @property
+    def scheduled_batch(self) -> bool:
+        """Whether the forward's batch is one `partition_batch` laid out."""
+        return self._scheduled_batch
+
+    @property
+    def hidden_restore_idx(self) -> torch.Tensor | None:
+        """For each global batch position, its row in the gathered layout; None
+        for a batch that was not partitioned."""
+        return self._hidden_restore_idx if self._scheduled_batch else None
+
+    @property
+    def single_request_end(self) -> int | None:
+        """Context end of the global batch's only request, if it has just one."""
+        batch = self._global_batch
+        if batch is None or batch.num_reqs != 1 or not self._scheduled_batch:
+            return None
+        return int(batch.num_computed_tokens_np[0] + batch.num_scheduled_tokens[0])
+
+    @property
+    def split_prefill_request(self) -> tuple[int, int] | None:
+        """Context start and end of the scheduled batch's only request, when it is
+        a prefill that PCP splits across the ranks; None for any other batch.
+
+        It depends on the global schedule only, so every rank gets the same
+        answer, and every rank then holds two full chunks of the request.
+        """
+        batch = self._global_batch
+        if batch is None or batch.num_reqs != 1 or not self._scheduled_batch:
+            return None
+        scheduled = int(batch.num_scheduled_tokens[0])
+        if scheduled <= 0 or bool(
+            self.replicated_requests(
+                batch.num_scheduled_tokens[:1], batch.is_prefilling_np[:1]
+            )[0]
+        ):
+            return None
+        start = int(batch.num_computed_tokens_np[0])
+        return start, start + scheduled
+
+    @property
     def input_buffers(self) -> InputBuffers:
         assert self._input_buffers is not None
         return self._input_buffers
@@ -467,6 +521,7 @@ class PCPManager:
 
         global_batch = input_batch
         self._global_batch = global_batch
+        self._scheduled_batch = True
 
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
@@ -660,6 +715,7 @@ class PCPManager:
             local_start_pos_np + local_num_scheduled_tokens
         )
         dcp_local_seq_lens_cpu_upper_bound = None
+        dcp_request_context_starts_cpu = None
         if self.dcp_world_size > 1:
             # The largest DCP shard of each row's whole request, identical on
             # every PCP rank: the sparse backends pad their KV gather to it.
@@ -677,6 +733,16 @@ class PCPManager:
             )
             dcp_local_seq_lens_cpu_upper_bound[:num_local_reqs].copy_(
                 real_dcp_local_seq_lens_cpu_upper_bound
+            )
+            dcp_request_context_starts_cpu = torch.zeros(
+                num_reqs_after_padding, dtype=torch.int32
+            )
+            dcp_request_context_starts_cpu[:num_local_reqs].copy_(
+                torch.from_numpy(
+                    num_computed_tokens[local_to_global_batch_req_idx_np].astype(
+                        np.int32
+                    )
+                )
             )
 
         self._local_batch = replace(
@@ -707,6 +773,7 @@ class PCPManager:
                     local_to_global_batch_req_idx_np
                 ],
                 dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+                dcp_request_context_starts_cpu=dcp_request_context_starts_cpu,
             ),
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
@@ -730,6 +797,7 @@ class PCPManager:
         self, input_batch: InputBatch
     ) -> InputBatch:
         """Stage a capture or dummy batch in persistent PCP input buffers."""
+        self._scheduled_batch = False
         input_buffers = self.input_buffers
         num_reqs = input_batch.num_reqs_after_padding
         num_tokens = input_batch.num_tokens_after_padding
@@ -922,7 +990,8 @@ def maybe_build_pcp_manager(
     dcp_size = parallel_config.decode_context_parallel_size
     dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
 
-    return cls(
+    global _ACTIVE_PCP_MANAGER
+    _ACTIVE_PCP_MANAGER = cls(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
@@ -936,3 +1005,4 @@ def maybe_build_pcp_manager(
         # Without EP all2all kernels, MoERunner all-gathers PCP tokens to route.
         moe_gathers_tokens=not parallel_config.enable_expert_parallel,
     )
+    return _ACTIVE_PCP_MANAGER

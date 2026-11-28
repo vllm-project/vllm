@@ -301,6 +301,7 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.cp_common import dcp_scheduled_step
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
@@ -637,6 +638,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.impl = impl  # type: ignore[assignment]
+        self.impl._layer_name = self.layer_name  # type: ignore[attr-defined]
         # ShardQ (see vllm.v1.attention.ops.shardq), if the impl supports it.
         self.use_shardq = shardq_eligible and getattr(impl, "use_shardq", False)
         # Indexer cache bytes per token, for DCP ShardQ (0: no indexer).
@@ -2765,6 +2767,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_manager.init_kv_gather(
                 self.chunked_prefill_workspace,
                 self.chunked_prefill_workspace_size,
+                enable_kv_prefetch=parallel_config.dcp_kv_prefetch,
             )
         else:
             self.chunked_prefill_workspace = torch.empty(
@@ -3217,6 +3220,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+        self._layer_name: str | None = None
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -3405,8 +3409,15 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output = None
         output_lse = None
         workspace = chunked_context.workspace
+        dcp_manager = cast(MLADCPManager, chunked_context.dcp_manager)
+        kv_prefetch = (
+            getattr(dcp_manager, "kv_prefetch", None)
+            if self._layer_name is not None
+            else None
+        )
+        scheduled = dcp_scheduled_step() if kv_prefetch is not None else False
 
-        for chunk in chunked_context.chunks:
+        for chunk_idx, chunk in enumerate(chunked_context.chunks):
             assert chunk.padded_local_seq_lens is not None
             assert chunk.local_context_lens_allranks is not None
             assert chunk.padded_local_cu_seq_lens is not None
@@ -3414,62 +3425,71 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             assert chunk.local_starts is not None
 
             toks = chunk.num_local_context_tokens
-            padded_local_cu_seq_lens = chunk.padded_local_cu_seq_lens
-            block_table = prefill_metadata.block_table[chunk.request_slice]
-            if self.kv_cache_dtype == "fp8_ds_mla":
-                ops.cp_gather_and_upconvert_fp8_kv_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace[:toks],
-                    block_table=block_table,
-                    workspace_starts=padded_local_cu_seq_lens,
-                    batch_size=chunk.num_requests,
-                    seq_starts=chunk.starts,
-                )
-            elif self.kv_cache_dtype == "nvfp4_ds_mla":
-                ops.cp_gather_and_upconvert_nvfp4_kv_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace[:toks],
-                    block_table=block_table,
-                    workspace_starts=padded_local_cu_seq_lens,
-                    batch_size=chunk.num_requests,
-                    seq_starts=chunk.starts,
-                )
-            elif is_quantized_kv_cache(self.kv_cache_dtype):
-                assert k_scale is not None
-                ops.gather_and_maybe_dequant_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace,
-                    block_table=block_table,
-                    cu_seq_lens=padded_local_cu_seq_lens,
-                    token_to_seq=chunk.padded_local_token_to_seq,
-                    num_tokens=toks,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                    scale=k_scale,
-                    seq_starts=chunk.starts,
-                )
+            prefetched = (
+                kv_prefetch.join(self._layer_name, chunk_idx, scheduled=scheduled)
+                if kv_prefetch is not None and self._layer_name is not None
+                else None
+            )
+            if prefetched is not None:
+                cur_allgather_kvcache = prefetched
+                assert kv_prefetch is not None and self._layer_name is not None
+                kv_prefetch.start_next(self._layer_name, chunk_idx)
             else:
-                ops.cp_gather_cache(
-                    src_cache=kv_c_and_k_pe_cache,
-                    dst=workspace[:toks],
-                    block_table=block_table,
-                    cu_seq_lens=padded_local_cu_seq_lens,
-                    batch_size=chunk.num_requests,
-                    seq_starts=chunk.starts,
-                )
-            # workspace
-            # |------- N tokens --------|--------- N*dcp_size tokens ----------|
-            # |<- use for local_gather ->|<--------- use for allgather -------->|
-            allgather_offset = workspace.shape[0] // (dcp_world_size + 1)
-            assert allgather_offset * (dcp_world_size + 1) == workspace.shape[0]
-            assert toks <= allgather_offset
-            local_gathered_kvcache = workspace[:toks]
-            cur_allgather_workspace = workspace[
-                allgather_offset : allgather_offset * (1 + dcp_world_size)
-            ]
-            assert toks * dcp_world_size <= cur_allgather_workspace.shape[0]
-            cur_allgather_kvcache = cur_allgather_workspace[: toks * dcp_world_size]
-            dcp_manager = cast(MLADCPManager, chunked_context.dcp_manager)
-            dcp_manager.kv_gather(cur_allgather_kvcache, local_gathered_kvcache)
+                padded_local_cu_seq_lens = chunk.padded_local_cu_seq_lens
+                block_table = prefill_metadata.block_table[chunk.request_slice]
+                if self.kv_cache_dtype == "fp8_ds_mla":
+                    ops.cp_gather_and_upconvert_fp8_kv_cache(
+                        src_cache=kv_c_and_k_pe_cache,
+                        dst=workspace[:toks],
+                        block_table=block_table,
+                        workspace_starts=padded_local_cu_seq_lens,
+                        batch_size=chunk.num_requests,
+                        seq_starts=chunk.starts,
+                    )
+                elif self.kv_cache_dtype == "nvfp4_ds_mla":
+                    ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+                        src_cache=kv_c_and_k_pe_cache,
+                        dst=workspace[:toks],
+                        block_table=block_table,
+                        workspace_starts=padded_local_cu_seq_lens,
+                        batch_size=chunk.num_requests,
+                        seq_starts=chunk.starts,
+                    )
+                elif is_quantized_kv_cache(self.kv_cache_dtype):
+                    assert k_scale is not None
+                    ops.gather_and_maybe_dequant_cache(
+                        src_cache=kv_c_and_k_pe_cache,
+                        dst=workspace,
+                        block_table=block_table,
+                        cu_seq_lens=padded_local_cu_seq_lens,
+                        token_to_seq=chunk.padded_local_token_to_seq,
+                        num_tokens=toks,
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        scale=k_scale,
+                        seq_starts=chunk.starts,
+                    )
+                else:
+                    ops.cp_gather_cache(
+                        src_cache=kv_c_and_k_pe_cache,
+                        dst=workspace[:toks],
+                        block_table=block_table,
+                        cu_seq_lens=padded_local_cu_seq_lens,
+                        batch_size=chunk.num_requests,
+                        seq_starts=chunk.starts,
+                    )
+                # workspace
+                # |------- N tokens --------|--------- N*dcp_size tokens ----------|
+                # |<- use for local_gather ->|<--------- use for allgather -------->|
+                allgather_offset = workspace.shape[0] // (dcp_world_size + 1)
+                assert allgather_offset * (dcp_world_size + 1) == workspace.shape[0]
+                assert toks <= allgather_offset
+                local_gathered_kvcache = workspace[:toks]
+                cur_allgather_workspace = workspace[
+                    allgather_offset : allgather_offset * (1 + dcp_world_size)
+                ]
+                assert toks * dcp_world_size <= cur_allgather_workspace.shape[0]
+                cur_allgather_kvcache = cur_allgather_workspace[: toks * dcp_world_size]
+                dcp_manager.kv_gather(cur_allgather_kvcache, local_gathered_kvcache)
             assert (
                 cur_allgather_kvcache.shape[-1]
                 == self.kv_lora_rank + self.qk_rope_head_dim
@@ -3556,6 +3576,37 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert output_scale is None or not has_context, (
             "Fused FP8 output is only wired for the non-chunked-context path"
         )
+
+        # Register the layer and overlap layer 0 chunk 0 with new-token
+        # kv_b_proj + suffix attention before entering the context loop.
+        if (
+            has_context
+            and prefill_metadata.chunked_context is not None
+            and self.dcp_world_size > 1
+            and self._layer_name is not None
+        ):
+            kv_prefetch = getattr(
+                prefill_metadata.chunked_context.dcp_manager, "kv_prefetch", None
+            )
+            if kv_prefetch is not None:
+                forward_context = get_forward_context()
+                scheduled = dcp_scheduled_step()
+                attn_metadata_raw = forward_context.attn_metadata
+                if isinstance(attn_metadata_raw, dict):
+                    meta_of: Callable[[str], Any] = attn_metadata_raw.get
+                elif isinstance(attn_metadata_raw, list) and attn_metadata_raw:
+                    meta_of = attn_metadata_raw[0].get
+                else:
+                    meta_of = lambda _name: attn_metadata_raw  # noqa: E731
+                kv_prefetch.begin_layer(
+                    self._layer_name,
+                    kv_c_and_k_pe_cache,
+                    k_scale,
+                    forward_context,
+                    meta_of,
+                    scheduled=scheduled,
+                )
+                kv_prefetch.start_first()
 
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
