@@ -1,7 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused Gemma-style RMSNorm for AMD ROCm via Triton.
+"""AMD/ROCm Gemma RMSNorm — re-exports the shared Triton implementation.
 
+The kernels live in ``common/ops/gemma_rmsnorm.py``; this shim keeps the AMD
+import path stable while avoiding duplication.
+"""
+
+from vllm.models.minimax_m3.common.ops.gemma_rmsnorm import (
+    gemma_fused_add_rmsnorm,
+    gemma_rmsnorm,
+)
+
+__all__ = ["gemma_rmsnorm", "gemma_fused_add_rmsnorm"]
 Gemma RMSNorm = normalize(x) * (1 + weight), computed in fp32. FlashInfer's
 `gemma_rmsnorm` / `gemma_fused_add_rmsnorm` CUDA kernels are unavailable on
 ROCm, so the AMD path previously used a ~8-op PyTorch sequence (float cast, add,

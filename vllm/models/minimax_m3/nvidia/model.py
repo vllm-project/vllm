@@ -368,6 +368,8 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         residual: torch.Tensor | None = None,
         mxfp8: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if x.is_cuda:
+            from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
         if x.dim() == 2:
             from vllm.models.minimax_m3.nvidia.ops.norm_mxfp8 import (
                 gemma_rmsnorm_mxfp8,
@@ -395,12 +397,22 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         assert not mxfp8
         from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
-        if residual is None:
-            return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
+            if residual is None:
+                return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
+            # gemma_fused_add_rmsnorm mutates x and residual in place.
+            gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
+            return x, residual
 
-        # gemma_fused_add_rmsnorm mutates x and residual in place.
-        gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
-        return x, residual
+        from vllm.models.minimax_m3.common.ops.gemma_rmsnorm import (
+            gemma_fused_add_rmsnorm as _fused,
+        )
+        from vllm.models.minimax_m3.common.ops.gemma_rmsnorm import (
+            gemma_rmsnorm as _norm,
+        )
+
+        if residual is None:
+            return _norm(x, self.weight, self.variance_epsilon)
+        return _fused(x, residual, self.weight, self.variance_epsilon)
 
 
 class MiniMaxM3MLP(nn.Module):
