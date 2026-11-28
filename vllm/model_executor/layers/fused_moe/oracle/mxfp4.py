@@ -85,10 +85,24 @@ if triton_kernels_version is not None:
 
 def store_params_in_triton(layer: torch.nn.Module, **tensors) -> None:
     """Back each loaded param and its triton_kernels tensor by one storage, so the
-    param keeps its loaded bytes without a second copy of the data."""
+    param keeps its loaded bytes without a second copy of the data.
+
+    A layerwise reload processes fresh params and copies them back into the
+    first ones; the triton_kernels tensors keep the first storage, which
+    captured CUDA graphs read, so the fresh copy can be freed."""
+    kernel_data = layer.__dict__.setdefault("_triton_kernel_data", {})
     for name, tensor in tensors.items():
         replace_parameter(layer, name, tensor.storage.data)
-        tensor.storage.data = getattr(layer, name).data
+        data = getattr(layer, name).data
+        old = kernel_data.get(name)
+        if (
+            old is not None
+            and old.data_ptr() != data.data_ptr()
+            and (old.shape, old.stride(), old.dtype, old.device)
+            == (data.shape, data.stride(), data.dtype, data.device)
+        ):
+            data = old.copy_(data)
+        tensor.storage.data = kernel_data[name] = data
 
 
 def triton_weight(layer: torch.nn.Module, name: str):
