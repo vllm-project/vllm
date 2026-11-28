@@ -10,7 +10,7 @@ import numpy as np
 import prometheus_client
 import pytest
 import torch
-from tokenizers import Tokenizer, decoders, models
+from tokenizers import AddedToken, Tokenizer, decoders, models
 from transformers import AutoTokenizer, TokenizersBackend
 
 from tests.v1.engine.utils import (
@@ -1815,10 +1815,7 @@ def _make_streaming_input_request(
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE]
 )
-@pytest.mark.parametrize(
-    "skip_per_chunk",
-    [(False, True, False), (True, False, True), (False,) * 3, (True,) * 3],
-)
+@pytest.mark.parametrize("skip_per_chunk", [(False, True, False), (True, False, True)])
 def test_streaming_input_skip_special_tokens(
     queued: bool, output_kind: RequestOutputKind, skip_per_chunk: tuple[bool, ...]
 ):
@@ -1897,6 +1894,80 @@ def test_skip_special_tokens_change_preserves_pending_text(
             observed += decoder.get_next_output_text(finished=True, delta=True)
             expected += reference.get_next_output_text(finished=True, delta=True)
         assert observed == expected
+
+
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize(
+    ("initial_skip", "stop_terminated"),
+    [(True, False), (False, True)],
+)
+def test_skip_special_tokens_change_preserves_bytes_across_hidden_eos(
+    fast: bool, initial_skip: bool, stop_terminated: bool
+):
+    """Skipped or excluded EOS cannot split pending UTF-8 bytes after a toggle."""
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    eos = tokenizer.eos_token_id
+    assert eos is not None
+    assert tokenizer.decode([19526, 254, 0]) == "你!"
+    request = _make_streaming_input_request(
+        "decode-setting", [], SamplingParams(skip_special_tokens=initial_skip)
+    )
+    decoder_class = FastIncrementalDetokenizer if fast else SlowIncrementalDetokenizer
+    decoder = decoder_class(tokenizer, request)
+    decoder.update([19526, eos], stop_terminated=stop_terminated)
+    first = decoder.get_next_output_text(finished=True, delta=True)
+    decoder.set_skip_special_tokens(not initial_skip)
+    decoder.update([254, 0], stop_terminated=False)
+    second = decoder.get_next_output_text(finished=True, delta=True)
+    assert first + second == "你!"
+    assert decoder.output_token_ids == [19526, eos, 254, 0]
+
+
+def test_skip_special_tokens_change_preserves_spacing_and_handles_invalid_ids():
+    """Toggling preserves spaces_between_special_tokens=False and tolerates bad IDs."""
+    raw = Tokenizer(
+        models.WordLevel({"hello": 0, "<s1>": 1, "<s2>": 2}, unk_token="hello")
+    )
+    raw.decoder = decoders.Sequence([decoders.WordPiece(prefix="##")])
+    raw.add_special_tokens(
+        [AddedToken("<s1>", special=True), AddedToken("<s2>", special=True)]
+    )
+    fast = FastIncrementalDetokenizer(
+        TokenizersBackend(tokenizer_object=raw),
+        _make_streaming_input_request(
+            "decode-spacing",
+            [],
+            SamplingParams(
+                skip_special_tokens=False, spaces_between_special_tokens=False
+            ),
+        ),
+    )
+    fast.update([1], stop_terminated=False)
+    p1 = fast.get_next_output_text(finished=True, delta=True)
+    fast.set_skip_special_tokens(True)
+    fast.update([2], stop_terminated=False)
+    fast.set_skip_special_tokens(False)
+    fast.update([1], stop_terminated=False)
+    assert p1 + fast.get_next_output_text(finished=True, delta=True) == "<s1><s1>"
+
+    gpt2 = AutoTokenizer.from_pretrained("gpt2")
+    eos = gpt2.eos_token_id
+    assert eos is not None
+    for decoder_class in (FastIncrementalDetokenizer, SlowIncrementalDetokenizer):
+        decoder = decoder_class(
+            gpt2,
+            _make_streaming_input_request(
+                "decode-invalid", [], SamplingParams(skip_special_tokens=True)
+            ),
+        )
+        decoder.update([-1, 0], stop_terminated=False)
+        assert decoder.get_next_output_text(finished=True, delta=True) == "!"
+        decoder.set_skip_special_tokens(False)
+        decoder.update([eos, 0], stop_terminated=False)
+        assert (
+            decoder.get_next_output_text(finished=True, delta=True)
+            == gpt2.decode([eos], skip_special_tokens=False) + "!"
+        )
 
 
 def _add_streaming_request_with_queued_chunk(
