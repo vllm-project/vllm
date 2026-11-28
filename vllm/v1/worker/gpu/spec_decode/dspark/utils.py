@@ -95,12 +95,15 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         speculative_config.attention_backend,
         vllm_config.attention_config.backend,
     )
+    target_parallel_config = (
+        speculative_config.target_parallel_config or vllm_config.parallel_config
+    )
 
     draft_vllm_config = speculative_config.apply_draft_overrides(
         replace(
             vllm_config,
             parallel_config=_get_dspark_parallel_config(
-                vllm_config.parallel_config,
+                target_parallel_config,
                 speculative_config.draft_parallel_config.tensor_parallel_size,
                 draft_model_config,
                 speculative_config.draft_enable_eplb,

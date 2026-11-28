@@ -6,7 +6,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
+from vllm.config import EPLBConfig, VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -45,10 +45,22 @@ class DFlashSpeculator(DraftModelSpeculator):
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
         vllm_config = copy.copy(vllm_config)
+        parallel_config_updates: dict[str, Any] = {
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": (
+                speculative_config.draft_decode_context_parallel_size
+            ),
+        }
+        if speculative_config.use_dspark():
+            # DSpark rebuilds its draft config from the target topology later.
+            # Keep this temporary execution view valid after PCP is removed.
+            parallel_config_updates.update(
+                enable_eplb=False,
+                eplb_config=EPLBConfig(),
+            )
         vllm_config.parallel_config = replace(
             parallel_config,
-            prefill_context_parallel_size=1,
-            decode_context_parallel_size=speculative_config.draft_decode_context_parallel_size,
+            **parallel_config_updates,
         )
         super().__init__(vllm_config, device)
 
