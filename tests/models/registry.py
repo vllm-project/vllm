@@ -1281,7 +1281,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "Nemotron3_5TranscribeForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B", is_available_online=False
+        "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B"
     ),
     "OmniASRForConditionalGeneration": _HfExamplesInfo(
         "hf-audio/omniasr-llm-300m-v2", min_transformers_version="5.24.1"
@@ -1874,7 +1874,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Nemotron3_5TranscribeMTPModel": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
         speculative_model="nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
-        is_available_online=False,
     ),
     "NemotronShortcutMTPModel": _HfExamplesInfo(
         "nvidia/NemotronShortcut",
