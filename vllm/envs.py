@@ -132,7 +132,7 @@ if TYPE_CHECKING:
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = True
-    VLLM_PP_TRANSPORT: Literal["auto", "nccl", "copy_engine"] = "auto"
+    VLLM_PP_TRANSPORT: Literal["auto", "nccl", "copy_engine", "mori_io"] = "auto"
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
@@ -1262,10 +1262,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # over NVLink, or SDMA engines over xGMI on ROCm gfx950. It needs each PP
     # chain's GPUs directly connected: on one node, or with CUDA across nodes in
     # one multi-node NVLink domain with an IMEX channel. It fails startup
-    # without. "auto" uses copy engines when every rank can, and NCCL otherwise;
-    # on ROCm it keeps NCCL.
+    # without. "mori_io" (ROCm, needs MoRI) writes them into receive slots
+    # pre-registered on the next stage with MoRI-IO: over xGMI on one node, over
+    # RDMA across nodes, for any PP size. "auto" uses copy engines when every
+    # rank can, and NCCL otherwise; on ROCm it keeps NCCL.
     "VLLM_PP_TRANSPORT": env_with_choices(
-        "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
+        "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine", "mori_io"]
     ),
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel

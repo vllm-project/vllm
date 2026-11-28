@@ -56,6 +56,22 @@ vllm serve gpt2 \
      --pipeline-parallel-size 2
 ```
 
+## Pipeline transport on ROCm
+
+Set `VLLM_PP_TRANSPORT=mori_io` on every worker to send pipeline intermediate
+tensors with [MoRI-IO](https://github.com/ROCm/mori). This requires ROCm and
+MoRI. A pipeline chain on one node uses xGMI; a chain spanning nodes uses
+RDMA. The default `VLLM_PP_TRANSPORT=auto` continues to use NCCL on ROCm.
+
+MoRI-IO reserves three receive slots per pipeline boundary and matching send
+slots on the preceding stage. Their size follows the model's maximum
+intermediate tensors, including auxiliary hidden states for speculative
+decoding. Reducing `--max-num-batched-tokens` reduces this memory reservation.
+The transport supports a separate pipeline chain for each tensor-parallel
+rank. Pipeline activation transport is configured independently of the KV
+connector used for disaggregated serving; the connector's own topology
+restrictions still apply.
+
 ## Multi-node deployment
 
 If a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. Ensure that every node provides an identical execution environment, including the model path and Python packages. Using container images is recommended because they provide a convenient way to keep environments consistent and to hide host heterogeneity.

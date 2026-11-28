@@ -1902,6 +1902,15 @@ class Worker(WorkerBase):
 
         gc.unfreeze()
 
+        if pp_transport := getattr(self, "_pp_transport", None):
+            try:
+                pp_transport.close()
+                self._pp_transport = None
+            except Exception:
+                # Keep the transport (and the buffers an unfinished transfer may
+                # still use) referenced, but finish shutting down the rest.
+                logger.exception("Failed to close the PP transport")
+
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()

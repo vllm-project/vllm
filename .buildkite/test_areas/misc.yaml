@@ -222,6 +222,28 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/moriio
 
+# MoRI-IO PP needs four GPUs to cover PP4 and a failure in one of two TP chains.
+- label: ":amd: (MI355) MoRI-IO Pipeline Transport"
+  key: amd-mori-io-pp-transport-mi355
+  automatic_shard: true
+  dind: false
+  device: mi355_4
+  num_devices: 4
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/pp_transport/
+  - vllm/distributed/parallel_state.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/worker/startup_plan.py
+  - tests/distributed/test_pp_transport.py
+  - requirements/test/rocm.txt
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
+  - pytest -v -s -rs distributed/test_pp_transport.py -k mori_io
+
 # Most UMBP tests need mori and skip on CUDA. Run them all on MI355 whenever
 # the connector or its tests change.
 - label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
