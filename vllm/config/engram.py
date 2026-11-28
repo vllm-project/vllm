@@ -48,9 +48,11 @@ class EngramConfig:
     Grace host memory when enabled and HBM when disabled."""
 
     disk_offload: bool = False
-    """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
-    rows on the host instead of allocating the table. Takes precedence over
-    cpu_offload."""
+    """Keep the tables in the checkpoint's safetensors files and read each
+    step's rows on the host instead of allocating the table in device or pinned
+    host memory (useful on unified-memory GPUs, where pinned memory comes out of
+    the same pool as the weights). Replaces cpu_offload. Supported for Qwen4Exp
+    PLE tables on CUDA and DeepSeek V4.1 Engram tables."""
 
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
@@ -113,6 +115,13 @@ class EngramConfig:
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.disk_offload:
+            if self.dp_shared_memory or self.use_thp:
+                raise ValueError(
+                    "disk_offload cannot be combined with dp_shared_memory or use_thp"
+                )
+            # The tables stay on disk, so there is no host copy to offload.
+            self.cpu_offload = False
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -165,8 +174,15 @@ class EngramConfig:
         if self.disk_offload:
             from vllm.platforms import current_platform
 
-            if field != "ple_layer_ids" or not current_platform.is_cuda():
-                raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
+            if field == "ple_layer_ids":
+                if not current_platform.is_cuda():
+                    raise ValueError("Qwen4Exp disk_offload requires CUDA")
+            elif self.embedding_across_dp or self.peer_group_size:
+                # Each DeepSeek V4.1 rank reads only its own TP rows.
+                raise ValueError(
+                    "DeepSeek V4.1 disk_offload cannot be combined with "
+                    "embedding_across_dp or peer_group_size"
+                )
         if self.peer_group_size and field not in _PEER_GROUP_FIELDS:
             raise ValueError(
                 "peer_group_size requires a model with Engram pool support"
