@@ -241,6 +241,10 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_e4m3_quantize,
     )
+    from vllm.models.minimax_m3.nvidia.model import (
+        FUSED_MOE_FINALIZE_MAX_TOKENS,
+        fused_moe_finalize_one_shot_max_tokens,
+    )
     from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
         FinalizeAllReduceGemmaRMSNormMxfp8,
     )
@@ -252,9 +256,20 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
+        cap = FUSED_MOE_FINALIZE_MAX_TOKENS
+        one_shot = fused_moe_finalize_one_shot_max_tokens(tp_size)
         op = FinalizeAllReduceGemmaRMSNormMxfp8(
             hidden_size=hidden,
-            max_num_tokens=32,
+            max_num_tokens=cap,
+            top_k=top_k,
+            fp32_weights=False,
+            device=device,
+            one_shot_max_tokens=one_shot,
+        )
+        # The two-shot all-reduce must reproduce the one-shot one exactly.
+        one_shot_only = FinalizeAllReduceGemmaRMSNormMxfp8(
+            hidden_size=hidden,
+            max_num_tokens=cap,
             top_k=top_k,
             fp32_weights=False,
             device=device,
@@ -315,15 +330,15 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
                 # rsqrt, so a value can move by one BF16 ULP, and with it rarely
                 # a block's scale. Padding rows' scales are zero in both.
                 assert quantized.scale.shape == ref_scales.shape
-                assert (quantized.scale == ref_scales).float().mean() >= 0.99
                 codes = quantized.data.view(torch.uint8)
                 assert (codes == ref_values.view(torch.uint8)).float().mean() >= 0.99
                 cols = hidden // 32
-                scales = _swizzled_scale_rows(
-                    quantized.scale, quantized.scale.numel() // cols, cols
-                )
+                padded_rows = quantized.scale.numel() // cols
+                scales = _swizzled_scale_rows(quantized.scale, padded_rows, cols)
                 assert not scales[n:].any()
                 scales = scales[:n]
+                ref_rows = _swizzled_scale_rows(ref_scales, padded_rows, cols)[:n]
+                assert (scales == ref_rows).float().mean() >= 0.99
                 step = torch.exp2(scales.float() - 127).repeat_interleave(32, dim=1)
                 dequantized = quantized.data.float() * step
                 expected = normed.float()
@@ -333,6 +348,16 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
                 assert torch.all((dequantized - expected).abs() <= tolerance)
 
             check(fused())
+            quantized, residual_out = fused()
+            expected, expected_residual = one_shot_only(
+                moe_output, residual, weight, eps
+            )
+            assert torch.equal(
+                quantized.data.view(torch.uint8), expected.data.view(torch.uint8)
+            )
+            assert torch.equal(quantized.scale, expected.scale)
+            # Compares values: the Lamport sentinel turns a -0.0 sum into +0.0.
+            assert torch.equal(residual_out, expected_residual)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 for _ in range(5):
@@ -347,9 +372,13 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
             graph.replay()
             check(captured)
 
-        # Changing shapes cover shrinking and growing batches in one mailbox.
-        for n in (1, 6, 32, 3, 17, 2, 1):
+        # Changing shapes cover shrinking and growing batches, switching between
+        # the one-shot and two-shot mailboxes, up to the model's cap.
+        sizes = (1, 6, one_shot, 3, one_shot + 1, 17, 2, cap // 4, 100, cap // 2)
+        for n in (*sizes, 1, cap - 1, cap, 40, 1):
             run(n)
+        with pytest.raises(ValueError, match="outside"):
+            run(cap + 1)
 
 
 @pytest.mark.skipif(
