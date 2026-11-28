@@ -16,8 +16,8 @@ from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_sup
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    LinearBase,
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
@@ -36,22 +36,6 @@ from .swa import FlashSparseBackend, FlashSWABackend, FlashWindowIndexer
 class HYV4FlashMLAAttention(MLAAttention):
     # FlashSWABackend indexes live pages and forces the paged FP8 kernel.
     supports_fp8_ds_mla_sliding_window = True
-
-
-def _get_fused_projection_sizes(config) -> list[int]:
-    return [
-        config.q_lora_rank,
-        config.kv_lora_rank + config.qk_rope_head_dim,
-        config.compressed_indexer_head_dim,
-        config.compressed_indexer_num_attention_heads,
-    ]
-
-
-def _can_fuse_unquantized_projections(*layers: LinearBase) -> bool:
-    return (
-        all(type(layer.quant_method) is UnquantizedLinearMethod for layer in layers)
-        and len({layer.params_dtype for layer in layers}) == 1
-    )
 
 
 class HYV4FlashAttention(HYV4MLAAttention):
@@ -91,10 +75,14 @@ class HYV4FlashAttention(HYV4MLAAttention):
             config.swa_v_head_dim if self.is_window_layer else config.v_head_dim
         )
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-        self.fused_qkv_a_split_sizes = _get_fused_projection_sizes(config)
         self.qkv_a_split_sizes = [
             self.q_lora_rank,
             self.kv_lora_rank + self.qk_rope_head_dim,
+        ]
+        self.fused_qkv_a_split_sizes = [
+            *self.qkv_a_split_sizes,
+            config.compressed_indexer_head_dim,
+            config.compressed_indexer_num_attention_heads,
         ]
         self.scaling = self.qk_head_dim**-0.5
         self.is_sparse = self.create_indexer = True
@@ -128,14 +116,6 @@ class HYV4FlashAttention(HYV4MLAAttention):
         ):
             raise ValueError("Flash requires normalized ungrouped RoPE MLA")
         quant = vllm_config.quant_config
-        self.fused_qkv_a_proj = MergedColumnParallelLinear(
-            config.hidden_size,
-            self.qkv_a_split_sizes,
-            bias=False,
-            quant_config=quant,
-            prefix=f"{prefix}.fused_qkv_a_proj",
-            disable_tp=True,
-        )
         self.q_a_layernorm = RMSNorm(self.q_lora_rank, config.rms_norm_eps)
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, config.rms_norm_eps)
         self.q_b_proj = ColumnParallelLinear(
@@ -190,30 +170,67 @@ class HYV4FlashAttention(HYV4MLAAttention):
                 vllm_config, self.config, topk_indices_buffer, f"{prefix}.indexer"
             )
         )
-        self._fuse_qkv_a_indexer = False
-        if not self.is_window_layer:
+        if self.is_window_layer:
+            self.fused_qkv_a_proj = MergedColumnParallelLinear(
+                config.hidden_size,
+                self.qkv_a_split_sizes,
+                bias=False,
+                quant_config=quant,
+                prefix=f"{prefix}.fused_qkv_a_proj",
+                disable_tp=True,
+            )
+        else:
             assert isinstance(self.indexer, FlashCompressedIndexer)
+            q_a_proj = ReplicatedLinear(
+                config.hidden_size,
+                self.q_lora_rank,
+                bias=False,
+                quant_config=quant,
+                prefix=f"{prefix}.q_a_proj",
+            )
+            kv_a_proj = ReplicatedLinear(
+                config.hidden_size,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                bias=False,
+                quant_config=quant,
+                prefix=f"{prefix}.kv_a_proj_with_mqa",
+            )
             token_key_projection = self.indexer.token_key_projection
             head_weight_projection = self.indexer.head_weight_projection
             assert token_key_projection is not None
             assert head_weight_projection is not None
-            if _can_fuse_unquantized_projections(
-                self.fused_qkv_a_proj,
-                token_key_projection,
-                head_weight_projection,
-            ):
-                self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                    config.hidden_size,
-                    self.fused_qkv_a_split_sizes,
-                    bias=False,
-                    params_dtype=self.fused_qkv_a_proj.params_dtype,
-                    quant_config=None,
-                    prefix=f"{prefix}.fused_qkv_a_proj",
-                    disable_tp=True,
+            projections = (
+                ("q_a_proj", q_a_proj),
+                ("kv_a_proj_with_mqa", kv_a_proj),
+                ("token_key_projection", token_key_projection),
+                ("head_weight_projection", head_weight_projection),
+            )
+            quantized = [
+                name
+                for name, layer in projections
+                if type(layer.quant_method) is not UnquantizedLinearMethod
+            ]
+            if quantized:
+                raise ValueError(
+                    "HYV4 Flash DSA fused qkv_a/indexer projections must be "
+                    f"unquantized; quantized projections: {', '.join(quantized)}"
                 )
-                self.indexer.token_key_projection = None
-                self.indexer.head_weight_projection = None
-                self._fuse_qkv_a_indexer = True
+            if len({layer.params_dtype for _, layer in projections}) != 1:
+                raise ValueError(
+                    "HYV4 Flash DSA fused qkv_a/indexer projections must use "
+                    "the same parameter dtype"
+                )
+            self.fused_qkv_a_proj = MergedColumnParallelLinear(
+                config.hidden_size,
+                self.fused_qkv_a_split_sizes,
+                bias=False,
+                params_dtype=q_a_proj.params_dtype,
+                quant_config=None,
+                prefix=f"{prefix}.fused_qkv_a_proj",
+                disable_tp=True,
+            )
+            self.indexer.token_key_projection = None
+            self.indexer.head_weight_projection = None
         self.learnable_sink_param = make_attention_sink(
             self.num_local_heads, torch.float32
         )
@@ -249,15 +266,15 @@ class HYV4FlashAttention(HYV4MLAAttention):
         projection = self.fused_qkv_a_proj(hidden_states)[0]
         indexer_token_keys = None
         indexer_head_weights = None
-        if self._fuse_qkv_a_indexer:
+        if self.is_window_layer:
+            q_c, kv = projection.split(self.qkv_a_split_sizes, dim=-1)
+        else:
             (
                 q_c,
                 kv,
                 indexer_token_keys,
                 indexer_head_weights,
             ) = projection.split(self.fused_qkv_a_split_sizes, dim=-1)
-        else:
-            q_c, kv = projection.split(self.qkv_a_split_sizes, dim=-1)
         if positions.ndim == 2:
             q_c, kv_c, k_pe, rope_pos, cos_sin = fused_mrope_norm(
                 self.rotary_emb,
@@ -267,12 +284,12 @@ class HYV4FlashAttention(HYV4MLAAttention):
                 self.q_a_layernorm,
                 self.kv_a_layernorm,
             )
-            q = self._project_query(q_c)
+            q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
             q_pe = q[..., self.qk_nope_head_dim :]
             rope_into(rope_pos, q_pe, cos_sin, q_pe)
         else:
             q_c = self.q_a_layernorm(q_c)
-            q = self._project_query(q_c)
+            q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
             kv_c, k_pe = kv.split((self.kv_lora_rank, self.qk_rope_head_dim), -1)
             kv_c = self.kv_a_layernorm(kv_c)
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
@@ -306,14 +323,6 @@ class HYV4FlashAttention(HYV4MLAAttention):
             return out
         return fused_allreduce_rms_norm(out, None, self.post_proj_norm)[0]
 
-    def _project_query(
-        self,
-        q_c: torch.Tensor,
-    ) -> torch.Tensor:
-        q_proj = self.q_b_proj(q_c)[0]
-        q = q_proj.view(-1, self.num_local_heads, self.qk_head_dim)
-        return q
-
     def _run_indexer(
         self,
         hidden_states: torch.Tensor,
@@ -331,6 +340,8 @@ class HYV4FlashAttention(HYV4MLAAttention):
                 )
             )
             return super()._run_indexer(hidden_states, q_c, positions)
+        assert indexer_token_keys is not None
+        assert indexer_head_weights is not None
         self.indexer(
             hidden_states,
             q_c,

@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HYV4 Flash backbone using the public HYV4 checkpoint contract."""
 
-from collections.abc import Iterable
-
 import torch
 from torch import nn
 
@@ -29,40 +27,6 @@ from vllm.sequence import IntermediateTensors
 
 from .attention import HYV4FlashAttention
 from .moe import HYV4FlashFeedForward, HYV4FlashMoE
-
-
-def _map_fused_indexer_projection_weights(
-    weights: Iterable[tuple[str, torch.Tensor]],
-    fused_layers: dict[int, bool],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    for name, tensor in weights:
-        parts = name.split(".")
-        layer_id = next(
-            (
-                parts[index + 2]
-                for index in range(len(parts) - 2)
-                if parts[index] == "model" and parts[index + 1] == "layers"
-            ),
-            None,
-        )
-        if layer_id is None or not layer_id.isdigit():
-            yield name, tensor
-            continue
-        if fused_layers.get(int(layer_id), False):
-            for projection, shard_id in (
-                ("token_key_projection", 2),
-                ("head_weight_projection", 3),
-            ):
-                for indexer in ("compressed_indexer", "indexer"):
-                    source = f".{indexer}.{projection}."
-                    if source in name:
-                        name = name.replace(source, ".fused_qkv_a_proj.", 1)
-                        tensor = tensor.detach()
-                        tensor.shard_id = shard_id
-                        break
-                else:
-                    continue
-        yield name, tensor
 
 
 def validate_platform() -> None:
@@ -199,6 +163,14 @@ class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM):
         orig_to_new_stacked={
             ".self_attn.q_a_proj.": (".self_attn.fused_qkv_a_proj.", 0),
             ".self_attn.kv_a_proj_with_mqa.": (".self_attn.fused_qkv_a_proj.", 1),
+            ".indexer.token_key_projection.": (
+                ".self_attn.fused_qkv_a_proj.",
+                2,
+            ),
+            ".indexer.head_weight_projection.": (
+                ".self_attn.fused_qkv_a_proj.",
+                3,
+            ),
             ".indexer.key_value_projection.": (".indexer.key_projection.", 0),
             ".indexer.key_gate_projection.": (".indexer.key_projection.", 1),
         },
@@ -207,15 +179,4 @@ class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         validate_platform()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        fused_layers = {
-            index: layer.self_attn._fuse_qkv_a_indexer
-            for index, layer in enumerate(self.model.layers)
-        }
-        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
-            weights_transforms=[
-                lambda weights: _map_fused_indexer_projection_weights(
-                    weights, fused_layers
-                )
-            ]
-        )
         self.init_weight_loading(vllm_config)

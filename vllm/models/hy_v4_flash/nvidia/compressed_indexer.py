@@ -104,8 +104,9 @@ class FlashCompressedIndexer(nn.Module):
         q_c,
         positions,
         rope=None,
-        indexer_token_keys: torch.Tensor | None = None,
-        indexer_head_weights: torch.Tensor | None = None,
+        *,
+        indexer_token_keys: torch.Tensor,
+        indexer_head_weights: torch.Tensor,
     ):
         output = self.topk_indices_buffer[: hidden_states.shape[0]]
         metadata = get_forward_context().attn_metadata
@@ -125,9 +126,6 @@ class FlashCompressedIndexer(nn.Module):
         # Scoring rows below `tokens` are fully written, padding included.
         if tokens < output.shape[0]:
             output[tokens:].fill_(-1)
-        if indexer_token_keys is None:
-            assert self.token_key_projection is not None
-            indexer_token_keys = self.token_key_projection(hidden_states)[0]
         keys = self.token_key_norm(indexer_token_keys).bfloat16()
         cache, tail = self.k_cache.kv_cache, self.tail_cache.kv_cache
         (
@@ -171,9 +169,6 @@ class FlashCompressedIndexer(nn.Module):
         write_tails(
             keys, positions, tail, tm.block_table, km.query_start_loc, km.seq_lens
         )
-        if indexer_head_weights is None:
-            assert self.head_weight_projection is not None
-            indexer_head_weights = self.head_weight_projection(hidden_states)[0]
         indexer_query = self.query_projection(q_c)[0]
         quant_q, weights = quantize_query(
             indexer_query[:tokens].view(tokens, self.num_heads, 128),
