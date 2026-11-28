@@ -54,6 +54,31 @@ def test_default_loader_rejects_zero_num_threads():
         )
 
 
+def test_default_loader_rejects_bool_num_threads():
+    with pytest.raises(ValueError, match="num_threads must be a positive integer"):
+        DefaultModelLoader(
+            LoadConfig(
+                model_loader_extra_config={
+                    "enable_multithread_load": True,
+                    "num_threads": True,
+                }
+            )
+        )
+
+
+def test_default_loader_accepts_positive_num_threads():
+    loader = DefaultModelLoader(
+        LoadConfig(
+            model_loader_extra_config={
+                "enable_multithread_load": True,
+                "num_threads": 2,
+            }
+        )
+    )
+
+    assert loader.load_config.model_loader_extra_config["num_threads"] == 2
+
+
 def test_default_loader_rejects_multithread_with_non_lazy_strategy():
     # The multi-thread loader ignores safetensors_load_strategy; reject the
     # combination instead of silently dropping the requested strategy.
