@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -127,4 +128,38 @@ async def test_iteration_workload_reaches_custom_stat_loggers(
         engine.shutdown()
         wait_for_memory_to_settle(
             threshold_ratio=1.0 - _required_utilization(engine_args)
+        )
+
+
+@pytest.mark.asyncio
+async def test_elastic_ep_scale_up_keeps_custom_stat_loggers(
+    log_stats_enabled_engine_args,
+):
+    """Scale-up rebuilds the logger manager; custom loggers must survive it."""
+    engine = AsyncLLM.from_engine_args(
+        log_stats_enabled_engine_args, stat_loggers=[DummyStatLogger]
+    )
+    try:
+        # Stop right after the loggers are rebuilt, before new engines start.
+        with (
+            patch.object(
+                engine.engine_core,
+                "prepare_elastic_ep",
+                AsyncMock(side_effect=RuntimeError("stop")),
+            ),
+            pytest.raises(RuntimeError, match="stop"),
+        ):
+            await engine.scale_elastic_ep(2)
+
+        per_engine_adapter = engine.logger_manager.stat_loggers[0]
+        assert isinstance(per_engine_adapter, PerEngineStatLoggerAdapter)
+        assert set(per_engine_adapter.per_engine_stat_loggers) == {0, 1}
+        assert all(
+            isinstance(stat_logger, DummyStatLogger)
+            for stat_logger in per_engine_adapter.per_engine_stat_loggers.values()
+        )
+    finally:
+        engine.shutdown()
+        wait_for_memory_to_settle(
+            threshold_ratio=1.0 - _required_utilization(log_stats_enabled_engine_args)
         )
