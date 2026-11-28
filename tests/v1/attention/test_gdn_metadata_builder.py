@@ -231,6 +231,13 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
 
     assert meta.num_decodes == test_case.expected_num_decodes
     assert meta.num_prefills == test_case.expected_num_prefills
+    if meta.num_prefills:
+        assert meta.non_spec_query_start_loc is not None
+        torch.testing.assert_close(
+            meta.non_spec_query_start_loc_cpu, meta.non_spec_query_start_loc.cpu()
+        )
+    else:
+        assert meta.non_spec_query_start_loc_cpu is None
     assert meta.num_prefill_tokens == test_case.expected_num_prefill_tokens
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
     if meta.spec_state_indices_tensor is not None:

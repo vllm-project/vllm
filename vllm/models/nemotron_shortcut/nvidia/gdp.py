@@ -120,6 +120,8 @@ def gdp_prefill(
     initial_state: torch.Tensor,
     cu_seqlens: torch.Tensor,
     out: torch.Tensor | None = None,
+    *,
+    cu_seqlens_cpu: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Chunked GDP prefill over packed sequences: the outputs and each
     sequence's final state. `key`, `value` and `beta` hold each token's
@@ -127,6 +129,8 @@ def gdp_prefill(
     L2-normalized; `decay` is the log-space decay."""
     from flashinfer.gdp_prefill import chunk_gated_delta_product
 
+    # FlashInfer's auto selects its Blackwell cuDNN engine even on Hopper.
+    hopper = torch.cuda.get_device_capability(query.device) == (9, 0)
     # FlashInfer takes a token's steps as consecutive sub-token rows and the
     # decay in linear space, whose neutral value is 1.
     return chunk_gated_delta_product(
@@ -139,8 +143,10 @@ def gdp_prefill(
         initial_state=initial_state,
         output_final_state=True,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
         use_qk_l2norm_in_kernel=False,
         output=out,
+        backend="cake" if hopper else "auto",
     )
 
 
@@ -716,6 +722,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
                 initial_state,
                 query_start_loc,
                 out,
+                cu_seqlens_cpu=attn_metadata.non_spec_query_start_loc_cpu,
             )
             ssm_state[state_indices] = last_state.to(ssm_state.dtype)
             return core_out

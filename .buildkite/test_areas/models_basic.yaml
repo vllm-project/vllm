@@ -95,6 +95,7 @@ steps:
   - tests/models/test_muse_spark_fp32_rope.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
   - tests/models/test_muse_spark_rocm_drafter.py
+  - tests/models/nemotron_shortcut/test_gdp_kernels.py
   - tests/models/hy_v4/test_dfly_config.py
   - tests/models/hy_v4/test_hy_v4_mrope.py
   commands:
@@ -121,6 +122,7 @@ steps:
       models/test_muse_spark_fp32_rope.py
       kernels/models/amd/test_muse_spark_fused_markov.py
       models/test_muse_spark_rocm_drafter.py
+      models/nemotron_shortcut/test_gdp_kernels.py::test_prefill_kernel_matches_recurrence
       models/hy_v4/test_dfly_config.py
       models/hy_v4/test_hy_v4_mrope.py
   mirror:
