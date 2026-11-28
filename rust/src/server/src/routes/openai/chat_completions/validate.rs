@@ -33,11 +33,20 @@ pub(super) fn validate_request(request: &ChatCompletionRequest) -> Result<(), Ap
         );
     }
 
-    if request.stream && request.prompt_logprobs.is_some_and(|n| n > 0 || n == -1) {
-        bail_invalid_request!(
-            param = "prompt_logprobs",
-            "prompt_logprobs are not available when stream=true."
-        );
+    if let Some(prompt_logprobs) = request.prompt_logprobs {
+        if prompt_logprobs < 0 && prompt_logprobs != -1 {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "prompt_logprobs must be a non-negative value or -1."
+            );
+        }
+
+        if request.stream {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "prompt_logprobs are not available when stream=true."
+            );
+        }
     }
 
     reject_unsupported_fields(request)?;
@@ -276,6 +285,28 @@ mod tests {
 
         let request = ChatCompletionRequest {
             prompt_logprobs: Some(-1),
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validate_request_rejects_streaming_prompt_logprobs_zero() {
+        // prompt_logprobs=0 is a meaningful, explicit request (not "unset"),
+        // so it must be rejected under stream=true just like any other
+        // prompt_logprobs value.
+        let request = ChatCompletionRequest {
+            prompt_logprobs: Some(0),
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validate_request_rejects_invalid_prompt_logprobs_value() {
+        let request = ChatCompletionRequest {
+            stream: false,
+            prompt_logprobs: Some(-2),
             ..base_request()
         };
         assert!(validate_request(&request).is_err());
