@@ -189,6 +189,7 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         "enable_confidence_head",
         "confidence_head_with_markov",
         "use_aux_hidden_state",
+        "quantization_config",
     ):
         if config_dict.get(key) is not None:
             pre_trained_config[key] = config_dict[key]

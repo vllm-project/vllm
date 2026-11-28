@@ -182,6 +182,5 @@ tests/transformers_utils/test_minimax_m3_config.py  # CI jobs disabled pending l
 tests/transformers_utils/test_muse_spark_config.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_processor.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_repo_utils.py  # CI jobs disabled pending locked cmake installation
-tests/transformers_utils/test_speculators_dspark_config.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_speculators_override.py  # CI jobs disabled pending locked cmake installation
 tests/transformers_utils/test_utils.py  # CI jobs disabled pending locked cmake installation

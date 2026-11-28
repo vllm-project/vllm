@@ -4,6 +4,8 @@ This document shows how to use [Speculative Decoding](https://arxiv.org/pdf/2302
 
 To train your own draft models for optimized speculative decoding, see [vllm-project/speculators](speculators.md) for seamless training and integration with vLLM.
 
+Qwen3 DSpark drafts saved with compressed-tensors FP8 or NVFP4 metadata use the draft checkpoint's quantization settings automatically. NVFP4 execution requires a supported hardware backend.
+
 ## vLLM Speculation Methods
 
 vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP and draft models provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
