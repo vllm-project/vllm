@@ -89,6 +89,18 @@ The replay rings add 8–9% of an FP32 SSM state to each request's state with th
 
 With `--prefix-match-unit`, a request can resume inside a Mamba block, so ReplaySSM also flushes its exact state at every prefix match unit. A unit that is a multiple of the buffer length adds no flushes.
 
+## Retaining prefix-cache checkpoints
+
+For sliding-window and Mamba cache groups, `prefix_cache_retention_interval` controls which checkpoints remain available for later prefix reuse:
+
+- `0` (the default) keeps semantic checkpoints, including the latest replay boundary and shared-prefix junctions.
+- A positive token interval additionally keeps periodic checkpoints. It must be a multiple of the scheduler block size; vLLM validates this at startup.
+- `None` keeps checkpoints densely (`--prefix-cache-retention-interval None`).
+
+Set a positive interval with `--prefix-cache-retention-interval <tokens>`. Keeping more checkpoints can help requests that branch from an earlier prefix, but consumes cache capacity that could serve other requests. Compare the hit rate and latency at the same cache size before choosing an interval.
+
+Full-attention and chunked-local cache groups retain checkpoints densely and ignore this setting. A positive interval is rejected if the model has no sliding-window or Mamba cache group.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
@@ -100,7 +112,15 @@ We describe two example workloads, where APC can provide huge performance benefi
 
 Divide the increase in `vllm:prefix_cache_hits` by the increase in `vllm:prefix_cache_queries` (both count tokens).
 
-For per-request counts, start the server with `--enable-prompt-tokens-details` to get `usage.prompt_tokens_details.cached_tokens` from `/v1/chat/completions` and `/v1/completions` (streaming needs `stream_options: {"include_usage": true}`). `/v1/responses` always reports `usage.input_tokens_details.cached_tokens`.
+For per-request counts, start the server with `--enable-prompt-tokens-details` (off by default):
+
+- `/v1/chat/completions` reports cache reads in `usage.prompt_tokens_details.cached_tokens` and cache writes in `usage.prompt_tokens_details.created_cache_tokens`, when those counts are available.
+- `/v1/completions` reports `usage.prompt_tokens_details.cached_tokens`.
+- `/v1/messages` maps those Chat Completions counts to `usage.cache_read_input_tokens` and `usage.cache_creation_input_tokens`. Its `usage.input_tokens` excludes the tokens reported in those two cache fields.
+
+For streaming Chat Completions and Completions, request `stream_options: {"include_usage": true}` to receive the final usage chunk, or start the server with `--enable-force-include-usage`. For streaming Messages, the initial `message_start` can omit cache counts that are not yet known; the final `message_delta` reports the resolved usage.
+
+Without `--enable-prompt-tokens-details`, these endpoints do not provide per-request cache counts; an absent field does not mean a cache miss. `/v1/responses` always reports `usage.input_tokens_details.cached_tokens`, independently of this flag.
 
 ## Limits
 
