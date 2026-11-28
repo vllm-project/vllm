@@ -843,6 +843,7 @@ def test_paused_dp_rank_ignores_start_wave(paused):
 def _pausable_engine_core_proc() -> tuple[EngineCoreProc, MagicMock]:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
+    core.vllm_config = VllmConfig()
     core._checkpoint_state = CheckpointState.RUNNING
     core._checkpoint_error = None
     core._kv_cache_reclaimable = False
@@ -1043,6 +1044,7 @@ def test_inproc_sleep_drains_before_keeping_connector_cache(reset_connector):
     """Keeping the connector's cache steps the in-process engine until its
     pending work, such as connector stores, is done; a reset does not step."""
     core = object.__new__(EngineCore)
+    core.vllm_config = VllmConfig()
     core._checkpoint_state = CheckpointState.RUNNING
     core._kv_cache_reclaimable = False
     core.model_executor = MagicMock()

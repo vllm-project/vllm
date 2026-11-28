@@ -25,7 +25,13 @@ from tests.v1.core.utils import (
     mock_kv,
     new_kv_cache_group,
 )
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import (
+    AuxOutputConfig,
+    CacheConfig,
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
@@ -592,9 +598,15 @@ def _versions(engine, objects):
     return [held[position][1][1] for position in sorted(held)]
 
 
+def _aux_on_config():
+    return SimpleNamespace(
+        aux_output_config=AuxOutputConfig(enable_return_routed_experts=True)
+    )
+
+
 def _abort(engine, request_id):
     core = object.__new__(EngineCoreProc)
-    core.aux_output_enabled = True
+    core.vllm_config = _aux_on_config()
     core.scheduler = engine.scheduler
     core.output_queue = queue.Queue()
     (request,) = engine.scheduler.finish_requests(
@@ -611,7 +623,7 @@ def _engine_core(engine):
     worker = object.__new__(WorkerBase)
     worker.model_runner = SimpleNamespace(aux_output_connector=engine.worker)
     core = object.__new__(EngineCore)
-    core.aux_output_enabled = True
+    core.vllm_config = _aux_on_config()
     core.scheduler = engine.scheduler
     core.model_executor = Mock()
     core.mm_receiver_cache = None
