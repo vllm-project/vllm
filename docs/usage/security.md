@@ -41,6 +41,25 @@ Key points from the PyTorch security guide:
 - Messages are sent unencrypted
 - Connections are accepted from anywhere without checks
 
+#### Which deployments create a TCPStore rendezvous listener
+
+Since [#50999](https://github.com/vllm-project/vllm/pull/50999) (first stable
+release: `v0.28.0`), single-node executors rendezvous over a `file://` URI
+backed by `torch.distributed.FileStore` and create **no TCPStore rendezvous
+listener**. Releases up to and including `v0.27.1` use the TCP rendezvous on
+every path.
+
+| Path | Rendezvous store |
+| --- | --- |
+| `UniProcExecutor`, `MultiprocExecutor` (single node) | `FileStore` |
+| Ray executors (multi-node) | `TCPStore` |
+| Data parallel coordination (`StatelessProcessGroup`) | `TCPStore` |
+| ROCm with AITER custom all-reduce, including single node | `TCPStore` |
+
+The ROCm row is temporary: AITER's custom all-reduce requires `TCPStore` (see
+`aiter_requires_tcp_store()` in `vllm/utils/network_utils.py`). The isolation
+recommendations below apply in full to every `TCPStore` row.
+
 ## Security Recommendations
 
 ### 1. **Network Isolation:**
