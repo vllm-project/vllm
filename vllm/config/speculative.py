@@ -125,6 +125,7 @@ DraftSampleMethod = Literal["greedy", "probabilistic"]
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
+    "disable_extract_hidden_states_decode_drafts",
     "dspark_draft_topk",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
@@ -568,6 +569,14 @@ class SpeculativeConfig:
     Each entry is `(range_start, range_end, num_speculative_tokens)` with an
     inclusive batch-size range.
     """
+
+    disable_extract_hidden_states_decode_drafts: bool | None = None
+    """For extract_hidden_states, disable the draft token it schedules on every
+    decode step. Saving hidden states does not need these drafts, even with
+    include_output_tokens, and they are rarely accepted. If set to True,
+    num_speculative_tokens_per_batch_size is set to 0 speculative tokens for
+    all batch sizes, so the two cannot be combined. Does not support data
+    parallelism for MoE models."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
