@@ -336,6 +336,15 @@ class TieringMetricsTracker:
             lookup_duration,
             tier_label,
         )
+        self._stats.increase_counter(
+            TieringOffloadingMetrics.LOOKUP_SYNC_TIME,
+            lookup_duration,
+            labelvalues=tier_label,
+        )
+        self._stats.increase_counter(
+            TieringOffloadingMetrics.LOOKUP_KEYS_QUERIED,
+            labelvalues=tier_label,
+        )
         if async_start_time is not None:
             self._stats.observe_histogram(
                 TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY,

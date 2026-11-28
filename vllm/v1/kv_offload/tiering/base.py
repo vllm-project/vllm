@@ -54,6 +54,8 @@ class TieringOffloadingMetrics:
     """Metric names for TieringOffloadingManager."""
 
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
+    LOOKUP_SYNC_TIME = "vllm:kv_offload_tiering_lookup_sync_time_seconds"
+    LOOKUP_KEYS_QUERIED = "vllm:kv_offload_tiering_lookup_keys_queried"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
     READ_BYTES = "vllm:kv_offload_tiering_read_bytes"
     READ_TIME = "vllm:kv_offload_tiering_read_time"
