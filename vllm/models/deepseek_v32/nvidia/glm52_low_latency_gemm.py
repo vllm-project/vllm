@@ -251,10 +251,10 @@ GLM52_PROJECTIONS_SM107 = {
 }
 
 
-# SM100 (B200) table: M=1-4, 6 and 8 were measured; each M is listed only where it
-# beat cuBLAS by >= 5 % (CUPTI, CUDA graph, cold and hot L2), others use cuBLAS.
-# Times are table backend / cuBLAS, cold L2. o_proj at TP4 and the shared expert
-# down projections stay on cuBLAS.
+# SM100 (B200) table: M=1-32 were measured; each M is listed only where it
+# beat cuBLAS on cold and hot L2 (CUPTI, CUDA graph, PDL where supported),
+# others use cuBLAS. Times are table backend / cuBLAS, cold L2. o_proj at TP4
+# stays on cuBLAS.
 # q_a + kv_a, replicated: 8.42 / 12.00 us at M=1.
 _SM100_QKV_A_PROJECTION = GLM52ProjectionSpec(
     n=2624,
@@ -263,9 +263,15 @@ _SM100_QKV_A_PROJECTION = GLM52ProjectionSpec(
         (1, SkinnyGemmConfig(1, 64, 4, k_unroll=4)),
         (2, SkinnyGemmConfig(2, 64, 2, k_unroll=4)),
         (3, SkinnyGemmConfig(3, 128, 2, k_unroll=2, vector_width=4)),
-        (4, SkinnyGemmConfig(4, 64, 2, k_unroll=2)),
     ),
-    dsv3_tokens=frozenset({6, 8}),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            8: (16, 8, 256, 9, 2),
+            16: (32, 16, 256, 8, 2),
+            24: (32, 32, 256, 6, 2),
+        },
+        first_m=4,
+    ),
 )
 
 # q_b_proj at TP8: 4.16 / 6.05 us at M=1.
@@ -277,7 +283,14 @@ _SM100_Q_B_TP8_PROJECTION = GLM52ProjectionSpec(
         (2, SkinnyGemmConfig(2, 128, 2, k_unroll=4, vector_width=4)),
         (3, SkinnyGemmConfig(3, 128, 2, k_unroll=4, vector_width=4)),
     ),
-    dsv3_tokens=frozenset({4, 6, 8}),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            12: (16, 8, 128, 16, 2),
+            16: (16, 16, 128, 14, 2),
+            32: (32, 16, 256, 8, 2),
+        },
+        first_m=4,
+    ),
 )
 
 # q_b_proj at TP4 and the indexer wq_b (replicated): 5.76 / 6.88 us at M=1.
@@ -287,8 +300,13 @@ _SM100_Q_B_TP4_PROJECTION = GLM52ProjectionSpec(
     cute_configs=(
         (1, SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4)),
         (2, SkinnyGemmConfig(2, 64, 2, k_unroll=4)),
-        (3, SkinnyGemmConfig(3, 64, 2, k_unroll=2)),
-        (4, SkinnyGemmConfig(4, 64, 2, k_unroll=4, vector_width=4)),
+    ),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            8: (16, 8, 128, 16, 2),
+            16: (32, 16, 256, 8, 2),
+        },
+        first_m=3,
     ),
 )
 
@@ -314,6 +332,12 @@ _SM100_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
         (6, SkinnyGemmConfig(6, 256, 1, k_unroll=2)),
         (8, SkinnyGemmConfig(8, 256, 1, k_unroll=2)),
     ),
+    # M=6 and M=8 keep CuTe; warp split-K is slower there.
+    warp_splitk_configs=tuple(
+        row
+        for row in _warp_splitk_rows({32: (16, 8, 256, 15, 2)}, first_m=5)
+        if row[0] not in {6, 8}
+    ),
 )
 
 # shared expert gate_up at TP8: 4.19 / 7.71 us at M=1.
@@ -328,6 +352,11 @@ _SM100_SHARED_GATE_UP_TP8_PROJECTION = GLM52ProjectionSpec(
         (6, SkinnyGemmConfig(6, 128, 1, k_unroll=2)),
         (8, SkinnyGemmConfig(8, 128, 1, k_unroll=4, vector_width=4)),
     ),
+    warp_splitk_configs=tuple(
+        row
+        for row in _warp_splitk_rows({32: (16, 8, 256, 16, 2)}, first_m=5)
+        if row[0] not in {6, 8}
+    ),
 )
 
 # shared expert gate_up at TP4: 5.28 / 8.67 us at M=1.
@@ -339,9 +368,22 @@ _SM100_SHARED_GATE_UP_TP4_PROJECTION = GLM52ProjectionSpec(
         (2, SkinnyGemmConfig(2, 256, 2, k_unroll=2)),
         (3, SkinnyGemmConfig(3, 128, 1, k_unroll=2)),
         (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2)),
-        (6, SkinnyGemmConfig(6, 128, 2, k_unroll=4, vector_width=4)),
-        (8, SkinnyGemmConfig(8, 128, 2, k_unroll=2)),
     ),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            16: (16, 8, 256, 15, 2),
+            32: (16, 16, 256, 12, 2),
+        },
+        first_m=5,
+    ),
+)
+
+# shared expert down at TP4: 4.05 / 4.50 us at M=1.
+_SM100_SHARED_DOWN_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=512,
+    cute_configs=(),
+    warp_splitk_configs=_warp_splitk_rows({8: (32, 8, 128, 4, 2)}),
 )
 
 # MTP eh_proj (draft M = number of requests): 26.34 / 37.31 us at M=1.
@@ -353,6 +395,13 @@ _SM100_EH_PROJECTION = GLM52ProjectionSpec(
         (2, SkinnyGemmConfig(2, 128, 1, k_unroll=4)),
         (3, SkinnyGemmConfig(3, 128, 2, k_unroll=4, vector_width=4)),
         (4, SkinnyGemmConfig(4, 128, 2, k_unroll=4, vector_width=4)),
+    ),
+    warp_splitk_configs=_warp_splitk_rows(
+        {
+            8: (16, 8, 256, 12, 2),
+            16: (16, 16, 256, 12, 2),
+        },
+        first_m=5,
     ),
 )
 
@@ -366,6 +415,7 @@ GLM52_PROJECTIONS_SM100 = {
         _SM100_WK_WEIGHTS_PROJECTION,
         _SM100_SHARED_GATE_UP_TP8_PROJECTION,
         _SM100_SHARED_GATE_UP_TP4_PROJECTION,
+        _SM100_SHARED_DOWN_TP4_PROJECTION,
         _SM100_EH_PROJECTION,
     )
 }
