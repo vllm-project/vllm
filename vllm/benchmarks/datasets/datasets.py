@@ -498,6 +498,7 @@ def gen_prompt_decode_to_target_len(
     max_retry: int = 10,
     add_special_tokens: bool = False,
     rng: np.random.Generator | None = None,
+    prefix_tokens: list[int] | None = None,
 ) -> tuple[str, list[int], int]:
     """Ensure decoded-then-encoded prompt length matches the target token length.
 
@@ -508,6 +509,8 @@ def gen_prompt_decode_to_target_len(
     For example, for GPT2Tokenizer:
     [6880, 6881] -> ['Ġcalls', 'here'] ->
     [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+
+    If re-encoding changes `prefix_tokens`, retry with a new suffix.
 
     Returns a tuple of the final prompt string, the adjusted token sequence,
     and the token mismatch (final_len - target_token_len) if the retry budget
@@ -523,9 +526,12 @@ def gen_prompt_decode_to_target_len(
                 token_mismatch = len(token_sequence) - target_token_len
             break
 
-        if len(token_sequence) == target_token_len:
+        if prefix_tokens and token_sequence[: len(prefix_tokens)] != prefix_tokens:
+            token_sequence = prefix_tokens.copy()
+        elif len(token_sequence) == target_token_len:
             break
-        elif len(token_sequence) < target_token_len:
+
+        if len(token_sequence) < target_token_len:
             if rng is not None:
                 extra_tokens = rng.integers(
                     0,
@@ -4305,8 +4311,18 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
                 )
                 token_mismatch_total += suffix_mismatch
                 combined_tokens = prefix_tokens + suffix_tokens
-                prompt = tokenizer.decode(combined_tokens)
-                prompt_len = len(combined_tokens)
+                prompt, prompt_tokens, token_mismatch = gen_prompt_decode_to_target_len(
+                    tokenizer=tokenizer,
+                    token_sequence=combined_tokens,
+                    target_token_len=prefix_len + suffix_len,
+                    prefix_tokens=prefix_tokens,
+                )
+                if token_mismatch or prompt_tokens[:prefix_len] != prefix_tokens:
+                    raise ValueError(
+                        f"Could not generate a prompt with {prefix_len} prefix and "
+                        f"{suffix_len} suffix tokens."
+                    )
+                prompt_len = len(prompt_tokens)
                 requests.append(
                     SampleRequest(
                         prompt=prompt,
@@ -4318,7 +4334,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
         if token_mismatch_total != 0:
             sign = "more" if token_mismatch_total > 0 else "fewer"
             logger.warning(
-                "Across all generated prompts, there were %d %s tokens "
+                "Across the sampled prefixes and suffixes, there were %d %s tokens "
                 "than expected after decoding and re-encoding. This is "
                 "expected due to the imperfect nature of the sampling "
                 "procedure.",

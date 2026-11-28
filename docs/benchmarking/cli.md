@@ -1193,6 +1193,12 @@ python3 benchmarks/benchmark_prefix_caching.py \
 
 ##### Prefix Repetition Dataset
 
+The Python sampler checks the token IDs of each final prompt with special-token
+insertion disabled. Requests in a group share the first
+`--prefix-repetition-prefix-len` tokens, and the total input length is the
+configured prefix length plus `--prefix-repetition-suffix-len`. Sampling raises
+an error if it cannot produce a prompt with those lengths and shared prefix.
+
 ```bash
 vllm bench serve \
   --backend openai \
