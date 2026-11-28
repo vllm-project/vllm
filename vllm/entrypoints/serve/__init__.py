@@ -46,10 +46,6 @@ def register_vllm_dev_api_routers(app: FastAPI):
         "This should NOT be used in production!"
     )
 
-    from .dev.cache.api_router import attach_router as attach_cache_router
-
-    attach_cache_router(app)
-
     from .dev.rpc.api_router import attach_router as attach_rpc_router
 
     attach_rpc_router(app)

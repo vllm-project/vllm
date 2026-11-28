@@ -116,7 +116,7 @@ def run_benchmark(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     server.run_subcommand(benchmark_cmd)
-    server.after_bench()
+    server.after_bench(benchmark_cmd)
 
     with output_path.open("rb") as f:
         run_data = json.load(f)
@@ -268,7 +268,7 @@ def run_comb(
             print(f"Failure details: {failure_path}")
             if server is not None:
                 with contextlib.suppress(Exception):
-                    server.after_bench()
+                    server.after_bench(bench_overrides.apply_to_cmd(bench_cmd))
             return None
 
     if warmup_num_prompts > 0:

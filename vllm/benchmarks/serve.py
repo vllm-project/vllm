@@ -54,6 +54,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (
     convert_to_pytorch_benchmark_format,
+    parse_request_headers,
     redact_sensitive_namespace,
     write_to_json,
 )
@@ -2184,16 +2185,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         api_url = f"http://{host_port}{args.endpoint}"
         base_url = f"http://{host_port}"
 
-    # Headers
-    headers = None
-    if args.header:
-        headers = {}
-        for item in args.header:
-            if "=" in item:
-                kvstring = item.split("=", 1)
-                headers[kvstring[0].strip()] = kvstring[1].strip()
-            else:
-                raise ValueError("Invalid header format. Please use KEY=VALUE format.")
+    headers = parse_request_headers(args.header)
 
     # SSL context configuration
     ssl_context: ssl.SSLContext | bool | None = None

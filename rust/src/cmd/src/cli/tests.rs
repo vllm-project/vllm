@@ -314,6 +314,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
+                        enable_cache_reset: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -1434,6 +1435,26 @@ fn enable_scale_out_defaults_to_server_dev_mode() {
 }
 
 #[test]
+fn enable_cache_reset_reaches_server_options() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-cache-reset",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(args.runtime.api_server_options().enable_cache_reset);
+    let args: SharedRuntimeArgs =
+        serde_json::from_str(r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_cache_reset":true}"#)
+            .unwrap();
+    assert!(args.api_server_options().enable_cache_reset);
+    assert!(!args.api_server_options().server_dev_mode);
+}
+
+#[test]
 fn log_stats_interval_falls_back_to_default_like_python() {
     let parsed = [
         "10", " 2.5 ", "1e-10", "0", "-1", "nan", "1e30", "inf", "ten",
@@ -2508,6 +2529,7 @@ fn frontend_args_accept_json() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
+                        enable_cache_reset: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -3676,6 +3698,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
+                        enable_cache_reset: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -3977,6 +4000,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     enable_request_id_headers: false,
                     log_error_stack: false,
                     enable_scale_out: false,
+                    enable_cache_reset: false,
                     skip_model_name_validation: false,
                     server_dev_mode: false,
                     allow_runtime_lora_updating: false,
@@ -4131,6 +4155,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                     enable_request_id_headers: false,
                     log_error_stack: false,
                     enable_scale_out: false,
+                    enable_cache_reset: false,
                     skip_model_name_validation: false,
                     server_dev_mode: false,
                     allow_runtime_lora_updating: false,
@@ -4391,6 +4416,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                     enable_request_id_headers: false,
                     log_error_stack: false,
                     enable_scale_out: false,
+                    enable_cache_reset: false,
                     skip_model_name_validation: false,
                     server_dev_mode: false,
                     allow_runtime_lora_updating: false,

@@ -33,6 +33,18 @@ def local_chat_model(tmp_path):
     return str(tmp_path)
 
 
+def test_render_server_does_not_expose_cache_resets(local_chat_model):
+    with RemoteLaunchRenderServer(
+        local_chat_model,
+        ["--enable-cache-reset", "--api-key", "test"],
+        env_dict={"VLLM_SERVER_DEV_MODE": "0"},
+    ) as server:
+        headers = {"Authorization": "Bearer test"}
+        for path in ("reset_prefix_cache", "reset_mm_cache", "reset_encoder_cache"):
+            response = httpx.post(server.url_for(path), headers=headers, timeout=10)
+            assert response.status_code == 404, response.text
+
+
 def test_chat_render_reserves_deepseek_tokenizer_options(local_chat_model):
     with RemoteLaunchRenderServer(
         local_chat_model, ["--tokenizer-mode", "deepseek_v32"]

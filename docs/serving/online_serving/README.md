@@ -206,17 +206,24 @@ For external checkpoint/restore orchestrators, available with `--enable-sleep-mo
 - `/checkpoint/status` - Return the state: 200 once prepared, 503 until then, 500 after a failure
 - `/checkpoint/restore` - Bring back released state and serve; 200 if already restoring or serving, 400 while preparing or after a failure
 
-## Server in development mode
+## Cache Management APIs
 
-When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
-
-**SECURITY WARNING: These endpoints should NOT be used in production!**
-
-### Cache Management APIs
+Use `--enable-cache-reset` to enable these endpoints without developer mode.
+The flag is disabled by default. When an API key is configured, cache-reset
+requests require Bearer authentication. Resets affect all clients; see
+[Cache-Reset Endpoints](../../usage/security.md#cache-reset-endpoints) for usage
+and access restrictions.
 
 - `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
 - `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
 - `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
+
+## Server in development mode
+
+When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints
+and the cache management endpoints above.
+
+**SECURITY WARNING: These endpoints should NOT be used in production!**
 
 ### Weight Transfer APIs (RL Training)
 

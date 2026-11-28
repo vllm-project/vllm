@@ -49,6 +49,27 @@ async def test_no_api_token(server: RemoteOpenAIServer):
     assert response.status_code == HTTPStatus.OK
 
 
+@pytest.mark.parametrize(
+    "server", [["--enable-cache-reset", "--api-key", "test"]], indirect=True
+)
+def test_cache_reset_without_developer_mode(server: RemoteOpenAIServer):
+    headers = {"Authorization": "Bearer test"}
+    for path in ("reset_prefix_cache", "reset_mm_cache", "reset_encoder_cache"):
+        assert (
+            requests.post(server.url_for(path)).status_code == HTTPStatus.UNAUTHORIZED
+        )
+        response = requests.post(server.url_for(path), headers=headers)
+        assert response.status_code == HTTPStatus.OK
+        if path == "reset_prefix_cache":
+            assert isinstance(response.json()["success"], bool)
+    assert (
+        requests.post(server.url_for("collective_rpc"), headers=headers).status_code
+        == 404
+    )
+    assert requests.post(server.url_for("sleep"), headers=headers).status_code == 404
+    assert requests.get(server.url_for("v1/models"), headers=headers).status_code == 200
+
+
 @pytest.mark.asyncio
 async def test_no_request_id_header(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("health"))
