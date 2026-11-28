@@ -105,6 +105,7 @@ Every plugin has three parts:
     - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc., can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
+    - `use_sequence_parallel_moe_without_dp`: Return `True` on platforms whose MoE communication backend shards tokens across the tensor-parallel group even when `data_parallel_size == 1` (with `tensor_parallel_size > 1` and `enable_expert_parallel=True`). Defaults to `False`.
 
     Optionally, implement `get_moe_backends` to return the platform's MoE backends as a dict from name to `FusedMoEExperts` subclass. Names are lowercase with underscores and must not reuse an in-tree backend's; each is accepted by `--moe-backend`. With `--moe-backend auto`, the first backend in the dict whose `is_supported_config` accepts the layer is used ahead of the in-tree ones; if all are rejected, a warning lists the reasons. Override `convert_fp8_weights` on the class to change the weight layout. Currently only FP8 MoE layers use these backends.
 

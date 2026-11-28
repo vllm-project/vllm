@@ -1331,6 +1331,11 @@ class Platform:
         return cls._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
 
     @classmethod
+    def use_sequence_parallel_moe_without_dp(cls) -> bool:
+        """Whether MoE sequence parallelism is used when `data_parallel_size == 1`."""
+        return False
+
+    @classmethod
     def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
         """Choose and validate the platform's EPLB policy and communicator.
 
