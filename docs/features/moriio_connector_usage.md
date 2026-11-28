@@ -104,6 +104,13 @@ vllm-router \
 
 Alternatively, you can use the reference implementation proxy shipped with vLLM:
 
+The single-host reference proxy selects prefill and decode data-parallel (DP)
+ranks independently, including when their DP sizes differ. Each request's
+`X-data-parallel-rank` header selects a rank within that leg's instance. The
+decode request's `kv_transfer_params.remote_dp_rank` identifies the prefill rank
+holding its KV cache; it does not select the decode rank. This applies to both
+READ and WRITE mode.
+
 ```bash
 cd <path_to>/vllm
 pip install quart aiohttp msgpack
