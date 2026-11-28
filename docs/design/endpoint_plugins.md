@@ -76,6 +76,90 @@ class MyAdminEndpointPlugin:
 
 A complete and tested version of this example is in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
 
+## Startup and cleanup (Optional)
+
+An endpoint plugin can implement [`SupportsStart`][vllm.plugins.endpoint_plugins.interface.SupportsStart], [`SupportsStop`][vllm.plugins.endpoint_plugins.interface.SupportsStop], or both. These capabilities are independent of `EndpointPlugin`; existing plugins need no new methods.
+
+The server awaits `start(state)` during lifespan startup, after `init_state` and before accepting HTTP requests. Hooks run in load order. If a hook raises or is cancelled, startup fails and the server calls `stop(state)` on preceding eligible plugins in reverse order. The failing plugin must release its own partially acquired resources before raising. On Uvicorn 0.50 and later a failed or cancelled plugin startup exits the process with status 3; on earlier versions it exits with status 0. A plugin with only `stop` becomes eligible when startup reaches its position in load order.
+
+The server gives each plugin with a `start` or `stop` hook its own asyncio task, which runs `start`, waits for shutdown, then runs `stop`. Some resources are bound to the task that entered them. anyio cancel scopes and task groups, which an MCP `ClientSession` uses, raise `RuntimeError` when exited from another task, and `asyncio.timeout` and `asyncio.TaskGroup` cancel the task that entered them. Because both hooks run in one task, a plugin can enter such a resource in `start` and exit it in `stop`, and a context variable set in `start` keeps its value in `stop`. The same task also means a plugin's `stop` cannot run while its `start` is running. Each task starts with a copy of the lifespan context, so a context variable set in one plugin's `start` is not visible to other plugins. If something other than server shutdown cancels the task after `start` returns, the task logs a warning and calls `stop` before it ends, with its own stop time limit. Event loop teardown cancels the task this way, and so does the failure of a child task in an anyio task group the plugin opened in `start`. The server calls each `stop` at most once.
+
+SIGINT, SIGTERM and `request_shutdown()` cancel pending plugin startup after engine shutdown. Watchdog exit cancels pending startup without waiting for engine shutdown. Cancellation targets plugin startup, not listener binding; the server waits for binding to finish before HTTP teardown. A startup hook must propagate cancellation after releasing partially acquired resources. Cancellation remains cooperative: a `start` hook that ignores it can keep the process alive until a process manager kills it.
+
+`start` and `stop` are reserved hook names on endpoint plugins. An attribute named `start` or `stop` that is not `None` must be an `async def` coroutine function. For any other value, such as a synchronous function or an object with an `async def __call__`, the plugin loader raises a `TypeError` that names the plugin and the hook, and server startup fails before routes are attached or state is initialized.
+
+On shutdown, the server calls each eligible `stop(state)` once, in reverse order, while the time limit lasts, before deleting app state. An exception or cancellation from a stop hook does not skip other plugins or native serving cleanup. Cancellation of the lifespan task is re-raised after cleanup. Stop hooks must settle their owned background work.
+
+All stop hooks share one time limit, set by `--endpoint-plugin-stop-timeout` (default 5 seconds; must be positive), which also applies to stops run after a failed startup. The limit bounds the wait for stop hooks, not process exit. When it expires the server cancels the running hook, stops waiting for it, does not call the remaining stop hooks, logs one warning naming the abandoned and skipped plugins, and continues with native serving cleanup. The limit is cooperative: a hook that ignores cancellation may keep running, overlap later cleanup and keep the process alive until a process manager kills it, and a hook that blocks the event loop synchronously cannot be bounded.
+
+In multi-API-server mode the parent process force-kills its API server workers after `--shutdown-timeout` (default 0, meaning immediately), so worker stop hooks are only attempted when that timeout is positive; when the parent exits for a reason other than a signal it waits 5 seconds instead.
+
+The server stops the engine before HTTP shutdown and plugin cleanup. **A stop hook cannot rely on a running engine.** Use the optional drain capability below to settle accepted plugin work before engine shutdown. The API server's `/health` behavior is unchanged.
+
+For example, this subclass acquires and closes an HTTP client used by its routes:
+
+```python
+import httpx
+from starlette.datastructures import State
+
+from vllm.plugins.endpoint_plugins.interface import SupportsStart, SupportsStop
+
+
+class ResourceEndpointPlugin(MyAdminEndpointPlugin):
+    async def start(self, state: State) -> None:
+        state.plugin_http_client = httpx.AsyncClient()
+
+    async def stop(self, state: State) -> None:
+        await state.plugin_http_client.aclose()
+
+
+plugin = ResourceEndpointPlugin()
+startup: SupportsStart = plugin
+cleanup: SupportsStop = plugin
+```
+
+The assignments let a static type checker validate the hook signatures. Runtime protocol checks detect capability members; they do not validate signatures or whether methods are asynchronous.
+
+### Requesting process shutdown
+
+`serve_http` exposes the synchronous callback `state.request_shutdown()` before startup hooks run. Call it on the server's event loop to request the same process-local shutdown as SIGINT or SIGTERM. Repeated calls are idempotent. It is available to hooks and route handlers, but not during `init_state`; it does not request deployment-wide shutdown. A startup hook that calls it must still finish or release its partial resources and raise.
+
+`--api-key` does not cover plugin routes such as `/plugins/<plugin-name>/...`. Because `state.request_shutdown()` requests process-local shutdown, a plugin that calls it from a route handler must authenticate that route; otherwise any client that reaches the port can stop the server. See [Endpoint Plugins security posture](../usage/security.md#endpoint-plugins).
+
+## Readiness and draining (Optional)
+
+[`SupportsReady`][vllm.plugins.endpoint_plugins.interface.SupportsReady] and [`SupportsDrain`][vllm.plugins.endpoint_plugins.interface.SupportsDrain] are independent capabilities. A plugin can implement either, both, or neither, independently of `start` and `stop`:
+
+```python
+class SupportsReady(Protocol):
+    def ready(self, state: State) -> bool: ...
+
+class SupportsDrain(Protocol):
+    async def drain(self, state: State, timeout: float) -> None: ...
+```
+
+Plugin authors can assign an instance to `SupportsReady` or `SupportsDrain` in a type-checked module, as in the startup example above, to check signatures. Runtime checks only detect capability members.
+
+### Readiness probes
+
+The Python HTTP API server exposes `/ready` for engine health, plugin readiness and drain state. It returns 503 if `state.draining` is true, the engine raises `EngineDeadError`, or any loaded plugin's synchronous `ready(state)` returns false or raises an ordinary exception. Other engine health errors propagate as 500, matching `/health`. A plugin without `ready` is ready by default. Render servers check draining and plugins without an engine health check.
+
+`ready` is a synchronous function that returns a `bool`. The server calls it on the event loop while it handles a `/ready` probe, so it must return quickly and must not block or perform I/O. The server skips plugin checks while draining or after an engine failure, and stops at the first plugin that is not ready. Run an expensive check outside `ready`, for example in a background task that refreshes a cached value, and have `ready` return the cached value. A result that is not a `bool`, such as a coroutine returned by a wrapper, counts as not ready; the server closes a returned coroutine and logs the error once per plugin. The server logs a warning once per plugin when a `ready` call returns after more than 100 ms; it does not interrupt a slow call.
+
+Use `/ready` for Kubernetes readiness and retain `/health` for liveness. `/health`, including SageMaker `/ping`, retains its existing engine-health behavior; plugin unreadiness and draining do not change it. Existing deployments keep their behavior until their readiness probes are reconfigured. See [Kubernetes deployment](../deployment/k8s.md).
+
+These checks describe the built-in routes. Plugins retain their existing ability to override `/ready` or `/health`. Readiness applies to this API-server process; it does not aggregate across workers or change DP-supervisor or gRPC probes, and it does not detect generation stalls. `/health_generate` runs a generation probe and returns 503 while the server drains, but it does not check plugin readiness; see [Kubernetes deployment](../deployment/k8s.md#generation-readiness-probe).
+
+### Draining accepted work
+
+On SIGINT, SIGTERM or `state.request_shutdown()`, the server sets `state.draining = True` before awaiting any plugin. Each plugin must check that flag in its admission paths and reject **new work owners**, including new sessions on existing connections. Already accepted owners may continue submitting final engine requests. Native realtime admission is a separate concern; plugin hooks do not close it.
+
+The server runs eligible plugins' `drain(state, timeout)` hooks concurrently before engine shutdown, each in a new task. `drain` does not run in the task that runs the plugin's `start` and `stop`, so it must not exit a task-bound resource that `start` entered. Eligibility follows startup: a plugin is eligible once its startup completes, or once startup reaches its position if it has no `start` hook. When `--shutdown-timeout` is positive, plugin drains get its first `--endpoint-plugin-drain-timeout` seconds (default half of `--shutdown-timeout`): each drain receives the seconds remaining until one monotonic deadline at that point. The server refuses an `--endpoint-plugin-drain-timeout` that is negative or greater than `--shutdown-timeout` before it loads the model. Ordinary drain errors are logged independently so healthy peers can finish. On completion, error or cancellation, a plugin must settle or abort and await its owned work before returning or raising. Core does not maintain a plugin session registry or provide an abort hook.
+
+When that deadline expires, the server logs one warning naming the plugins whose drains are still running, then cancels them and waits for them to settle. Engine shutdown receives the time that remains of `--shutdown-timeout`, which is at least `--shutdown-timeout` minus `--endpoint-plugin-drain-timeout` when the drains settle by their deadline. With `--shutdown-timeout 0` (the default), the server sets draining, skips drain hooks and proceeds with immediate engine shutdown and plugin cleanup. The CPU-only render server uses the same configured timeout for plugin drains.
+
+`stop` hooks run only after drains settle, including after watchdog exit and startup rollback. The `--endpoint-plugin-stop-timeout` limit starts once the shutdown sequence, including drains and engine shutdown, has ended. Drains are cooperative, so the drain deadline is **not a hard process-exit bound**. A drain that ignores cancellation holds shutdown before engine shutdown, and SIGINT or SIGTERM only request shutdown, so the process stays alive until a process manager kills it.
+
 ## Registering the entry point
 
 Register a zero argument factory (a class or function) under the `vllm.endpoint_plugins` group. The factory must return an object satisfying `EndpointPlugin`:
@@ -136,3 +220,9 @@ There is currently no rejection of route conflicts (tracked as a follow-up to RF
 ## Compatibility
 
 `state`/serving handler internals (e.g. the shape of in-tree `OpenAIServing*` classes) are not a stable public contract yet. Treat them as use-at-your-own-risk and expect them to change between vLLM versions. `FastAPI`, `EngineClient` and the `EndpointPlugin` protocol itself are the supported surface.
+
+### Upgrading existing plugins
+
+An attribute named `start` or `stop` that is not `None` must be an `async def` coroutine function. A plugin with a synchronous `start` or `stop`, or any other non-`None` attribute with those names, now makes server startup fail. Make the attribute `async def`, or rename it if it is not a lifecycle hook.
+
+The names `ready` and `drain` are reserved in the same way. An attribute named `drain` that is not `None` must be an `async def` coroutine function. An attribute named `ready` that is not `None` must be a synchronous callable: a plugin whose `ready` is an `async def` function or is not callable now makes server startup fail. Define `ready` with `def`, make `drain` `async def`, or rename an attribute that is not a readiness or drain hook.

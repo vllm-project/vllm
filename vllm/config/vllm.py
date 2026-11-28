@@ -554,7 +554,11 @@ class VllmConfig:
     shutdown_timeout: int = Field(default=0, ge=0)
     """Shutdown grace period for in-flight requests. Shutdown will be delayed for
     up to this amount of time to allow already-running requests to complete. Any
-    remaining requests are aborted once the timeout is reached.
+    remaining requests are aborted once the timeout is reached. Endpoint plugin
+    drains still running after `--endpoint-plugin-drain-timeout` seconds
+    (default half of this time) are cancelled; the engine gets the time that
+    remains. A drain that ignores cancellation can delay engine
+    shutdown until the process is killed.
     """
 
     def compile_factors(self, include_version: bool = True) -> CompileFactors:

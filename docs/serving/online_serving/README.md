@@ -93,6 +93,7 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/load` - Server load metrics
 - `/v1/models` - List available models
 - `/health` - Health check
+- `/ready` - Readiness check for this API server, including endpoint plugins and draining
 - `/health_generate` - Generation readiness check, see [below](#generation-readiness-check)
 
 ### Generation readiness check
@@ -109,12 +110,13 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 | `sleeping` | An engine rank is sleeping or paused, e.g. during a weight sync. |
 | `probe_timeout` | An engine rank did not answer in time. Its busy loop is blocked, e.g. in a hung collective, or a single step is taking longer than the timeout. |
 | `probe_failed` | The GPU probe on an idle engine rank raised an error. |
+| `draining` | The API server has begun shutting down. This reason takes precedence over the others, including when draining begins during the probe. |
 
 A busy engine rank is reported ready without extra GPU work. An idle rank runs one dummy forward pass on every worker. For MoE models with data parallelism, idle ranks only check that the engine answers, because a dummy batch outside a DP wave could deadlock.
 
 The `timeout_s` query parameter sets how long to wait for each engine rank before reporting `probe_timeout` (default 20 s), e.g. `/health_generate?timeout_s=10`.
 
-Use `/health_generate` for readiness checks and keep `/health` for liveness checks, so that a sleeping or temporarily slow server is taken out of rotation instead of restarted. `/health_generate` is not authenticated with `--api-key`, like `/health`.
+Use `/health_generate` for readiness checks and keep `/health` for liveness checks, so that a sleeping or temporarily slow server is taken out of rotation instead of restarted. `/health_generate` is not authenticated with `--api-key`, like `/health`. It does not check endpoint plugin readiness; `/ready` does.
 
 While elastic EP is scaling, the server answers every request, including `/health_generate`, with a 503 and an `{"error": ...}` body instead. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not serve `/health_generate` yet.
 

@@ -25,6 +25,8 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 - [vllm-project/AIBrix](integrations/aibrix.md)
 - [vllm-project/production-stack](integrations/production-stack.md)
 
+For the Python HTTP API server, use `/ready` for readiness probes and `/health` for liveness probes. `/ready` checks engine health, loaded [endpoint plugins](../design/endpoint_plugins.md#readiness-probes), and whether this API-server process is draining. `/health` retains its existing engine-health behavior. Existing manifests keep their behavior until their readiness probes are reconfigured. `/ready` does not run a generation probe; [`/health_generate`](#generation-readiness-probe) does. Both return 503 while this API-server process drains, but `/health_generate` does not check endpoint plugin readiness. These routes do not aggregate deployment-wide readiness; DP-supervisor and gRPC probes retain their separate semantics.
+
 ## Deployment with CPUs
 
 !!! note
@@ -249,7 +251,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 periodSeconds: 10
               readinessProbe:
                 httpGet:
-                  path: /health
+                  path: /ready
                   port: 8000
                 initialDelaySeconds: 60
                 periodSeconds: 5
@@ -409,6 +411,8 @@ readinessProbe:
 ```
 
 Set `timeoutSeconds` above the `timeout_s` query parameter (20 s by default); the Kubernetes default of 1 s can be shorter than an idle GPU probe. Don't use `/health_generate` for the liveness probe: it returns 503 while the engine sleeps, so the container would be restarted during a weight sync.
+
+`/health_generate` returns 503 as soon as the API server begins draining, so the pod leaves the Service when shutdown begins. It does not check endpoint plugin readiness; use [`/ready`](../design/endpoint_plugins.md#readiness-probes) instead when the pod's endpoint plugins report readiness.
 
 ## Serving with gRPC
 
