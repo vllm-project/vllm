@@ -1643,3 +1643,13 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8 --timeout=5400
+
+- label: ":nvidia: (H200 MIG 35GB) Logprob Drift Eval"
+  device: h200_35gb
+  key: logprob-drift-eval
+  timeout_in_minutes: 45
+  source_file_dependencies:
+  - tests/evals/logprob_drift/
+  - tests/evals/gsm8k/gsm8k_eval.py
+  commands:
+  - pytest -s -v evals/logprob_drift/test_logprob_drift.py --config-list-file=configs/models-small.txt
