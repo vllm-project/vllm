@@ -40,6 +40,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _uses_global_input_scale(
+    quant_method: FusedMoEMethodBase, weight_name: str
+) -> bool:
+    return (
+        getattr(quant_method, "use_global_sf", False) and "input_scale" in weight_name
+    )
+
+
 def _index_expert_mapping(
     mapping: list[tuple[str, str, int, str]],
 ) -> dict[str, list[tuple[str, str, int, str]]]:
@@ -761,10 +769,7 @@ class RoutedExperts(PluggableLayer):
         )
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
-        use_global_sf = (
-            getattr(base_quant_method, "use_global_sf", False)
-            and "input_scale" in weight_name
-        )
+        use_global_sf = _uses_global_input_scale(base_quant_method, weight_name)
 
         if expert_id == -1 and not use_global_sf:
             # Failed to load this param since it's not local to this rank
@@ -1032,6 +1037,8 @@ class RoutedExperts(PluggableLayer):
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
         mapping_by_expert = _index_expert_mapping(expert_mapping)
+        quant_method = getattr(self, "quant_method", None)
+        source_method = getattr(quant_method, "requantization_source", None)
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
@@ -1067,6 +1074,13 @@ class RoutedExperts(PluggableLayer):
                     )
                 )
                 weight_name = qual_name.replace(weight_name, param_name)
+                if (
+                    named_expert is not None
+                    and source_method is not None
+                    and self._map_global_expert_id_to_local_expert_id(expert_id) == -1
+                    and not _uses_global_input_scale(source_method, weight_name)
+                ):
+                    continue
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 if self.shared_expert_online_loader is not None:
                     param_name = self.shared_expert_online_loader.redirect_param_name(
