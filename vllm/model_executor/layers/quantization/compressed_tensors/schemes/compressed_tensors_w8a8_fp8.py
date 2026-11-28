@@ -175,6 +175,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 layer.weight_scale,
                 layer.logical_widths,
                 getattr(layer, "input_scale", None),
+                keep_shard_scales=isinstance(
+                    self.fp8_linear, CutlassFP8ScaledMMLinearKernel
+                ),
             )
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight, weight_scale, input_scale = process_fp8_weight_channel_strategy(

@@ -25,6 +25,7 @@ from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
@@ -342,7 +343,11 @@ def test_compressed_tensors_fp8(monkeypatch, dist_init, workspace_init):
         assert len(qkv_proj.input_scale.shape) == 0
         assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
         assert qkv_proj.weight_scale.dtype is torch.float32
-        assert len(qkv_proj.weight_scale.shape) == 0
+        if isinstance(qkv_proj.scheme.fp8_linear, CutlassFP8ScaledMMLinearKernel):
+            # q/k/v keep their own scales, one per output channel
+            assert qkv_proj.weight_scale.shape == (qkv_proj.weight.shape[1], 1)
+        else:
+            assert len(qkv_proj.weight_scale.shape) == 0
 
     monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
     input_ids = torch.tensor([1, 2, 3, 4], device=target_device)

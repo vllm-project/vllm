@@ -1451,9 +1451,11 @@ def process_fp8_weight_tensor_strategy(
     weight_scale: torch.Tensor,
     logical_widths: list[int],
     input_scale: torch.Tensor | None = None,
+    keep_shard_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Requantize fused shards to one scale and return `(K, N)` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+        convert_to_channelwise,
         normalize_e4m3fn_to_e4m3fnuz,
         requantize_with_max_scale,
     )
@@ -1462,6 +1464,16 @@ def process_fp8_weight_tensor_strategy(
         weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
+
+    # Shards with different scales (none left unset at float32 min): keep each
+    # shard's scale instead of re-rounding its weights to the max scale.
+    if (
+        keep_shard_scales
+        and weight_scale.min() > torch.finfo(torch.float8_e4m3fn).min
+        and weight_scale.min() < weight_scale.max()
+    ):
+        weight_scale = convert_to_channelwise(weight_scale, logical_widths)
+        return _maybe_pad_fp8_weight(weight).t(), weight_scale, input_scale
 
     # Requantize with max scale
     weight_scale, weight = requantize_with_max_scale(
