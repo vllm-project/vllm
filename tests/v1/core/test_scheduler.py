@@ -8903,8 +8903,10 @@ def _create_hybrid_mamba_connector_scheduler(
     block_size: int = 16,
     num_blocks: int = 100,
     supports_divergent_hits: bool = True,
+    sliding_window_block_size: int | None = None,
+    connector_is_async: bool = False,
 ) -> Scheduler:
-    """FA + Mamba ("align" cache mode) scheduler with a MockKVConnector."""
+    """Hybrid scheduler with a MockKVConnector and optional sliding window."""
     model_config = ModelConfig(
         model="facebook/opt-125m", dtype="float16", seed=42, skip_tokenizer_init=True
     )
@@ -8927,7 +8929,7 @@ def _create_hybrid_mamba_connector_scheduler(
             kv_role="kv_both",
             kv_connector_extra_config={
                 "matched_tokens": matched_tokens,
-                "is_async": False,
+                "is_async": connector_is_async,
                 "supports_divergent_local_hybrid_hits": supports_divergent_hits,
             },
         ),
@@ -8957,14 +8959,68 @@ def _create_hybrid_mamba_connector_scheduler(
             ),
         ],
     )
+    if sliding_window_block_size is not None:
+        kv_cache_config.kv_cache_groups.append(
+            new_kv_cache_group(
+                ["swa"],
+                new_sliding_window_layer(
+                    sliding_window=128, block_size=sliding_window_block_size
+                ),
+            )
+        )
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
-        hash_block_size=block_size,
+        hash_block_size=sliding_window_block_size or block_size,
         collect_stats=True,
     )
+
+
+@pytest.mark.parametrize(
+    "evict_swa,expected_num_computed",
+    [(True, 16), (False, 64)],
+    ids=["swa-missing", "only-mamba-missing"],
+)
+def test_hybrid_connector_short_sliding_window_hit(
+    evict_swa: bool, expected_num_computed: int
+):
+    """Only a missing Mamba state can be supplied beyond the common hit."""
+    scheduler = _create_hybrid_mamba_connector_scheduler(
+        matched_tokens=16, sliding_window_block_size=4, connector_is_async=True
+    )
+    manager = scheduler.kv_cache_manager
+    [fill] = create_requests(
+        num_requests=1, num_tokens=64, block_size=4, req_ids=["fill"]
+    )
+    for _ in range(4):
+        assert manager.allocate_slots(fill, 16) is not None
+        fill.num_computed_tokens += 16
+    _, mamba_ids, swa_ids = manager.get_block_ids(fill.request_id)
+    manager.free(fill)
+    evicted = set(mamba_ids)
+    if evict_swa:
+        evicted.update(swa_ids)
+    evicted.discard(manager.block_pool.null_block.block_id)
+    manager.block_pool.evict_blocks(evicted)
+
+    replay = Request(
+        request_id="replay",
+        prompt_token_ids=[0] * 60 + [1] * 20,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256),
+    )
+    _, hits = manager.coordinator.find_longest_cache_hit_per_group(
+        replay.block_hashes, replay.num_tokens - 1, replay.num_tokens
+    )
+    assert hits == (60, 32, 0 if evict_swa else 60)
+
+    scheduler.add_request(replay)
+    _step_until_kv_transfer_finished(scheduler, [replay.request_id])
+    [scheduled] = scheduler.schedule().scheduled_new_reqs
+    assert scheduled.num_computed_tokens == expected_num_computed
 
 
 def _seed_hybrid_prefix(

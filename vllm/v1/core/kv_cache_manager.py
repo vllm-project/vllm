@@ -19,6 +19,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
     MambaManager,
+    SlidingWindowManager,
     get_kv_cache_kind,
 )
 from vllm.v1.kv_cache_interface import (
@@ -390,6 +391,8 @@ class KVCacheManager:
         than a lagging group. Such a hit only has a valid Mamba state at its
         boundary if the connector supplies it, so the caller must fall back to
         `get_computed_blocks` to reconcile when no external tokens are found.
+        A shorter sliding-window hit requires reconciliation before querying
+        the connector, since the missing history may precede the transfer.
 
         Non-hybrid models and already-convergent hits use `get_computed_blocks`.
 
@@ -414,13 +417,19 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, max_cache_hit_length, request.num_tokens
         )
-        if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
-            # A lagging group hit deeper than full attention means its
-            # full-attention blocks were evicted; use the reconciled boundary
-            # that every group agrees on.
-            return *self.get_computed_blocks(request, max_cache_hit_length), False
-
         num_local = per_group_hits[fa_group_id]
+        groups = self.kv_cache_config.kv_cache_groups
+        # Reconcile if full attention lags another group, or if a sliding
+        # window needs KV before the transfer start. A connector can backfill
+        # lagging recurrent state at the full-attention boundary.
+        for group, hit in zip(groups, per_group_hits, strict=True):
+            if hit > num_local or (
+                hit < num_local
+                and group.prefix_cacheable
+                and issubclass(group.manager_cls, SlidingWindowManager)
+            ):
+                return *self.get_computed_blocks(request, max_cache_hit_length), False
+
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
