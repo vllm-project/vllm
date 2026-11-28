@@ -23,15 +23,18 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
+    fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterFp8BlockExperts,
+    AiterFp8ChannelExperts,
     derive_aiter_quant_type,
-    mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
@@ -47,15 +50,20 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW8A8Fp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
 )
 from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseMoERunner,
-    MuseSparkAiterExperts,
+    MuseSparkAiterFp8Experts,
+    MuseSparkAiterMxfp4Experts,
+    MuseSparkAiterRouteExperts,
     MuseSparkOnlineMXFP4FusedMoE,
+    MuseSparkQuarkFp8MoEQuantConfig,
     MuseSparkQuarkOCPMXFusedMoE,
     MuseSparkQuarkOCPMXMoEQuantConfig,
     MuseSparkQuarkW8A8Fp8FusedMoE,
@@ -152,7 +160,7 @@ def _rms_norm(x: torch.Tensor, *, out_dtype: torch.dtype | None = None) -> torch
 
 
 def _route_launcher(
-    experts: MuseSparkTritonExperts | MuseSparkAiterExperts,
+    experts: MuseSparkTritonExperts | MuseSparkAiterMxfp4Experts,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -205,7 +213,7 @@ def _route_launcher(
 
 def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None:
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
-    experts = MuseSparkAiterExperts(
+    experts = MuseSparkAiterMxfp4Experts(
         config, _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
     )
     calls: list[dict[str, torch.Tensor | bool]] = []
@@ -288,7 +296,7 @@ def test_muse_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
     monkeypatch.setattr(QuarkOCP_MX_MoEMethod, "__init__", _fake_quark_init)
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
     method = MuseSparkQuarkOCPMXFusedMoE(config, kMxfp4Static, kMxfp4Dynamic)
-    assert method.experts_cls is MuseSparkAiterExperts
+    assert method.experts_cls is MuseSparkAiterMxfp4Experts
 
     state["scheme"] = "w_mxfp4"
     with pytest.raises(NotImplementedError, match="W4A4"):
@@ -300,15 +308,15 @@ def test_muse_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
         MuseSparkQuarkOCPMXFusedMoE(config, kMxfp4Static, kMxfp4Dynamic)
 
 
-def test_muse_fp8_method_requires_route_preserving_triton(monkeypatch) -> None:
-    state = {"backend": Fp8MoeBackend.TRITON}
+def test_muse_fp8_method_selects_route_preserving_experts(monkeypatch) -> None:
+    state = {"backend": Fp8MoeBackend.TRITON, "experts_cls": TritonExperts}
 
     def _fake_quark_init(self, moe, weight_quant_key, activation_quant_key) -> None:
         self.moe = moe
         self.weight_quant_key = weight_quant_key
         self.activation_quant_key = activation_quant_key
         self.fp8_backend = state["backend"]
-        self.experts_cls = None
+        self.experts_cls = state["experts_cls"]
 
     monkeypatch.setattr(QuarkW8A8Fp8MoEMethod, "__init__", _fake_quark_init)
     config = _moe_config(
@@ -320,8 +328,15 @@ def test_muse_fp8_method_requires_route_preserving_triton(monkeypatch) -> None:
     assert method.experts_cls is MuseSparkTritonExperts
 
     state["backend"] = Fp8MoeBackend.AITER
-    with pytest.raises(NotImplementedError, match="Triton FP8"):
-        MuseSparkQuarkW8A8Fp8FusedMoE(config, kFp8StaticChannelSym, kFp8DynamicTokenSym)
+    state["experts_cls"] = AiterFp8ChannelExperts
+    method = MuseSparkQuarkW8A8Fp8FusedMoE(
+        config, kFp8StaticChannelSym, kFp8DynamicTokenSym
+    )
+    assert method.experts_cls is MuseSparkAiterFp8Experts
+
+    state["experts_cls"] = AiterFp8BlockExperts
+    with pytest.raises(NotImplementedError, match="per-token"):
+        MuseSparkQuarkW8A8Fp8FusedMoE(config, kFp8Static128BlockSym, kFp8Dynamic128Sym)
 
 
 def test_muse_unquantized_method_is_pinned_to_triton(
@@ -452,7 +467,7 @@ _FAIL_CLOSED_EVERYWHERE = [
     + [
         (validate_bf16_deployment, _moe_config(moe_backend="aiter"), "Triton"),
         (validate_fp8_deployment, _moe_config(moe_backend="auto"), "Triton"),
-        (validate_fp8_deployment, _moe_config(moe_backend="aiter"), "Triton"),
+        (validate_fp8_deployment, _moe_config(moe_backend="flydsl"), "Triton"),
     ],
 )
 def test_unsupported_deployments_fail_closed(
@@ -492,14 +507,22 @@ def test_runner_reduces_only_expert_parallel_partials(
 
 ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_GFX950 = False
+ROCM_CDNA3_OR_4 = False
 ROCM_AITER_SUPPORTED = False
 
 if ROCM_AVAILABLE:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import get_cdna_version, on_gfx950
 
     ROCM_GFX950 = on_gfx950()
+    ROCM_CDNA3_OR_4 = get_cdna_version() in (3, 4)
     ROCM_AITER_SUPPORTED = is_aiter_found_and_supported()
+
+# MXFP4 needs gfx950; per-channel FP8 also runs on gfx942.
+_AITER_QUANT_SUPPORTED = {
+    "mxfp4": ROCM_GFX950 and ROCM_AITER_SUPPORTED,
+    "fp8": ROCM_CDNA3_OR_4 and ROCM_AITER_SUPPORTED,
+}
 
 
 @pytest.fixture
@@ -584,12 +607,56 @@ def _mxfp4_weights(
     return w13_quant, w2_quant, quant_config
 
 
-@pytest.mark.skipif(not ROCM_GFX950, reason="requires a GFX950 GPU")
-@pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
+def _fp8_weights(
+    w13: torch.Tensor, w2: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, MuseSparkQuarkFp8MoEQuantConfig]:
+    """Quantize to per-channel FP8 and shuffle to the AITER kernel layout."""
+    from vllm import _custom_ops as ops
+
+    def _quantize(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        num_experts, rows, cols = w.shape
+        w_quant, w_scale = ops.scaled_fp8_quant(
+            w.reshape(-1, cols), use_per_token_if_dynamic=True
+        )
+        return (
+            w_quant.view(num_experts, rows, cols),
+            w_scale.view(num_experts, rows, 1),
+        )
+
+    w13_quant, w13_scale = _quantize(w13)
+    w2_quant, w2_scale = _quantize(w2)
+    w13_quant, w2_quant = rocm_aiter_ops.shuffle_weights(w13_quant, w2_quant)
+    base_quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+        per_act_token_quant=True,
+        per_out_ch_quant=True,
+    )
+    quant_config = MuseSparkQuarkFp8MoEQuantConfig(
+        **vars(base_quant_config), post_expert_norm_fn=_rms_norm
+    )
+    return w13_quant, w2_quant, quant_config
+
+
+def _aiter_experts(
+    quant: str, config: FusedMoEConfig, w13: torch.Tensor, w2: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, MuseSparkAiterRouteExperts]:
+    if quant == "mxfp4":
+        w13, w2, mxfp4_config = _mxfp4_weights(w13, w2)
+        return w13, w2, MuseSparkAiterMxfp4Experts(config, mxfp4_config)
+    w13, w2, fp8_config = _fp8_weights(w13, w2)
+    return w13, w2, MuseSparkAiterFp8Experts(config, fp8_config)
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
+@pytest.mark.parametrize("quant", ["mxfp4", "fp8"])
 @torch.inference_mode()
-def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
-    enable_rocm_aiter,
+def test_rocm_aiter_route_expansion_numeric_and_graph_replay(
+    request: pytest.FixtureRequest, quant: str
 ) -> None:
+    if not _AITER_QUANT_SUPPORTED[quant]:
+        pytest.skip(f"AITER {quant} MoE is not supported on this GPU")
+    request.getfixturevalue("enable_rocm_aiter")
     torch.manual_seed(1234)
     num_tokens, num_experts, top_k = 16, 8, 4
     hidden_size, intermediate_size = 256, 256
@@ -625,8 +692,7 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
         )
         / intermediate_size**0.5
     )
-    w13, w2, quant_config = _mxfp4_weights(w13_float, w2_float)
-    experts = MuseSparkAiterExperts(config, quant_config)
+    w13, w2, experts = _aiter_experts(quant, config, w13_float, w2_float)
     reducer = experts.finalize_weight_and_reduce_impl()
 
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -661,10 +727,10 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
         topk_ids=topk_ids,
         moe_config=config,
         activation=MoEActivation.SILU,
-        quant_config=quant_config,
-        quant_type=derive_aiter_quant_type(quant_config),
+        quant_config=experts.quant_config,
+        quant_type=derive_aiter_quant_type(experts.quant_config),
         output_dtype=dtype,
-        **mxfp4_w4a16_extra_kwargs(quant_config, config),
+        **experts._extra_fused_moe_kwargs(),
     ).clone()
     actual = _run().clone()
     routes = parked[0]
@@ -814,15 +880,16 @@ def test_rocm_triton_experts_numeric_and_graph_replay() -> None:
 
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="requires a ROCm GPU")
 @pytest.mark.parametrize("routing", ["random", "first_rank_only"])
-@pytest.mark.parametrize("backend", ["triton", "aiter_mxfp4"])
+@pytest.mark.parametrize("backend", ["triton", "aiter_mxfp4", "aiter_fp8"])
 @torch.inference_mode()
 def test_rocm_ep_ranks_sum_to_the_unsharded_output(
     request: pytest.FixtureRequest, backend: str, routing: str
 ) -> None:
     """Each EP rank's finalize is a disjoint addend, whatever non-local rows hold."""
-    if backend == "aiter_mxfp4":
-        if not (ROCM_GFX950 and ROCM_AITER_SUPPORTED):
-            pytest.skip("requires a GFX950 GPU with supported AITER")
+    if backend != "triton":
+        quant = backend.removeprefix("aiter_")
+        if not _AITER_QUANT_SUPPORTED[quant]:
+            pytest.skip(f"AITER {quant} MoE is not supported on this GPU")
         request.getfixturevalue("enable_rocm_aiter")
     torch.manual_seed(1234)
     num_tokens, num_experts, top_k, ep_size = 300, 8, 4, 2
@@ -860,13 +927,12 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
             device="cuda",
             routing_method=RoutingMethodType.Renormalize,
         )
-        experts: MuseSparkTritonExperts | MuseSparkAiterExperts
+        experts: MuseSparkTritonExperts | MuseSparkAiterRouteExperts
         if backend == "triton":
             experts = MuseSparkTritonExperts(config, _quant_config(_rms_norm))
             kernel_map = expert_map
         else:
-            w13, w2, quant_config = _mxfp4_weights(w13, w2)
-            experts = MuseSparkAiterExperts(config, quant_config)
+            w13, w2, experts = _aiter_experts(quant, config, w13, w2)
             kernel_map = expert_mask
         route_buffer, launch = _route_launcher(
             experts,
@@ -888,15 +954,28 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
         out = reducer.apply(out, route_buffer, topk_weights, topk_ids, False)
         return routes, out, expert_map
 
+    def _assert_matches_unsharded(
+        actual: torch.Tensor, expected: torch.Tensor, **tolerance: float
+    ) -> None:
+        if backend != "aiter_fp8":
+            torch.testing.assert_close(actual, expected, **tolerance)
+            return
+        # AITER's 1-stage FP8 kernel picks its N tile from the CU count and the
+        # number of sorted M blocks, so the sharded and unsharded calls may run
+        # different tiles, which do not round alike.
+        diff = (actual.float() - expected.float()).norm().item()
+        bound = 0.04 * expected.float().norm().item()
+        assert diff <= bound, f"{diff:.4f} > {bound:.4f}"
+
     full_routes, full, _ = _finalize(1, 0)
     summed = torch.zeros(num_tokens, hidden_size, device="cuda")
     for ep_rank in range(ep_size):
         routes, partial, expert_map = _finalize(ep_size, ep_rank)
         assert expert_map is not None
         is_local = expert_map.cuda()[topk_ids.long()] >= 0
-        torch.testing.assert_close(routes[is_local], full_routes[is_local])
+        _assert_matches_unsharded(routes[is_local], full_routes[is_local])
         summed += partial.float()
-    torch.testing.assert_close(summed, full.float(), rtol=1e-2, atol=1e-2)
+    _assert_matches_unsharded(summed, full.float(), rtol=1e-2, atol=1e-2)
 
 
 def _post_expert_norm_module(hidden_size: int) -> torch.nn.Module:

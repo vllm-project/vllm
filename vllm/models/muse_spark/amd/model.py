@@ -81,7 +81,7 @@ from .decode_moe import MuseSparkDecodeMoE
 from .mono import MuseSparkMono, maybe_attach_mono
 from .muse_moe_runner import (
     MuseMoERunner,
-    MuseSparkQuarkOCPMXFusedMoE,
+    MuseSparkAiterRouteExperts,
     MuseSparkRoutedExperts,
     token_sharded_moe_output,
 )
@@ -394,14 +394,16 @@ class MuseSparkMoE(nn.Module):
 
     @functools.cached_property
     def _experts_take_expanded_input(self) -> bool:
-        """Whether the experts consume one input row per route (AITER MXFP4)."""
+        """Whether the experts consume one input row per route (AITER)."""
         norm = self.pre_expert_norm
+        experts_cls = getattr(
+            self.experts.routed_experts.quant_method, "experts_cls", None
+        )
         return (
             norm is not None
             and norm.variance_size_override is None
-            and isinstance(
-                self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
-            )
+            and isinstance(experts_cls, type)
+            and issubclass(experts_cls, MuseSparkAiterRouteExperts)
         )
 
     def _pool(

@@ -36,7 +36,7 @@ from vllm.models.muse_spark.common.ops.fused_finalize import (
     fused_post_expert_finalize,
 )
 
-from .muse_moe_runner import MuseSparkAiterExperts, MuseSparkQuarkOCPMXFusedMoE
+from .muse_moe_runner import MuseSparkAiterMxfp4Experts, MuseSparkQuarkOCPMXFusedMoE
 from .ops.compact_moe import compact_moe_experts, supports_compact_moe
 from .ops.decode_moe import (
     decode_moe_prep,
@@ -125,7 +125,7 @@ class MuseSparkDecodeMoE:
         routed = moe.experts.routed_experts
         kernel = routed.quant_method.moe_kernel
         if kernel is None or not isinstance(
-            kernel.fused_experts, MuseSparkAiterExperts
+            kernel.fused_experts, MuseSparkAiterMxfp4Experts
         ):
             return None
         local, inter2 = routed.w13_weight.shape[:2]
