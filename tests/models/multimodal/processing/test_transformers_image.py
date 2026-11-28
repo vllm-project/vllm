@@ -302,3 +302,65 @@ def test_nested_image_fields_split_per_image():
         assert isinstance(pixel_values, torch.Tensor)
         assert isinstance(num_image_patches, torch.Tensor)
         assert pixel_values.shape[1] == int(num_image_patches)
+
+
+def test_per_image_and_per_token_rows_split_per_image():
+    """Molmo2 returns one row of `image_grids` per image and one row of
+    `image_token_pooling` per image token, beside `pixel_values` rows per crop. Two
+    two-crop images also give `image_grids` as many columns as there are crops."""
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model="allenai/Molmo2-8B", model_impl="transformers")
+    )
+    image = ImageAsset("cherry_blossom").pil_image
+    result = mm_processor(
+        prompt="<|image|><|image|>",
+        mm_items=mm_processor.info.parse_mm_data(
+            {"image": [image.resize((100, 120)), image.resize((130, 100))]}
+        ),
+        hf_processor_mm_kwargs={},
+    )
+
+    items = result["mm_kwargs"]["image"]
+    assert len(items) == 2
+    for item, placeholder in zip(items, result["mm_placeholders"]["image"]):
+        assert item is not None
+        assert placeholder.is_embed is not None
+        image_grids = item["image_grids"].data
+        assert isinstance(image_grids, torch.Tensor)
+        assert tuple(image_grids.shape) == (4,)
+        assert len(item["image_token_pooling"].data) == int(placeholder.is_embed.sum())
+
+
+@pytest.mark.parametrize(
+    ("model", "image_sizes", "key", "rows"),
+    [
+        # One merge size per image
+        (
+            "vllm-project/VideoLLaMA3-2B-Image-HF",
+            [(640, 480), (64, 64)],
+            "image_merge_sizes",
+            [1, 1],
+        ),
+        # One target size per slice of a lone image
+        (
+            "hf-internal-testing/tiny-processor-minicpmv4_6",
+            [(640, 480)],
+            "target_sizes",
+            [3],
+        ),
+    ],
+)
+def test_per_image_rows_stay_with_their_image(model, image_sizes, key, rows):
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model, model_impl="transformers")
+    )
+    image = ImageAsset("cherry_blossom").pil_image
+    images = [image.resize(size) for size in image_sizes]
+    result = mm_processor(
+        prompt=mm_processor.dummy_inputs.get_dummy_text({"image": len(images)}),
+        mm_items=mm_processor.info.parse_mm_data({"image": images}),
+        hf_processor_mm_kwargs={},
+    )
+
+    items = result["mm_kwargs"].require_data()["image"]
+    assert [len(torch.atleast_1d(item[key].data)) for item in items] == rows
