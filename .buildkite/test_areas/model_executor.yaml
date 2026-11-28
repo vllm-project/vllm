@@ -68,6 +68,7 @@ steps:
   - vllm/model_executor
   - vllm/model_executor/warmup
   - vllm/models/deepseek_v32/
+  - vllm/preload/
   - tests/model_executor
   - tests/single_rank_group.py
   - tests/model_executor/test_jit_warmup.py

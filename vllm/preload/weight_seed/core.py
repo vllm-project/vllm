@@ -10,17 +10,14 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+from vllm.preload.weight_seed.utils import (
     allocate_storage,
     manifest_nbytes,
     rebuild_tensors,
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-        IPCBackendBase,
-        StorageRecord,
-    )
+    from vllm.preload.ipc_backends.base import IPCBackendBase, StorageRecord
 
 SeedBackend = Literal["peer_ipc", "mooncake"]
 
@@ -106,15 +103,11 @@ def get_mover(
 ) -> WeightMover:
     """The mover for a backend; `device_index` pins the peer_ipc device."""
     if name == PEER_IPC_BACKEND:
-        from vllm.model_executor.model_loader.weight_cache.weight_seed.peer_ipc import (
-            PeerIpcMover,
-        )
+        from vllm.preload.weight_seed.peer_ipc import PeerIpcMover
 
         return PeerIpcMover(device_index, ipc_backend)
     if name == MOONCAKE_BACKEND:
-        from vllm.model_executor.model_loader.weight_cache.weight_seed.mooncake import (
-            MooncakeMover,
-        )
+        from vllm.preload.weight_seed.mooncake import MooncakeMover
 
         return MooncakeMover()
     raise ValueError(f"Unknown weight-cache seed backend {name!r}")

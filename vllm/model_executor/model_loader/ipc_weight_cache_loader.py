@@ -24,16 +24,10 @@ from vllm.model_executor.model_loader.utils import (
     build_model_from_processed_weights,
     get_draft_load_config,
 )
-from vllm.model_executor.model_loader.weight_cache.ipc_backends import IPC_BACKENDS
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    rebuild_entries,
-    record_bytes,
-)
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
-    recv_msg,
-    send_msg,
-)
-from vllm.model_executor.model_loader.weight_cache.protocol import (
+from vllm.preload.ipc_backends import IPC_BACKENDS
+from vllm.preload.ipc_backends.base import rebuild_entries, record_bytes
+from vllm.preload.ipc_backends.serial_utils import recv_msg, send_msg
+from vllm.preload.protocol import (
     CacheConfigMismatchError,
     WeightCacheKey,
     WeightCacheState,
@@ -43,15 +37,13 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     get_socket_path,
     verify_socket_owner,
 )
-from vllm.model_executor.model_loader.weight_cache.utils import (
+from vllm.preload.utils import (
     build_weight_cache_key,
     is_draft_model_cacheable,
     record_external_weight_charge,
     record_external_weight_fallback,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
-    rebuild_tensors,
-)
+from vllm.preload.weight_seed.utils import rebuild_tensors
 from vllm.tracing import instrument
 
 logger = init_logger(__name__)
@@ -63,8 +55,8 @@ _STARTUP_RETRY_INTERVAL_S = 0.5
 _T = TypeVar("_T")
 
 
-class IpcModelLoader(BaseModelLoader):
-    """Zero-copy loads a model using the weight cache daemon's sharing backend.
+class IpcWeightCacheLoader(BaseModelLoader):
+    """Map cached weights from the local preload daemon into an engine via IPC.
 
     The model is initialized on the meta device and receives the daemon's
     post-processed tensors. Post-load hooks can recreate process-local state
@@ -126,7 +118,7 @@ class IpcModelLoader(BaseModelLoader):
             # would load the draft with.
             draft_config = get_draft_load_config(vllm_config)
             if draft_config.load_format == "ipc_cache":
-                draft_loader = IpcModelLoader(draft_config)
+                draft_loader = IpcWeightCacheLoader(draft_config)
                 # An explicit draft_load_config without is_draft would resolve
                 # back to the target socket and double-count it.
                 if draft_loader.is_draft:

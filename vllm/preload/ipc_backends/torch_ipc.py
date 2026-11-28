@@ -7,13 +7,13 @@ from dataclasses import dataclass
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+from vllm.preload.ipc_backends.base import (
     IPCBackendBase,
     StorageEntry,
     StorageRecord,
     storage_bytes,
 )
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.memfd_storage import (
+from vllm.preload.ipc_backends.memfd_storage import (
     MemfdStorageEntry,
     materialize_pinned_cpu_storages,
 )

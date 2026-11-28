@@ -12,13 +12,8 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    StorageRecord,
-    storage_bytes,
-)
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
-    SharedFileDescriptor,
-)
+from vllm.preload.ipc_backends.base import StorageRecord, storage_bytes
+from vllm.preload.ipc_backends.serial_utils import SharedFileDescriptor
 from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
 
 

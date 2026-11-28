@@ -25,12 +25,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
-from vllm.model_executor.model_loader.weight_cache.protocol import (
-    check_ipc_quant_support,
-)
-from vllm.model_executor.model_loader.weight_cache.utils import (
-    is_draft_model_cacheable,
-)
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.interfaces import SupportsQuant
@@ -38,6 +32,8 @@ from vllm.model_executor.utils import (
     is_weights_pre_processed,
     weights_already_processed,
 )
+from vllm.preload.protocol import check_ipc_quant_support
+from vllm.preload.utils import is_draft_model_cacheable
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available

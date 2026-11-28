@@ -8,13 +8,9 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.artifact_store import (
-    STORE_BACKENDS,
-    ArtifactStore,
-    artifact_key,
-)
-from vllm.model_executor.model_loader.weight_cache.warmup_cache.base import WarmupCache
-from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
+from vllm.preload.artifact_store import STORE_BACKENDS, ArtifactStore, artifact_key
+from vllm.preload.warmup_cache.base import WarmupCache
+from vllm.preload.warmup_cache.common import (
     BUNDLE_LIMIT,
     _bundle,
     _cache_roots,
@@ -23,8 +19,8 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.common import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
-    from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
+    from vllm.preload.daemon import WeightCacheDaemon
+    from vllm.preload.transport import SeedTransport
 
 logger = init_logger(__name__)
 

@@ -12,11 +12,11 @@ from safetensors.torch import save_file
 
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.weight_cache.protocol import hash_checkpoint
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_safetensors_files_by_weight_name,
 )
+from vllm.preload.protocol import hash_checkpoint
 
 
 def test_filter_duplicate_safetensors_files_missing_weight():

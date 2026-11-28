@@ -75,7 +75,7 @@ CHECK_STRINGS = {
             "vllm/distributed/weight_transfer/ipc_engine.py",
             "vllm/distributed/weight_transfer/clients.py",
             "examples/rl/rlhf_http_ipc_no_vllm.py",
-            "vllm/model_executor/model_loader/weight_cache/ipc_backends/serial_utils.py",
+            "vllm/preload/ipc_backends/serial_utils.py",
             "tests/distributed/test_shm_broadcast.py",
             "tests/distributed/test_weight_transfer.py",
             "vllm/utils/hashing.py",
