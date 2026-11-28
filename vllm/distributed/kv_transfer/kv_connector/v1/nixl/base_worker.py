@@ -1076,11 +1076,20 @@ class NixlBaseConnectorWorker:
                     "hybrid KV cache layouts (HMA) only for attention KV without "
                     "MLA or CSA-linear caches; use NixlPushConnector for those."
                 )
-            # Mamba/SSM hybrid PP stages are not validated yet.
-            if self._has_mamba:
+            if self._has_mamba and self._TRANSFER_MODE != "push":
                 raise NotImplementedError(
-                    "NIXL connectors do not support pipeline_parallel_size > 1 "
-                    "with Mamba/SSM hybrid KV cache layouts yet."
+                    "NixlConnector (pull) does not support pipeline_parallel_size "
+                    "> 1 with Mamba/SSM hybrid KV cache layouts; use "
+                    "NixlPushConnector for those."
+                )
+            # A stage of SSM layers alone has no kernel blocks, so its block
+            # geometry cannot match a decoder that also holds attention.
+            if self._has_mamba and all(
+                isinstance(spec, MambaSpec) for spec in self._layer_specs.values()
+            ):
+                raise NotImplementedError(
+                    "NixlPushConnector requires every pipeline stage of a "
+                    "Mamba/SSM hybrid to hold an attention layer."
                 )
         # Keep heartbeat handshakes to a PP-sharded producer notif-only.
         self._hb_handshake_notif_only = False

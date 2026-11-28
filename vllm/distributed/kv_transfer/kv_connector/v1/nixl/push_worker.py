@@ -190,6 +190,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             nixl_agent_meta, remote_tp_size, remote_dcp_size, local_region_ids
         )
         assert self.transfer_topo is not None
+        if self.dcp_size != remote_dcp_size:
+            # Equal shards pair rank to rank and block to block, like no DCP.
+            raise NotImplementedError(
+                "NIXL push mode requires the same DCP size on both sides: "
+                f"local={self.dcp_size}, remote={remote_dcp_size}."
+            )
         if (
             self._head_sharded_draft_regions
             and self.transfer_topo.tp_size != remote_tp_size

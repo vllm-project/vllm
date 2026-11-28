@@ -381,6 +381,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.pcp_rank = 0
+        w.dcp_size = 1
         w.pcp_dcp_sharded = False
         w.world_size = 1
         w.pp_size = 1
@@ -2238,6 +2239,22 @@ def test_head_sharded_draft_push_rejects_heterogeneous_tp():
         w._validate_remote_agent_handshake(meta, remote_tp_size=4)
         with pytest.raises(NotImplementedError, match="push mode"):
             w._validate_remote_agent_handshake(meta, remote_tp_size=1)
+
+
+def test_dcp_push_requires_equal_dcp():
+    """Push pairs DCP shards rank to rank; other layouts are the pull path's job."""
+    w = _StubWriterWorker.fresh()
+    w.dcp_size = 8
+    w.transfer_topo = MagicMock(tp_size=8)
+    meta = MagicMock(spec=NixlAgentMetadata)
+    with patch.object(
+        NixlBaseConnectorWorker, "_validate_remote_agent_handshake", return_value=None
+    ):
+        w._validate_remote_agent_handshake(meta, remote_tp_size=8, remote_dcp_size=8)
+        with pytest.raises(NotImplementedError, match="same DCP size"):
+            w._validate_remote_agent_handshake(
+                meta, remote_tp_size=8, remote_dcp_size=1
+            )
 
 
 def test_layer_handshake_rejects_unsupported_geometry():

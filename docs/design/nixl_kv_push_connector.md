@@ -271,7 +271,9 @@ Invariants enforced when pairing:
 Decode-side PP is unsupported because completions are counted per
 consumer TP rank. Both connectors therefore require `kv_role="kv_producer"`
 under PP and reject bidirectional transfer, which would make P a receiver.
-Mamba/SSM hybrids are unsupported under PP. Packed PP push
+Mamba/SSM hybrids are supported under PP in push mode only. DCP in push
+mode requires the same DCP size on P and D, so shards pair rank to rank.
+Packed PP push
 requires MLA caches and equal P/D block sizes. MLA pages are replicated
 across TP ranks, so producer TP1 to consumer TP2 is supported.
 
