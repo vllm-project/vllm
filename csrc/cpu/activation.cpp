@@ -1,4 +1,6 @@
 #include "cpu_types.hpp"
+#include <ATen/TensorIterator.h>
+#include <algorithm>
 
 namespace {
 template <typename scalar_t, vec_op::FP32Vec8 (*func)(const vec_op::FP32Vec8&),
@@ -82,6 +84,33 @@ FORCE_INLINE vec_op::FP32Vec8 gelu_tanh_act(const vec_op::FP32Vec8& x) {
   const vec_op::FP32Vec8 inner = w1 * (x + x_3 * w3);
   return x * w2 * (ones + inner.tanh());
 }
+
+template <typename scalar_t>
+void gelu_tanh_strided_kernel(torch::Tensor& out, const torch::Tensor& input) {
+  using scalar_vec_t = vec_op::vec_t<scalar_t>;
+  constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
+  auto iter = at::TensorIteratorConfig()
+                  .resize_outputs(false)
+                  .add_output(out)
+                  .add_const_input(input)
+                  .build();
+  iter.for_each([&](char** data, const int64_t* strides, int64_t size) {
+    for (int64_t i = 0; i < size; i += VEC_ELEM_NUM) {
+      const int count = std::min<int64_t>(VEC_ELEM_NUM, size - i);
+      scalar_t values[VEC_ELEM_NUM] = {};
+      for (int j = 0; j < count; ++j) {
+        values[j] =
+            *reinterpret_cast<const scalar_t*>(data[1] + (i + j) * strides[1]);
+      }
+      const vec_op::FP32Vec8 x{scalar_vec_t(values)};
+      scalar_vec_t(gelu_tanh_act(x)).save(values);
+      for (int j = 0; j < count; ++j) {
+        *reinterpret_cast<scalar_t*>(data[0] + (i + j) * strides[0]) =
+            values[j];
+      }
+    }
+  });
+}
 };  // namespace
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input) {
@@ -132,8 +161,12 @@ void gelu_tanh(torch::Tensor& out, torch::Tensor& input) {
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_tanh_impl", [&] {
     CPU_KERNEL_GUARD_IN(gelu_tanh_impl)
-    activation_kernel<scalar_t, gelu_tanh_act, false>(
-        num_tokens, d, input.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
+    if (input.is_contiguous() && out.is_contiguous()) {
+      activation_kernel<scalar_t, gelu_tanh_act, false>(
+          num_tokens, d, input.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
+    } else {
+      gelu_tanh_strided_kernel<scalar_t>(out, input);
+    }
     CPU_KERNEL_GUARD_OUT(gelu_tanh_impl)
   });
 }
