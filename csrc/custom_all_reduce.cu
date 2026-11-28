@@ -16,7 +16,7 @@ static_assert(sizeof(void*) == sizeof(fptr_t));
 
 fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
                       torch::stable::Tensor& rank_data, int64_t rank,
-                      bool fully_connected) {
+                      bool fully_connected, bool release_start) {
   int world_size = fake_ipc_ptrs.size();
   if (world_size > vllm::kMaxCustomCollectiveRanks)
     throw std::invalid_argument("world size > 16 is not supported");
@@ -31,7 +31,7 @@ fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
   }
   return (fptr_t) new vllm::CustomAllreduce(
       ipc_ptrs, rank_data.mutable_data_ptr(), rank_data.numel(), rank,
-      world_size, fully_connected);
+      world_size, fully_connected, release_start);
 }
 
 /**
