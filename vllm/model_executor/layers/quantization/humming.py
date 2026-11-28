@@ -415,6 +415,8 @@ class HummingLinearMethod(LinearMethodBase):
                         if name != "bias":
                             delattr(layer, name)
                     self.__class__ = UnquantizedLinearMethod  # type: ignore
+                    # The class swap skips __init__, which sets _gemm_impl.
+                    UnquantizedLinearMethod.__init__(self)  # type: ignore
                     tensor = torch.empty(
                         (
                             layer.output_partition_sizes_sum,
