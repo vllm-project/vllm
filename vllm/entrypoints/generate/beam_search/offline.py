@@ -3,7 +3,8 @@
 
 import itertools
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
+from operator import itemgetter
 
 import torch
 from tqdm import tqdm
@@ -29,6 +30,7 @@ from .utils import (
     BeamSearchSequence,
     create_sort_beams_key_function,
     get_beam_search_eos_token_ids,
+    get_beam_search_score,
 )
 
 logger = init_logger(__name__)
@@ -184,7 +186,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         eos_token_ids=eos_token_ids,
                         ignore_eos=ignore_eos,
                         beam_width=beam_width,
-                        sort_beams_key=sort_beams_key,
+                        length_penalty=length_penalty,
                         structured_output_backend=structured_output_backend,
                         structured_output_key=structured_output_key,
                         structured_output_bitmask=structured_output_bitmask,
@@ -219,7 +221,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         eos_token_ids: set[int],
         ignore_eos: bool,
         beam_width: int,
-        sort_beams_key: Callable,
+        length_penalty: float,
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple | None,
         structured_output_bitmask: torch.Tensor | None,
@@ -332,7 +334,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 instance.beams = []
                 continue
 
-            instance_new_beams = []
+            candidates = []
             for i in range(start, end):
                 current_beam = all_beams[i]
                 result = output[i]
@@ -358,25 +360,23 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     for token_id, logprob_obj in logprobs.items():
                         if allowed is not None and token_id not in allowed:
                             continue
-                        new_beam = BeamSearchSequence(
-                            current_beam.orig_prompt,
-                            tokens=current_beam.tokens + [token_id],
-                            logprobs=current_beam.logprobs + [logprobs],
-                            lora_request=current_beam.lora_request,
-                            cum_logprob=current_beam.cum_logprob + logprob_obj.logprob,
-                        )
-
                         if token_id in eos_token_ids and not ignore_eos:
-                            instance.completed.append(new_beam)
+                            instance.completed.append(
+                                current_beam.append_token(token_id, logprobs)
+                            )
                         else:
-                            instance_new_beams.append(new_beam)
-            sorted_beams = sorted(
-                instance_new_beams,
-                key=sort_beams_key,
-                reverse=True,
-            )
+                            score = get_beam_search_score(
+                                len(current_beam.logprobs) + 1,
+                                current_beam.cum_logprob + logprob_obj.logprob,
+                                length_penalty,
+                            )
+                            candidates.append((score, current_beam, token_id, logprobs))
+
+            # Copy token and logprob histories only for beams that survive pruning.
+            candidates.sort(key=itemgetter(0), reverse=True)
             instance.beams = []
-            for beam in sorted_beams[:beam_width]:
+            for _, parent, token_id, logprobs in candidates[:beam_width]:
+                beam = parent.append_token(token_id, logprobs)
                 if len(beam.tokens) >= self.model_config.max_model_len:
                     beam.finish_reason = "length"
                     instance.completed.append(beam)

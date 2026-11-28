@@ -89,6 +89,43 @@ def test_beam_search_stops_at_context_limit_per_prompt(vllm_runner, model: str) 
                 )
 
 
+def test_beam_search_copies_only_retained_histories(monkeypatch):
+    class CountingTokens(list):
+        copies = 0
+
+        def __add__(self, other):
+            CountingTokens.copies += 1
+            return CountingTokens(super().__add__(other))
+
+    logprobs = {token: Logprob(-0.25) for token in (11, 12, 13, 14)}
+
+    def run_requests(prompts, **kwargs):
+        return [
+            SimpleNamespace(
+                outputs=[SimpleNamespace(logprobs=[logprobs], finish_reason="length")]
+            )
+            for _ in prompts
+        ]
+
+    llm = LLM.__new__(LLM)
+    llm.llm_engine = Mock()
+    llm.llm_engine.input_processor.generation_config_fields = {}
+    llm.model_config = Mock(max_model_len=32)
+    llm.renderer = Mock()
+    llm.renderer.get_tokenizer.return_value = SimpleNamespace(
+        eos_token_id=0, decode=lambda tokens, **kwargs: str(tokens)
+    )
+    monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
+    monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
+    prompt = TokensInput(type="token", prompt_token_ids=CountingTokens([1]))
+    (output,) = llm.beam_search([prompt], BeamSearchParams(beam_width=2, max_tokens=2))
+
+    # Tied scores keep insertion order across parents. Only the two winners
+    # of each step need a copy of their token histories.
+    assert [beam.tokens for beam in output.sequences] == [[1, 11, 11], [1, 11, 12]]
+    assert CountingTokens.copies == 4
+
+
 @pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
 @pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
 def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
