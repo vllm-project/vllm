@@ -10,11 +10,15 @@ from typing import Any, NamedTuple
 import torch
 
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.ops.gdn_replayssm import (
+    gdn_replayssm_materialize,
+)
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
     replayssm_materialize,
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
@@ -388,6 +392,17 @@ class _ReplaySSMMaterializeTables(NamedTuple):
     state_scale_slot_strides: torch.Tensor
 
 
+class _GDNReplaySSMMaterializeTables(NamedTuple):
+    state_ptrs: torch.Tensor
+    state_slot_strides: torch.Tensor
+    d_cache_ptrs: torch.Tensor
+    d_cache_slot_strides: torch.Tensor
+    k_cache_ptrs: torch.Tensor
+    k_cache_slot_strides: torch.Tensor
+    g_cache_ptrs: torch.Tensor
+    g_cache_slot_strides: torch.Tensor
+
+
 @dataclass(slots=True)
 class ReplaySSMModelContext:
     """Shared replay plans with independent physical slots for each cache group."""
@@ -401,7 +416,7 @@ class ReplaySSMModelContext:
     src_slots_ptrs: torch.Tensor
     dst_slots_ptrs: torch.Tensor
     num_layers: torch.Tensor
-    materialize_tables: _ReplaySSMMaterializeTables
+    materialize_tables: _ReplaySSMMaterializeTables | _GDNReplaySSMMaterializeTables
     src_slots: torch.Tensor
     dst_slots: torch.Tensor
     plan_ring_start: torch.Tensor
@@ -412,6 +427,7 @@ class ReplaySSMModelContext:
     logical_window: int
     ring_buffer_len: int
     materialize_prefixes: bool
+    is_gdn: bool = False
 
     @classmethod
     def create(
@@ -428,10 +444,12 @@ class ReplaySSMModelContext:
         assert all(spec == first_spec for _, spec, _ in grouped), (
             "ReplaySSM trackers require equal Mamba cache specs"
         )
+        is_gdn = first.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
         geometry = [(state.shape[1:], state.dtype) for state in first.kv_cache[1:]]
         assert all(
             [(state.shape[1:], state.dtype) for state in mixer.kv_cache[1:]] == geometry
-            and mixer.A.dtype == first.A.dtype
+            and mixer.mamba_type == first.mamba_type
+            and (is_gdn or mixer.A.dtype == first.A.dtype)
             and mixer.replayssm_buffer_len == first.replayssm_buffer_len
             for mixer in mixers
         ), "ReplaySSM trackers require equal materialization geometry"
@@ -451,6 +469,43 @@ class ReplaySSMModelContext:
         # Each pointer selects a group's first row in the flat [layer, batch]
         # allocation. Different group sizes need no padding or per-step concat.
         zero_table = torch.zeros(len(mixers), dtype=torch.int64, device=device)
+        materialize_tables: _ReplaySSMMaterializeTables | _GDNReplaySSMMaterializeTables
+        if is_gdn:
+            states, d_caches, k_caches, g_caches = (
+                [m.kv_cache[idx] for m in mixers] for idx in range(1, 5)
+            )
+            materialize_tables = _GDNReplaySSMMaterializeTables(
+                state_ptrs=_cuda_i64_ptrs(states),
+                state_slot_strides=_cuda_i64_slot_strides(states),
+                d_cache_ptrs=_cuda_i64_ptrs(d_caches),
+                d_cache_slot_strides=_cuda_i64_slot_strides(d_caches),
+                k_cache_ptrs=_cuda_i64_ptrs(k_caches),
+                k_cache_slot_strides=_cuda_i64_slot_strides(k_caches),
+                g_cache_ptrs=_cuda_i64_ptrs(g_caches),
+                g_cache_slot_strides=_cuda_i64_slot_strides(g_caches),
+            )
+        else:
+            materialize_tables = _ReplaySSMMaterializeTables(
+                state_ptrs=_cuda_i64_ptrs([m.kv_cache[1] for m in mixers]),
+                state_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[1] for m in mixers]
+                ),
+                x_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[2] for m in mixers]),
+                x_cache_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[2] for m in mixers]
+                ),
+                B_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[4] for m in mixers]),
+                B_cache_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[4] for m in mixers]
+                ),
+                dt_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[3] for m in mixers]),
+                dt_cache_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[3] for m in mixers]
+                ),
+                A_ptrs=_cuda_i64_ptrs([m.A for m in mixers]),
+                state_scale_ptrs=zero_table,
+                state_scale_slot_strides=zero_table,
+            )
         return cls(
             mixers=mixers,
             block_tables=block_tables,
@@ -473,27 +528,7 @@ class ReplaySSMModelContext:
                 dtype=torch.int32,
                 device=device,
             ),
-            materialize_tables=_ReplaySSMMaterializeTables(
-                state_ptrs=_cuda_i64_ptrs([m.kv_cache[1] for m in mixers]),
-                state_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[1] for m in mixers]
-                ),
-                x_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[2] for m in mixers]),
-                x_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[2] for m in mixers]
-                ),
-                B_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[4] for m in mixers]),
-                B_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[4] for m in mixers]
-                ),
-                dt_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[3] for m in mixers]),
-                dt_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[3] for m in mixers]
-                ),
-                A_ptrs=_cuda_i64_ptrs([m.A for m in mixers]),
-                state_scale_ptrs=zero_table,
-                state_scale_slot_strides=zero_table,
-            ),
+            materialize_tables=materialize_tables,
             src_slots=src_slots,
             dst_slots=dst_slots,
             plan_ring_start=torch.zeros(max_num_reqs, dtype=torch.int32, device=device),
@@ -506,17 +541,42 @@ class ReplaySSMModelContext:
             max_num_reqs=max_num_reqs,
             mamba_block_size=first_spec.block_size,
             logical_window=int(first.replayssm_buffer_len),
+            # Mamba2 x_cache [slots, nheads, R, head_dim]; GDN d_cache
+            # [slots, HV, R, V].
             ring_buffer_len=first.kv_cache[2].size(2),
             materialize_prefixes=materialize_prefixes,
+            is_gdn=is_gdn,
         )
 
     def _materialize(self, num_reqs: int) -> None:
         """Publish all canonical prefix snapshots in one kernel launch."""
         first = self.mixers[0]
+        tables = self.materialize_tables
+        if self.is_gdn:
+            assert isinstance(tables, _GDNReplaySSMMaterializeTables)
+            state = first.kv_cache[1]
+            gdn_replayssm_materialize(
+                *tables,
+                self.src_slots,
+                self.dst_slots,
+                self.plan_ring_start,
+                self.plan_flush_count,
+                self.active_request_indices,
+                num_reqs=num_reqs,
+                state_dtype=state.dtype,
+                ring_dtype=first.kv_cache[2].dtype,
+                num_k_heads=first.kv_cache[3].size(1),
+                num_v_heads=state.size(1),
+                head_k_dim=state.size(3),
+                head_v_dim=state.size(2),
+                ring_buffer_len=self.ring_buffer_len,
+            )
+            return
+        assert isinstance(tables, _ReplaySSMMaterializeTables)
         mamba_config = first.mamba_config
         if not first.use_flashinfer_replayssm:
             replayssm_materialize(
-                *self.materialize_tables[:9],
+                *tables[:9],
                 self.src_slots,
                 self.dst_slots,
                 self.plan_ring_start,
@@ -543,7 +603,7 @@ class ReplaySSMModelContext:
             )
             philox_rounds = mamba_config.stochastic_rounding_philox_rounds or 10
         _load_replayssm_materialize()(
-            *self.materialize_tables,
+            *tables,
             self.src_slots,
             self.dst_slots,
             self.plan_ring_start,

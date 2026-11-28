@@ -286,6 +286,9 @@ class MambaStateShapeCalculator:
         temporal_state_shape = (local_v_heads, head_v_dim, head_k_dim)
         if replayssm_buffer_len is None:
             return conv_state_shape, temporal_state_shape
+        if num_spec > 0:
+            # The tracker contract keeps the live and current verify windows.
+            replayssm_buffer_len += 1 + num_spec
         return (
             conv_state_shape,
             temporal_state_shape,

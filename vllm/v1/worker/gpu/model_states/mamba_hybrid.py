@@ -12,7 +12,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionMetadata,
+    GDNAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadata,
     Mamba2AttentionMetadataBuilder,
@@ -346,15 +349,17 @@ class MambaHybridModelState(DefaultModelState):
                 (
                     metadata
                     for metadata in attn_metadata.values()
-                    if isinstance(metadata, Mamba2AttentionMetadata)
+                    if isinstance(
+                        metadata, (Mamba2AttentionMetadata, GDNAttentionMetadata)
+                    )
                 ),
                 None,
             )
             # Autotune dummy runs and draft capture can omit Mamba metadata.
             if mamba_metadata is not None:
                 self._replayssm_query_start_loc = input_batch.query_start_loc
-                replayssm_prefilling = (
-                    torch.arange(num_reqs, device="cpu") >= mamba_metadata.num_decodes
+                replayssm_prefilling = _replayssm_prefilling_rows(
+                    mamba_metadata, num_reqs
                 )
                 async_tensor_h2d(
                     replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
@@ -466,6 +471,22 @@ class MambaHybridModelState(DefaultModelState):
             live_cols=(self._mamba_state_idx_gpu if self.prefix_caching else None),
             num_reqs=num_reqs,
         )
+
+
+def _replayssm_prefilling_rows(
+    metadata: Mamba2AttentionMetadata | GDNAttentionMetadata, num_reqs: int
+) -> torch.Tensor:
+    """Rows whose forward wrote a canonical state (CPU bool mask).
+
+    Mamba2 runs decodes first; GDN marks its speculative verify rows, and every
+    other row ran the prefill kernels, which rewrite the live checkpoint.
+    """
+    if isinstance(metadata, Mamba2AttentionMetadata):
+        return torch.arange(num_reqs, device="cpu") >= metadata.num_decodes
+    masks = metadata.spec_sequence_masks_cpu
+    if masks is None:
+        return torch.ones(num_reqs, dtype=torch.bool, device="cpu")
+    return ~masks[:num_reqs]
 
 
 @triton.jit

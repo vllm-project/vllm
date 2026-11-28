@@ -264,7 +264,8 @@ def test_triton_replayssm_spec_decode_validates_config(
     ),
     [
         (0, MambaBackendEnum.TRITON, False, 32, 1.0, None),
-        (2, MambaBackendEnum.TRITON, False, 16, 1.0, "speculative decoding"),
+        (3, MambaBackendEnum.TRITON, False, 16, 1.0, None),
+        (8, MambaBackendEnum.TRITON, False, 16, 1.0, "at most 8 tokens"),
         (0, MambaBackendEnum.FLASHINFER, False, 16, 1.0, "--mamba-backend triton"),
         (0, MambaBackendEnum.TRITON, True, 16, 1.0, "stochastic-rounding"),
         (0, MambaBackendEnum.TRITON, False, 64, 1.0, "--replayssm-buffer-len <= 32"),
@@ -273,6 +274,7 @@ def test_triton_replayssm_spec_decode_validates_config(
     ids=[
         "stp",
         "spec",
+        "spec-window",
         "flashinfer",
         "stochastic-rounding",
         "long-buffer",
