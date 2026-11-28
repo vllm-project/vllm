@@ -35,7 +35,10 @@ request racing the pause call itself may instead be treated as in-flight, and
 input to an already-open streaming-input session is still accepted. Other pauses,
 such as `sleep`, keep queueing new requests.
 
-The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
+The `clear_cache` parameter controls whether to clear the KV cache, prefix cache and encoder cache
+after pausing. With `mode="keep"`, it preempts running requests, which are recomputed with the new
+weights on resume, and keeps the multimodal processor cache, which holds preprocessed inputs rather
+than model outputs and which requests kept across the pause may still read.
 
 `clear_cache=True` also resets a configured KV connector's cache. To clear only the local caches,
 pause with `clear_cache=False`, then call

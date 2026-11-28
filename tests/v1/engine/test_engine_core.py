@@ -1023,7 +1023,7 @@ def test_kv_cache_discard_resets_connector_unless_kept(entry, kwargs, expected):
     core.model_executor.is_sleeping = False
     reset_calls: list[bool] = []
 
-    def _reset_caches(reset_connector: bool) -> None:
+    def _reset_caches(reset_connector: bool, reset_mm_cache: bool = True) -> None:
         reset_calls.append(reset_connector)
 
     core._reset_caches = _reset_caches  # type: ignore[method-assign]
@@ -1058,7 +1058,7 @@ def test_inproc_sleep_drains_before_keeping_connector_cache(reset_connector):
 
     core.step_fn = step
 
-    def _reset_caches(reset_connector: bool) -> None:
+    def _reset_caches(reset_connector: bool, reset_mm_cache: bool = True) -> None:
         order.append("reset_caches")
 
     core._reset_caches = _reset_caches  # type: ignore[method-assign]
@@ -1094,3 +1094,22 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+@pytest.mark.parametrize("mode", ["abort", "wait", "keep"])
+def test_clearing_pause_keeps_mm_cache_only_for_keep(mode: str):
+    """Every clearing pause preempts running requests and clears the prefix
+    and encoder caches, which new weights make stale. Only "keep" keeps the
+    multimodal processor cache, which the requests it keeps may still read."""
+    core, scheduler = _pausable_engine_core_proc()
+    core.reject_new_requests = False
+    core.mm_receiver_cache = None
+
+    core.pause_generation(mode=mode, clear_cache=True)
+
+    scheduler.reset_prefix_cache.assert_called_once_with(True, True)
+    resets = [name for name in _executor_calls(core) if name.startswith("reset_")]
+    if mode == "keep":
+        assert resets == ["reset_encoder_cache"]
+    else:
+        assert resets == ["reset_mm_cache", "reset_encoder_cache"]

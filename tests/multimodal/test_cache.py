@@ -6,7 +6,7 @@ import threading
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
@@ -1088,6 +1088,47 @@ def test_shm_handle_issued_before_cache_clear():
     finally:
         receiver_cache._shm_cache.close()
         sender_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_keep_pause_keeps_shm_handles_of_queued_requests():
+    """A keep pause leaves requests queued with handles into the SHM sender
+    cache, so it must not clear that cache, though it still asks the engine to
+    clear its caches (#62123)."""
+    vllm_config = _small_shm_vllm_config()
+    renderer = renderer_from_config(vllm_config)
+    receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+    engine_core = SimpleNamespace(pause_generation_async=AsyncMock())
+    engine = SimpleNamespace(renderer=renderer, engine_core=engine_core)
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(1024)
+
+    try:
+        sender_cache = renderer.mm_processor_cache
+        assert isinstance(sender_cache, ShmObjectStoreSenderCache)
+        queued_item, _ = sender_cache.get_and_update_item((item, []), mm_hash)
+
+        await AsyncLLM.pause_generation(engine, mode="keep")
+        engine_core.pause_generation_async.assert_awaited_once_with(
+            mode="keep", clear_cache=True
+        )
+
+        # An image added while paused must not take the queued item's place.
+        sender_cache.get_and_update_item(
+            (MultiModalKwargsItem.dummy(2048), []), "image_B"
+        )
+        queued = MultiModalFeatureSpec(
+            data=queued_item,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+        receiver_cache.get_and_update_features([queued])
+        assert queued.data == item
+    finally:
+        receiver_cache._shm_cache.close()
+        renderer.shutdown()
 
 
 def test_processor_cache_shared_across_loras():

@@ -140,12 +140,15 @@ class TestPauseResume:
             # Rejected while paused; a retry after resume succeeds.
             assert ok(gen(server_url, max_tokens=4, timeout=60))
 
-    def test_clear_cache_preserves_output_and_controls_prefix_cache(self, server_url):
+    @pytest.mark.parametrize("mode", ["abort", "keep"])
+    def test_clear_cache_preserves_output_and_controls_prefix_cache(
+        self, server_url, mode
+    ):
         prompt = (
             "Paris is the capital of France. Berlin is the capital of Germany. "
         ) * 20
 
-        assert pause(server_url, clear_cache=True) == 200
+        assert pause(server_url, mode=mode, clear_cache=True) == 200
         assert resume(server_url) == 200
         baseline = completion_with_cache_details(server_url, prompt)
         warmed = completion_with_cache_details(server_url, prompt)
@@ -153,13 +156,13 @@ class TestPauseResume:
         assert cached_tokens(baseline) == 0
         assert cached_tokens(warmed) > 0
 
-        assert pause(server_url, clear_cache=False) == 200
+        assert pause(server_url, mode=mode, clear_cache=False) == 200
         assert resume(server_url) == 200
         preserved = completion_with_cache_details(server_url, prompt)
         assert golden_output(preserved) == golden_output(baseline)
         assert cached_tokens(preserved) > 0
 
-        assert pause(server_url, clear_cache=True) == 200
+        assert pause(server_url, mode=mode, clear_cache=True) == 200
         assert resume(server_url) == 200
         cleared = completion_with_cache_details(server_url, prompt)
         assert golden_output(cleared) == golden_output(baseline)
