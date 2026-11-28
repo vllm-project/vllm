@@ -295,6 +295,8 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
         self._ec_metadata_resolver: PlaceholderMetadataResolver | None = None
+        # Adapters of running requests, the one holding its slot longest first.
+        self.lora_slot_order: list[int] = []
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1065,6 +1067,8 @@ class Scheduler(SchedulerInterface):
                 if req.lora_request and req.lora_request.lora_int_id > 0
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
+            held = [i for i in self.lora_slot_order if i in scheduled_loras]
+            self.lora_slot_order = held + sorted(scheduled_loras.difference(held))
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
@@ -1096,6 +1100,8 @@ class Scheduler(SchedulerInterface):
             )
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
+            # Set once a request is skipped for want of a LoRA slot.
+            lora_slot_awaited = False
             while True:
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
@@ -1143,14 +1149,19 @@ class Scheduler(SchedulerInterface):
                 if (
                     self.lora_config
                     and request.lora_request
-                    and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id not in scheduled_loras
-                    )
+                    and len(scheduled_loras) == self.lora_config.max_loras
                 ):
-                    # Scheduling would exceed max_loras, skip.
-                    skip_request(request_queue)
-                    continue
+                    lora_id = request.lora_request.lora_int_id
+                    if lora_id not in scheduled_loras:
+                        # Scheduling would exceed max_loras, skip.
+                        lora_slot_awaited = True
+                        skip_request(request_queue)
+                        continue
+                    if lora_slot_awaited and lora_id == self.lora_slot_order[0]:
+                        # The adapter holding its slot longest admits no more
+                        # requests, so that the slot frees for the one skipped.
+                        skip_request(request_queue)
+                        continue
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
@@ -1642,7 +1653,10 @@ class Scheduler(SchedulerInterface):
                 scheduled_new_reqs.append(request)
 
                 if self.lora_config and request.lora_request:
-                    scheduled_loras.add(request.lora_request.lora_int_id)
+                    lora_id = request.lora_request.lora_int_id
+                    if lora_id not in scheduled_loras:
+                        scheduled_loras.add(lora_id)
+                        self.lora_slot_order.append(lora_id)
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
                     request_id
                 )

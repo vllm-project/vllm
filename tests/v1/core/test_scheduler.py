@@ -1178,6 +1178,78 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
+def test_max_loras_waiting_adapter_is_not_starved_by_later_requests():
+    """A request waiting for a LoRA slot gets one in bounded time: the adapter
+    holding its slot longest admits no more requests until it does, while the
+    other adapters keep admitting."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=2))
+    loras = {
+        name: LoRARequest(f"lora-{name}", lora_id, f"/path/{name}")
+        for lora_id, name in enumerate("abc", start=1)
+    }
+
+    def add_request(req_id: str, lora: str) -> Request:
+        (request,) = create_requests(
+            num_requests=1,
+            num_tokens=8,
+            max_tokens=4,
+            ignore_eos=True,
+            req_ids=[req_id],
+        )
+        request.lora_request = loras[lora]
+        scheduler.add_request(request)
+        return request
+
+    def step() -> list[str]:
+        output = scheduler.schedule()
+        req_ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[[0] for _ in req_ids],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+        return [request.req_id for request in output.scheduled_new_reqs]
+
+    add_request("a0", "a")
+    add_request("b0", "b")
+    step()
+    starved = add_request("c", "c")
+
+    # Each request runs for 4 steps and its successor arrives every 2, so
+    # adapters a and b always have a running request.
+    admitted_after_starved = []
+    for i in range(1, 101):
+        if i % 2 == 0:
+            add_request(f"a{i}", "a")
+            add_request(f"b{i}", "b")
+        admitted_after_starved += step()
+        if starved.status != RequestStatus.WAITING:
+            break
+
+    assert starved.status != RequestStatus.WAITING, (
+        f"{len(admitted_after_starved)} later requests were admitted ahead of it"
+    )
+    assert admitted_after_starved == ["b2", "c"]
+
+
+def test_max_loras_slot_wait_when_slots_fill_in_the_same_step():
+    """The adapter to hold back is known even if the slots only fill in the
+    step that first skips a request for want of one."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=2))
+    requests = create_requests(num_requests=4, req_ids=["a", "b", "c", "a2"])
+    for request, lora_id in zip(requests, (1, 2, 3, 1)):
+        request.lora_request = LoRARequest(f"lora-{lora_id}", lora_id, "/path")
+        scheduler.add_request(request)
+
+    # a2 is held back: its adapter got a slot first, and c waits for one.
+    assert list(scheduler.schedule().num_scheduled_tokens) == ["a", "b"]
+
+
 def test_max_loras_counts_running_request_awaiting_output():
     """PP: a running request with its prompt fully scheduled is skipped until
     its output returns, but still holds its LoRA slot, so a request with
