@@ -250,7 +250,7 @@ def test_bmm_matches_dequantized_matmul(fmt: str, tile: int, n: int, k: int):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(120), reason="SM120 native MXFP8"
+    not current_platform.is_device_capability_family(120), reason="SM12x native MXFP8"
 )
 def test_mini_mxfp8_gate_up_prefill():
     # Row 65 exercises the second 64-row subtile of a 128-row routed tile.

@@ -179,7 +179,7 @@ def bmm(
             plan.tile == 128
             and n == 2304
             and k in (1152, 2304)
-            and current_platform.is_device_capability(120)
+            and current_platform.is_device_capability_family(120)
         )
         if native_mxfp8:
             block_n, block_t, num_warps = 128, 64, 4

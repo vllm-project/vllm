@@ -111,8 +111,8 @@ guide: |
   Inkling 2 Mini is supported in vLLM main. Use the `vllm/vllm-openai:nightly` image or a
   nightly wheel until it is in a vLLM release.
 
-  On SM120, long prefills with a 128-row expert tile use native block-scaled MMA for
-  the last four MXFP8 expert layers. Rounding can differ from the BF16 GEMM path,
+  On SM120 and SM121, long prefills with a 128-row expert tile use native block-scaled
+  MMA for the last four MXFP8 expert layers. Rounding can differ from the BF16 GEMM path,
   so prompt logprobs and generated tokens can differ.
 
   ## Configurations
