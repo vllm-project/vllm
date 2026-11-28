@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import torch
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     RoutingMethodType,
@@ -13,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.models.muse_spark.common.layers import MuseSparkQKVOGateParallelLinear
 from vllm.models.muse_spark.common.ops.fused_routing import (
     fused_muse_spark_routing,
 )
@@ -131,6 +133,21 @@ class MuseSparkMoEConfig(FusedMoEConfig):
     Muse Spark normalizes every expert's output before the weighted top-k
     reduction, so the kernel must always stop after GEMM2.
     """
+
+    def __post_init__(self):
+        # The factory initializes this flag from the engine-wide LoRA switch.
+        # A deployment restricted to the QKV/O-gate projection never wraps experts.
+        if self.is_lora_enabled:
+            config = get_current_vllm_config_or_none()
+            lora = config.lora_config if config is not None else None
+            if (
+                lora
+                and lora.target_modules
+                and set(lora.target_modules)
+                <= {"qkv_proj", *MuseSparkQKVOGateParallelLinear.lora_packed_modules}
+            ):
+                self.is_lora_enabled = False
+        super().__post_init__()
 
     def should_defer_moe_finalize(self, num_tokens: int) -> bool:
         return num_tokens > 0

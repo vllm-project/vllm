@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -127,7 +128,9 @@ def uses_modular_all2all(moe_config: FusedMoEConfig) -> bool:
     )
 
 
-def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> None:
+def validate_deployment(
+    moe_config: FusedMoEConfig, *, kernel_routes: bool, supports_lora: bool = False
+) -> None:
     """Reject deployments the post-expert norm cannot be spliced into."""
     parallel_config = moe_config.moe_parallel_config
     routing_method = moe_config.routing_method
@@ -139,10 +142,9 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
             f"route_scale == 1.0); this checkpoint classifies as "
             f"{routing_method.name}."
         )
-    if moe_config.is_lora_enabled:
+    if moe_config.is_lora_enabled and not supports_lora:
         raise NotImplementedError(
-            "Muse Spark post-expert norm does not support MoE LoRA: the LoRA "
-            "path applies the top-k weights alongside GEMM2."
+            "This Muse Spark MoE backend does not support routed expert LoRA."
         )
     if parallel_config.enable_eplb:
         raise NotImplementedError("Muse Spark post-expert norm does not support EPLB.")
@@ -160,13 +162,30 @@ def validate_deployment(moe_config: FusedMoEConfig, *, kernel_routes: bool) -> N
         )
 
 
-def _validate_route_major_deployment(moe_config: FusedMoEConfig) -> None:
-    validate_deployment(moe_config, kernel_routes=False)
+def _validate_route_major_deployment(
+    moe_config: FusedMoEConfig, *, supports_lora: bool = False
+) -> None:
+    validate_deployment(moe_config, kernel_routes=False, supports_lora=supports_lora)
     parallel_config = moe_config.moe_parallel_config
     if parallel_config.dp_size != 1 or parallel_config.pcp_size != 1:
         raise NotImplementedError(
             "Muse Spark Triton/Marlin currently requires DP1 and PCP1."
         )
+
+
+def _validate_quantized_route_major_deployment(moe: FusedMoEConfig) -> None:
+    if moe.is_lora_enabled:
+        config = get_current_vllm_config_or_none()
+        if not (
+            current_platform.is_device_capability_family(90)
+            and config is not None
+            and config.lora_config is not None
+            and config.lora_config.lora_dtype == torch.bfloat16
+        ):
+            raise NotImplementedError(
+                "Muse Spark quantized expert LoRA requires BF16 adapters on Hopper."
+            )
+    _validate_route_major_deployment(moe, supports_lora=True)
 
 
 # Decode-sized batches; larger ones keep the finalize + separate all-reduce.
@@ -614,7 +633,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
             and current_platform.is_device_capability_family(90)
         )
         if self.use_route_major:
-            _validate_route_major_deployment(moe_config)
+            _validate_quantized_route_major_deployment(moe_config)
             if not self.moe.is_act_and_mul:
                 raise NotImplementedError("MuseSpark Marlin requires SwiGLU.")
             logger.info_once(
@@ -714,13 +733,13 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _process_hopper_marlin_weights(self, layer: "MuseSparkRoutedExperts") -> None:
-        # Keep the SiLU gate input exact; the up-side gain is compensated in
-        # GEMM2, not left to RMSNorm's approximate scale invariance.
         scales = layer.w13_weight_scale_2.data
         w13_weight_scale_2 = scales[:, 0].contiguous()
-        w2_weight_scale_2 = (
-            layer.w2_weight_scale_2.data * (scales[:, 1] / scales[:, 0])
-        ).contiguous()
+        up_to_gate = scales[:, 1] / scales[:, 0]
+        w2_weight_scale_2 = layer.w2_weight_scale_2.data
+        if not self.moe.is_lora_enabled:
+            # With no adapter, folding the up-side gain into GEMM2 is equivalent.
+            w2_weight_scale_2 = (w2_weight_scale_2 * up_to_gate).contiguous()
 
         (
             w13,
@@ -767,6 +786,12 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
             backend=NvFp4MoeBackend.MARLIN,
             routing_tables=layer._expert_routing_tables(),
         )
+        if self.moe.is_lora_enabled:
+            # Keep live adapters independent of the checkpoint's up/gate ratio.
+            # Refill in place on reload for already captured CUDA graphs.
+            self.moe_kernel.fused_experts.up_projection_scale = refill_derived(
+                layer, "_up_projection_scale", up_to_gate
+            )
         self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
@@ -792,10 +817,39 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig) -> None:
         self.use_route_major = current_platform.is_device_capability_family(90)
         if self.use_route_major:
-            _validate_route_major_deployment(moe)
+            _validate_route_major_deployment(moe, supports_lora=True)
             FusedMoEMethodBase.__init__(self, moe)
             self.unquantized_backend = UnquantizedMoeBackend.TRITON
             self.experts_cls = TritonExperts
+            cfg = get_current_vllm_config_or_none()
+            lora = cfg.lora_config if cfg is not None else None
+            if (
+                moe.is_lora_enabled
+                and lora is not None
+                and lora.lora_dtype == torch.float32
+            ):
+                from vllm.models.muse_spark.nvidia.merge_order_experts import (
+                    MuseSparkMergeOrderExperts,
+                )
+
+                if (
+                    set(lora.target_modules or ()) != {"experts"}
+                    or lora.max_lora_rank != 8
+                    or lora.max_loras != 1
+                    or lora.fully_sharded_loras
+                    or lora.enable_moe_shared_loras
+                    or cfg.parallel_config.tensor_parallel_size not in (1, 2)
+                    or not cfg.model_config.enforce_eager
+                ):
+                    raise ValueError(
+                        "Muse Spark FP32 expert LoRA requires eager mode, TP 1 or 2, "
+                        "one expert-only adapter slot, and max_lora_rank=8."
+                    )
+                if moe.num_experts % moe.moe_parallel_config.ep_size:
+                    raise ValueError(
+                        "Muse Spark FP32 expert LoRA requires equally sized EP shards."
+                    )
+                self.experts_cls = MuseSparkMergeOrderExperts
             return
         super().__init__(moe)
         modular = uses_modular_all2all(moe)
@@ -840,7 +894,7 @@ class MuseSparkFp8FusedMoE(Fp8PtpcOnlineMoEMethod):
                 "Muse Spark online MoE quantization supports fp8_per_channel "
                 f"only; got {quant_key}."
             )
-        _validate_route_major_deployment(moe)
+        _validate_quantized_route_major_deployment(moe)
         supported, reason = TritonExperts.is_supported_config(
             TritonExperts,
             moe,
