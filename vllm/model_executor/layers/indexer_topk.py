@@ -17,6 +17,16 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+# Persistent state of cooperative_topk's grid launches for FP32 rows (kStateBytes
+# in csrc/attention/dsa/topk/cooperative_grid_topk.cuh): the grid path's per-row
+# barrier counters and histograms, the candidate lists, and the 23-33-row
+# dynamic split's per-row state. Zeroed once and kept across calls, including
+# CUDA graph replays: one per ubatch/lane through the workspace manager.
+COOPERATIVE_TOPK_STATE_SIZE = (
+    64 * (32 + 2 * 6 * (32 + 2048)) * 4  # grid path row headers
+    + 64 * 16384 * 8  # candidate lists
+    + (64 * (32 + 2048) + 32) * 4  # dynamic split rows + exit counter
+)
 
 # Prefill chunks with fewer rows run faster on top_k_per_row_prefill (GB300),
 # and their many distinct small shapes would JIT-compile gvr_2 mid-serving.
@@ -514,8 +524,15 @@ class SparseIndexerTopk(torch.nn.Module):
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
             deep_select_topk(logits, topk_tokens, end=row_ends, output_idx=topk_indices)
         elif backend == "cooperative":
-            (topk_workspace,) = current_workspace_manager().get_simultaneous(
+            manager = current_workspace_manager()
+            (topk_workspace,) = manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            topk_state = manager.get_persistent(
+                "cooperative_topk_state",
+                (COOPERATIVE_TOPK_STATE_SIZE,),
+                torch.uint8,
+                zero_init=True,
             )
             torch.ops._C.cooperative_topk(
                 logits,
@@ -524,6 +541,7 @@ class SparseIndexerTopk(torch.nn.Module):
                 topk_workspace,
                 topk_tokens,
                 max_seq_len,
+                topk_state,
             )
         elif backend == "persistent":
             (topk_workspace,) = current_workspace_manager().get_simultaneous(

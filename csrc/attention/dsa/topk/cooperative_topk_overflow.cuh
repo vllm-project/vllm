@@ -163,8 +163,8 @@ candidate_offsets(uint32_t local_above, uint32_t local_equal) {
   constexpr uint32_t kCountBits = 16;
   constexpr uint32_t kCountMask = (1u << kCountBits) - 1;
   const uint32_t tx = threadIdx.x;
-  const uint32_t rank = blockIdx.y;
   auto cluster = cooperative_groups::this_cluster();
+  const uint32_t rank = cluster.block_rank();
   __shared__ uint32_t counts[CS];
   __shared__ uint32_t packed_offset;
   __shared__ uint32_t total_above;
@@ -233,8 +233,8 @@ cluster_key_range(uint32_t lo, uint32_t hi, uint32_t* scratch) {
       hi = max(hi, __shfl_xor_sync(0xFFFFFFFF, hi, offset));
     }
     if (lane < CS) {
-      cluster.map_shared_rank(rank_lo, lane)[blockIdx.y] = lo;
-      cluster.map_shared_rank(rank_hi, lane)[blockIdx.y] = hi;
+      cluster.map_shared_rank(rank_lo, lane)[cluster.block_rank()] = lo;
+      cluster.map_shared_rank(rank_hi, lane)[cluster.block_rank()] = hi;
     }
   }
   cluster.sync();
@@ -312,7 +312,7 @@ __device__ bool emit_staged_candidates(
 
   if (tx < CS) {
     auto* dst = cluster.map_shared_rank(rank_staging_ok, tx);
-    dst[blockIdx.y] = staged_above + staged_candidates <= capacity;
+    dst[cluster.block_rank()] = staged_above + staged_candidates <= capacity;
   }
   cluster.sync();
   if (tx == 0) {
