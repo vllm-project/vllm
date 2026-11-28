@@ -18,6 +18,10 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 _CPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
 
 
+def _has_cpu_gemm_wna16() -> bool:
+    return hasattr(getattr(torch.ops, "_C", None), "cpu_gemm_wna16")
+
+
 class CPUWNA16LinearKernel(MPLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
@@ -27,6 +31,15 @@ class CPUWNA16LinearKernel(MPLinearKernel):
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cpu():
             return False, "CPUWNA16 only supported on CPU"
+
+        if not _has_cpu_gemm_wna16():
+            return (
+                False,
+                (
+                    "torch.ops._C.cpu_gemm_wna16 is not registered; CPU WNA16 "
+                    "requires a build with WNA16 CPU support"
+                ),
+            )
 
         if c.weight_type not in _CPUWNA16_SUPPORTED_QUANT_TYPES:
             return (
