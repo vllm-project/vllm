@@ -204,6 +204,15 @@ def fused_topk(
         topk_weights, topk_ids = topk_func(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
         )
+
+    # AITER's launchers take no padding mask; vLLM's kernels mask in-kernel.
+    if (
+        topk_func not in (vllm_topk_softmax, vllm_topk_sigmoid)
+        and (is_padding := get_moe_padding_mask(M)) is not None
+    ):
+        topk_weights.masked_fill_(is_padding.unsqueeze(1), 0)
+        topk_ids.masked_fill_(is_padding.unsqueeze(1), -1)
+
     return topk_weights, topk_ids, token_expert_indices
 
 
