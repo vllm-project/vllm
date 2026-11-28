@@ -539,6 +539,7 @@ class EngineArgs:
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_hc_sp: bool = ParallelConfig.enable_hc_sp
+    enable_residual_sp: bool = ParallelConfig.enable_residual_sp
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
@@ -1305,6 +1306,9 @@ class EngineArgs:
             "a supervisor port.",
         )
         parallel_group.add_argument("--enable-hc-sp", **parallel_kwargs["enable_hc_sp"])
+        parallel_group.add_argument(
+            "--enable-residual-sp", **parallel_kwargs["enable_residual_sp"]
+        )
         parallel_group.add_argument(
             "--enable-expert-parallel",
             "-ep",
@@ -2612,6 +2616,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_hc_sp=self.enable_hc_sp,
+            enable_residual_sp=self.enable_residual_sp,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
