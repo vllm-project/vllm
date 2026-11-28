@@ -86,6 +86,7 @@ class Olmo3ReasoningBuffer:
     state: Olmo3ReasoningState = Olmo3ReasoningState.REASONING
 
     def process_buffer(self) -> DeltaMessage | None:
+        """Convert buffered text into the next reasoning/content delta."""
         start_think_idx = self.buffer.find(self.think_start)
 
         if start_think_idx >= 0:
@@ -110,7 +111,9 @@ class Olmo3ReasoningBuffer:
             if end_think_idx > 0:
                 # this covers the case there's content before
                 # the end of the reasoning block
-                return DeltaMessage(reasoning=pretext)
+                content = self.buffer or None
+                self.buffer = ""
+                return DeltaMessage(reasoning=pretext, content=content)
 
         if self.state == Olmo3ReasoningState.REASONING:
             # we are inside reasoning block, return and empty
@@ -138,6 +141,7 @@ class Olmo3ReasoningBuffer:
         return len(self.buffer)
 
     def add_text(self, delta_text: str) -> DeltaMessage | None:
+        """Append streamed text and return any newly complete delta."""
         # we start by adding the delta text to the buffer
         self.buffer += delta_text
 
