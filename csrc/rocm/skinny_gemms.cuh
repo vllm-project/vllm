@@ -9,9 +9,10 @@
 
 // <torch/all.h> is not needed here: it also pulls in autograd, nn and jit,
 // which is several seconds of frontend for every skinny GEMM translation unit.
-#include <torch/types.h>            // torch::Tensor, torch::empty, AT_DISPATCH
-#include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream
-#include <c10/cuda/CUDAGuard.h>     // at::cuda::OptionalCUDAGuard
+#include <torch/types.h>             // torch::Tensor, torch::empty, AT_DISPATCH
+#include <ATen/cuda/CUDAContext.h>   // at::cuda::getCurrentCUDAStream
+#include <c10/cuda/CUDAGuard.h>      // at::cuda::OptionalCUDAGuard
+#include <c10/cuda/CUDAException.h>  // C10_CUDA_KERNEL_LAUNCH_CHECK
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

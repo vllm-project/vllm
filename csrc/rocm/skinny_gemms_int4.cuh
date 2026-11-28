@@ -3,6 +3,7 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>  // C10_CUDA_KERNEL_LAUNCH_CHECK
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -1303,6 +1304,10 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
 #undef WVSPLIT_INT4G_TILE
 #undef WVSPLIT_INT4G_WIDE
 #undef WVSPLIT_INT4G_DISPATCH
+
+  // out_c comes from torch::empty(), so a launch that silently failed
+  // would return uninitialised memory to the caller rather than raising.
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return out_c;
 }
