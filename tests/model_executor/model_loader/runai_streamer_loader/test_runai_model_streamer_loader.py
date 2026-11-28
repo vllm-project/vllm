@@ -86,6 +86,71 @@ def test_runai_model_loader_download_files(vllm_runner):
         assert deserialized_outputs
 
 
+@create_new_process_for_each_test("spawn")
+def test_runai_cpu_shards_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
+    """Mixed GPU/CPU loading preserves generation from real checkpoint weights."""
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    checkpoint = tmp_path / "checkpoint"
+    hf_api().snapshot_download(
+        repo_id=test_model,
+        local_dir=str(checkpoint),
+        allow_patterns=["*.json", "*.txt", "*.safetensors"],
+    )
+    original_files = list(checkpoint.glob("*.safetensors"))
+    tensors = {}
+    for path in original_files:
+        tensors.update(load_file(path))
+    cpu = {
+        name: tensor
+        for name, tensor in tensors.items()
+        if name.startswith("h.0.") or ".h.0." in name
+    }
+    ordinary = {name: tensor for name, tensor in tensors.items() if name not in cpu}
+    assert cpu and ordinary
+    files = [checkpoint / "ordinary.safetensors", checkpoint / "cpu.safetensors"]
+    for path, contents in zip(files, (ordinary, cpu)):
+        save_file(contents, path, metadata={"format": "pt"})
+    for path in original_files:
+        path.unlink()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    name: path.name
+                    for path, contents in zip(files, (ordinary, cpu))
+                    for name in contents
+                },
+            }
+        )
+    )
+    del tensors, cpu, ordinary
+    results = []
+    for load_format in ("safetensors", "runai_streamer"):
+        extra = (
+            {}
+            if load_format == "safetensors"
+            else {
+                "distributed": True,
+                "memory_limit": 64 << 20,
+                "cpu_weight_files": [files[1].name],
+                "cpu_memory_limit": 16 << 20,
+            }
+        )
+        with vllm_runner(
+            str(checkpoint),
+            load_format=load_format,
+            model_loader_extra_config=extra,
+            enforce_eager=True,
+            max_model_len=128,
+            gpu_memory_utilization=0.2,
+        ) as runner:
+            results.append(runner.generate_greedy(prompts, max_tokens=16))
+    assert all(text for _, text in results[1])
+    assert results[0] == results[1]
+
+
 # In-process MTP compilation must not retain GPU resources in the pytest worker.
 @create_new_process_for_each_test("spawn")
 def test_runai_mtp_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
@@ -188,8 +253,8 @@ def test_runai_model_loader_download_files_gcs(
 def test_runai_passes_revision_by_name():
     # revision must reach download_safetensors_index_file_from_hf as the
     # ``revision`` keyword, not the positional ``subfolder`` slot.
-    fake_self = types.SimpleNamespace(
-        load_config=types.SimpleNamespace(download_dir="/cache", ignore_patterns=[])
+    loader = rsl.RunaiModelStreamerLoader(
+        LoadConfig(download_dir="/cache", ignore_patterns=[])
     )
     with (
         patch.object(rsl, "is_runai_obj_uri", return_value=False),
@@ -199,7 +264,7 @@ def test_runai_passes_revision_by_name():
         ),
         patch.object(rsl, "download_safetensors_index_file_from_hf") as mock_idx,
     ):
-        rsl.RunaiModelStreamerLoader._prepare_weights(fake_self, "org/model", "myrev")
+        loader._prepare_weights("org/model", "myrev")
 
     mock_idx.assert_called_once()
     assert mock_idx.call_args.kwargs.get("revision") == "myrev"
@@ -249,42 +314,36 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
         assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ
 
 
-@pytest.mark.parametrize(
-    "model_config,expected_source",
-    [
-        # Object storage: model_weights holds the URI, model the pulled config dir.
-        (
-            types.SimpleNamespace(
-                model="/tmp/pulled-config-files",
-                model_weights="s3://bucket/weights",
-                revision="myrev",
-            ),
-            "s3://bucket/weights",
-        ),
-        # HF repo or local path: model_weights is empty, model is the source.
-        (
-            types.SimpleNamespace(
-                model="org/model", model_weights="", revision="myrev"
-            ),
-            "org/model",
-        ),
-    ],
-    ids=["object_storage", "hf_repo"],
-)
-def test_runai_get_all_weights_resolves_source(model_config, expected_source):
-    fake_self = types.SimpleNamespace(
-        _get_weights_iterator=lambda path, revision, is_unused_weight=None: iter(
-            [(f"{path}@{revision}", None)]
-        )
-    )
+@pytest.mark.parametrize("override", [False, True])
+def test_runai_get_all_weights_resolves_source(tmp_path, override):
+    from transformers import GPT2Config
 
-    weights = list(
-        rsl.RunaiModelStreamerLoader.get_all_weights(
-            fake_self, model_config, model=None
-        )
-    )
+    from vllm.config import ModelConfig
 
-    assert weights == [(f"{expected_source}@myrev", None)]
+    model_dir = tmp_path / "model"
+    weights_dir = tmp_path / "weights"
+    model_dir.mkdir()
+    weights_dir.mkdir()
+    GPT2Config(
+        n_layer=1,
+        n_head=1,
+        n_embd=8,
+        n_positions=32,
+        vocab_size=16,
+        bos_token_id=0,
+        eos_token_id=1,
+        architectures=["GPT2LMHeadModel"],
+    ).save_pretrained(model_dir)
+    save_file({"weight": torch.tensor([1.0])}, model_dir / "model.safetensors")
+    save_file({"weight": torch.tensor([2.0])}, weights_dir / "model.safetensors")
+    config = ModelConfig(
+        model=str(model_dir),
+        model_weights=str(weights_dir) if override else "",
+        skip_tokenizer_init=True,
+        max_model_len=32,
+    )
+    weights = dict(_runai_loader({}).get_all_weights(config, torch.nn.Module()))
+    assert torch.equal(weights["weight"], torch.tensor([2.0 if override else 1.0]))
 
 
 @pytest.mark.parametrize("selection", ["draft", "unadapted", "reject_all"])

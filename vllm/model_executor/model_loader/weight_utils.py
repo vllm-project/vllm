@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +58,7 @@ from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.file_utils import atomic_writer as atomic_writer
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.system_utils import set_env_var
 
 try:
     from runai_model_streamer import SafetensorsStreamer
@@ -1236,9 +1237,17 @@ def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     is_distributed: bool = False,
+    *,
+    memory_limit: int | None = None,
+    can_borrow_weight: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
-    with SafetensorsStreamer() as streamer:
+    """Stream weights, borrowing only tensors the consumer copies synchronously."""
+    limit_context = (
+        set_env_var("RUNAI_STREAMER_MEMORY_LIMIT", str(memory_limit))
+        if memory_limit is not None
+        else nullcontext()
+    )
+    with limit_context, SafetensorsStreamer() as streamer:
         is_cuda_alike = current_platform.is_cuda_alike()
         device = (
             f"cuda:{current_platform.current_device()}"
@@ -1247,12 +1256,13 @@ def runai_safetensors_weights_iterator(
         )
 
         # runai-model-streamer<0.17.0 has no `owned` and reuses its buffers
-        owned = "owned" in inspect.signature(streamer.stream_files).parameters
+        supports_owned = "owned" in inspect.signature(streamer.stream_files).parameters
+        owned = supports_owned and memory_limit is None and can_borrow_weight is None
         streamer.stream_files(
             hf_weights_files,
             device=device,
             is_distributed=is_distributed,
-            **({"owned": True} if owned else {}),
+            **({"owned": owned} if supports_owned else {}),
         )
         total_tensors = sum(
             len(tensors_meta)
@@ -1269,7 +1279,8 @@ def runai_safetensors_weights_iterator(
         )
 
         for name, tensor in tensor_iter:
-            yield name, tensor if owned else tensor.clone()
+            borrow = can_borrow_weight is not None and can_borrow_weight(name)
+            yield name, tensor if owned or borrow else tensor.clone()
 
 
 def fastsafetensors_weights_iterator(

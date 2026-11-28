@@ -334,6 +334,15 @@ class DeepseekV41ForCausalLM(
         loader = AutoWeightsLoader(self)
         return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
 
+    def can_borrow_checkpoint_weight(self, name: str) -> bool:
+        mapped = self.hf_to_vllm_mapper.map_name(name)
+        prefix = "language_model."
+        return (
+            mapped is not None
+            and mapped.startswith(prefix)
+            and self.language_model.can_borrow_checkpoint_weight(mapped[len(prefix) :])
+        )
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefixes in the multimodal model."""
         return MultiModelKeys.from_string_field(

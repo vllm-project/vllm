@@ -5,6 +5,7 @@ import os
 import posixpath
 import tempfile
 from collections.abc import Callable, Generator
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -129,10 +130,18 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         super().__init__(load_config)
 
         self._is_distributed: bool = False
+        self._cpu_weight_files: frozenset[str] = frozenset()
+        self._cpu_memory_limit: int | None = None
         if load_config.model_loader_extra_config:
             extra_config = load_config.model_loader_extra_config
 
-            allowed_keys = {"distributed", "concurrency", "memory_limit"}
+            allowed_keys = {
+                "distributed",
+                "concurrency",
+                "memory_limit",
+                "cpu_weight_files",
+                "cpu_memory_limit",
+            }
             if unexpected_keys := set(extra_config) - allowed_keys:
                 raise ValueError(
                     "Unexpected extra config keys for runai_streamer: "
@@ -144,6 +153,25 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 if not isinstance(distributed, bool):
                     raise ValueError(f"distributed must be a bool, got {distributed!r}")
                 self._is_distributed = distributed
+
+            cpu_files = extra_config.get("cpu_weight_files")
+            cpu_limit = extra_config.get("cpu_memory_limit")
+            if (cpu_files is None) != (cpu_limit is None):
+                raise ValueError("Set cpu_weight_files and cpu_memory_limit together")
+            if cpu_files is not None:
+                if not isinstance(cpu_files, list) or not all(
+                    isinstance(name, str) and name and Path(name).name == name
+                    for name in cpu_files
+                ):
+                    raise ValueError("cpu_weight_files must be a list of shard names")
+                if (
+                    isinstance(cpu_limit, bool)
+                    or not isinstance(cpu_limit, int)
+                    or cpu_limit <= 0
+                ):
+                    raise ValueError("cpu_memory_limit must be a positive integer")
+                self._cpu_weight_files = frozenset(cpu_files)
+                self._cpu_memory_limit = cpu_limit
 
             # Validate every value before mutating os.environ, so a later
             # invalid key cannot leave an earlier one partially applied.
@@ -220,6 +248,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 f"Cannot find any safetensors model weights with `{model_name_or_path}`"
             )
 
+        if missing := self._cpu_weight_files - {
+            Path(path).name for path in hf_weights_files
+        }:
+            raise ValueError(f"CPU weight files are missing: {sorted(missing)}")
         return hf_weights_files
 
     def _get_weights_iterator(
@@ -227,6 +259,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         model_or_path: str,
         revision: str | None,
         is_unused_weight: Callable[[str], bool] | None = None,
+        can_borrow_weight: Callable[[str], bool] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
@@ -257,9 +290,37 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             else:
                 # Do not substitute another node's local checkpoint paths.
                 selected_files = hf_weights_files
-        return runai_safetensors_weights_iterator(
-            selected_files, self.load_config.use_tqdm_on_load, is_distributed
+        return self._stream_weight_files(
+            selected_files,
+            is_distributed=is_distributed,
+            can_borrow_weight=can_borrow_weight,
         )
+
+    def _stream_weight_files(
+        self,
+        files: list[str],
+        *,
+        is_distributed: bool,
+        can_borrow_weight: Callable[[str], bool] | None = None,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        ordinary_files, cpu_files = [], []
+        for path in files:
+            if Path(path).name in self._cpu_weight_files:
+                cpu_files.append(path)
+            else:
+                ordinary_files.append(path)
+        if ordinary_files:
+            yield from runai_safetensors_weights_iterator(
+                ordinary_files, self.load_config.use_tqdm_on_load, is_distributed
+            )
+        if cpu_files:
+            yield from runai_safetensors_weights_iterator(
+                cpu_files,
+                self.load_config.use_tqdm_on_load,
+                is_distributed=False,
+                memory_limit=self._cpu_memory_limit,
+                can_borrow_weight=can_borrow_weight,
+            )
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model if necessary."""
@@ -277,6 +338,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             model_weights,
             model_config.revision,
             getattr(model, "is_unused_checkpoint_weight", None),
+            getattr(model, "can_borrow_checkpoint_weight", None),
         )
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
