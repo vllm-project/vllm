@@ -2626,7 +2626,8 @@ def test_chunked_context_backend_correctness(
         tensor_parallel_size=16,
         kv_cache_dtype=kv_cache_dtype,
         q_scale=1.0,
-        k_scale=1.0,
+        # The FP8 prefill context gather must apply k_scale.
+        k_scale=0.5 if use_prefill_query_quantization else 1.0,
         prefill_backend=prefill_backend,
         qk_nope_head_dim=qk_nope_head_dim,
         v_head_dim=v_head_dim,

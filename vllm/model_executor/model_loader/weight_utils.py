@@ -1768,6 +1768,14 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
     # would otherwise double-apply the `.attn` prefix and drop the weight.
     if name in params_dict:
         return name
+    # The quant config's cache-scale mapper names every format
+    # `.attn.{q,k,v}_scale`; MLA layers hold theirs at `.mla_attn.mla_attn`
+    # (DeepSeek V2/V3) or on the attention module itself (DeepSeek V3.2).
+    if suffix := re.search(r"\.attn(\.[qkv]_(?:scale|zero_point))$", name):
+        for layer in (".mla_attn.mla_attn", ""):
+            mla_name = name[: suffix.start()] + layer + suffix[1]
+            if mla_name in params_dict:
+                return mla_name
     if name.endswith(".kv_scale"):
         logger.warning_once(
             "DEPRECATED. Found kv_scale in the checkpoint. "
@@ -1836,8 +1844,6 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
             ".v_cache.scale",
         )
     ):
-        import regex as re
-
         for pattern, replacement in scale_mapping_patterns:
             if re.search(pattern, name):
                 remapped_name = re.sub(pattern, replacement, name)
