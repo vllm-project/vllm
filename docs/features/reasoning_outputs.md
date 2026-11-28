@@ -278,6 +278,11 @@ To use this feature:
 
 If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
 
+The generation limit includes both reasoning and the final answer. If a response
+ends with `finish_reason="length"`, the limit may have been reached before any
+final-answer content was produced. When evaluating answer quality, record the
+limit, reasoning output, final-answer content, and finish reason separately.
+
 `--reasoning-config` accepts a JSON object corresponding to  
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
 
@@ -355,6 +360,12 @@ This means you no longer need to manually pass `chat_template_kwargs: {"enable_t
     If you explicitly set `enable_thinking` in `chat_template_kwargs`, your value takes priority over the automatic injection. This allows you to override the behavior if needed.
 
     For models whose templates don't declare `enable_thinking` (e.g., DeepSeek R1), the injected kwarg is harmlessly filtered out by `resolve_chat_template_kwargs`.
+
+    With the native Python Inkling 2 renderer, `reasoning_effort="none"` maps to
+    effort `0.0`, and `enable_thinking` is not an output-channel switch. Effort
+    `0.0` does not force a final-text continuation; the model may still emit
+    reasoning. Reserve output tokens for both channels and inspect the actual
+    response.
 
 ### Example
 
