@@ -14,7 +14,12 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
-from vllm.v1.kv_cache_interface import KVCacheLayerConfig, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheLayerConfig,
+    KVCacheLayout,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 
 class MambaBase(AttentionLayerBase):
@@ -34,12 +39,26 @@ class MambaBase(AttentionLayerBase):
     _replayssm_ring_start: torch.Tensor
     _replayssm_prev_num_accepted: torch.Tensor
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        """Unpack a raw `[B, 1, 1, C]` int8 page view into per-state views.
+    def bind_kv_cache(
+        self,
+        kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
+        *,
+        spec: KVCacheSpec | None = None,
+        layout: KVCacheLayout | None = None,
+    ) -> None:
+        """Bind runtime state views or unpack a raw `[B, 1, 1, C]` int8 page.
 
         Each block's `C` bytes hold the layer's states (e.g. conv, ssm)
         packed by dtype/shape with the layer's state alignment.
         """
+        if isinstance(kv_cache, tuple):
+            self.kv_cache = kv_cache
+            return
+        if spec is not None and layout is not None:
+            views = self.get_attn_backend().get_runtime_views(kv_cache, spec, layout)
+            if views is not None:
+                self.kv_cache = views
+                return
         pages = kv_cache.squeeze(dim=(1, 2))
         states: list[torch.Tensor] = []
         offset = 0

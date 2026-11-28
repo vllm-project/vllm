@@ -22,7 +22,12 @@ from vllm.config.cache import _layout_from_name
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
+    np_to_pinned_tensor,
+    nvfp4_split_data_scale,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayerConfig,
@@ -214,6 +219,40 @@ _FLASHINFER_LAYOUT_NAMES = {
     "BLNHC": "NHD",
     "BHLNC": "HND",
 }
+
+
+def flashinfer_nvfp4_kv_views(
+    kv_cache: torch.Tensor, num_kv_heads: int, layout: KVCacheLayout | None = None
+) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor], str]:
+    """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
+    num_blocks, num_slots, block_size, full_dim = kv_cache.shape
+    hnd_strides = (block_size * full_dim, full_dim, 1)
+    nhd_strides = (full_dim, num_slots * full_dim, 1)
+    strides = kv_cache.stride()[1:]
+    hnd = (
+        strides == hnd_strides
+        if layout is None
+        else get_flashinfer_layout_string(layout) == "HND"
+    )
+    expected = hnd_strides if hnd else nhd_strides
+    if any(
+        n > 1 and stride != dense
+        for n, stride, dense in zip(kv_cache.shape[1:], strides, expected, strict=True)
+    ):
+        raise ValueError(f"NVFP4 KV pages must be dense, got {kv_cache.stride()}")
+    dims = (num_kv_heads, block_size) if hnd else (block_size, num_kv_heads)
+    side_size = num_kv_heads * block_size * full_dim
+    (k_data, k_scale), (v_data, v_scale) = (
+        nvfp4_split_data_scale(
+            kv_cache.as_strided(
+                (num_blocks, *dims, full_dim),
+                (kv_cache.stride(0), dims[1] * full_dim, full_dim, 1),
+                kv_cache.storage_offset() + side * side_size,
+            )
+        )
+        for side in range(2)
+    )
+    return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
 
 def get_flashinfer_layout_string(layout: KVCacheLayout) -> str:

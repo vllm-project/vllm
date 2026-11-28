@@ -428,7 +428,11 @@ def init_kv_cache(
                 allocate=allocate,
             )
     return bind_kv_caches(
-        kv_caches, forward_context, kv_cache_config, vllm_config, attn_groups
+        kv_caches,
+        forward_context,
+        kv_cache_config,
+        vllm_config,
+        attn_groups,
     )
 
 
@@ -442,11 +446,17 @@ def bind_kv_caches(
     """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
+    attn_groups = tuple(attn_groups)
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
-    bind_kv_cache_to_layers(bindable_caches, forward_context)
+    bind_kv_cache_to_layers(
+        bindable_caches,
+        forward_context,
+        attn_groups=attn_groups,
+        cache_config=vllm_config.cache_config,
+    )
     return kv_caches
 
 

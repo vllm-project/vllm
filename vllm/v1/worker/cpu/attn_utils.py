@@ -226,11 +226,17 @@ def init_kv_cache(
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
 
+    attn_groups = tuple(attn_groups)
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
-    bind_kv_cache_to_layers(bindable_caches, forward_context)
+    bind_kv_cache_to_layers(
+        bindable_caches,
+        forward_context,
+        attn_groups=attn_groups,
+        cache_config=vllm_config.cache_config,
+    )
     return kv_caches
 
 

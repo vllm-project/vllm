@@ -70,6 +70,13 @@ class AttentionBackend(ABC):
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
 
+    @classmethod
+    def get_runtime_views(
+        cls, kv_cache: torch.Tensor, spec: "KVCacheSpec", layout: KVCacheLayout
+    ) -> tuple[torch.Tensor, ...] | None:
+        """Return typed aliases of the page, or None to use default binding."""
+        return None
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,
@@ -784,6 +791,11 @@ class AttentionImplBase(ABC, Generic[T]):
     standard AttentionImpl and MLAAttentionImpl. Does not define a forward
     method - subclasses define their own forward interfaces.
     """
+
+    # Bound kernel views for backends that consume both packed pages and components.
+    runtime_kv_cache_views: (
+        tuple[torch.Tensor, KVCacheLayout, tuple[torch.Tensor, ...]] | None
+    ) = None
 
     # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
     # route between the dense-MHA prefill and sparse-MQA paths.

@@ -21,7 +21,8 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     get_replayssm_align_block_size,
 )
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -35,7 +36,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
@@ -91,6 +92,26 @@ class GDNFlashInferCheckpointPlan:
 
 
 class GDNAttentionBackend(AttentionBackend):
+    @classmethod
+    def get_runtime_views(
+        cls, kv_cache: torch.Tensor, spec: KVCacheSpec, layout: KVCacheLayout
+    ) -> tuple[torch.Tensor, ...]:
+        assert isinstance(spec, MambaSpec)
+        pages = kv_cache.squeeze(dim=(1, 2))
+        offset = 0
+        views = []
+        for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True):
+            nbytes = math.prod(shape) * get_dtype_size(dtype)
+            component = pages.narrow(1, offset, nbytes).view(dtype)
+            inner_strides = tuple(math.prod(shape[i + 1 :]) for i in range(len(shape)))
+            views.append(
+                component.as_strided(
+                    (pages.shape[0], *shape), (component.stride(0), *inner_strides)
+                )
+            )
+            offset += round_up(nbytes, spec.state_alignment)
+        return tuple(views)
+
     @staticmethod
     def get_name() -> str:
         return "GDN_ATTN"
