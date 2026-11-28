@@ -37,6 +37,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (
+    MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsMultiModalEmbeddings,
     SupportsPP,
@@ -45,6 +46,7 @@ from .interfaces import (
 )
 from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
+    NemotronHMoE,
     NemotronHMoEDecoderLayer,
 )
 
@@ -334,7 +336,13 @@ class NemotronHMultiTokenPredictor(nn.Module):
         return hidden_states
 
 
-class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbeddings):
+class NemotronHMTP(
+    nn.Module,
+    SupportsPP,
+    SupportsQuant,
+    SupportsMultiModalEmbeddings,
+    MixtureOfExperts,
+):
     """NemotronH MTP model.
 
     The draft block is trained on the target decoder's input stream. On a
@@ -389,6 +397,39 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+
+        # Set MoE hyperparameters so EPLB can balance the draft's experts.
+        self.moe_mlp_layers: list[NemotronHMoE] = [
+            layer.mixer
+            for layer in self.model.layers.values()
+            if isinstance(layer, NemotronHMoEDecoderLayer)
+        ]
+        self.moe_layers = [moe.experts for moe in self.moe_mlp_layers]
+        self.num_moe_layers = len(self.moe_layers)
+        if self.moe_mlp_layers:
+            example_moe = self.moe_mlp_layers[-1]
+            self.num_expert_groups = config.n_group
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
 
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> QuantizationConfig | None:
