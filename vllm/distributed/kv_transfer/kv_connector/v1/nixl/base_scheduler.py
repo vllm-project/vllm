@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
+    KVLoadRange,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
@@ -33,12 +34,18 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.core.kv_cache_utils import (
+    resolve_dcp_kv_block_size,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     MambaManager,
     SlidingWindowManager,
 )
+
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -105,6 +112,18 @@ class NixlBaseConnectorScheduler:
         self._bounded_replay = any(
             g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
+        self._scheduler_block_size, _ = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
+        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self._range_group_block_sizes = tuple(
+            resolve_dcp_kv_block_size(group, dcp_size)
+            for group in kv_cache_config.kv_cache_groups
+        )
+        self._range_transfer_group_block_sizes = tuple(
+            resolve_dcp_kv_block_size(group, dcp_size)
+            for group in kv_cache_config.transfer_groups
+        )
 
         # Set by `bind_kv_cache_manager`, see `_num_prefill_backoff_tokens`.
         self._kv_cache_manager: KVCacheManager
@@ -124,7 +143,7 @@ class NixlBaseConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[
-            ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
+            ReqId, tuple[Request, BlockIds, tuple[int, ...], bool, int, int]
         ] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
@@ -305,6 +324,80 @@ class NixlBaseConnectorScheduler:
                 blocks = clip_ssm_state_blocks(blocks, n_spec_blocks)
             clipped.append(blocks)
         return tuple(clipped)
+
+    @property
+    def supports_load_range(self) -> bool:
+        parallel = self.vllm_config.parallel_config
+        return (
+            parallel.decode_context_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+            and parallel.pipeline_parallel_size == 1
+            and all(
+                g.manager_cls in (FullAttentionManager, SlidingWindowManager)
+                and all(type(s) is AttentionSpec for s in g.kv_cache_specs.values())
+                for g in self.kv_cache_config.kv_cache_groups
+            )
+        )
+
+    def get_loadable_window_group_ids(
+        self, request: "Request", end_token: int
+    ) -> tuple[int, ...]:
+        if not self.supports_load_range or end_token != (
+            self._get_remote_prefill_token_count(request.num_prompt_tokens)
+        ):
+            return ()
+        matched, _ = self.get_num_new_matched_tokens(request, 0)
+        if matched != end_token:
+            return ()
+        return tuple(
+            i
+            for i in self.kv_cache_config.transfer_group_ids
+            if self.kv_cache_config.kv_cache_groups[i].manager_cls is SlidingWindowManager
+        )
+
+    @property
+    def load_range_alignment(self) -> int:
+        return self._scheduler_block_size
+
+    def get_range_block_ids(
+        self,
+        blocks: "KVCacheBlocks",
+        load_range: KVLoadRange,
+    ) -> BlockIds:
+        """Return destination blocks owned by a piecewise load range."""
+        assert not load_range.num_tokens or (
+            load_range.start_token % self._scheduler_block_size == 0
+        )
+        block_ids = blocks.get_block_ids()
+        selected: list[list[int]] = []
+        for group_id, (group, cache_group, block_size) in enumerate(
+            zip(
+                block_ids,
+                self.kv_cache_config.kv_cache_groups,
+                self._range_group_block_sizes,
+                strict=True,
+            )
+        ):
+            if not issubclass(cache_group.manager_cls, FullAttentionManager):
+                if group_id in load_range.window_group_ids:
+                    assert load_range.window_end_token is not None
+                    end_block = cdiv(load_range.window_end_token, block_size)
+                    selected.append(list(group[:end_block]))
+                else:
+                    selected.append([])
+                continue
+            start_block = load_range.start_token // block_size
+            end_block = cdiv(load_range.end_token, block_size)
+            selected.append(
+                list(group[start_block:end_block]) if load_range.num_tokens else []
+            )
+        return self.get_exchange_clipped_blocks(tuple(selected))
+
+    def get_range_start_blocks(self, load_range: KVLoadRange) -> tuple[int, ...]:
+        return tuple(
+            load_range.start_token // block_size
+            for block_size in self._range_transfer_group_block_sizes
+        )
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
@@ -571,6 +664,8 @@ class NixlBaseConnectorScheduler:
             block_ids,
             cached,
             awaiting_kvs,
+            load_start_token,
+            load_end_token,
         ) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req_to_recv(
@@ -579,6 +674,8 @@ class NixlBaseConnectorScheduler:
                 kv_transfer_params=req.kv_transfer_params,
                 local_num_computed_blocks=cached,
                 awaiting_kvs=awaiting_kvs,
+                load_start_token=load_start_token,
+                load_end_token=load_end_token,
             )
 
         if self.use_host_buffer:
@@ -639,6 +736,14 @@ class NixlBaseConnectorScheduler:
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
+        raise NotImplementedError
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        load_range: KVLoadRange,
+    ) -> None:
         raise NotImplementedError
 
     def request_finished(

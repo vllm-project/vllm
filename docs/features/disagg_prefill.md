@@ -49,6 +49,30 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
 
+## Piecewise prefix loading with MultiConnector
+
+By default, `MultiConnector` loads from the first child with a positive hit and
+saves through all children. Set `"load_policy": "range_aware"` in
+`kv_connector_extra_config` to let ordered children load adjacent ranges of one
+prefix. A suffix loader must implement `supports_load_range` and
+`update_state_after_alloc_for_range`.
+
+Load ranges follow the scheduler's and each child's alignment requirements.
+Multi-source loading is used when compatible ranges cover the longest hit and
+the selected sources use compatible load modes. Otherwise, the child with the
+longest hit handles the load. Async loading waits for every selected source to
+finish before execution resumes.
+
+### Hybrid cache support
+
+Full-attention KV is split by token range. Each sliding-window attention (SWA)
+cache group independently selects a source that provides its complete window.
+The scheduler finalizes the load plan and window sources using the adopted
+prefix length.
+
+Recurrent state and legacy hybrid loaders use the existing single-source load
+path, with bounded replay handled by the backend.
+
 ## Reusing prefill token ids on decode
 
 !!! note

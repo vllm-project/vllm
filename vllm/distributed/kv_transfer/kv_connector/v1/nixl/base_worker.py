@@ -3600,7 +3600,17 @@ class NixlBaseConnectorWorker:
                 remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             )
-            if block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl:
+            windowed = (
+                meta.load_end_token > meta.load_start_token
+                and self.dcp_size == 1
+                and remote_info.remote_dcp_size == 1
+            )
+            if (
+                block_size_ratio > 1
+                or self.enable_permute_local_kv
+                or hetero_ppl
+                or windowed
+            ):
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue
@@ -3991,6 +4001,8 @@ class NixlBaseConnectorWorker:
         num_tokens: int,
         block_size_ratio: int,
         remote_physical_per_logical: int,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ) -> tuple[BlockIds, BlockIds, list[range]]:
         """Pair kernel blocks holding the same tokens across P/D block sizes.
 
@@ -4020,6 +4032,17 @@ class NixlBaseConnectorWorker:
             block_size = self.kv_cache_config.transfer_groups[g].block_size
             num_sub_blocks = cdiv(num_tokens, block_size // local_per_logical)
             local = self.get_mapped_blocks(np.asarray(local), block_size_ratio).tolist()
+            if load_end_token > load_start_token and issubclass(
+                self.kv_cache_config.transfer_groups[g].manager_cls, FullAttentionManager
+            ):
+                start, count = self._kernel_block_window(
+                    load_start_token, load_end_token, block_size_ratio
+                )
+                assert len(local) >= count and start + count <= len(remote)
+                paired_local.append(local[:count])
+                paired_remote.append(list(remote[start : start + count]))
+                covered.append(range(count))
+                continue
             local_padding = -num_sub_blocks % local_per_logical
             remote_padding = -num_sub_blocks % remote_physical_per_logical
             local = local[: len(local) - local_padding]
@@ -4179,14 +4202,35 @@ class NixlBaseConnectorWorker:
             )
         return decode_block_ids, trimmed_prefill
 
+    def _kernel_block_window(
+        self,
+        load_start_token: int,
+        load_end_token: int,
+        block_size_ratio: int = 1,
+    ) -> tuple[int, int]:
+        """Return the remote-granularity block start and transfer count."""
+        assert 0 <= load_start_token <= load_end_token
+        assert block_size_ratio >= 1
+        assert self.block_size % block_size_ratio == 0
+        transfer_block_size = self.block_size // block_size_ratio
+        assert load_start_token % transfer_block_size == 0, (
+            f"Load start {load_start_token} is not aligned to transfer block size "
+            f"{transfer_block_size}"
+        )
+        start = load_start_token // transfer_block_size
+        return start, cdiv(load_end_token, transfer_block_size) - start
+
     def _apply_prefix_caching(
         self,
         decode_block_ids: BlockIds,
         prefill_block_ids: BlockIds,
         decode_physical_per_logical: int,
         prefill_physical_per_logical: int,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
+        block_size_ratio: int = 1,
     ) -> tuple[BlockIds, BlockIds]:
-        """Trim block ID lists so only the uncomputed suffix is transferred.
+        """Pair Decode destinations with the same Prefill token window.
 
         Inputs are *kernel* (physical) block IDs, already expanded from logical IDs
         with each side's physical-per-logical ratio. Both pull and push call this after
@@ -4204,16 +4248,30 @@ class NixlBaseConnectorWorker:
         groups end-trim to the uncomputed suffix when physical-per-logical
         matches.
         """
-        # Partial prefix cache hit: just transfer uncomputed blocks.
-        # Skip mamba groups — their blocks represent full state (conv+ssm),
-        # not per-token data, so trimming would corrupt the transfer.
         prefill_block_ids = list(prefill_block_ids)
+        has_window = load_end_token > load_start_token
         if not self._has_mamba:
+            decode_block_ids = list(decode_block_ids)
             for i, prefill_group in enumerate(prefill_block_ids):
                 num_decode_blocks = len(decode_block_ids[i])
+                if (
+                    num_decode_blocks
+                    and has_window
+                    and issubclass(self.kv_cache_config.transfer_groups[i].manager_cls, FullAttentionManager)
+                ):
+                    start, count = self._kernel_block_window(
+                        load_start_token, load_end_token, block_size_ratio
+                    )
+                    assert num_decode_blocks >= count
+                    assert len(prefill_group) >= start + count
+                    decode_block_ids[i] = decode_block_ids[i][:count]
+                    prefill_block_ids[i] = prefill_group[start : start + count]
+                    continue
                 assert num_decode_blocks <= len(prefill_group)
                 if num_decode_blocks < len(prefill_group):
-                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
+                    prefill_block_ids[i] = (
+                        prefill_group[-num_decode_blocks:] if num_decode_blocks else []
+                    )
         else:
             # (NOTE: ZhanqiuHu) HeteroTP can cause different kernel block counts
             # due to logical block rounding.

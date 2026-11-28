@@ -175,6 +175,7 @@ class TestPushScheduler:
         assert reg["decode_port"] == sched.side_channel_port
         assert reg["local_block_ids"] == ([10, 11, 12],)
         assert reg["remote_engine_id"] == "prefill-engine"
+        assert (reg["load_start_token"], reg["load_end_token"]) == (0, 0)
 
         # Watchdog deadline set in the future.
         deadline = sched._push_registration_deadlines[request.request_id]
@@ -431,6 +432,8 @@ def _registration_data(
     remote_host: str = "10.0.0.1",
     remote_port: int = 5601,
     remote_tp_size: int = 1,
+    load_start_token: int = 0,
+    load_end_token: int = 0,
 ) -> dict[str, Any]:
     return {
         "request_id": request_id,
@@ -443,6 +446,8 @@ def _registration_data(
         "remote_host": remote_host,
         "remote_port": remote_port,
         "remote_tp_size": remote_tp_size,
+        "load_start_token": load_start_token,
+        "load_end_token": load_end_token,
     }
 
 
@@ -736,6 +741,7 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready(
     assert meta.remote.engine_id == "decode-engine"
     # RemoteMeta.request_id is D's request id from the registration.
     assert meta.remote.request_id == "req-hs"
+    assert (meta.load_start_token, meta.load_end_token) == (0, 0)
 
 
 def test_do_start_push_kv_drops_request_on_handshake_failure(
@@ -1869,6 +1875,57 @@ class TestPushPrefixCaching:
         assert local == [13, 14]
         assert remote == [500, 501]
 
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize(
+        "start,end,expected", [(16, 48, [11, 12]), (48, 80, [13, 14])]
+    )
+    def test_explicit_range_selects_producer_blocks(
+        self, nixl_worker_factory, start, end, expected
+    ):
+        """An explicit interior range must not be interpreted as a suffix."""
+        import torch
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+            RemoteMeta,
+            ReqMeta,
+        )
+
+        producer = nixl_worker_factory(NixlPushConnectorWorker, "prefill-engine")
+        consumer = nixl_worker_factory(NixlPushConnectorWorker, "decode-engine")
+        for worker in (producer, consumer):
+            worker.register_kv_caches(
+                {
+                    name: torch.zeros((512, 16, 4, 32), dtype=torch.float16)
+                    for name in ("layer0", "layer2")
+                }
+            )
+        payload = consumer.xfer_handshake_metadata
+        assert payload is not None
+        remote_agent = msgspec.msgpack.decode(
+            payload.agent_metadata_bytes, type=NixlAgentMetadata
+        )
+        producer.add_remote_agent(remote_agent)
+        blocks = ([10, 11, 12, 13, 14],)
+        meta = ReqMeta(
+            local_block_ids=blocks,
+            local_physical_block_ids=blocks,
+            tp_size=1,
+            load_start_token=start,
+            load_end_token=end,
+            remote=RemoteMeta(
+                block_ids=([500, 501],),
+                host="localhost",
+                port=1,
+                engine_id=consumer.engine_id,
+                request_id="range-request",
+            ),
+        )
+        producer._xfer_blocks_for_req("range-request", meta)
+
+        local, remote = self._written_block_ids(producer)
+        assert local == expected + [512 + block for block in expected]
+        assert remote == [500, 501, 1012, 1013]
+
     def test_no_prefix_hit_leaves_blocks_untrimmed(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -1881,6 +1938,35 @@ class TestPushPrefixCaching:
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
         assert remote == [500, 501, 502]
+
+    def test_heterogeneous_logical_pages_use_token_window(self, monkeypatch):
+        w, _ = self._worker_driving_xfer(monkeypatch=monkeypatch)
+        w._has_mamba = False
+        from tests.v1.kv_connector.unit.utils import make_kv_cache_config
+
+        w.kv_cache_config = make_kv_cache_config(160)
+        w._physical_blocks_per_logical_kv_block = 10
+        remote_info = w.transfer_topo.get_engine_info.return_value
+        remote_info.remote_physical_blocks_per_logical = 6
+        w._compute_desc_ids = lambda block_ids, **_: list(block_ids[0])
+        reg = _registration_data(
+            "req-hetero",
+            local_block_ids=([500, 501, 502, 503],),
+            load_start_token=96,
+            load_end_token=160,
+        )
+
+        NixlPushConnectorWorker._start_push_kv(
+            w,
+            "req-hetero",
+            (list(range(10)),),
+            reg,
+        )
+
+        local, remote = self._written_block_ids(w)
+        assert local == [6, 7, 8, 9]
+        assert remote == [500, 501, 502, 503]
+
 
     @pytest.mark.parametrize("groups_match", [False, True])
     def test_push_requires_each_layer_in_the_same_cache_group(
