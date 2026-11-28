@@ -22,11 +22,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
+from ..base import partial_sum_prescaled, store_partial_sum_prescaled
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
+
+    supports_partial_sum_dtype = True
 
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         super().__init__(config)
@@ -56,6 +59,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         replace_parameter(layer, "weight", padded_weight)
+        store_partial_sum_prescaled(layer, "partial_sum_alpha", layer.alpha)
 
     def apply_weights(
         self,
@@ -65,6 +69,19 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
         qa = self.prepare_input(layer, x)
+        output_dtype = qa.orig_dtype
+
+        # FP16 partial sums of RowParallelLinear, prescaled by 2^-k.
+        alpha = layer.alpha
+        partial_sum_dtype = getattr(layer, "partial_sum_dtype", None)
+        if partial_sum_dtype is not None:
+            output_dtype = partial_sum_dtype
+            if layer.partial_sum_scale != 1.0:
+                alpha = partial_sum_prescaled(layer, "partial_sum_alpha", alpha)
+                if bias is not None:
+                    bias = bias * layer.partial_sum_scale
+        if bias is not None:
+            bias = bias.to(output_dtype)
 
         # A padded N leaves the bias shorter than the GEMM output.
         fuse_bias = (
@@ -77,8 +94,8 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight,
             qa.scale,
             layer.weight_scale,
-            layer.alpha,
-            qa.orig_dtype,
+            alpha,
+            output_dtype,
             bias=bias if fuse_bias else None,
         )
 
