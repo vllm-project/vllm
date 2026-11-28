@@ -151,6 +151,7 @@ def build_weight_cache_key(
         is_draft=is_draft,
         enable_expert_parallel=parallel_config.enable_expert_parallel,
         expert_placement_strategy=parallel_config.expert_placement_strategy,
+        enable_hc_sp_replicated_moe=parallel_config.enable_hc_sp_replicated_moe,
         kernel_config=vllm_config.kernel_config,
         engram_cpu_offload=bool(engram_config and engram_config.cpu_offload),
         engram_embedding_across_dp=bool(
