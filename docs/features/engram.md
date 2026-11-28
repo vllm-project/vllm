@@ -125,7 +125,7 @@ the same pool as the weights and the KV cache:
 vllm serve <qwen4exp-checkpoint> --engram-config '{"disk_offload": true}'
 ```
 
-It applies only to Qwen4Exp on CUDA and takes precedence over `cpu_offload`.
+The Qwen4Exp implementation runs on CUDA and takes precedence over `cpu_offload`.
 
 Rows are read with `preadv` and copied to fixed device buffers before the
 forward, so CUDA graphs replay unchanged. They stay in the checkpoint format
@@ -146,6 +146,27 @@ Costs and limits:
   not file-backed safetensors views (`.bin`, runai, `fastsafetensors`,
   `instanttensor`, or `--safetensors-load-strategy eager`);
   `--load-format dummy` serves zeros.
+
+## Disk offload (HY4 Flash)
+
+On NVIDIA CUDA, HY4 Flash can read the Engram rows for each step directly
+from a lazy-loaded safetensors checkpoint. This does not change the model's
+GPU requirements:
+
+```bash
+vllm serve tencent/Hy4-flash-FP8 --language-model-only --enforce-eager \
+  --tensor-parallel-size 4 --enable-expert-parallel --max-model-len 4096 \
+  --safetensors-load-strategy lazy --engram-config '{"disk_offload": true}'
+```
+
+Each tensor-parallel rank reads only its own hash heads. Both BF16 rows and
+FP8 rows with their scales stay in the checkpoint files; this replaces the
+pinned host tables, not the model's other weights or KV cache.
+
+Reads synchronize with the GPU and can be slower than pinned RAM, especially
+on page-cache misses. Use a local SSD and keep the checkpoint files unchanged
+while serving. Weight reload, shared or cross-DP Engram tables, and CUDA
+graphs are not supported with HY4 Flash disk offload.
 
 ## Data-parallel topologies (DeepSeek V4.1)
 

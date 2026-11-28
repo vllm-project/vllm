@@ -48,9 +48,9 @@ class EngramConfig:
     Grace host memory when enabled and HBM when disabled."""
 
     disk_offload: bool = False
-    """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
-    rows on the host instead of allocating the table. Takes precedence over
-    cpu_offload."""
+    """Keep supported Engram tables in the checkpoint files and read each
+    step's rows on the host instead of allocating the table. Takes precedence
+    over cpu_offload."""
 
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
@@ -158,15 +158,24 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
-        if model_config.architecture in _FLASH_ENGRAM_ARCHITECTURES:
-            for option in ("dp_shared_memory", "embedding_across_dp", "disk_offload"):
+        is_flash = model_config.architecture in _FLASH_ENGRAM_ARCHITECTURES
+        if is_flash:
+            for option in ("dp_shared_memory", "embedding_across_dp"):
                 if getattr(self, option):
                     raise ValueError(f"Flash Engram does not support {option}")
         if self.disk_offload:
             from vllm.platforms import current_platform
 
-            if field != "ple_layer_ids" or not current_platform.is_cuda():
-                raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
+            if (field != "ple_layer_ids" and not is_flash) or not (
+                current_platform.is_cuda()
+            ):
+                raise ValueError("disk_offload requires Qwen4Exp or HY4 Flash on CUDA")
+            if is_flash and not model_config.enforce_eager:
+                raise ValueError("HY4 Flash disk_offload requires --enforce-eager")
+            if is_flash and (self.use_thp or self.peer_group_size):
+                raise ValueError(
+                    "HY4 Flash disk_offload does not support use_thp or peer_group_size"
+                )
         if self.peer_group_size and field not in _PEER_GROUP_FIELDS:
             raise ValueError(
                 "peer_group_size requires a model with Engram pool support"
