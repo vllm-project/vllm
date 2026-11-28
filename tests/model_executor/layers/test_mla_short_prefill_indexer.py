@@ -57,6 +57,7 @@ def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
     with pytest.raises(BatchStateRefreshed):
         DeepseekV32Attention._sparse_indexer_and_attn(
             layer,
+            MLA_LAYER,
             torch.empty(1, dtype=torch.long),
             torch.empty(1, 1),
             torch.empty(1, 1, 1),
@@ -391,6 +392,7 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
     index_k = torch.zeros(num_tokens, 4)
     rocm.DeepseekV32MLAAttention._fused_attention(
         layer,
+        MLA_LAYER,
         torch.arange(num_tokens),
         torch.zeros(num_tokens, 8),
         torch.zeros(num_tokens, 4),
@@ -505,6 +507,7 @@ def test_deepseek_v32_dispatches_selected_mha(
 
     DeepseekV32Attention._sparse_indexer_and_attn(
         layer,
+        MLA_LAYER,
         torch.arange(2),
         torch.empty(2, 2),
         q_nope,

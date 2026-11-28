@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
+    def prepare_kv_writes(self, scheduler_output: "SchedulerOutput") -> None:
+        pass
+
     def pre_forward(
         self,
         scheduler_output: "SchedulerOutput",
@@ -82,6 +85,12 @@ class ActiveKVConnector(KVConnector):
             kv_transfer_config is not None and kv_transfer_config.is_kv_producer
         )
         self._mrope_position_deltas: dict[str, int] = {}
+
+    def prepare_kv_writes(self, scheduler_output: "SchedulerOutput") -> None:
+        if not self._disabled:
+            metadata = scheduler_output.kv_connector_metadata
+            assert metadata is not None
+            self.kv_connector.prepare_kv_writes(metadata)
 
     def pre_forward(
         self,

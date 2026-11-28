@@ -382,6 +382,15 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def prepare_kv_writes(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        """Protect outstanding transfers before any writes in a runner step.
+
+        Unlike start_load_kv, this runs before request-state updates, cache
+        zeroing, block copies and recurrent-state preprocessing. Connectors
+        can drain cancelled transfers here before their blocks are reused.
+        """
+        return
+
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading the KV cache from the connector to vLLM's paged
@@ -457,11 +466,13 @@ class KVConnectorBase_V1(ABC):
         to track which workers are done.
 
         Returns:
-            ids of requests that have finished asynchronous transfer
-            (requests that previously returned True from request_finished()),
-            tuple of (sending/saving ids, recving/loading ids).
-            The finished saves/sends req ids must belong to a set provided in a
-            call to this method (this call or a prior one).
+            ids of requests that have finished asynchronous transfer,
+            tuple of (sending/saving ids, recving/loading ids). Report each
+            completed send only once per worker. Normally these requests
+            previously returned True from request_finished() and their ids were
+            provided in this call or a prior one. A connector reporting sends
+            earlier must defer their release in update_connector_output() until
+            request_finished() and discard completions for cancelled requests.
 
         """
         return None, None

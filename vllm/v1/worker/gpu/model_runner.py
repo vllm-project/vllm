@@ -1874,6 +1874,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
+            # Settle cancelled transfers before zeroing/copies can reuse their
+            # blocks. Normal handoffs retain their blocks and can stay in flight.
+            self.kv_connector.prepare_kv_writes(scheduler_output)
             self.draft_tokens_handler.begin_step(scheduler_output)
             # Update the request states.
             self.update_pp_decode_requests()
