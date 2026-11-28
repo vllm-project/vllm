@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SM120/121 expert GEMMs with native NVFP4 MMA and dequantized MXFP8.
+"""SM120/121 expert GEMMs with block-scaled NVFP4 and MXFP8 operands.
 
 Weights remain row-major, while activations retain Inkling2's tile-padded
 R8c4/R128c4 layout and its four-or-six quantization and outer row scales.
@@ -8,6 +8,7 @@ R8c4/R128c4 layout and its four-or-six quantization and outer row scales.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .block_scales import _scale_offsets
@@ -106,6 +107,7 @@ def _mxfp8_gemm(
     BN: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
+    NATIVE_MXFP8: tl.constexpr,
 ):
     T_BLOCKS: tl.constexpr = tl.cdiv(TILE, BT)
     tl.extra.cuda.gdc_wait()
@@ -129,25 +131,26 @@ def _mxfp8_gemm(
             weight + cols[:, None].to(tl.int64) * K + kp[None, :],
             col_mask[:, None],
         )
-        w_scale = _expand_scales(
-            tl.load(
-                weight_scale + cols[:, None] * (K // 32) + kg[None, :],
-                col_mask[:, None],
-            )
+        w_scale = tl.load(
+            weight_scale + cols[:, None] * (K // 32) + kg[None, :],
+            col_mask[:, None],
         )
         a = tl.load(
             Act + rows[:, None].to(tl.int64) * K + kp[None, :],
             row_mask[:, None],
         )
-        a_scale = _expand_scales(
-            tl.load(
-                ActScale + _scale_offsets(rows[:, None], kg[None, :], K // 32, TILE),
-                row_mask[:, None],
+        a_scale = tl.load(
+            ActScale + _scale_offsets(rows[:, None], kg[None, :], K // 32, TILE),
+            row_mask[:, None],
+        )
+        if NATIVE_MXFP8:
+            acc = tl.dot_scaled(w, w_scale, "e4m3", tl.trans(a), a_scale, "e4m3", acc)
+        else:
+            acc = tl.dot(
+                _dequant_e4m3(w, _expand_scales(w_scale)),
+                tl.trans(_dequant_e4m3(a, _expand_scales(a_scale))),
+                acc,
             )
-        )
-        acc = tl.dot(
-            _dequant_e4m3(w, w_scale), tl.trans(_dequant_e4m3(a, a_scale)), acc
-        )
     acc = acc * tl.load(ExpertScale + expert)
     tl.store(
         Out + rows[None, :].to(tl.int64) * N + cols[:, None],
@@ -172,7 +175,15 @@ def bmm(
     if weight.dtype == torch.float8_e4m3fn:
         n, k = weight.shape[1:]
         assert k % 128 == 0
-        if plan.tile <= 16:
+        native_mxfp8 = (
+            plan.tile == 128
+            and n == 2304
+            and k in (1152, 2304)
+            and current_platform.is_device_capability_family(120)
+        )
+        if native_mxfp8:
+            block_n, block_t, num_warps = 128, 64, 4
+        elif plan.tile <= 16:
             block_n, block_t, num_warps = 128, 16, 4
         elif plan.tile <= 64:
             block_n, block_t, num_warps = 128, 64, 4
@@ -196,8 +207,9 @@ def bmm(
             BN=block_n,
             BT=block_t,
             BK=128,
+            NATIVE_MXFP8=native_mxfp8,
             num_warps=num_warps,
-            num_stages=3,
+            num_stages=2 if native_mxfp8 else 3,
             launch_pdl=True,
         )
         return out
