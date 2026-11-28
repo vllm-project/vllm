@@ -25,14 +25,15 @@ logger = init_logger(__name__)
 # Audited against Pillow's registered open plugins (python -m PIL / Image.OPEN):
 # Allowed: native still-image / raster readers that decode in-process.
 # Denied:
+#   AVIF — native decode can allocate a raster before scaling to the canvas
+#   BLP — the container dimensions do not bound the embedded raster decode
 #   EPS — may invoke Ghostscript on untrusted PostScript
 #   ICNS — the decoder does not expose reliable dimensions before loading
+#   ICO — opening the container decodes the embedded raster
 #   WMF — Windows GDI / stub-handler path
 #   BUFR / GRIB / HDF5 — stub drivers requiring external handlers
 #   MPEG — identify-only; not a decodable still image
 ALLOWED_IMAGE_FORMATS: tuple[str, ...] = (
-    "AVIF",
-    "BLP",
     "BMP",
     "CUR",
     "DCX",
@@ -43,7 +44,6 @@ ALLOWED_IMAGE_FORMATS: tuple[str, ...] = (
     "FTEX",
     "GBR",
     "GIF",
-    "ICO",
     "IM",
     "IMT",
     "IPTC",
@@ -132,7 +132,7 @@ def convert_image_mode(
 # The images torchcodec decodes to the same pixels as Pillow. It differs on
 # alpha (dropped rather than composited onto the background color), CMYK,
 # 16-bit samples and animated images, so those are left to Pillow.
-_TORCHCODEC_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "AVIF"})
+_TORCHCODEC_FORMATS = frozenset({"JPEG", "PNG", "WEBP"})
 _TORCHCODEC_MODES = frozenset({"RGB", "L"})
 
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import struct
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,7 @@ from typing import Any
 import numpy as np
 import pybase64
 import torch
-from PIL import Image
+from PIL import Image, TiffImagePlugin, WebPImagePlugin
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -36,6 +37,66 @@ MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generat
 # Image decoding backends selectable via
 # `--media-io-kwargs '{"image": {"image_backend": ...}}'`.
 IMAGE_BACKENDS = ("pil", "torchcodec")
+
+
+def _webp_canvas_size(data: bytes) -> tuple[int, int] | None:
+    header = data[:30]
+    if WebPImagePlugin._accept(header) is not True:
+        return None
+    size = WebPImagePlugin._get_size(header)
+    if size is None or min(size) <= 0:
+        raise Image.UnidentifiedImageError("Invalid WebP canvas size")
+    return size
+
+
+def _tiff_directory_tags(
+    data: bytes, directory: TiffImagePlugin.ImageFileDirectory_v2
+) -> set[int]:
+    endian = "<" if data[:2] == b"II" else ">"
+    bigtiff = data[2:4] in (b"+\0", b"\0+")
+    offset = directory.offset
+    count_struct = struct.Struct(endian + ("Q" if bigtiff else "H"))
+    entry_struct = struct.Struct(endian + ("H18x" if bigtiff else "H10x"))
+    if offset is None or offset + count_struct.size > len(data):
+        raise Image.UnidentifiedImageError("Invalid TIFF directory offset")
+    (count,) = count_struct.unpack_from(data, offset)
+    start = offset + count_struct.size
+    end = start + count * entry_struct.size
+    if end > len(data):
+        raise Image.UnidentifiedImageError("Incomplete TIFF directory")
+
+    # Pillow and libtiff must account for the same directory entries.
+    tags = {tag for (tag,) in entry_struct.iter_unpack(memoryview(data)[start:end])}
+    if len(tags) != count:
+        raise Image.UnidentifiedImageError("Duplicate TIFF directory tags")
+    return tags
+
+
+def _decode_size(image: Image.Image, data: bytes) -> tuple[int, int]:
+    size = image.size
+    if isinstance(image, TiffImagePlugin.TiffImageFile):
+        tags = image.tag_v2
+        directory_tags = _tiff_directory_tags(data, tags)
+        if not directory_tags.isdisjoint(
+            (
+                TiffImagePlugin.TILEWIDTH,
+                TiffImagePlugin.TILELENGTH,
+                TiffImagePlugin.TILEOFFSETS,
+            )
+        ):
+            width = tags.get(TiffImagePlugin.TILEWIDTH)
+            height = tags.get(TiffImagePlugin.TILELENGTH)
+            if not (
+                isinstance(width, int)
+                and isinstance(height, int)
+                and width > 0
+                and height > 0
+            ):
+                raise Image.UnidentifiedImageError("Invalid TIFF tile size")
+            # The native decoder reads a whole tile, including any edge padding.
+            if width * height > size[0] * size[1]:
+                return width, height
+    return size
 
 
 class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
@@ -119,21 +180,30 @@ class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
             "rgba_background_color": self.rgba_background_color,
         }
 
+    def _charge_decode_size(self, width: int, height: int) -> None:
+        pixels = width * height
+        max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
+        if max_pixels > 0 and pixels > max_pixels:
+            raise ValueError(
+                f"Image dimensions {width}x{height} ({pixels} pixels) exceed "
+                f"the maximum of {max_pixels} pixels. Set "
+                "VLLM_MAX_IMAGE_PIXELS to increase this limit."
+            )
+        if self.decoded_budget is not None:
+            self.decoded_budget.charge(pixels * 4)
+
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image | torch.Tensor]:
         try:
-            # Opening only parses the header, so the limits below are checked
-            # before any pixel data is decoded.
+            # Pillow allocates the WebP canvas during open.
+            webp_size = _webp_canvas_size(data)
+            if webp_size is not None:
+                self._charge_decode_size(*webp_size)
+
             image = open_image(BytesIO(data))
-            w, h = image.size
-            max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
-            if max_pixels > 0 and w * h > max_pixels:
-                raise ValueError(
-                    f"Image dimensions {w}x{h} ({w * h} pixels) exceed "
-                    f"the maximum of {max_pixels} pixels. Set "
-                    f"VLLM_MAX_IMAGE_PIXELS to increase this limit."
-                )
-            if self.decoded_budget is not None:
-                self.decoded_budget.charge(w * h * 4)
+            if webp_size is None:
+                self._charge_decode_size(*_decode_size(image, data))
+            elif image.size != webp_size:
+                raise Image.UnidentifiedImageError("Inconsistent WebP canvas size")
             if (
                 self.image_backend == "torchcodec"
                 and self.image_mode == "RGB"
@@ -145,10 +215,8 @@ class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
             image = normalize_image(image)
             image.load()
             converted = self._convert_image_mode(image)
-        # Pillow raises SyntaxError (not OSError) for broken PNG chunks and
-        # RuntimeError for undecodable data, e.g. from the AVIF decoder.
-        # RuntimeError also covers NotImplementedError (e.g. BLPFormatError)
-        # and RecursionError, which here are caused by the input image too.
+        # Pillow can raise SyntaxError for corrupt chunks and RuntimeError
+        # for decoder failures.
         except (
             OSError,
             Image.UnidentifiedImageError,
