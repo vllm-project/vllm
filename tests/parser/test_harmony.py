@@ -362,6 +362,33 @@ class TestParse:
         assert content == "Here is the answer"
         assert tool_calls is None
 
+    def test_stray_assistant_header_is_reasoning(self, harmony_parser, chat_request):
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=encode_output(
+                "<|channel|>commentary to=assistant<|channel|>analysis"
+                "<|message|>I'm thinking<|end|>"
+                "<|start|>assistant<|channel|>final<|message|>Hello"
+            ),
+        )
+
+        assert reasoning == "I'm thinking"
+        assert content == "Hello"
+        assert tool_calls is None
+
+    def test_restarted_header_tool_name(self, harmony_parser, chat_request):
+        _, _, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=encode_output(
+                "<|channel|>commentary to=functions.ls<|channel|>commentary"
+                ' <|constrain|>json<|message|>{"path": "."}<|call|>'
+            ),
+        )
+
+        assert tool_call_tuples(tool_calls) == [("ls", json.dumps({"path": "."}))]
+
     def test_tool_call_dotted_name(self, harmony_parser, chat_request):
         response = [tool_call("math.sum", '{"a": 2, "b": 3}')]
 
@@ -706,6 +733,23 @@ class TestParseDelta:
 
         assert delta is None
 
+    def test_stray_assistant_header_is_reasoning(self, harmony_parser, chat_request):
+        delta = harmony_parser.parse_delta(
+            delta_text="",
+            delta_token_ids=encode_output(
+                "<|channel|>commentary to=assistant<|channel|>analysis"
+                "<|message|>I'm thinking<|end|>"
+                "<|start|>assistant<|channel|>final<|message|>Hello"
+            ),
+            request=chat_request,
+            finished=True,
+        )
+
+        assert delta is not None
+        assert delta.reasoning == "I'm thinking"
+        assert delta.content == "Hello"
+        assert not delta.tool_calls
+
     def test_cross_channel_with_tool(self, gpt_oss_tokenizer, chat_request):
         parser = HarmonyParser(gpt_oss_tokenizer)
 
@@ -947,6 +991,24 @@ class TestCountReasoningTokens:
             "", chat_request, model_output_token_ids=token_ids
         )
         assert (reasoning, content) == ("Think", "Answer")
+
+    def test_does_not_leak_analysis_channel_into_following_final_message(
+        self,
+        harmony_parser,
+    ):
+        analysis_message = (
+            "<|start|>assistant<|channel|>analysis<|message|>thinking<|end|>"
+        )
+        final_message = "<|start|>assistant<|channel|>final<|message|>answer<|end|>"
+
+        analysis_tokens = encode_output(analysis_message)
+        combined_tokens = encode_output(analysis_message + final_message)
+
+        expected = harmony_parser.count_reasoning_tokens(analysis_tokens)
+        actual = harmony_parser.count_reasoning_tokens(combined_tokens)
+
+        assert expected > 0
+        assert actual == expected
 
 
 class TestAdjustRequest:
