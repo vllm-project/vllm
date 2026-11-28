@@ -700,6 +700,42 @@ fn tools_convert_string_arguments() {
 }
 
 #[test]
+fn merge_duplicates_preserves_array_values() {
+    let mut spec = qwen3_template();
+    spec["fields"]["tool_calls"]["content_args"]["merge_duplicates"] = json!(true);
+    let template = compile(spec);
+    let text = "<tool_call><function=set_alarm>\
+                <parameter=groups>[1, 2]</parameter>\
+                <parameter=groups>[3, 4]</parameter>\
+                <parameter=groups>[5, 6]</parameter>\
+                </function></tool_call>";
+    for chunks in [vec![text], split_by_chars(text, 1), split_by_chars(text, 7)] {
+        let events = parse_events(&template, &[], "", &chunks).unwrap();
+        assert_eq!(
+            message(&events),
+            json!({"tool_calls": [{"name": "set_alarm", "arguments": {"groups": [[1, 2], [3, 4], [5, 6]]}}]})
+        );
+    }
+}
+
+#[test]
+fn merge_duplicates_preserves_single_array() {
+    let mut spec = qwen3_template();
+    spec["fields"]["tool_calls"]["content_args"]["merge_duplicates"] = json!(true);
+    let template = compile(spec);
+    let text = "<tool_call><function=set_alarm>\
+                <parameter=groups>[1, 2]</parameter>\
+                </function></tool_call>";
+    for chunks in [vec![text], split_by_chars(text, 1), split_by_chars(text, 7)] {
+        let events = parse_events(&template, &[], "", &chunks).unwrap();
+        assert_eq!(
+            message(&events),
+            json!({"tool_calls": [{"name": "set_alarm", "arguments": {"groups": [1, 2]}}]})
+        );
+    }
+}
+
+#[test]
 fn stripped_reasoning_whitespace_keeps_its_tokens() {
     let template = compile(gemma4_template());
     let mut parser = HfUnifiedParser::new(template, &[], tokenizer());
