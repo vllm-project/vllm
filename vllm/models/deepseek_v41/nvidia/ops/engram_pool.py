@@ -133,6 +133,7 @@ class PoolEngramEmbedding(ParallelEngramEmbedding):
         assert get_tensor_model_parallel_world_size() == 1
         self.num_embeddings, self.dim = num_embeddings, dim
         self.block_size, self.packed_fp4 = SCALE_BLOCK, packed_fp4
+        self.quantized = True
         self.row_bytes = dim // 2 if packed_fp4 else dim
         self.n_hash_cols = self.part_n_hash_cols = len(head_sizes)
         self.tp_size = self.dp_size = 1
@@ -203,6 +204,8 @@ class PoolEngram(Engram):
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
     ) -> ParallelEngramEmbedding:
+        if layout.weight_dtype == torch.bfloat16:
+            raise ValueError("BF16 Engram tables do not support peer_group_size")
         # One fetch reads every Engram layer's table.
         n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
         max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens

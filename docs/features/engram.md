@@ -63,17 +63,38 @@ relieved from reconstructing static patterns in its first layers, deep enough
 that vLLM can hide table lookups behind the compute of the preceding layers
 (see below).
 
-In vLLM, hashing, lookup, and gating run as fused Triton kernels over FP8
-or packed MXFP4 rows with ue8m0 block-32 scales. The layer layout — table
+In vLLM, hashing, lookup, and gating run as fused Triton kernels over BF16
+rows, or FP8 and packed MXFP4 rows with ue8m0 block-32 scales. The layer layout — table
 sizes, n-gram size, head count — is fixed by the checkpoint and is not user-configurable. Only the
 storage and sharding described below are configurable, via
 `--engram-config`, which takes a JSON object and can also be set field by
 field as `--engram-config.<field>`
 ([CLI reference](../cli/serve.md#-engram-config)).
 
+### DeepSeek V4.1 checkpoint precision
+
+DeepSeek V4.1 checkpoints without a quantization configuration, including
+BF16 SFT exports, keep Engram rows in BF16 without scale tensors. Existing
+quantized checkpoints use FP8 or packed MXFP4 rows and ue8m0 scales.
+The table format comes from the checkpoint's quantization configuration,
+independently of runtime quantization; a weight with a different dtype fails
+loading rather than being silently cast.
+
+All three formats support GPU storage, CPU offload, shared host tables and huge
+pages. BF16 tables use the ordinary BF16 head exchange; packed FP8 staging is
+reserved for FP8 tables. GPU peer-table reads and cross-engine Engram pools
+require quantized tables; BF16 with `peer_group_size` fails at startup. With the same head
+dimension, BF16 storage costs two bytes per element instead of one FP8 byte
+plus one scale byte per 32 elements: about 1.94 times the table memory.
+
+```bash
+vllm serve <bf16-deepseek-v41-checkpoint> --dtype bfloat16 \
+  --engram-config.cpu_offload true
+```
+
 DeepSeek V4.1 checkpoints select packed MXFP4 tables with
-`quantization_config.engram_embed_quant: "mxfp4"`; absent or `"fp8"` keeps
-FP8 tables. MXFP4 stores two E2M1 values per byte, with the even column in
+`quantization_config.engram_embed_quant: "mxfp4"`; in a nonempty quantization
+configuration, absent or `"fp8"` keeps FP8 tables. MXFP4 stores two E2M1 values per byte, with the even column in
 the low nibble. If specified, `engram_embed_block_size` must be `32`,
 `engram_embed_scale_dtype` must be `"ue8m0"`, and `engram_embed_layers` must
 match `engram_layer_ids`. Mixed per-layer table formats are not supported.

@@ -15,12 +15,16 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v41.common.engram import Engram
-from vllm.platforms.rocm import get_cdna_version
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
 def _shards_engram_gate() -> bool:
     """Whether TP ranks keep a dim slice of `wkv` and exchange gate partial sums."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
     return get_cdna_version() in (3, 4)
 
 
