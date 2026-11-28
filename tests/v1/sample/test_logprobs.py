@@ -25,7 +25,7 @@ from vllm import SamplingParams, TokensPrompt
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
-from vllm.logprobs import Logprob
+from vllm.logprobs import LogprobsOnePosition
 from vllm.platforms import current_platform
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -1174,6 +1174,84 @@ def test_correct_decoded_token_preserves_valid_tokens():
                     assert "�" not in decoded_token
 
 
+def _spec_logprobs_close(ref: float, spec: float) -> bool:
+    return math.isclose(ref, spec, rel_tol=5e-2, abs_tol=2.5e-1)
+
+
+def _assert_spec_decode_position_matches(
+    ref: LogprobsOnePosition,
+    spec: LogprobsOnePosition,
+    sampled_token_id: int,
+    num_top_logprobs: int,
+    context: str,
+) -> None:
+    """Compare one position of reference vs spec-decode logprobs.
+
+    The spec-decode path computes logits with a different batch shape than
+    the reference, so logprobs only match within tolerance. Alternatives
+    within that tolerance of each other can therefore swap order, or swap
+    in and out at the top-k boundary. Compare the top-k values by rank and
+    each shared token by ID instead of requiring the same token at each
+    rank.
+    """
+    detail = _describe_position(ref, spec, context)
+    assert sampled_token_id in ref and sampled_token_id in spec, (
+        f"Sampled token missing {detail}"
+    )
+
+    # The dict holds the top-k plus the sampled token, which is either one
+    # of them or ranked below them, so its k largest values are the top-k.
+    ref_top = sorted((lp.logprob for lp in ref.values()), reverse=True)
+    spec_top = sorted((lp.logprob for lp in spec.values()), reverse=True)
+    ref_top = ref_top[:num_top_logprobs]
+    spec_top = spec_top[:num_top_logprobs]
+    assert len(ref_top) == len(spec_top), f"Top-k size mismatch {detail}"
+    for ref_value, spec_value in zip(ref_top, spec_top):
+        assert _spec_logprobs_close(ref_value, spec_value), (
+            f"Top-k logprob mismatch {detail}"
+        )
+
+    for token_id in ref.keys() & spec.keys():
+        ref_lp, spec_lp = ref[token_id], spec[token_id]
+        assert _spec_logprobs_close(ref_lp.logprob, spec_lp.logprob), (
+            f"Logprob mismatch for token {token_id} {detail}"
+        )
+        assert ref_lp.decoded_token == spec_lp.decoded_token, (
+            f"Decoded token mismatch for token {token_id} {detail}"
+        )
+        # Within the top-k, a rank change is a near-tie swap: the top-k
+        # values compared by rank above already match within tolerance.
+        ref_rank, spec_rank = ref_lp.rank, spec_lp.rank
+        assert ref_rank == spec_rank or (
+            ref_rank is not None
+            and spec_rank is not None
+            and max(ref_rank, spec_rank) <= num_top_logprobs
+        ), f"Rank mismatch for token {token_id} {detail}"
+
+    # A token in only one side's top-k must be tied with the other side's
+    # k-th value, within tolerance.
+    for only, top, other_top in (
+        (ref.keys() - spec.keys(), ref, spec_top),
+        (spec.keys() - ref.keys(), spec, ref_top),
+    ):
+        for token_id in only:
+            assert other_top and _spec_logprobs_close(
+                top[token_id].logprob, other_top[-1]
+            ), f"Top-k membership mismatch for token {token_id} {detail}"
+
+
+def _describe_position(
+    ref: LogprobsOnePosition, spec: LogprobsOnePosition, context: str
+) -> str:
+    def describe(logprobs: LogprobsOnePosition) -> list:
+        return [
+            (token_id, lp.decoded_token, lp.rank, round(lp.logprob, 4))
+            for token_id, lp in logprobs.items()
+        ]
+
+    return f"({context}): ref={describe(ref)} spec={describe(spec)}"
+
+
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 @pytest.mark.parametrize(
     "model_setup",
@@ -1279,14 +1357,12 @@ def test_spec_decode_logprobs(
     ref_results = ref_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
-    # Collect logprobs outputs from reference LLM.
-    ref_logprobs: list[Logprob] = []
-    for results in ref_results:
-        for output in results.outputs:
-            assert output.logprobs is not None
-            for logprobs in output.logprobs:
-                assert logprobs is not None
-                ref_logprobs.extend(logprobs.values())
+    # Collect sampled tokens and logprobs from the reference LLM.
+    ref_outputs = [
+        (output.token_ids, output.logprobs)
+        for results in ref_results
+        for output in results.outputs
+    ]
     del ref_llm
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
@@ -1302,35 +1378,31 @@ def test_spec_decode_logprobs(
     spec_results = spec_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
-    # Collect logprobs outputs from spec decode LLM.
-    spec_logprobs: list[Logprob] = []
-    for results in spec_results:
-        for output in results.outputs:
-            assert output.logprobs is not None
-            for logprobs in output.logprobs:
-                assert logprobs is not None
-                spec_logprobs.extend(logprobs.values())
+    # Collect sampled tokens and logprobs from the spec decode LLM.
+    spec_outputs = [
+        (output.token_ids, output.logprobs)
+        for results in spec_results
+        for output in results.outputs
+    ]
     del spec_llm
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
-    # Per-token logprobs are expected to be the same.
-    assert len(ref_logprobs) == len(spec_logprobs)
-    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
-        assert math.isclose(
-            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=2.5e-1
-        ), (
-            f"Logprob mismatch: ref={ref_logprob.logprob} "
-            f"spec={spec_logprob.logprob} "
-            f"diff={abs(ref_logprob.logprob - spec_logprob.logprob)} "
-            f"(token={ref_logprob.decoded_token!r})"
-        )
-        assert ref_logprob.rank == spec_logprob.rank, (
-            f"Rank mismatch: ref={ref_logprob.rank} "
-            f"spec={spec_logprob.rank} "
-            f"(token={ref_logprob.decoded_token!r})"
-        )
-        assert ref_logprob.decoded_token == spec_logprob.decoded_token
+    # Greedy decoding must produce the same tokens, and per-token logprobs
+    # must match within tolerance.
+    assert len(ref_outputs) == len(spec_outputs)
+    for req_idx, ((ref_ids, ref_lps), (spec_ids, spec_lps)) in enumerate(
+        zip(ref_outputs, spec_outputs)
+    ):
+        assert ref_lps is not None and spec_lps is not None
+        assert len(ref_ids) == len(spec_ids) == len(ref_lps) == len(spec_lps)
+        for pos, (ref_pos, spec_pos) in enumerate(zip(ref_lps, spec_lps)):
+            context = f"request {req_idx}, position {pos}"
+            detail = _describe_position(ref_pos, spec_pos, context)
+            assert ref_ids[pos] == spec_ids[pos], f"Sampled token mismatch {detail}"
+            _assert_spec_decode_position_matches(
+                ref_pos, spec_pos, ref_ids[pos], top_logprobs, context
+            )
 
 
 def test_prompt_logprobs_with_chunking_and_preemption():
