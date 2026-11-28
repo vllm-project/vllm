@@ -6659,8 +6659,7 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
     );
 }
 
-/// Media the request got wrong is a 400: a data URL that is not base64 or not
-/// an image, and a `file://` URL, which this frontend never reads.
+/// Invalid schemes, malformed image data and disabled local files return 400.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_chat_rejects_invalid_media_as_bad_request() {
@@ -6684,6 +6683,8 @@ async fn non_stream_chat_rejects_invalid_media_as_bad_request() {
         "data:image/png;base64,not base64!",
         "data:image/png;base64,aGVsbG8=",
         "file:///etc/hosts",
+        "abc",
+        "ftp://example.com/image.png",
     ] {
         let (status, json) = post_json(
             &mut app,
@@ -6701,6 +6702,7 @@ async fn non_stream_chat_rejects_invalid_media_as_bad_request() {
         )
         .await;
         let error = &json["error"];
+        assert_eq!(error["code"], status.as_u16());
         rendered.push(format!(
             "{} {}: {}",
             status.as_u16(),
@@ -6711,7 +6713,9 @@ async fn non_stream_chat_rejects_invalid_media_as_bad_request() {
     expect_test::expect![[r#"
         400 BadRequestError: base64 decode error: Invalid symbol 32, offset 3.
         400 BadRequestError: image decode error: The image format could not be determined
-        400 BadRequestError: unsupported media scheme: file"#]]
+        400 BadRequestError: unsupported media scheme: file
+        400 BadRequestError: invalid media URL: abc
+        400 BadRequestError: unsupported media scheme: ftp"#]]
     .assert_eq(&rendered.join("\n"));
 }
 

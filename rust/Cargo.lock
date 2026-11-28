@@ -5927,6 +5927,7 @@ dependencies = [
  "openssl",
  "prost",
  "prost-types",
+ "reqwest 0.13.4",
  "rmp-serde",
  "rmpv",
  "serde",

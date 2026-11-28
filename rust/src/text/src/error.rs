@@ -86,7 +86,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// High-level fault classification of a request error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// Invalid user request parameters (HTTP 400 / gRPC `INVALID_ARGUMENT`),
+    /// Invalid user request parameters (HTTP 400, or 422 for permanent media
+    /// fetch failures / gRPC `INVALID_ARGUMENT`),
     /// with the canonical offending parameter name when attributable to a
     /// single field.
     InvalidRequest { param: Option<&'static str> },
