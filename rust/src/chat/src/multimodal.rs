@@ -2660,6 +2660,51 @@ mod tests {
         .assert_debug_eq(&uuids);
     }
 
+    /// Tool-result media is extracted together with user media, in message
+    /// order by default and in the renderer's order when it reorders results.
+    #[test]
+    fn extract_media_parts_includes_tool_response_media() {
+        let image = |uuid: &str| ChatContentPart::ImageUrl {
+            image_url: format!("data:image/png;base64,{uuid}"),
+            detail: None,
+            uuid: Some(uuid.to_string()),
+        };
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::user(vec![image("user-1")]),
+                ChatMessage::assistant_blocks(vec![]),
+                ChatMessage::tool_response(vec![ChatContentPart::text("a"), image("tool-a")], "a"),
+                ChatMessage::tool_response(vec![image("tool-b")], "b"),
+                ChatMessage::user(vec![image("user-2")]),
+            ],
+            ..ChatRequest::for_test()
+        };
+        let source = |message_index, content_part_index| MediaPartSource {
+            message_index,
+            content_part_index,
+        };
+        let reordered = [source(3, 0), source(2, 1), source(0, 0), source(4, 0)];
+
+        let uuids = [None, Some(&reordered[..])].map(|order| {
+            extract_media_parts(&request, order)
+                .unwrap()
+                .into_iter()
+                .map(|part| match part {
+                    MediaContentPart::ImageUrl { uuid, .. } => uuid.unwrap(),
+                    _ => panic!("expected image URL"),
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(
+            uuids,
+            [
+                ["user-1", "tool-a", "tool-b", "user-2"],
+                ["tool-b", "tool-a", "user-1", "user-2"],
+            ]
+        );
+    }
+
     fn image_url_part() -> MediaContentPart {
         MediaContentPart::ImageUrl {
             url: "https://example.com/image.png".to_string().into(),

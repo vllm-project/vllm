@@ -348,3 +348,35 @@ pub(crate) fn tool_search_request(references: &[&str]) -> ChatRequest {
         .insert("thinking".into(), Value::Bool(false));
     request
 }
+
+/// A tool round trip whose result is `[text, image]`, as an image-returning
+/// tool (e.g. `view_image`) produces.
+pub(crate) fn tool_image_request() -> ChatRequest {
+    let messages = vec![
+        ChatMessage::user("what is in the file?"),
+        ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "call_1".to_string(),
+            name: "view_image".to_string(),
+            arguments: "{}".to_string(),
+        })]),
+        ChatMessage::tool_response(
+            vec![
+                ChatContentPart::text("Viewed image"),
+                ChatContentPart::image_url("data:image/png;base64,AAAA"),
+            ],
+            "call_1",
+        ),
+    ];
+    let tools = vec![tool(
+        "view_image",
+        "View an image",
+        json!({"type": "object"}),
+        false,
+    )];
+    let tool_context = ResolvedToolContext::new(&messages, tools, None, true).unwrap();
+    ChatRequest {
+        messages,
+        tool_context,
+        ..ChatRequest::for_test()
+    }
+}

@@ -14,7 +14,7 @@ use crate::error::ErrorKind;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{
-    FixtureRequestOptions, fixture_chat_request, tool_search_request,
+    FixtureRequestOptions, fixture_chat_request, tool_image_request, tool_search_request,
 };
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
@@ -884,4 +884,19 @@ fn tool_references_render_as_tool_names_like_deepseek_recipe() {
     expect_file!["fixtures/tool_search_references.txt"].assert_eq(&render_request(
         &tool_search_request(&["get_weather", "get_time"]),
     ));
+}
+
+/// V4 has no image placeholder; V4.1 does, so only V4 refuses a tool image.
+#[test]
+fn rejects_multimodal_tool_result() {
+    let request = tool_image_request();
+
+    let error = DeepSeekV4ChatRenderer::default().render(&request).unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::Error::UnsupportedMultimodalContent("image_url")
+    ));
+    let rendered = DeepSeekV41ChatRenderer::default().render(&request).unwrap();
+    assert_eq!(rendered.media_order.unwrap().len(), 1);
 }

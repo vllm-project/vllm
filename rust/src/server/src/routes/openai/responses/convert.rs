@@ -450,7 +450,7 @@ fn convert_input(
             ResponseInputItem::FunctionCallOutput(output) => {
                 assistant.flush(&mut messages);
                 messages.push(ChatMessage::tool_response(
-                    output.output.into_text_content()?,
+                    convert_content_parts(output.output)?,
                     output.call_id,
                 ));
             }
@@ -492,7 +492,8 @@ fn convert_input(
     Ok((messages, continue_final))
 }
 
-/// Convert message content into internal chat content.
+/// Convert message or `function_call_output` content into internal chat
+/// content, so a tool result carries the same parts as a user message.
 fn convert_content_parts(content: ResponseMessageContent) -> Result<ChatContent, ApiError> {
     match content {
         ResponseMessageContent::Text(text) => Ok(ChatContent::Text(text)),
@@ -657,35 +658,6 @@ fn assistant_text_blocks(
         }]);
     }
     Ok(texts.into_iter().map(|text| AssistantContentBlock::Text { text }).collect())
-}
-
-impl ResponseMessageContent {
-    /// Lower `function_call_output` content, keeping its text parts so the
-    /// renderer joins them as for a chat tool message; non-text parts are
-    /// rejected (tool outputs support text only in this frontend).
-    fn into_text_content(self) -> Result<ChatContent, ApiError> {
-        match self {
-            Self::Text(text) => Ok(ChatContent::Text(text)),
-            Self::Parts(parts) => parts
-                .into_iter()
-                .map(|part| -> Result<ChatContentPart, ApiError> {
-                    match part {
-                        ResponseInputContentPart::InputText { text }
-                        | ResponseInputContentPart::OutputText { text, .. } => {
-                            Ok(ChatContentPart::text(text))
-                        }
-                        other => bail_invalid_request!(
-                            param = "input",
-                            "function_call_output only supports text content parts; got part type \
-                         '{}'",
-                            part_type_name(&other)
-                        ),
-                    }
-                })
-                .try_collect()
-                .map(ChatContent::Parts),
-        }
-    }
 }
 
 /// Build the `usage` block of a completed response.
@@ -1092,6 +1064,182 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// Codex's `view_image` and image-returning MCP tools send a tool result
+    /// as `[input_text, input_image]`.
+    #[test]
+    fn function_call_output_keeps_text_and_image_parts() {
+        let input = serde_json::from_value(json!([
+            {"role": "user", "content": "What is on screen?"},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "view_image",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "input_text", "text": "Viewed image"},
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,AAAA",
+                        "detail": "high"
+                    }
+                ]
+            }
+        ]))
+        .expect("deserialize Responses input");
+
+        let (messages, _) = convert_input(&None, input).expect("convert Responses input");
+        expect![[r#"
+            ToolResponse {
+                content: Parts(
+                    [
+                        Text {
+                            text: "Viewed image",
+                        },
+                        ImageUrl {
+                            image_url: "data:image/png;base64,AAAA",
+                            detail: Some(
+                                High,
+                            ),
+                            uuid: None,
+                        },
+                    ],
+                ),
+                tool_call_id: "call_1",
+            }
+        "#]]
+        .assert_debug_eq(&messages[2]);
+    }
+
+    /// Images keep the order of the input items, whether a user message or a
+    /// tool result carries them, so the renderer's placeholders and the
+    /// extracted media stay aligned.
+    #[test]
+    fn images_in_user_and_function_call_output_items_keep_input_order() {
+        let image = |url: &str| json!({"type": "input_image", "image_url": url, "detail": "auto"});
+        let input = serde_json::from_value(json!([
+            {"role": "user", "content": [image("user-1")]},
+            {"type": "function_call", "call_id": "call_1", "name": "view", "arguments": "{}"},
+            {"type": "function_call", "call_id": "call_2", "name": "view", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_2", "output": [image("tool-2")]},
+            {"type": "function_call_output", "call_id": "call_1", "output": [image("tool-1")]},
+            {"role": "user", "content": [image("user-2")]}
+        ]))
+        .expect("deserialize Responses input");
+
+        let (messages, _) = convert_input(&None, input).expect("convert Responses input");
+        let images: Vec<(&str, &str)> = messages
+            .iter()
+            .flat_map(|message| {
+                let (role, content) = match message {
+                    ChatMessage::User { content } => ("user", content),
+                    ChatMessage::ToolResponse { content, .. } => ("tool", content),
+                    _ => return vec![],
+                };
+                let ChatContent::Parts(parts) = content else {
+                    return vec![];
+                };
+                parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ChatContentPart::ImageUrl { image_url, .. } => {
+                            Some((role, image_url.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            images,
+            [
+                ("user", "user-1"),
+                ("tool", "tool-2"),
+                ("tool", "tool-1"),
+                ("user", "user-2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn function_call_output_keeps_input_audio() {
+        let input = serde_json::from_value(json!([
+            {"type": "function_call", "call_id": "call_1", "name": "listen", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "input_audio", "input_audio": {"data": "dGVzdA==", "format": "wav"}}
+                ]
+            }
+        ]))
+        .expect("deserialize Responses input");
+
+        let (messages, _) = convert_input(&None, input).expect("convert Responses input");
+        assert_eq!(
+            messages[1],
+            ChatMessage::tool_response(
+                ChatContent::Parts(vec![ChatContentPart::InputAudio {
+                    data: "dGVzdA==".to_string(),
+                    format: Some("wav".to_string()),
+                    uuid: None,
+                }]),
+                "call_1",
+            )
+        );
+    }
+
+    /// A tool result rejects the same unsupported parts as a user message, so
+    /// no image or file is dropped silently.
+    #[test]
+    fn function_call_output_rejects_unsupported_parts_like_user_messages() {
+        let cases = [
+            (
+                "file_id image",
+                json!({"type": "input_image", "file_id": "file-1"}),
+            ),
+            ("image without url", json!({"type": "input_image"})),
+            (
+                "input_file",
+                json!({"type": "input_file", "file_id": "file-1"}),
+            ),
+            (
+                "audio without format",
+                json!({"type": "input_audio", "input_audio": {"data": "dGVzdA=="}}),
+            ),
+        ];
+        let errors: Vec<String> = cases
+            .into_iter()
+            .map(|(name, part)| {
+                let convert = |item: Value| {
+                    convert_input(&None, serde_json::from_value(json!([item])).unwrap())
+                };
+                let user = convert(json!({"role": "user", "content": [part.clone()]}));
+                let tool = convert(json!({
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [part]
+                }));
+                let (Err(user), Err(tool)) = (user, tool) else {
+                    panic!("{name}: expected both conversions to fail");
+                };
+                assert_eq!(format!("{user:?}"), format!("{tool:?}"), "{name}");
+                format!("{name}: {tool:?}")
+            })
+            .collect();
+        expect![[r#"
+            [
+                "file_id image: InvalidRequest { message: \"input_image parts with file_id are not supported; pass an image_url instead.\", param: Some(\"input\") }",
+                "image without url: InvalidRequest { message: \"input_image parts require 'image_url'.\", param: Some(\"input\") }",
+                "input_file: InvalidRequest { message: \"input_file parts are not supported by this frontend.\", param: Some(\"input\") }",
+                "audio without format: InvalidRequest { message: \"input_audio parts require 'input_audio.format'.\", param: Some(\"input\") }",
+            ]
+        "#]].assert_debug_eq(&errors);
     }
 
     #[test]

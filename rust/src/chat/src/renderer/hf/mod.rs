@@ -915,6 +915,44 @@ mod tests {
         assert_eq!(rendered.prompt, Prompt::Text("a<|image_pad|>b".to_string()));
     }
 
+    /// A tool result with an image reaches the template with the image in its
+    /// position in both content formats, and the renderer leaves `media_order`
+    /// unset so the media follow the request's message order.
+    #[test]
+    fn tool_result_image_reaches_template_in_both_content_formats() {
+        let request = sample_request(vec![
+            ChatMessage::user(vec![ChatContentPart::image_url("user-image")]),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::text("a"),
+                    ChatContentPart::image_url("tool-image"),
+                ],
+                "call_1",
+            ),
+        ]);
+        let rendered = |template: &str, format| render_mm(template, &request, format).unwrap();
+
+        let string = rendered(
+            "{% for m in messages %}[{{ m.role }}:{{ m.content }}]{% endfor %}",
+            ChatTemplateContentFormatOption::String,
+        );
+        let parts = rendered(
+            "{% for m in messages %}[{{ m.role }}:{% for p in m.content %}{% if p.type == 'image' %}<|image_pad|>{% else %}{{ p.text }}{% endif %}{% endfor %}]{% endfor %}",
+            ChatTemplateContentFormatOption::OpenAi,
+        );
+
+        assert_eq!(
+            string.prompt,
+            Prompt::Text("[user:<image>][tool:a\n<image>]".to_string())
+        );
+        assert_eq!(
+            parts.prompt,
+            Prompt::Text("[user:<|image_pad|>][tool:a<|image_pad|>]".to_string())
+        );
+        assert_eq!(string.media_order, None);
+        assert_eq!(parts.media_order, None);
+    }
+
     #[test]
     fn openai_content_format_normalizes_video_url_for_template() {
         let rendered = render_mm(

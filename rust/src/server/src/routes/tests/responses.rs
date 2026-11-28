@@ -171,6 +171,36 @@ async fn responses_rejects_invalid_controls_before_inference() {
     }
 }
 
+/// A text-only model refuses a tool-result image with the same 400 as a user
+/// image, instead of dropping it or failing later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_rejects_tool_result_image_for_text_only_model() {
+    let (app, _engine_task) = test_app_with_engine_handle().await;
+    let image = json!({"type": "input_image", "image_url": "data:image/png;base64,AAAA"});
+    let tool_result = json!([
+        {"role": "user", "content": "look"},
+        {"type": "function_call", "call_id": "call_1", "name": "view_image", "arguments": "{}"},
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [{"type": "input_text", "text": "Viewed image"}, image.clone()]
+        }
+    ]);
+    let user_image = json!([{"role": "user", "content": [image]}]);
+
+    let mut messages = vec![];
+    for input in [tool_result, user_image] {
+        let response = responses_call(&app, json!({"input": input})).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        messages.push(body["error"]["message"].as_str().expect("error message").to_string());
+    }
+    assert_eq!(messages[0], messages[1]);
+    assert!(messages[0].contains("multimodal"), "{}", messages[0]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn responses_accepts_codex_controls_and_metadata_boundaries() {

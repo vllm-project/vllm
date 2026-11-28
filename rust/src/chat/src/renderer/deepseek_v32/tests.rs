@@ -11,7 +11,9 @@ use super::DeepSeekV32ChatRenderer;
 use crate::EffortValue;
 use crate::error::{Error, ErrorKind};
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, tool_image_request,
+};
 use crate::request::{
     ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode,
     ResolvedToolContext,
@@ -468,6 +470,16 @@ fn render_rejects_multimodal_input() {
     };
 
     let error = DeepSeekV32ChatRenderer::default().render(&request).unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::UnsupportedMultimodalContent("image_url")
+    ));
+}
+
+#[test]
+fn render_rejects_multimodal_tool_result() {
+    let error = DeepSeekV32ChatRenderer::default().render(&tool_image_request()).unwrap_err();
 
     assert!(matches!(
         error,

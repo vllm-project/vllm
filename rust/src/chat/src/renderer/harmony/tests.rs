@@ -12,7 +12,9 @@ use crate::ChatRenderer;
 use crate::EffortValue;
 use crate::error::{Error, ErrorKind};
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::renderer::test_utils::{
+    FixtureRequestOptions, fixture_chat_request, tool_image_request,
+};
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
 
 const PINNED_DATE: &str = "2025-06-28";
@@ -213,6 +215,16 @@ fn rejects_multimodal_input() {
     };
 
     let error = test_renderer(false).render(&request).unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::UnsupportedMultimodalContent("image_url")
+    ));
+}
+
+#[test]
+fn rejects_multimodal_tool_result() {
+    let error = test_renderer(false).render(&tool_image_request()).unwrap_err();
 
     assert!(matches!(
         error,
