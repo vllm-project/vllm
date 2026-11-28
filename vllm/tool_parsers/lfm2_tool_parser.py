@@ -9,7 +9,9 @@ import regex as re
 
 import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ExtractedToolCallInformation,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -39,6 +41,62 @@ logger = init_logger(__name__)
 
 TOOL_CALL_START = "<|tool_call_start|>"
 TOOL_CALL_END = "<|tool_call_end|>"
+
+# Inside a string argument, a delta without these characters can neither close
+# the string, start an escape, nor start a sentinel token. The control chars
+# are escaped before parsing, which changes their value in a raw string.
+# Surrogates cannot be parsed as Python source.
+STRING_BREAK = re.compile(r"[\"'\\<\n\r\t\x00\ud800-\udfff]")
+# A digit can extend an octal escape shorter than three digits.
+OPEN_OCTAL_ESCAPE = re.compile(r"\\[0-7]{1,2}$")
+
+
+def _last_key_is_unique(keys: list) -> bool:
+    """Whether `keys` are strings and the last is not repeated: a repeated key
+    keeps its first position, and keys like `1` and `"1"` are one JSON key."""
+    return (
+        bool(keys)
+        and all(isinstance(key, str) for key in keys)
+        and keys[-1] not in keys[:-1]
+    )
+
+
+def _ends_in_last_argument(call: ast.expr, text: str) -> bool:
+    """Whether `text`, parsed into `call`, ends with the plain string literal
+    that ends the arguments JSON of `call`.
+
+    Deltas without `STRING_BREAK` characters extend such a literal verbatim,
+    unlike an f-string, whose braces are syntax. The literal must end where
+    `text` does, since comments and other statements are not part of `call`.
+    """
+    if not isinstance(call, ast.Call) or call.args:
+        return False
+    names = [keyword.arg for keyword in call.keywords]
+    if not _last_key_is_unique(names):
+        return False
+    # Restoring the names rename_reserved_kwargs changed must not repeat a
+    # name Python normalized to a keyword, such as a fullwidth `from`.
+    if len(restore_reserved_kwarg_names(dict.fromkeys(names))) < len(set(names)):
+        return False
+    node = call.keywords[-1].value
+    while isinstance(node, (ast.List, ast.Dict)):
+        if isinstance(node, ast.Dict):
+            keys = [getattr(key, "value", None) for key in node.keys]
+            if not _last_key_is_unique(keys):
+                return False
+            node = node.values[-1]
+        elif node.elts:
+            node = node.elts[-1]
+        else:
+            return False
+    if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+        return False
+    # ast counts lines, which a CR also ends, and UTF-8 byte columns.
+    line_start = text.rfind("\n") + 1
+    return "\r" not in text and (node.end_lineno, node.end_col_offset) == (
+        text.count("\n") + 1,
+        len(text[line_start:].encode()),
+    )
 
 
 class Lfm2ToolParser(ToolParser):
@@ -76,6 +134,10 @@ class Lfm2ToolParser(ToolParser):
         # call body after the first <|tool_call_end|> while still
         # allowing legitimate post-call prose through.
         self._trailing_emitted: str = ""
+
+        # True while the tool text ends inside a plain string argument that
+        # the next delta can extend without re-parsing the call.
+        self._in_string_arg = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -257,6 +319,34 @@ class Lfm2ToolParser(ToolParser):
         if TOOL_CALL_START not in current_text:
             return DeltaMessage(content=delta_text)
 
+        # A delta that only extends the open string argument is streamed
+        # JSON-escaped without re-parsing: re-normalizing and re-parsing the
+        # whole call on every delta makes a long argument cost quadratic time.
+        if (
+            self._in_string_arg
+            and delta_text
+            and not STRING_BREAK.search(delta_text)
+            # Preserve make_valid_python's trimming and incomplete-value
+            # behavior, even inside strings. Emitting ahead of it can corrupt
+            # a later fallback when another keyword overwrites this value.
+            and not delta_text[-1].isspace()
+            and delta_text[-1] not in ",=:"
+        ):
+            arguments = json.dumps(delta_text, ensure_ascii=False)[1:-1]
+            self.streamed_args_for_tool[self.current_tool_index] += arguments
+            # The stream omits unset fields, and a full parse sets these to None.
+            return DeltaMessage(
+                content=None,
+                tool_calls=[
+                    DeltaToolCall(
+                        id=None,
+                        index=self.current_tool_index,
+                        function=DeltaFunctionCall(arguments=arguments),
+                    )
+                ],
+            )
+        self._in_string_arg = False
+
         # Compute leading content (before <|tool_call_start|>) that arrived
         # in this delta and hasn't been streamed yet. Without this, when the
         # prefix and the start token land in the same delta the prefix is
@@ -411,6 +501,24 @@ class Lfm2ToolParser(ToolParser):
                         and delta.function.arguments is not None
                     ):
                         self.streamed_args_for_tool[index] += delta.function.arguments
+
+            # Stream later deltas straight onto the open string only if no `<`
+            # near the end could still become TOOL_CALL_END, no digit could
+            # extend an octal escape at its end, and it is the literal that
+            # ends the last call's arguments, with no trailing comma or
+            # whitespace that make_valid_python trimmed.
+            self._in_string_arg = (
+                not has_end_in_current
+                and self.current_tool_index == len(tool_calls) - 1
+                and added_text[:1] in ("'", '"')
+                and "<" not in current_text[-len(TOOL_CALL_END) :]
+                and not OPEN_OCTAL_ESCAPE.search(tool_text[-3:])
+                and _ends_in_last_argument(parsed.elts[-1], tool_text + added_text[0])
+                # A fallback may have changed earlier arguments. Only append
+                # directly when the client has the current JSON prefix.
+                and self.streamed_args_for_tool[-1]
+                == tool_calls[-1].function.arguments[: -len(withheld_suffix)]
+            )
 
             if tool_deltas and not self.prev_tool_call_arr:
                 self.prev_tool_call_arr = [{"arguments": {}}]

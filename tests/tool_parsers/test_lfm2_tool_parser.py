@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from cProfile import Profile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +15,7 @@ from tests.tool_parsers.utils import (
 from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
+from vllm.tool_parsers.utils import make_valid_python
 
 TOOL_CALL_START = "<|tool_call_start|>"
 TOOL_CALL_END = "<|tool_call_end|>"
@@ -681,3 +684,150 @@ def test_regex_timeout_handling(streaming: bool, lfm2_tokenizer: TokenizerLike):
         assert content == fake_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+def test_streaming_long_string_argument_is_not_reparsed(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """Deltas inside a string argument extend it without re-parsing the whole
+    call, which made streaming a long argument take quadratic time."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    words = [f"word{i}" for i in range(500)]
+    deltas = [
+        f'{TOOL_CALL_START}[write_file(path="a.txt", content="',
+        words[0],
+        *(f" {word}" for word in words[1:]),
+        f'")]{TOOL_CALL_END}',
+    ]
+
+    # Observe the real calls without replacing parser objects or methods.
+    # A wall-clock threshold would be sensitive to CI machine load.
+    with Profile() as profile:
+        reconstructor = run_tool_extraction_streaming(tool_parser, deltas)
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == FunctionCall(
+        name="write_file",
+        arguments=json.dumps({"path": "a.txt", "content": " ".join(words)}),
+    )
+    parse_calls = sum(
+        entry.callcount
+        for entry in profile.getstats()
+        if entry.code == make_valid_python.__code__
+    )
+    assert parse_calls == 2  # Opening and closing deltas only.
+
+
+def test_streaming_string_delta_serializes_like_full_parse(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """The stream omits unset fields, so a delta sent without re-parsing must
+    set the same fields as one from a full parse."""
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    opening = f'{TOOL_CALL_START}[f(text="a'
+    tool_parser.extract_tool_calls_streaming("", opening, opening, [], [], [], request)
+
+    delta = tool_parser.extract_tool_calls_streaming(
+        opening, opening + " b", " b", [], [], [], request
+    )
+
+    assert delta is not None
+    assert delta.model_dump(exclude_unset=True) == {
+        "content": None,
+        "tool_calls": [{"id": None, "index": 0, "function": {"arguments": " b"}}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("deltas", "arguments"),
+    [
+        (
+            [f'{TOOL_CALL_START}[f(text="Hello ', "world", f'")]{TOOL_CALL_END}'],
+            '{"text": "Hello world"}',
+        ),
+        (
+            [f'{TOOL_CALL_START}[f(text="Hello,', " world", f'")]{TOOL_CALL_END}'],
+            '{"text": "Hello, world"}',
+        ),
+        (
+            [f'{TOOL_CALL_START}[f(text=r"Hello', "\nworld", f'")]{TOOL_CALL_END}'],
+            '{"text": "Hello\\\\nworld"}',
+        ),
+        (
+            [f'{TOOL_CALL_START}[f(text="\\0', "0", f'")]{TOOL_CALL_END}'],
+            '{"text": "\\u0000"}',
+        ),
+        (
+            [f'{TOOL_CALL_START}[f(text="a")] # [f(x="', "b", f'")]{TOOL_CALL_END}'],
+            '{"text": "a"}',
+        ),
+        (
+            [f'{TOOL_CALL_START}[f(text="a")]; [f(x="', "b", f'")]{TOOL_CALL_END}'],
+            '{"text": "a"}',
+        ),
+        (
+            [
+                f'{TOOL_CALL_START}[f(ｆrom="", x="y", from="a',
+                "b",
+                f'", from="a", x="yy")]{TOOL_CALL_END}',
+            ],
+            '{"from": "a", "x": "yy"}',
+        ),
+        (
+            [
+                f'{TOOL_CALL_START}[f(in_pyreservedkw_="abc',
+                '", from="a',
+                " b",
+                "more",
+                f'")]{TOOL_CALL_END}',
+            ],
+            # Preserve main's valid JSON even when restoring names mid-stream
+            # has already made the emitted prefix differ from the parsed call.
+            '{"in_pyreservedkw_": "abcbmore"}',
+        ),
+    ],
+    ids=[
+        "after_trimmed_space",
+        "after_trimmed_comma",
+        "raw_string_newline",
+        "octal_escape",
+        "quote_in_comment",
+        "second_statement",
+        "restored_reserved_name",
+        "changed_json_prefix",
+    ],
+)
+def test_streaming_string_argument_needs_full_parse(
+    deltas: list[str], arguments: str, lfm2_tokenizer: TokenizerLike
+):
+    """Preserve full-parse results across lexical and JSON transformations."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+
+    reconstructor = run_tool_extraction_streaming(tool_parser, deltas)
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == FunctionCall(
+        name="f", arguments=arguments
+    )
+
+
+@pytest.mark.parametrize("delta", ["  ", "\f", "\u2002", ",", "x=", "x:"])
+def test_streaming_string_preserves_withheld_text(
+    delta: str, lfm2_tokenizer: TokenizerLike
+):
+    """Emitting text main withholds can corrupt a later overwritten value."""
+    cls = ToolParserManager.get_tool_parser("lfm2")
+    deltas = [
+        f'{TOOL_CALL_START}[f(text="a',
+        delta,
+        f'b", text="axb")]{TOOL_CALL_END}',
+    ]
+    _, expected = run_tool_extraction(cls(lfm2_tokenizer), "".join(deltas))
+    reconstructor = run_tool_extraction_streaming(cls(lfm2_tokenizer), deltas)
+
+    assert reconstructor.tool_calls[0].function == expected[0].function
