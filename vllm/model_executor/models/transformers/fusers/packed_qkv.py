@@ -55,6 +55,10 @@ class PackedQKVFuser(RewriteFuser):
             f"Fused: {self.qkv_name} ({name}: {self.source_cls}) -> QKVParallelLinear"
         )
 
+    @property
+    def packed_modules_mapping(self) -> dict[str, list[str]]:
+        return {self.qkv_name: [self.qkv_name]}
+
     @staticmethod
     def _split_sizes(node: fx.Node) -> tuple[int, int] | None:
         """`(q, kv)` from a `split((q, kv, kv), ...)` call, if it is one."""
