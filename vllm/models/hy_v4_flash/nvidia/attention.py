@@ -7,9 +7,7 @@ from copy import deepcopy
 import torch
 from torch import nn
 
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import (
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
@@ -25,7 +23,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
-from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.hy_v4.common.mrope import fused_mrope_norm, rope_into
 from vllm.models.hy_v4.nvidia.attention import HYV4MLAAttention
@@ -41,16 +38,13 @@ class HYV4FlashMLAAttention(MLAAttention):
     supports_fp8_ds_mla_sliding_window = True
 
 
-def _get_fused_projection_sizes(config, is_window_layer: bool) -> list[int]:
-    sizes = [config.q_lora_rank, config.kv_lora_rank + config.qk_rope_head_dim]
-    if not is_window_layer:
-        sizes.extend(
-            [
-                config.compressed_indexer_head_dim,
-                config.compressed_indexer_num_attention_heads,
-            ]
-        )
-    return sizes
+def _get_fused_projection_sizes(config) -> list[int]:
+    return [
+        config.q_lora_rank,
+        config.kv_lora_rank + config.qk_rope_head_dim,
+        config.compressed_indexer_head_dim,
+        config.compressed_indexer_num_attention_heads,
+    ]
 
 
 def _can_fuse_unquantized_projections(*layers: LinearBase) -> bool:
@@ -60,73 +54,9 @@ def _can_fuse_unquantized_projections(*layers: LinearBase) -> bool:
     )
 
 
-class HYV4FlashFusedQIndexerQueryLinear(MergedColumnParallelLinear):
-    """Fuse TP-sharded attention Q with replicated Indexer query output."""
-
-    def __init__(
-        self,
-        input_size: int,
-        q_output_size: int,
-        indexer_output_size: int,
-        params_dtype: torch.dtype,
-        prefix: str,
-    ) -> None:
-        self.q_tp_rank = get_tensor_model_parallel_rank()
-        self.q_tp_size = get_tensor_model_parallel_world_size()
-        assert q_output_size % self.q_tp_size == 0
-        self.q_output_size = q_output_size
-        self.q_output_size_per_partition = q_output_size // self.q_tp_size
-        super().__init__(
-            input_size,
-            [self.q_output_size_per_partition, indexer_output_size],
-            bias=False,
-            params_dtype=params_dtype,
-            quant_config=None,
-            disable_tp=True,
-            prefix=prefix,
-        )
-
-    def _slice_q_weight(
-        self,
-        param: torch.Tensor,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None,
-    ) -> torch.Tensor:
-        output_dim = getattr(param, "output_dim", None)
-        if loaded_shard_id == 0 and output_dim is not None:
-            loaded_size = loaded_weight.shape[output_dim]
-            if loaded_size == self.q_output_size:
-                loaded_weight = loaded_weight.narrow(
-                    output_dim,
-                    self.q_tp_rank * self.q_output_size_per_partition,
-                    self.q_output_size_per_partition,
-                )
-            else:
-                assert loaded_size == self.q_output_size_per_partition
-        return loaded_weight
-
-    def weight_loader(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
-    ) -> None:
-        loaded_weight = self._slice_q_weight(param, loaded_weight, loaded_shard_id)
-        super().weight_loader(param, loaded_weight, loaded_shard_id)
-
-    def weight_loader_v2(
-        self,
-        param: BasevLLMParameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
-    ) -> None:
-        loaded_weight = self._slice_q_weight(param, loaded_weight, loaded_shard_id)
-        super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-
-
 class HYV4FlashAttention(HYV4MLAAttention):
     q_a_layernorm: RMSNorm
-    q_b_proj: ColumnParallelLinear | HYV4FlashFusedQIndexerQueryLinear
+    q_b_proj: ColumnParallelLinear
     fused_qkv_a_proj: MergedColumnParallelLinear
     linear_gate: ColumnParallelLinear
 
@@ -161,6 +91,11 @@ class HYV4FlashAttention(HYV4MLAAttention):
             config.swa_v_head_dim if self.is_window_layer else config.v_head_dim
         )
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        self.fused_qkv_a_split_sizes = _get_fused_projection_sizes(config)
+        self.qkv_a_split_sizes = [
+            self.q_lora_rank,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+        ]
         self.scaling = self.qk_head_dim**-0.5
         self.is_sparse = self.create_indexer = True
         self.skip_topk = self.external_topk = False
@@ -195,7 +130,7 @@ class HYV4FlashAttention(HYV4MLAAttention):
         quant = vllm_config.quant_config
         self.fused_qkv_a_proj = MergedColumnParallelLinear(
             config.hidden_size,
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+            self.qkv_a_split_sizes,
             bias=False,
             quant_config=quant,
             prefix=f"{prefix}.fused_qkv_a_proj",
@@ -256,15 +191,12 @@ class HYV4FlashAttention(HYV4MLAAttention):
             )
         )
         self._fuse_qkv_a_indexer = False
-        self._fuse_q_b_indexer = False
         if not self.is_window_layer:
             assert isinstance(self.indexer, FlashCompressedIndexer)
             token_key_projection = self.indexer.token_key_projection
             head_weight_projection = self.indexer.head_weight_projection
-            query_projection = self.indexer.query_projection
             assert token_key_projection is not None
             assert head_weight_projection is not None
-            assert query_projection is not None
             if _can_fuse_unquantized_projections(
                 self.fused_qkv_a_proj,
                 token_key_projection,
@@ -272,7 +204,7 @@ class HYV4FlashAttention(HYV4MLAAttention):
             ):
                 self.fused_qkv_a_proj = MergedColumnParallelLinear(
                     config.hidden_size,
-                    _get_fused_projection_sizes(config, self.is_window_layer),
+                    self.fused_qkv_a_split_sizes,
                     bias=False,
                     params_dtype=self.fused_qkv_a_proj.params_dtype,
                     quant_config=None,
@@ -282,17 +214,6 @@ class HYV4FlashAttention(HYV4MLAAttention):
                 self.indexer.token_key_projection = None
                 self.indexer.head_weight_projection = None
                 self._fuse_qkv_a_indexer = True
-
-            if _can_fuse_unquantized_projections(self.q_b_proj, query_projection):
-                self.q_b_proj = HYV4FlashFusedQIndexerQueryLinear(
-                    self.q_lora_rank,
-                    self.num_heads * self.qk_head_dim,
-                    self.indexer.num_heads * self.config.compressed_indexer_head_dim,
-                    self.q_b_proj.params_dtype,
-                    prefix=f"{prefix}.q_b_proj",
-                )
-                self.indexer.query_projection = None
-                self._fuse_q_b_indexer = True
         self.learnable_sink_param = make_attention_sink(
             self.num_local_heads, torch.float32
         )
@@ -334,21 +255,9 @@ class HYV4FlashAttention(HYV4MLAAttention):
                 kv,
                 indexer_token_keys,
                 indexer_head_weights,
-            ) = projection.split(
-                [
-                    self.q_lora_rank,
-                    self.kv_lora_rank + self.qk_rope_head_dim,
-                    self.config.compressed_indexer_head_dim,
-                    self.config.compressed_indexer_num_attention_heads,
-                ],
-                dim=-1,
-            )
+            ) = projection.split(self.fused_qkv_a_split_sizes, dim=-1)
         else:
-            q_c, kv = projection.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-        indexer_query = None
+            q_c, kv = projection.split(self.qkv_a_split_sizes, dim=-1)
         if positions.ndim == 2:
             q_c, kv_c, k_pe, rope_pos, cos_sin = fused_mrope_norm(
                 self.rotary_emb,
@@ -358,38 +267,14 @@ class HYV4FlashAttention(HYV4MLAAttention):
                 self.q_a_layernorm,
                 self.kv_a_layernorm,
             )
-            q_proj = self.q_b_proj(q_c)[0]
-            if self._fuse_q_b_indexer:
-                assert isinstance(self.indexer, FlashCompressedIndexer)
-                q_proj, indexer_query = q_proj.split(
-                    [
-                        self.num_local_heads * self.qk_head_dim,
-                        self.indexer.num_heads
-                        * self.config.compressed_indexer_head_dim,
-                    ],
-                    dim=-1,
-                )
-            q = q_proj.view(-1, self.num_local_heads, self.qk_head_dim)
+            q = self._project_query(q_c)
             q_pe = q[..., self.qk_nope_head_dim :]
             rope_into(rope_pos, q_pe, cos_sin, q_pe)
         else:
             q_c = self.q_a_layernorm(q_c)
-            q_proj = self.q_b_proj(q_c)[0]
+            q = self._project_query(q_c)
             kv_c, k_pe = kv.split((self.kv_lora_rank, self.qk_rope_head_dim), -1)
             kv_c = self.kv_a_layernorm(kv_c)
-            if self._fuse_q_b_indexer:
-                assert isinstance(self.indexer, FlashCompressedIndexer)
-                q_proj, indexer_query = q_proj.split(
-                    [
-                        self.num_local_heads * self.qk_head_dim,
-                        self.indexer.num_heads
-                        * self.config.compressed_indexer_head_dim,
-                    ],
-                    dim=-1,
-                )
-            else:
-                indexer_query = None
-            q = q_proj.view(-1, self.num_local_heads, self.qk_head_dim)
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe.unsqueeze(1)
             )
@@ -410,7 +295,6 @@ class HYV4FlashAttention(HYV4MLAAttention):
             out,
             indexer_token_keys=indexer_token_keys,
             indexer_head_weights=indexer_head_weights,
-            indexer_query=indexer_query,
         )
         if self.use_hpc_gated_mla:
             assert hidden_states.is_contiguous() and out.is_contiguous()
@@ -422,50 +306,36 @@ class HYV4FlashAttention(HYV4MLAAttention):
             return out
         return fused_allreduce_rms_norm(out, None, self.post_proj_norm)[0]
 
-    @eager_break_during_capture
-    def _indexer_and_attn(
+    def _project_query(
+        self,
+        q_c: torch.Tensor,
+    ) -> torch.Tensor:
+        q_proj = self.q_b_proj(q_c)[0]
+        q = q_proj.view(-1, self.num_local_heads, self.qk_head_dim)
+        return q
+
+    def _run_indexer(
         self,
         hidden_states: torch.Tensor,
-        q_c: torch.Tensor,
+        q_c: torch.Tensor | None,
         positions: torch.Tensor,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        out: torch.Tensor,
         indexer_token_keys: torch.Tensor | None = None,
         indexer_head_weights: torch.Tensor | None = None,
-        indexer_query: torch.Tensor | None = None,
     ) -> None:
-        """Use the combined DSA projections before running sparse attention."""
-        if self.indexer is not None and self.is_sparse and not self.skip_topk:
-            if (
-                indexer_token_keys is None
-                and indexer_head_weights is None
-                and indexer_query is None
-            ):
-                self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-            else:
-                assert isinstance(self.indexer, FlashCompressedIndexer)
-                self.indexer(
-                    hidden_states,
-                    q_c,
-                    positions,
-                    self.indexer_rope_emb,
-                    indexer_token_keys=indexer_token_keys,
-                    indexer_head_weights=indexer_head_weights,
-                    indexer_query=indexer_query,
+        if not isinstance(self.indexer, FlashCompressedIndexer):
+            assert all(
+                projection is None
+                for projection in (
+                    indexer_token_keys,
+                    indexer_head_weights,
                 )
-            if self.topk_snapshot is not None:
-                assert self.topk_indices_buffer is not None
-                num_rows = hidden_states.shape[0]
-                self.topk_snapshot[:num_rows].copy_(self.topk_indices_buffer[:num_rows])
-        if self.is_sparse:
-            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
-        out.copy_(
-            self.mla_attn(
-                q,
-                kv_c_normed,
-                k_pe,
-                output_shape=out.shape,
             )
+            return super()._run_indexer(hidden_states, q_c, positions)
+        self.indexer(
+            hidden_states,
+            q_c,
+            positions,
+            self.indexer_rope_emb,
+            indexer_token_keys=indexer_token_keys,
+            indexer_head_weights=indexer_head_weights,
         )

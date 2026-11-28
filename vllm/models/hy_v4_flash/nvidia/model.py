@@ -33,37 +33,35 @@ from .moe import HYV4FlashFeedForward, HYV4FlashMoE
 
 def _map_fused_indexer_projection_weights(
     weights: Iterable[tuple[str, torch.Tensor]],
-    fused_layers: dict[int, tuple[bool, bool]],
+    fused_layers: dict[int, bool],
 ) -> Iterable[tuple[str, torch.Tensor]]:
     for name, tensor in weights:
-        if not name.startswith("model.layers."):
+        parts = name.split(".")
+        layer_id = next(
+            (
+                parts[index + 2]
+                for index in range(len(parts) - 2)
+                if parts[index] == "model" and parts[index + 1] == "layers"
+            ),
+            None,
+        )
+        if layer_id is None or not layer_id.isdigit():
             yield name, tensor
             continue
-        layer_id, _, _ = name.removeprefix("model.layers.").partition(".")
-        if not layer_id.isdigit():
-            yield name, tensor
-            continue
-        fuse_qkv_a, fuse_q_b = fused_layers.get(int(layer_id), (False, False))
-        if fuse_qkv_a:
-            for prefix in (".compressed_indexer.", ".indexer."):
-                name = name.replace(
-                    f"{prefix}token_key_projection.",
-                    f"{prefix}fused_token_key_projection.",
-                )
-                name = name.replace(
-                    f"{prefix}head_weight_projection.",
-                    f"{prefix}fused_head_weight_projection.",
-                )
-        if fuse_q_b:
-            name = name.replace(
-                ".self_attn.q_b_proj.",
-                ".self_attn.fused_q_b_indexer_proj.q_b_proj.",
-            )
-            for prefix in (".compressed_indexer.", ".indexer."):
-                name = name.replace(
-                    f"{prefix}query_projection.",
-                    f"{prefix}fused_query_projection.",
-                )
+        if fused_layers.get(int(layer_id), False):
+            for projection, shard_id in (
+                ("token_key_projection", 2),
+                ("head_weight_projection", 3),
+            ):
+                for indexer in ("compressed_indexer", "indexer"):
+                    source = f".{indexer}.{projection}."
+                    if source in name:
+                        name = name.replace(source, ".fused_qkv_a_proj.", 1)
+                        tensor = tensor.detach()
+                        tensor.shard_id = shard_id
+                        break
+                else:
+                    continue
         yield name, tensor
 
 
@@ -201,22 +199,6 @@ class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM):
         orig_to_new_stacked={
             ".self_attn.q_a_proj.": (".self_attn.fused_qkv_a_proj.", 0),
             ".self_attn.kv_a_proj_with_mqa.": (".self_attn.fused_qkv_a_proj.", 1),
-            ".indexer.fused_token_key_projection.": (
-                ".fused_qkv_a_proj.",
-                2,
-            ),
-            ".indexer.fused_head_weight_projection.": (
-                ".fused_qkv_a_proj.",
-                3,
-            ),
-            ".self_attn.fused_q_b_indexer_proj.q_b_proj.": (
-                ".self_attn.q_b_proj.",
-                0,
-            ),
-            ".indexer.fused_query_projection.": (
-                ".self_attn.q_b_proj.",
-                1,
-            ),
             ".indexer.key_value_projection.": (".indexer.key_projection.", 0),
             ".indexer.key_gate_projection.": (".indexer.key_projection.", 1),
         },
@@ -226,10 +208,7 @@ class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM):
         validate_platform()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         fused_layers = {
-            index: (
-                layer.self_attn._fuse_qkv_a_indexer,
-                layer.self_attn._fuse_q_b_indexer,
-            )
+            index: layer.self_attn._fuse_qkv_a_indexer
             for index, layer in enumerate(self.model.layers)
         }
         self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(

@@ -50,7 +50,7 @@ class FlashCompressedIndexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         self.max_model_len = vllm_config.model_config.max_model_len
         self.logits_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024 // 4
-        self.query_projection: ReplicatedLinear | None = ReplicatedLinear(
+        self.query_projection: ReplicatedLinear = ReplicatedLinear(
             config.q_lora_rank,
             self.num_heads * 128,
             bias=False,
@@ -106,7 +106,6 @@ class FlashCompressedIndexer(nn.Module):
         rope=None,
         indexer_token_keys: torch.Tensor | None = None,
         indexer_head_weights: torch.Tensor | None = None,
-        indexer_query: torch.Tensor | None = None,
     ):
         output = self.topk_indices_buffer[: hidden_states.shape[0]]
         metadata = get_forward_context().attn_metadata
@@ -175,9 +174,7 @@ class FlashCompressedIndexer(nn.Module):
         if indexer_head_weights is None:
             assert self.head_weight_projection is not None
             indexer_head_weights = self.head_weight_projection(hidden_states)[0]
-        if indexer_query is None:
-            assert self.query_projection is not None
-            indexer_query = self.query_projection(q_c)[0]
+        indexer_query = self.query_projection(q_c)[0]
         quant_q, weights = quantize_query(
             indexer_query[:tokens].view(tokens, self.num_heads, 128),
             indexer_head_weights[:tokens],
