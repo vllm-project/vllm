@@ -489,3 +489,38 @@ def _create_ragged_varlen_ref_outs(
             max_query_len=max_query_len,
         )
         yield out_ref
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires the GPU Triton prefill"
+)
+@pytest.mark.parametrize("width", [2, 4, 7])
+def test_causal_conv1d_varlen_bf16_with_fp32_cache(width):
+    set_random_seed(0)
+    dim = 269
+    lengths = (2, 1, 17)
+    x = torch.randn(sum(lengths), dim + 32, device=DEVICE, dtype=torch.bfloat16)
+    x = x[:, 7 : 7 + dim].T
+    weight = torch.randn(dim, width, device=DEVICE, dtype=x.dtype)
+    bias = torch.randn(dim, device=DEVICE, dtype=x.dtype)
+    initial = torch.randn(6, width - 1, dim, device=DEVICE).transpose(1, 2)
+    assert not torch.equal(initial, initial.bfloat16().float())
+    state, expected_state = initial.clone(), initial.clone()
+    offsets = torch.tensor([0, 2, 3, 20], device=DEVICE, dtype=torch.int32)
+    slots = torch.tensor([3, 1, 4], device=DEVICE, dtype=torch.int32)
+    has_history = torch.tensor([False, True, True], device=DEVICE)
+    out = causal_conv1d_fn(x, weight, bias, state, offsets, slots, has_history)
+
+    # The FP32 path reproduces the original wrapper's two explicit casts.
+    expected = causal_conv1d_fn(
+        x.float(), weight, bias, expected_state, offsets, slots, has_history
+    ).bfloat16()
+    assert out.dtype == x.dtype
+    assert out.stride() == expected.stride()
+    assert torch.equal(
+        out.contiguous().view(torch.int16), expected.contiguous().view(torch.int16)
+    )
+    assert torch.equal(
+        state.contiguous().view(torch.int32),
+        expected_state.contiguous().view(torch.int32),
+    )
