@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for per-token-head KV cache quantization (INT4, INT8 and FP8).
+"""Tests for per-token-head KV cache quantization (INT4, K8V4, INT8 and FP8).
 
 Covers:
 - Per-token-head Triton reshape-and-cache kernel
@@ -162,6 +162,18 @@ class TestIsQuantizedKvCache:
         from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
         assert get_kv_quant_mode("fp8_per_token_head") == KVQuantMode.FP8_PER_TOKEN_HEAD
+
+    def test_kv_quant_mode_k8v4(self):
+        from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+        from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+        mode = get_kv_quant_mode("k8v4_per_token_head")
+        assert mode == KVQuantMode.K8V4_PER_TOKEN_HEAD
+        assert mode.is_per_token_head and mode.is_int4_packed
+        assert is_quantized_kv_cache("k8v4_per_token_head")
+        assert kv_cache_dtype_str_to_dtype("k8v4_per_token_head", None) == torch.int8
+        assert KVQuantMode.INT4_PER_TOKEN_HEAD.is_int4_packed
+        assert not KVQuantMode.INT8_PER_TOKEN_HEAD.is_int4_packed
 
     @pytest.mark.parametrize(
         "cache_dtype", ["octave_k3v4", "octave_k3v3", "octave_k3v3_compact"]
@@ -499,7 +511,12 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
 # ===========================================================================
 @pytest.mark.parametrize(
     "kv_cache_dtype",
-    ["int4_per_token_head", "int8_per_token_head", "fp8_per_token_head"],
+    [
+        "int4_per_token_head",
+        "k8v4_per_token_head",
+        "int8_per_token_head",
+        "fp8_per_token_head",
+    ],
 )
 def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     """Per-token-head should set _k_scale=1.0, _v_scale=1.0
@@ -749,3 +766,322 @@ def test_triton_unified_attention_per_token_head_scale(
     )
 
     torch.testing.assert_close(output_q, output_ref, atol=5e-2, rtol=5e-2)
+
+
+# ===========================================================================
+# 7. K8V4_PER_TOKEN_HEAD: int8 keys + INT4 values
+# ===========================================================================
+def test_k8v4_page_cell_size():
+    """K8V4 cell: hs int8 keys + hs / 2 packed values + two fp32 scales."""
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+    from vllm.v1.kv_cache_interface import AttentionSpec
+
+    assert TritonAttentionBackend.supports_kv_cache_dtype("k8v4_per_token_head")
+    sizes = {}
+    for mode, dtype in [
+        (KVQuantMode.INT4_PER_TOKEN_HEAD, torch.uint8),
+        (KVQuantMode.K8V4_PER_TOKEN_HEAD, torch.int8),
+        (KVQuantMode.INT8_PER_TOKEN_HEAD, torch.int8),
+    ]:
+        spec = TritonAttentionBackend.customize_spec(
+            AttentionSpec(
+                block_size=16,
+                num_kv_heads=4,
+                head_size=256,
+                dtype=dtype,
+                kv_quant_mode=mode,
+            )
+        )
+        sizes[mode] = spec.state_content_size_bytes
+    assert sizes == {
+        KVQuantMode.INT4_PER_TOKEN_HEAD: 264,
+        KVQuantMode.K8V4_PER_TOKEN_HEAD: 392,
+        KVQuantMode.INT8_PER_TOKEN_HEAD: 520,
+    }
+
+
+def _k8v4_caches(num_blocks, block_size, num_heads, head_size, interleaved=False):
+    """(key, value, k_scale, v_scale) caches of the K8V4 layout.
+
+    `interleaved` lays K and V out in one buffer as the engine does,
+    `[K(hs) int8 | K scale | V(hs / 2) | V scale]` per (slot, head).
+    """
+    shape = (num_blocks, block_size, num_heads)
+    k_scale = torch.ones(*shape, dtype=torch.float32)
+    v_scale = torch.ones(*shape, dtype=torch.float32)
+    if interleaved:
+        kv = torch.zeros(*shape, head_size + head_size // 2 + 8, dtype=torch.int8)
+        key = kv[..., :head_size]
+        value = kv[..., head_size + 4 : head_size + 4 + head_size // 2]
+        return key, value.view(torch.uint8), k_scale, v_scale
+    key = torch.zeros(*shape, head_size, dtype=torch.int8)
+    value = torch.zeros(*shape, head_size // 2, dtype=torch.uint8)
+    return key, value, k_scale, v_scale
+
+
+def _k8v4_dequant(key_cache, value_cache, k_scale_cache, v_scale_cache):
+    """Dequantize the K8V4 caches in the RHT domain (fp32)."""
+    k = key_cache.float() * k_scale_cache[..., None]
+    bits = v_scale_cache.contiguous().view(torch.int32)
+    zp = (bits & 0xF).float()
+    scale = (bits & -16).view(torch.float32)
+    packed = value_cache.to(torch.int32)
+    nib = torch.stack((packed & 0xF, (packed >> 4) & 0xF), dim=-1).flatten(-2)
+    v = (nib.float() - zp[..., None]) * scale[..., None]
+    return k, v
+
+
+def _rel_err(x, ref):
+    return ((x.double() - ref.double()).norm() / ref.double().norm()).item()
+
+
+@pytest.mark.parametrize("head_size", [64, 128, 256])
+@torch.inference_mode()
+def test_k8v4_store_int8_keys_and_int4_values(head_size: int):
+    """K8V4 writes the key as int8 and the value exactly as INT4 does."""
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_per_token_head_quant,
+    )
+
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    num_tokens, num_heads, block_size, num_blocks = 300, 4, 16, 24
+    key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
+    value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
+    slot_mapping = torch.tensor(
+        random.sample(range(num_blocks * block_size), num_tokens), dtype=torch.long
+    )
+    slot_mapping[::7] = -1  # padding tokens leave the cache untouched
+
+    caches = _k8v4_caches(num_blocks, block_size, num_heads, head_size)
+    triton_reshape_and_cache_flash_per_token_head_quant(
+        key,
+        value,
+        *caches,
+        slot_mapping,
+        kv_quant_mode=KVQuantMode.K8V4_PER_TOKEN_HEAD,
+    )
+    int4_key = torch.zeros(
+        num_blocks, block_size, num_heads, head_size // 2, dtype=torch.uint8
+    )
+    int4_value = torch.zeros_like(int4_key)
+    int4_ks, int4_vs = torch.ones_like(caches[2]), torch.ones_like(caches[3])
+    triton_reshape_and_cache_flash_per_token_head_quant(
+        key,
+        value,
+        int4_key,
+        int4_value,
+        int4_ks,
+        int4_vs,
+        slot_mapping,
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+    )
+
+    written = slot_mapping >= 0
+    slots = slot_mapping[written]
+    blk, off = slots // block_size, slots % block_size
+    # Values: byte-identical to the INT4 cache.
+    torch.testing.assert_close(
+        caches[1][blk, off], int4_value[blk, off], rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        caches[3][blk, off].view(torch.int32), int4_vs[blk, off].view(torch.int32)
+    )
+    # Keys: int8 in the RHT domain, symmetric scale absmax / 127.  The store
+    # rotates in fp32 and rounds the rotated rows back to the input dtype.
+    k_rht = single_rht(key[written].float()).to(key.dtype).float()
+    k_deq, v_deq = _k8v4_dequant(*caches)
+    assert caches[0].abs().max() <= 127
+    torch.testing.assert_close(
+        caches[2][blk, off], k_rht.abs().amax(-1) / 127, rtol=1e-5, atol=1e-7
+    )
+    assert _rel_err(k_deq[blk, off], k_rht) < 0.01  # int8: ~0.5 %
+    v_rht = single_rht(value[written].float()).to(value.dtype).float()
+    v_err = _rel_err(v_deq[blk, off], v_rht)
+    assert 0.03 < v_err < 0.15  # 4 bits: ~8 %
+    # Nothing written for the padding tokens.
+    unused = torch.ones(num_blocks * block_size, dtype=torch.bool)
+    unused[slots] = False
+    assert (caches[0].flatten(0, 1)[unused] == 0).all()
+    assert (caches[1].flatten(0, 1)[unused] == 0).all()
+
+
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [(1, 128)],
+        [(1, 1000), (1, 37)],
+        [(4, 4), (1, 523)],
+        [(97, 97), (16, 300)],
+    ],
+    ids=["decode", "decode-2-seqs", "mtp-and-decode", "prefill"],
+)
+@pytest.mark.parametrize("split_kv", [False, True])
+@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("head_size", [128, 256])
+@torch.inference_mode()
+def test_k8v4_unified_attention_matches_dequantized_reference(
+    seq_lens: list[tuple[int, int]],
+    split_kv: bool,
+    interleaved: bool,
+    head_size: int,
+):
+    """K8V4 attention equals attention over its own dequantized cache."""
+    from vllm.utils.math_utils import next_power_of_2
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_per_token_head_quant,
+    )
+    from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    num_query_heads, num_kv_heads, block_size = 16, 4, 16
+    query_lens = [s[0] for s in seq_lens]
+    kv_lens = [s[1] for s in seq_lens]
+    num_seqs = len(seq_lens)
+    blocks_per_seq = [(n + block_size - 1) // block_size for n in kv_lens]
+    num_blocks = sum(blocks_per_seq) + 3
+
+    # Fill each sequence's blocks through the K8V4 store kernel.
+    perm = torch.randperm(num_blocks, device="cpu")[: sum(blocks_per_seq)]
+    block_tables = torch.zeros(num_seqs, max(blocks_per_seq), dtype=torch.int32)
+    caches = _k8v4_caches(num_blocks, block_size, num_kv_heads, head_size, interleaved)
+    start = 0
+    for i, (nb, n) in enumerate(zip(blocks_per_seq, kv_lens)):
+        tbl = perm[start : start + nb].to(DEVICE_TYPE)
+        start += nb
+        block_tables[i, :nb] = tbl.to(torch.int32)
+        pos = torch.arange(n)
+        slots = tbl[pos // block_size].long() * block_size + pos % block_size
+        k = torch.randn(n, num_kv_heads, head_size, dtype=torch.bfloat16)
+        v = torch.randn(n, num_kv_heads, head_size, dtype=torch.bfloat16)
+        triton_reshape_and_cache_flash_per_token_head_quant(
+            k, v, *caches, slots, kv_quant_mode=KVQuantMode.K8V4_PER_TOKEN_HEAD
+        )
+
+    query = torch.randn(
+        sum(query_lens), num_query_heads, head_size, dtype=torch.bfloat16
+    )
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        0, dtype=torch.int32
+    )
+    seqused_k = torch.tensor(kv_lens, dtype=torch.int32)
+    scale = head_size**-0.5
+    num_segments = 16
+    seq_threshold_3D = num_seqs if split_kv else 0
+    segm_rows = max(seq_threshold_3D, 1) * max(query_lens)
+    output = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=caches[0],
+        v=caches[1],
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=seqused_k,
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_segments,
+        softmax_segm_output=torch.empty(
+            segm_rows, num_query_heads, num_segments, next_power_of_2(head_size)
+        ),
+        softmax_segm_max=torch.empty(segm_rows, num_query_heads, num_segments),
+        softmax_segm_expsum=torch.empty(segm_rows, num_query_heads, num_segments),
+        kv_quant_mode=KVQuantMode.K8V4_PER_TOKEN_HEAD,
+        k_scale_cache=caches[2],
+        v_scale_cache=caches[3],
+    )
+
+    # fp64 reference over the dequantized cache, in the RHT domain.
+    k_deq, v_deq = _k8v4_dequant(*caches)
+    q_rht = single_rht(query.float()).double()
+    rht_norm = head_size  # power-of-two head sizes: the RHT norm is sqrt(hs)
+    q_start = 0
+    for i, (ql, n) in enumerate(zip(query_lens, kv_lens)):
+        pos = torch.arange(n)
+        tbl = block_tables[i].long()
+        K = k_deq[tbl[pos // block_size], pos % block_size].double()
+        V = v_deq[tbl[pos // block_size], pos % block_size].double()
+        for h in range(num_query_heads):
+            kvh = h // (num_query_heads // num_kv_heads)
+            q = q_rht[q_start : q_start + ql, h]
+            s = q @ K[:, kvh].T * (scale / rht_norm)
+            q_pos = n - ql + torch.arange(ql)
+            s = s.masked_fill(pos[None, :] > q_pos[:, None], float("-inf"))
+            ref = torch.softmax(s, -1) @ V[:, kvh]
+            ref = single_rht(ref.float(), inverse=True).double() / rht_norm
+            out = output[q_start : q_start + ql, h].double()
+            # The value path is the INT4 one, whose TF32 P @ V against the
+            # exact zero-point sum drifts with the context length on random
+            # data (about 1 % at 128 tokens, 2.4 % at 1000; see #67102).
+            assert _rel_err(out, ref) < 0.03, (i, h, _rel_err(out, ref))
+        q_start += ql
+
+
+@pytest.mark.parametrize("physical", ["HND", "NHD"])
+@torch.inference_mode()
+def test_k8v4_backend_views_address_the_page_cell(physical: str):
+    """The Triton backend's K8V4 views and scale caches cover the page cell.
+
+    Writing through the backend into one engine-layout buffer must give the
+    same key, value and scale bytes as writing into separate caches.
+    """
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionImpl
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_per_token_head_quant,
+    )
+
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    num_heads, num_kv_heads, head_size, block_size, num_blocks = 16, 4, 128, 16, 8
+    impl = TritonAttentionImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="k8v4_per_token_head",
+    )
+    cell = head_size + head_size // 2 + 8
+    if physical == "HND":
+        kv_cache = torch.zeros(num_blocks, num_kv_heads, block_size, cell)
+    else:
+        kv_cache = torch.zeros(num_blocks, block_size, num_kv_heads, cell)
+        kv_cache = kv_cache.transpose(1, 2)
+    kv_cache = kv_cache.to(torch.int8)
+
+    num_tokens = 50
+    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=torch.bfloat16)
+    value = torch.randn(num_tokens, num_kv_heads, head_size, dtype=torch.bfloat16)
+    slot_mapping = torch.randperm(num_blocks * block_size)[:num_tokens]
+    impl.do_kv_cache_update(MagicMock(), key, value, kv_cache, slot_mapping)
+    key_view, value_view = impl._pth_key_value_caches(kv_cache)
+    assert key_view.dtype == torch.int8 and value_view.dtype == torch.uint8
+
+    ref = _k8v4_caches(num_blocks, block_size, num_kv_heads, head_size)
+    triton_reshape_and_cache_flash_per_token_head_quant(
+        key,
+        value,
+        *ref,
+        slot_mapping,
+        kv_quant_mode=KVQuantMode.K8V4_PER_TOKEN_HEAD,
+    )
+    blk, off = slot_mapping // block_size, slot_mapping % block_size
+    assert torch.equal(key_view[blk, off, :, :head_size], ref[0][blk, off])
+    assert torch.equal(value_view[blk, off, :, : head_size // 2], ref[1][blk, off])
+    for got, want in [(impl._k_scale_cache, ref[2]), (impl._v_scale_cache, ref[3])]:
+        assert torch.equal(
+            got[blk, off].view(torch.int32), want[blk, off].view(torch.int32)
+        )
+    # The value scale is the last 4 bytes of the cell.
+    last = kv_cache.transpose(1, 2)[blk, off, :, -4:].contiguous()
+    assert torch.equal(last.view(torch.float32)[..., 0], ref[3][blk, off])

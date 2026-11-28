@@ -68,6 +68,9 @@ class KVQuantMode(IntEnum):
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
     CUSTOM = 15
+    # int8 keys (symmetric) + packed int4 values (as INT4_PER_TOKEN_HEAD),
+    # both RHT-rotated; served by the INT4 packed kernels.
+    K8V4_PER_TOKEN_HEAD = 16
 
     @property
     def is_per_token_head(self) -> bool:
@@ -76,6 +79,16 @@ class KVQuantMode(IntEnum):
             KVQuantMode.INT8_PER_TOKEN_HEAD,
             KVQuantMode.FP8_PER_TOKEN_HEAD,
             KVQuantMode.INT4_PER_TOKEN_HEAD,
+            KVQuantMode.K8V4_PER_TOKEN_HEAD,
+        )
+
+    @property
+    def is_int4_packed(self) -> bool:
+        """True for the modes served by the packed INT4 kernels
+        (int4 values, RHT-rotated K/V)."""
+        return self in (
+            KVQuantMode.INT4_PER_TOKEN_HEAD,
+            KVQuantMode.K8V4_PER_TOKEN_HEAD,
         )
 
     @property
@@ -117,6 +130,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return handler.quant_mode()
     if kv_cache_dtype == "int4_per_token_head":
         return KVQuantMode.INT4_PER_TOKEN_HEAD
+    if kv_cache_dtype == "k8v4_per_token_head":
+        return KVQuantMode.K8V4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":

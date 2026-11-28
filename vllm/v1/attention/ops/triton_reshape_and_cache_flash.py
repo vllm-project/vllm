@@ -299,11 +299,12 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     quantized data in key_cache/value_cache, and stores the float32
     scale in k_scale_cache/v_scale_cache.
 
-    INT4 needs sub-byte packing + a Hadamard rotation, so it is handled by
-    its own kernel; INT8 / FP8 share this kernel, with the quantization
-    range (QUANT_MAX, QUANT_MIN) derived from the cache tensor dtype.
+    INT4 and K8V4 (int8 keys, INT4 values) need sub-byte packing + a
+    Hadamard rotation, so they are handled by their own kernel; INT8 / FP8
+    share this kernel, with the quantization range (QUANT_MAX, QUANT_MIN)
+    derived from the cache tensor dtype.
     """
-    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+    if kv_quant_mode.is_int4_packed:
         from vllm.v1.attention.ops.int4_per_token_head import (
             reshape_and_cache_int4,
         )
@@ -316,6 +317,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
             slot_mapping,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
+            key_int8=kv_quant_mode == KVQuantMode.K8V4_PER_TOKEN_HEAD,
         )
         return
 

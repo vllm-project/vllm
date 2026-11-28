@@ -89,6 +89,7 @@ def test_merged_quantized_helpers():
     assert is_quantized_kv_cache("fp8_e4m3") is True
     assert is_quantized_kv_cache("float16") is False
     assert kv_cache_uses_per_token_head_scales("int4_per_token_head") is True
+    assert kv_cache_uses_per_token_head_scales("k8v4_per_token_head") is True
 
 
 def test_re_register_kv_cache_dtype_warns(caplog_vllm):
