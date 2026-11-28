@@ -42,6 +42,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert not routed_experts.quant_method.is_monolithic, (
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )
+        assert routed_experts.ct_transforms is None, (
+            "Compressed-tensors expert transforms are not supported for Fused MoE LoRA."
+        )
 
         # Use the MoE-aware TP rank/size: when EP is active, MoERunner collapses
         # moe_parallel_config.tp_size to 1 (experts are sharded across the

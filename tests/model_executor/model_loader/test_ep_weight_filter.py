@@ -310,6 +310,11 @@ class TestShouldSkipWeight:
             "model.layers.0.mlp.experts.200.gate_proj.weight_scale", self.local_ids
         )
 
+    def test_remote_expert_transform_not_skipped(self):
+        assert not should_skip_weight(
+            "model.layers.0.mlp.experts.200.gate_proj.v_input.weight", self.local_ids
+        )
+
     def test_boundary_expert(self):
         # Expert 47 is local (last one), 48 is not
         assert not should_skip_weight(
