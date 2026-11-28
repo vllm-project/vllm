@@ -174,10 +174,12 @@ static PyObject* method_spinloop(PyObject* self, PyObject* args,
   }
 
   if (result) {
-    Py_RETURN_TRUE;
+    Py_INCREF(Py_True);
+    return Py_True;
   }
 
-  Py_RETURN_FALSE;
+  Py_INCREF(Py_False);
+  return Py_False;
 }
 
 static PyMethodDef spinloop_methods[] = {
