@@ -577,6 +577,34 @@ def test_modelopt_mixed_precision_does_not_quantize_unlisted_fused_sibling():
     assert config._resolve_quant_algo("model.layers.0.linear_attn.in_proj_ba") is None
 
 
+@pytest.mark.parametrize("text_root", ["model.language_model", "language_model.model"])
+def test_modelopt_mixed_precision_resolves_text_draft_layer(text_root):
+    """A multimodal checkpoint (nvidia/GLM-5.3-Flash-FP4-Local) lists its MTP
+    layer with the language model's layers, as stored or after the target
+    model's hf_to_vllm_mapper; the MTP draft builds it as `model.layers.45`."""
+    mtp = f"{text_root}.layers.45"
+    config = _mixed_precision_config(
+        {
+            f"{mtp}.mlp.experts": {"quant_algo": "W4A16_NVFP4", "group_size": 16},
+            f"{mtp}.mlp.shared_experts.gate_proj": {"quant_algo": "MXFP8"},
+            f"{mtp}.mlp.shared_experts.up_proj": {"quant_algo": "MXFP8"},
+            f"{mtp}.self_attn.q_b_proj": {"quant_algo": "MXFP8"},
+            f"{text_root}.layers.3.mlp.experts": {"quant_algo": "NVFP4"},
+        }
+    )
+    config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    draft = "model.layers.45"
+    assert config._resolve_quant_algo(f"{draft}.mlp.experts") == "W4A16_NVFP4"
+    assert (
+        config._resolve_quant_algo(f"{draft}.mlp.shared_experts.gate_up_proj")
+        == "MXFP8"
+    )
+    assert config._resolve_quant_algo(f"{draft}.self_attn.q_b_proj") == "MXFP8"
+    assert config._resolve_quant_algo(f"{draft}.self_attn.kv_b_proj") is None
+    assert config._resolve_quant_algo("model.layers.4.mlp.experts") is None
+
+
 @pytest.mark.parametrize("prefix", ["", "model"])
 @pytest.mark.parametrize("start_layer_id", [0, 1])
 def test_draft_quant_config_uses_runtime_module_names(prefix, start_layer_id):
