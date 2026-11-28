@@ -120,11 +120,10 @@ def _get_default_ssm_launch_config(
         BLOCK_SIZE_M, num_warps = 16, 4
     elif dstate <= 64:
         BLOCK_SIZE_M, num_warps = 8, 4
-    else:
-        if is_blackwell:
-            BLOCK_SIZE_M, num_warps = 32, 8
-        elif dstate <= 128:
-            BLOCK_SIZE_M, num_warps = 4, 4
+    elif dstate <= 128:
+        BLOCK_SIZE_M, num_warps = (4, 1) if is_blackwell else (4, 4)
+    elif is_blackwell:
+        BLOCK_SIZE_M, num_warps = 32, 8
     return BLOCK_SIZE_M, num_warps
 
 
