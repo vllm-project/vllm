@@ -102,7 +102,7 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     )
     manager._capture_descs[CUDAGraphMode.FULL] = [desc]
 
-    def create_forward_fn(desc, warmup):
+    def create_forward_fn(desc):
         return lambda _mode: None
 
     @contextmanager
@@ -306,8 +306,8 @@ def test_speculator_capture_preserves_decode_query_bounds(
     )
 
     def capture(self, create_forward_fn, progress_bar_desc):
-        for warmup in (True, False):
-            create_forward_fn(desc, warmup)(desc.cg_mode)
+        for mode in (CUDAGraphMode.NONE, desc.cg_mode):
+            create_forward_fn(desc)(mode)
 
     monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
     manager.capture(
@@ -373,7 +373,7 @@ def test_capture_inputs_match_execute_model(
     desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, num_tokens, num_tokens)
 
     def capture(self, create_forward_fn, progress_bar_desc):
-        create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+        create_forward_fn(desc)(CUDAGraphMode.NONE)
 
     monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
 
@@ -500,7 +500,7 @@ def test_capture_default_model_state_clears_input_ids(monkeypatch, tmp_path):
     desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, num_tokens, num_tokens)
 
     def capture(self, create_forward_fn, progress_bar_desc):
-        create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+        create_forward_fn(desc)(CUDAGraphMode.NONE)
 
     monkeypatch.setattr(gpu_cudagraph_utils.CudaGraphManager, "capture", capture)
 
@@ -1159,7 +1159,7 @@ def test_speculator_replays_graph_for_runtime_width(monkeypatch, specialize):
 
     def capture(manager, create_forward_fn, progress_bar_desc):
         for desc in manager._capture_descs[CUDAGraphMode.FULL]:
-            create_forward_fn(desc, warmup=False)(CUDAGraphMode.FULL)
+            create_forward_fn(desc)(CUDAGraphMode.FULL)
             k = forward.call_args.kwargs["num_speculative_steps"]
             graph = MagicMock()
             graph.replay.side_effect = lambda k=k: replayed_widths.append(k)

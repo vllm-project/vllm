@@ -40,7 +40,8 @@ def _enable_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch):
     envs.disable_envs_cache()
 
 
-def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
+@pytest.mark.parametrize("use_breakable", [False, True])
+def test_piecewise_capture_rebuilds_metadata_only_for_breakable_graphs(use_breakable):
     from vllm.config import CUDAGraphMode
     from vllm.v1.worker.gpu.cudagraph_utils import (
         BatchExecutionDescriptor,
@@ -52,20 +53,17 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     manager.device = torch.device("cpu")
     manager._capture_descs = {CUDAGraphMode.PIECEWISE: [desc]}
     manager._graphs_captured = False
-    manager.use_breakable_cg = True
+    manager.use_breakable_cg = use_breakable
     manager.ubatch_runner = None
 
-    create_calls = []
     forward_calls = []
 
-    def create_forward_fn(desc_arg, warmup):
+    def create_forward_fn(desc_arg):
         assert desc_arg == desc
-        metadata = {"layer": object()}
-        create_calls.append((warmup, metadata))
+        metadata = object()
 
         def forward_fn(cg_mode):
-            assert metadata
-            forward_calls.append((warmup, cg_mode, metadata))
+            forward_calls.append((cg_mode, metadata))
 
         return forward_fn
 
@@ -83,12 +81,11 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
         manager.capture(create_forward_fn)
 
     assert manager.capture_stream is capture_stream
-    assert [warmup for warmup, _ in create_calls] == [True, False]
-    assert [mode for _, mode, _ in forward_calls] == [
+    assert [mode for mode, _ in forward_calls] == [
         CUDAGraphMode.NONE,
         CUDAGraphMode.PIECEWISE,
     ]
-    assert create_calls[0][1] is not create_calls[1][1]
+    assert (forward_calls[0][1] is not forward_calls[1][1]) == use_breakable
 
 
 @pytest.fixture(autouse=True)

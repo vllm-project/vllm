@@ -93,7 +93,6 @@ class DFlashCudaGraphManager(CudaGraphManager):
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
-            warmup: bool,
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
