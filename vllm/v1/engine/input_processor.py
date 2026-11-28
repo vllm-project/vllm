@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import time
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
@@ -16,6 +17,7 @@ from vllm.inputs import (
     split_enc_dec_input,
 )
 from vllm.logger import init_logger
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -63,6 +65,7 @@ class InputProcessor:
         self.model_config = model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self._valid_lora_adapters: set[tuple[int, str]] = set()
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
@@ -300,6 +303,21 @@ class InputProcessor:
             raise VLLMValidationError(
                 f"Got lora_request {lora_request} but LoRA is not enabled!"
             )
+
+        # The worker checks the adapter config only when it loads the adapter, in
+        # the model step, where the error stops the engine. Check local adapters
+        # here, once each, so a bad one fails only its own request.
+        path = lora_request.lora_path
+        adapter = (lora_request.lora_int_id, path)
+        config_file = os.path.join(path, "adapter_config.json")
+        if adapter not in self._valid_lora_adapters and os.path.isfile(config_file):
+            try:
+                PEFTHelper.from_local_dir(path, None).validate_legal(self.lora_config)
+            except ValueError as e:
+                raise VLLMValidationError(
+                    f"Invalid LoRA adapter {lora_request.lora_name!r}: {e}"
+                ) from e
+            self._valid_lora_adapters.add(adapter)
 
         if self.tokenizer is not None:
             logger.warning_once(
