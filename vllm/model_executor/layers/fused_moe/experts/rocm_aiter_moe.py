@@ -569,11 +569,20 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         workspace2 = (0,)
         # MoRI dispatches MXFP4 activations packed two per byte, so K is
         # half the hidden size there.
-        packed_fp4_input = (
-            self.moe_config.use_mori_epv1_kernels and self.quant_config.use_mxfp4_w4a4
-        )
+        packed_fp4_input = self.moe_config.use_mori_fp4_dispatch(self.quant_config)
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
+
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        # An EP rank that receives no tokens sizes its empty output from the
+        # dispatched width, which packed MXFP4 halves; the layer's own
+        # (unpacked) hidden states keep their width.
+        if (
+            self.moe_config.use_mori_fp4_dispatch(self.quant_config)
+            and hidden_dim * 2 == self.moe_config.hidden_dim
+        ):
+            return hidden_dim * 2
+        return hidden_dim
 
     def apply(
         self,
