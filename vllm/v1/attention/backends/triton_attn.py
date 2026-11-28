@@ -680,10 +680,6 @@ class TritonAttentionImpl(AttentionImpl):
                 value_cache = value_cache.view(self.fp8_dtype)
             if self._set_kv_ptr_range:
                 set_triton_ptr_range(kv_cache, key_cache, value_cache)
-            descale_shape = (
-                attn_metadata.query_start_loc.shape[0] - 1,
-                key_cache.shape[2],
-            )
             q_descale = (
                 layer._q_scale
                 if (
@@ -692,8 +688,8 @@ class TritonAttentionImpl(AttentionImpl):
                 )
                 else None
             )
-            k_descale = layer._k_scale.expand(descale_shape)
-            v_descale = layer._v_scale.expand(descale_shape)
+            k_descale = layer._k_scale
+            v_descale = layer._v_scale
             k_scale_cache = None
             v_scale_cache = None
 
