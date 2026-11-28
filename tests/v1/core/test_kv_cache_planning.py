@@ -37,8 +37,8 @@ from vllm.config.attention import HiSparseConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
-    DefaultKVCacheConfigBuilder,
     _estimate_max_model_len_from_groups,
+    _pool_bytes_per_block,
     can_share_block_table,
     get_kv_cache_groups,
     get_pipeline_stages,
@@ -1041,8 +1041,9 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
         )
     # Estimate the maximum model length, 16384 model_len need 8GB
     groups = get_kv_cache_groups(vllm_config, kv_cache_spec)
+    usable_blocks = 8 * GiB_bytes // _pool_bytes_per_block(vllm_config, groups)
     estimated_max_len = _estimate_max_model_len_from_groups(
-        DefaultKVCacheConfigBuilder(), vllm_config, groups, 8 * GiB_bytes
+        vllm_config, groups, usable_blocks
     )
     assert estimated_max_len == want_estimated_max_len
 

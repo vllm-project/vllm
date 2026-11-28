@@ -30,6 +30,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 from vllm.v1.hisparse.layout import (
+    create_hisparse_layout,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
@@ -97,27 +98,25 @@ def _more_kv_cache_memory_hint(
 
 
 def _check_enough_kv_cache_memory(
-    builder: KVCacheConfigBuilder,
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
-    available_memory: int,
+    usable_blocks: int,
+    bytes_per_block: int,
     after_warmup: bool = False,
 ) -> None:
     hint = _more_kv_cache_memory_hint(vllm_config, after_warmup=after_warmup)
-    if available_memory <= 0:
+    if usable_blocks <= 0:
         raise ValueError(
             f"No available memory for the cache blocks. {hint} "
             "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             "for more details."
         )
 
-    needed_memory = _max_memory_usage_bytes_from_groups(
-        builder, vllm_config, kv_cache_groups
-    )
+    needed_blocks = _required_blocks_per_request(vllm_config, kv_cache_groups)
 
-    if needed_memory > available_memory:
+    if needed_blocks > usable_blocks:
         estimated_max_len = _estimate_max_model_len_from_groups(
-            builder, vllm_config, kv_cache_groups, available_memory
+            vllm_config, kv_cache_groups, usable_blocks
         )
         estimated_msg = ""
         if estimated_max_len > 0:
@@ -126,12 +125,14 @@ def _check_enough_kv_cache_memory(
                 f"the estimated maximum model length is {estimated_max_len}. "
             )
 
+        needed_memory = needed_blocks * bytes_per_block
+        usable_memory = usable_blocks * bytes_per_block
         raise ValueError(
             f"To serve at least one request with the model's max seq len "
             f"({vllm_config.model_config.max_model_len}), "
             f"({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
-            f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
+            f"memory ({format_gib(usable_memory)} GiB). {estimated_msg}"
             f"{hint} Decreasing `max_model_len` also reduces what is needed. "
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             f"for more details."
@@ -1066,41 +1067,28 @@ def kv_cache_groups_tp_replicas(
     )
 
 
-def _max_memory_usage_bytes_from_groups(
-    builder: KVCacheConfigBuilder,
+def _required_blocks_per_request(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
 ) -> int:
-    """Calculate maximum memory usage in bytes from KV cache groups.
+    """Device blocks needed to serve one request at `max_model_len`.
 
-    This correctly accounts for padding in hybrid models. For example, if a
-    model has 8 full attention layers and 9 sliding window layers, they will
-    be padded to 9 full + 9 sliding window for uniform group sizes.
-
-    Each group independently claims blocks from the shared pool, so a request consumes
-    the sum of the per-group block counts, i.e. `bytes_per_block * total_blocks`.
+    Each device group independently claims blocks from the shared pool, so one
+    request consumes the sum of the per-group block counts.
     """
-    kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
-    if not kv_cache_groups:
-        return 0
-
-    bytes_per_block = _pool_bytes_per_block_from_builder(
-        builder, vllm_config, kv_cache_groups
+    return sum(
+        group.max_allocated_blocks_per_request(vllm_config)
+        for group in kv_cache_groups
+        if not group.host_resident
     )
-    total_blocks = sum(
-        group.max_allocated_blocks_per_request(vllm_config) for group in kv_cache_groups
-    )
-
-    return bytes_per_block * total_blocks
 
 
 def _estimate_max_model_len_from_groups(
-    builder: KVCacheConfigBuilder,
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
-    available_memory: int,
+    usable_blocks: int,
 ) -> int:
-    """Binary search for the maximum model length that fits in available memory.
+    """Binary search for the maximum model length that fits in `usable_blocks`.
     Returns 0 if even 1 token doesn't fit.
     """
     original_max = vllm_config.model_config.max_model_len
@@ -1108,23 +1096,18 @@ def _estimate_max_model_len_from_groups(
         vllm_config.attention_config.hisparse_config is not None
         and bool(kv_cache_groups)
     )
+    host_budget = get_hisparse_host_pool_bytes(vllm_config) if hisparse_enabled else 0
 
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
+        if _required_blocks_per_request(vllm_config, kv_cache_groups) > usable_blocks:
+            return False
         if hisparse_enabled:
             try:
-                num_blocks = available_memory // _pool_bytes_per_block_from_builder(
-                    builder, vllm_config, kv_cache_groups
-                )
-                builder.get_kv_cache_config_from_groups(
-                    vllm_config, kv_cache_groups, num_blocks
-                )
+                create_hisparse_layout(vllm_config, kv_cache_groups, host_budget)
             except ValueError:
                 return False
-        return (
-            _max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
-            <= available_memory
-        )
+        return True
 
     try:
         left, right = 1, original_max
@@ -1144,10 +1127,10 @@ def _estimate_max_model_len_from_groups(
 
 
 def _auto_fit_max_model_len(
-    builder: KVCacheConfigBuilder,
     vllm_config: VllmConfig,
     projected_groups_per_worker: list[list[KVCacheGroup]],
-    available_memory: list[int],
+    usable_blocks_per_worker: list[int],
+    bytes_per_block_per_worker: list[int],
     after_warmup: bool = False,
 ) -> None:
     """When max_model_len is set to -1, this function estimates the largest
@@ -1156,11 +1139,11 @@ def _auto_fit_max_model_len(
     workers.
 
     Args:
-        builder: The builder whose hooks drive block accounting.
-        vllm_config: The global VllmConfig (will be modified in-place)
+        vllm_config: The global VllmConfig (will be modified in-place).
         projected_groups_per_worker: KV cache groups projected to each worker.
-        available_memory: Memory available for KV cache in bytes for each
-            worker.
+        usable_blocks_per_worker: Usable device blocks (excluding the null
+            block) for each worker.
+        bytes_per_block_per_worker: Device bytes per block for each worker.
         after_warmup: Whether this re-fits a length fitted before CUDA graph
             capture and warmup to the memory measured after them.
 
@@ -1178,16 +1161,20 @@ def _auto_fit_max_model_len(
 
     # Find the max_model_len that fits across all workers.
     auto_fit_max = original_max
-    limiting_worker_mem = available_memory[0]
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+    limiting_worker_mem = usable_blocks_per_worker[0] * bytes_per_block_per_worker[0]
+    for groups, usable_blocks, bytes_per_block in zip(
+        projected_groups_per_worker,
+        usable_blocks_per_worker,
+        bytes_per_block_per_worker,
+    ):
         if not groups:
             continue
         worker_max = _estimate_max_model_len_from_groups(
-            builder, vllm_config, groups, avail_mem
+            vllm_config, groups, usable_blocks
         )
         if worker_max < auto_fit_max:
             auto_fit_max = worker_max
-            limiting_worker_mem = avail_mem
+            limiting_worker_mem = usable_blocks * bytes_per_block
 
     if auto_fit_max <= 0:
         hint = (
@@ -1354,13 +1341,12 @@ def get_kv_cache_configs(
     2. Generate the KV cache groups based on the layer ratio of the whole model.
        This also handles spec unification for hybrid models.
        (Steps 1-2 are done by `get_global_kv_cache_groups`.)
-    3. Handle auto-fit max_model_len and memory checks using per-worker
-       projected groups to account for PP sharding.
-    4. Generate the KV cache configs for each worker based on the KV cache
-       grouping strategy. (This is reasonable because the layer ratio of
-       different PP stages are similar.)
-    5. Change the num_blocks of each worker to the smallest among all workers
-       and shrink tensor sizes proportionally to avoid allocating unused memory.
+    3. Probe each worker's bytes per block once and convert its memory budget
+       (or `num_gpu_blocks_override`) into a block count.
+    4. Run auto-fit `max_model_len` and admission checks in block units using
+       per-worker projected groups to account for PP sharding.
+    5. Converge on the smallest block count across all workers and materialize
+       each worker's `KVCacheConfig` once at that count.
 
     Args:
         vllm_config: The global VllmConfig
@@ -1376,97 +1362,83 @@ def get_kv_cache_configs(
     """
     builder = get_kv_cache_config_builder(vllm_config)
 
-    # If original_max_model_len was -1, automatically
-    # determine the maximum model length that fits in available GPU memory.
-    # We use per-worker projected groups to account for PP sharding.
     projected_groups_per_worker = [
         _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
         for worker_spec in layer_configs
     ]
-
-    # If `num_gpu_blocks_override` is set, the cache size that will actually
-    # be allocated is decoupled from the profiled `available_memory`. Reflect
-    # that in `available_memory` here so auto-fit, the admission check, and
-    # the per-worker config builder all plan against the same effective
-    # capacity.
-    override = vllm_config.cache_config.num_gpu_blocks_override
-    if override is not None:
-        adjusted_memory: list[int] = []
-        for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
-            if not groups:
-                adjusted_memory.append(avail_mem)
-                continue
-            bytes_per_block = _pool_bytes_per_block_from_builder(
-                builder, vllm_config, groups
-            )
-            logger.info(
-                "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
-                avail_mem // bytes_per_block,
-                override,
-            )
-            adjusted_memory.append(override * bytes_per_block)
-        available_memory = adjusted_memory
-
-    # Reserve the null block BlockPool permanently holds back, so auto-fit and
-    # the capacity check both plan against usable blocks. Allocation below
-    # still uses the full memory.
-    check_memory = [
-        (
-            avail_mem - _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
-            if groups
-            else avail_mem
-        )
-        for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
-    ]
-
-    if vllm_config.model_config.original_max_model_len == -1:
-        _auto_fit_max_model_len(
-            builder, vllm_config, projected_groups_per_worker, check_memory
-        )
-
-    # Check if the available memory is enough per worker.
-    for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
-        if not groups:
-            continue
-        _check_enough_kv_cache_memory(builder, vllm_config, groups, avail_mem)
-
-    kv_cache_configs: list[KVCacheConfig] = []
-    for projected_groups, layer_configs_one_worker, available_memory_one_worker in zip(
-        projected_groups_per_worker, layer_configs, available_memory
+    for projected_groups, layer_configs_one_worker in zip(
+        projected_groups_per_worker, layer_configs
     ):
         assert sum(len(group.layer_names) for group in projected_groups) == len(
             layer_configs_one_worker
         ), "Some layers are not assigned to any group."
-        bytes_per_block = _pool_bytes_per_block_from_builder(
-            builder, vllm_config, projected_groups
-        )
-        num_blocks = (
-            available_memory_one_worker // bytes_per_block if projected_groups else 1
-        )
-        kv_cache_configs.append(
-            builder.get_kv_cache_config_from_groups(
-                vllm_config, projected_groups, num_blocks
-            )
-        )
 
-    # Change the num_blocks of each rank to the smallest among all ranks.
-    # We also need to shrink the tensor size proportionally to avoid
-    # allocating unused memory.
-    min_num_blocks = min(
-        kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
-    )
-    for i, kv_cache_config in enumerate(kv_cache_configs):
-        if kv_cache_config.num_blocks == min_num_blocks:
+    bytes_per_block_per_worker = [
+        _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
+        for groups in projected_groups_per_worker
+    ]
+    override = vllm_config.cache_config.num_gpu_blocks_override
+    num_blocks_per_worker: list[int] = []
+    for groups, bytes_per_block, avail_mem in zip(
+        projected_groups_per_worker, bytes_per_block_per_worker, available_memory
+    ):
+        if not groups:
+            # Attention-free workers still need 1 block for BlockPool's null block.
+            num_blocks_per_worker.append(1)
             continue
-        # Re-plan with exactly the smallest rank's block count, so strides and
-        # offsets stay consistent with the shrunken allocation.
-        kv_cache_configs[i] = builder.get_kv_cache_config_from_groups(
+        num_blocks = avail_mem // bytes_per_block
+        if override is not None:
+            logger.info(
+                "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
+                num_blocks,
+                override,
+            )
+            num_blocks = override
+        num_blocks_per_worker.append(num_blocks)
+
+    # Reserve the null block BlockPool permanently holds back, so auto-fit and
+    # the capacity check both plan against usable blocks. Allocation below
+    # still uses the full block count.
+    usable_blocks_per_worker = [
+        num_blocks - 1 if groups else 0
+        for groups, num_blocks in zip(
+            projected_groups_per_worker, num_blocks_per_worker
+        )
+    ]
+
+    if vllm_config.model_config.original_max_model_len == -1:
+        _auto_fit_max_model_len(
             vllm_config,
-            kv_cache_config.kv_cache_groups,
-            min_num_blocks,
+            projected_groups_per_worker,
+            usable_blocks_per_worker,
+            bytes_per_block_per_worker,
         )
 
+    for groups, usable_blocks, bytes_per_block in zip(
+        projected_groups_per_worker,
+        usable_blocks_per_worker,
+        bytes_per_block_per_worker,
+    ):
+        if not groups:
+            continue
+        _check_enough_kv_cache_memory(
+            vllm_config, groups, usable_blocks, bytes_per_block
+        )
+
+    # Every rank must share the smallest block count so the centralized
+    # scheduler's block IDs apply uniformly across all workers.
+    min_num_blocks = min(num_blocks_per_worker)
+    kv_cache_configs = [
+        builder.get_kv_cache_config_from_groups(
+            vllm_config, projected_groups, min_num_blocks
+        )
+        for projected_groups in projected_groups_per_worker
+    ]
     for kv_cache_config in kv_cache_configs:
+        assert kv_cache_config.num_blocks == min_num_blocks, (
+            f"KVCacheConfigBuilder returned num_blocks={kv_cache_config.num_blocks}, "
+            f"expected {min_num_blocks}."
+        )
         kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
             kv_cache_config.kv_cache_groups,
             vllm_config.parallel_config.tensor_parallel_size,
@@ -1608,6 +1580,17 @@ def shrink_kv_cache_configs(
     builder = get_kv_cache_config_builder(vllm_config)
     for kv_cache_config in kv_cache_configs:
         assert num_blocks <= kv_cache_config.num_blocks
+        groups = kv_cache_config.kv_cache_groups
+        if groups:
+            # The null block is held back by the BlockPool, as in the capacity
+            # check of `get_kv_cache_configs`.
+            _check_enough_kv_cache_memory(
+                vllm_config,
+                groups,
+                num_blocks - 1,
+                _pool_bytes_per_block_from_builder(builder, vllm_config, groups),
+                after_warmup=True,
+            )
         kv_cache_config.kv_cache_tensors = [
             tensor
             if tensor.host_resident
@@ -1616,18 +1599,6 @@ def shrink_kv_cache_configs(
             )
             for tensor in kv_cache_config.kv_cache_tensors
         ]
-        groups = kv_cache_config.kv_cache_groups
-        if groups:
-            # The null block is held back by the BlockPool, as in the capacity
-            # check of `get_kv_cache_configs`.
-            _check_enough_kv_cache_memory(
-                builder,
-                vllm_config,
-                groups,
-                (num_blocks - 1)
-                * _pool_bytes_per_block_from_builder(builder, vllm_config, groups),
-                after_warmup=True,
-            )
         kv_cache_config.num_blocks = num_blocks
 
 
@@ -1657,15 +1628,16 @@ def finalize_extensible_kv_cache(
         # graphs and warmup took their share; fit it again to the measured one.
         builder = get_kv_cache_config_builder(vllm_config)
         groups_per_worker = [config.kv_cache_groups for config in kv_cache_configs]
-        available_memory = [
-            (num_blocks - 1)
-            * _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
-            if groups
-            else 0
+        bytes_per_block_per_worker = [
+            _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
             for groups in groups_per_worker
         ]
         _auto_fit_max_model_len(
-            builder, vllm_config, groups_per_worker, available_memory, after_warmup=True
+            vllm_config,
+            groups_per_worker,
+            [num_blocks - 1 if groups else 0 for groups in groups_per_worker],
+            bytes_per_block_per_worker,
+            after_warmup=True,
         )
     shrink_kv_cache_configs(
         vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
