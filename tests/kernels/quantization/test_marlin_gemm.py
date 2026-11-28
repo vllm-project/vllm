@@ -352,6 +352,183 @@ def test_marlin_gemm(
     assert max_diff < 0.04
 
 
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin")
+    or not current_platform.has_device_capability(80),
+    reason="BF16 Marlin requires an SM80 or newer GPU.",
+)
+@pytest.mark.parametrize(
+    "size_m,size_k,size_n,layout",
+    [
+        *[
+            (m, 4096, 18560, "contiguous")
+            for m in (
+                1,
+                8,
+                9,
+                48,
+                49,
+                56,
+                63,
+                64,
+                65,
+                79,
+                80,
+                81,
+                95,
+                96,
+                97,
+                127,
+                128,
+                129,
+                159,
+                160,
+                161,
+                257,
+                511,
+                512,
+                513,
+                4095,
+                4096,
+                4097,
+                1024,
+                1025,
+                8191,
+                8192,
+                8193,
+            )
+        ],
+        *[(m, 4096, 18560, "strided") for m in (8, 49, 79, 96, 128)],
+        *[(m, 4096, 18560, "minimal_workspace") for m in (8, 49, 96, 128, 1025)],
+        *[(m, 4096, 18560, "below_profile_workspace") for m in (49, 96, 513)],
+        *[
+            (m, 8192, 4096, "contiguous")
+            for m in (
+                1,
+                8,
+                9,
+                64,
+                65,
+                79,
+                95,
+                96,
+                97,
+                98,
+                111,
+                126,
+                127,
+                128,
+                129,
+                159,
+                160,
+                161,
+                191,
+                192,
+                193,
+                224,
+                255,
+                256,
+                257,
+                511,
+                512,
+                513,
+                2047,
+                2048,
+                2049,
+                1024,
+                8191,
+                8192,
+                8193,
+            )
+        ],
+        *[(m, 8192, 4096, "strided") for m in (79, 97, 256)],
+        *[(m, 8192, 4096, "minimal_workspace") for m in (97, 111, 127, 256, 2049)],
+        *[
+            (97, 8192, 4096, layout)
+            for layout in ("bias", "atomic", "bf16_reduce", "undersized_workspace")
+        ],
+    ],
+)
+def test_marlin_nvfp4_projection_profiles(size_m, size_k, size_n, layout):
+    """Projection profiles preserve outputs and writes at boundaries and tails."""
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    padded_input = rand_data((size_m, size_k + 8), dtype)
+    strided_input = padded_input[:, :size_k]
+    if layout == "strided":
+        inputs = strided_input
+    else:
+        inputs = torch.empty(
+            (size_m, size_k), dtype=dtype, device=padded_input.device
+        ).copy_(strided_input)
+        assert inputs.stride(0) == size_k
+    weight_ref, weight, scales, global_scale = rand_marlin_weight_nvfp4_like(
+        rand_data((size_n, size_k), dtype), 16
+    )
+    workspace = marlin_make_workspace_new(inputs.device, max_blocks_per_sm=2)
+    workspace_guard = None
+    if layout in (
+        "minimal_workspace",
+        "below_profile_workspace",
+        "undersized_workspace",
+    ):
+        sms = torch.cuda.get_device_properties(inputs.device).multi_processor_count
+        workspace_guard = torch.full(
+            (2 * sms + 64,), 12345, dtype=torch.int32, device=inputs.device
+        )
+        lock_count = {
+            "minimal_workspace": sms,
+            "below_profile_workspace": 2 * sms - 1,
+            "undersized_workspace": sms - 1,
+        }[layout]
+        workspace = workspace_guard[:lock_count]
+        workspace.zero_()
+    bias = rand_data((size_n,), dtype) if layout == "bias" else None
+    packed_bias = marlin_permute_bias(bias) if bias is not None else None
+
+    def run(inputs, output=None):
+        return ops.marlin_gemm(
+            inputs,
+            output,
+            weight,
+            packed_bias,
+            scales,
+            global_scale,
+            None,
+            workspace,
+            scalar_types.float4_e2m1f,
+            size_m,
+            size_n,
+            size_k,
+            use_atomic_add=layout == "atomic",
+            use_fp32_reduce=layout != "bf16_reduce",
+            is_zp_float=False,
+        )
+
+    if layout == "undersized_workspace":
+        with pytest.raises(RuntimeError, match="below min_workspace_size"):
+            run(inputs)
+        return
+
+    reference = torch.matmul(inputs, weight_ref)
+    if bias is not None:
+        reference += bias
+    guarded_output = torch.full(
+        (size_m + 128, size_n), 2048, dtype=dtype, device="cuda"
+    )
+    for _ in range(2):
+        output_view = guarded_output[64 : 64 + size_m]
+        output_view.fill_(float("nan"))
+        output = run(inputs, output_view)
+        assert compute_max_diff(output, reference) < 0.04
+        assert torch.isfinite(output).all()
+        assert (guarded_output[:64] == 2048).all()
+        assert (guarded_output[64 + size_m :] == 2048).all()
+        assert torch.count_nonzero(workspace) == 0
+        if workspace_guard is not None:
+            assert (workspace_guard[workspace.numel() :] == 12345).all()
+
+
 def test_marlin_persistent_locks_cuda_graph_streams(workspace_init):
     """Compiled GEMMs select stream-local locks at runtime and survive replay."""
     size_m, size_k, size_n = 32, 1024, 2048

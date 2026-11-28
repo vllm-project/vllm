@@ -738,6 +738,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
             PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
         endif()
         list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
+        cuda_archs_loose_intersection(MARLIN_GROUPED_NVFP4_ARCHS
+          "12.0+PTX" "${CUDA_ARCHS}")
+        if(MARLIN_GROUPED_NVFP4_ARCHS)
+          set(MARLIN_GROUPED_NVFP4_SRC
+            "csrc/quantization/marlin/grouped_nvfp4_bfloat16.cu")
+          set_gencode_flags_for_srcs(
+            SRCS "${MARLIN_GROUPED_NVFP4_SRC}"
+            CUDA_ARCHS "${MARLIN_GROUPED_NVFP4_ARCHS}")
+          if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+            set_source_files_properties(${MARLIN_GROUPED_NVFP4_SRC}
+              PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+          endif()
+          list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_GROUPED_NVFP4_SRC})
+        endif()
       endif()
 
       if (MARLIN_SM75_ARCHS)
@@ -1348,6 +1362,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
+    if(MARLIN_GROUPED_NVFP4_SRC)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_MARLIN_GROUPED_NVFP4)
+    endif()
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_COOPERATIVE_TOPK=1)

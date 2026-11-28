@@ -48,14 +48,31 @@ module prefix and decoder layer indices before constructing quantized layers.
     time from the backends available on the current platform (CUTLASS,
     FlashInfer, Marlin, and others). On GPUs without a supported native FP4
     GEMM kernel, vLLM falls back to weight-only (W4A16) execution via Marlin
-    and logs a warning; this may reduce throughput for compute-heavy
-    workloads. Use `--linear-backend` to override the automatic selection
+    and logs the selected backend at info level. This may reduce throughput
+    for compute-heavy workloads. Use `--linear-backend` to override the automatic selection
     (this replaces the deprecated `VLLM_NVFP4_GEMM_BACKEND` environment
     variable). Values relevant to NVFP4 include `cutlass`,
     `flashinfer_cutlass`, `flashinfer_cutedsl`, `flashinfer_trtllm`,
     `flashinfer_cudnn`, and `marlin`; see `KernelConfig` on the
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
     `vllm serve --help=KernelConfig`.
+
+    On SM120 and SM121, eligible Mamba2 input and output projections use
+    Marlin for ModelOpt NVFP4 weights with FP16 or BF16 activations. This
+    Mamba2-specific choice takes precedence over `--linear-backend`; attention
+    and MoE layers keep their configured backends. The choice applies to both
+    prefill and decode and uses one Marlin weight representation. LoRA,
+    batch-invariant mode, preprocessed checkpoints and disabled Marlin kernels
+    retain their existing selection.
+
+    On SM121, BF16 Bolt projections also use Marlin launch profiles for
+    prefill and decode. Input prefill groups the aligned bulk of a request
+    separately from its final partial tile group; output profiles retain
+    the ordinary schedule where the grouped schedule does not improve it.
+    These shape-based profiles apply to any matching Marlin call,
+    independently of Mamba2 backend selection. Unsupported layouts,
+    batch-invariant mode and insufficient workspace retain ungrouped Marlin
+    dispatch.
 
 !!! note
     For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,

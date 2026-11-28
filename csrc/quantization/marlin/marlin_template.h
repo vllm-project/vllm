@@ -53,8 +53,9 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
                              // fetch pipeline
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
-          const bool is_zp_float   // is zero point of float16 type?
-          >
+          const bool is_zp_float,  // is zero point of float16 type?
+          const int m_tile_group, const bool group_all_mn_tiles,
+          const bool partial_m_tiles>
 __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
@@ -212,8 +213,9 @@ template <const vllm::ScalarTypeId a_type_id,  // A ScalarType id
                              // fetch pipeline
           const int group_blocks,  // number of consecutive 16x16 blocks
                                    // with a separate quantization scale
-          const bool is_zp_float   // is zero point of float16 type?
-          >
+          const bool is_zp_float,  // is zero point of float16 type?
+          const int m_tile_group, const bool group_all_mn_tiles,
+          const bool partial_m_tiles>
 __global__ void Marlin(
     const int4* __restrict__ A0,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,   // 4bit quantized weight matrix of shape kxn
@@ -320,6 +322,7 @@ __global__ void Marlin(
   static_assert(group_blocks != 0,
                 "runtime activation ordering is not supported");
   constexpr int m_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
+  static_assert(!partial_m_tiles || group_all_mn_tiles);
 
   extern __shared__ int4 sh[];
   constexpr int pack_factor = 32 / b_type.size_bits();
@@ -327,8 +330,11 @@ __global__ void Marlin(
 
   // For larger GEMMs we run multiple batchsize 64 versions in parallel for a
   // better partitioning with less reductions
+  const int total_m = prob_m;
   int parallel = 1;
-  if (prob_m > m_block_size) {
+  if constexpr (partial_m_tiles) {
+    parallel = div_ceil(total_m, m_block_size);
+  } else if (prob_m > m_block_size) {
     parallel = prob_m / m_block_size;
     prob_m = m_block_size;
   }
@@ -372,6 +378,19 @@ __global__ void Marlin(
   int par_id = 0;
   int locks_off = 0;
 
+  // Keep reduction ownership virtual while mapping physical tile addresses.
+  auto set_global_mn_tile = [&](int virtual_tile) {
+    int group = virtual_tile / (m_tile_group * n_tiles);
+    int group_m = min(m_tile_group, parallel - group * m_tile_group);
+    int tile = virtual_tile - group * m_tile_group * n_tiles;
+    par_id = group * m_tile_group + tile % group_m;
+    slice_col = tile / group_m;
+    if constexpr (partial_m_tiles)
+      prob_m = min(m_block_size, total_m - par_id * m_block_size);
+    A = A0 + 16 * thread_m_blocks / 8 * par_id * lda;
+    C = C0 + 16 * thread_m_blocks / 8 * par_id * prob_n;
+  };
+
   if (part2_mn_tiles >= gridDim.x) {
     // when part2_mn_tiles >= sms
     // then there are at most $sms$ conflict tile blocks
@@ -389,6 +408,9 @@ __global__ void Marlin(
     if (slice_iters < 0 || slice_col_par >= part2_mn_tiles) slice_iters = 0;
     if (slice_iters == 0) return;
     if (slice_row + slice_iters > k_tiles) slice_iters = k_tiles - slice_row;
+    if constexpr (group_all_mn_tiles) {
+      set_global_mn_tile(global_mn_tiles - part2_mn_tiles + slice_col_par);
+    }
     slice_count = 1;
     slice_idx = 0;
     int col_first = iters * div_ceil(k_tiles * slice_col_par, iters);
@@ -433,22 +455,41 @@ __global__ void Marlin(
       if (threadIdx.x == 0) locks[locks_off] = 1 - slice_count;
     }
 
-    if (slice_col == n_tiles) {
-      A += 16 * thread_m_blocks * lda / 8;
-      C += 16 * thread_m_blocks * prob_n / 8;
-      slice_col = 0;
-      par_id++;
+    if constexpr (!group_all_mn_tiles) {
+      if (slice_col == n_tiles) {
+        A += 16 * thread_m_blocks * lda / 8;
+        C += 16 * thread_m_blocks * prob_n / 8;
+        slice_col = 0;
+        par_id++;
+      }
     }
   };
 
   auto init_part1_slice = [&]() {
     if (part1_mn_iters) {
       part1_mn_iters--;
-      par_id = slice_col_par / n_tiles;
-      slice_col = slice_col_par % n_tiles;
-      slice_iters = k_tiles;
-      A = A0 + 16 * thread_m_blocks / 8 * par_id * lda;
-      C = C0 + 16 * thread_m_blocks / 8 * par_id * prob_n;
+      if constexpr (group_all_mn_tiles) {
+        set_global_mn_tile(slice_col_par);
+        slice_iters = k_tiles;
+      } else {
+        par_id = slice_col_par / n_tiles;
+        slice_col = slice_col_par % n_tiles;
+        if constexpr (m_tile_group > 1) {
+          // Full-K grouping: https://github.com/vllm-project/vllm/pull/56493.
+          // Leave the Stream-K tail unchanged.
+          int full_m = (global_mn_tiles - part2_mn_tiles) / n_tiles;
+          if (full_m > 1 && slice_col_par < full_m * n_tiles) {
+            int group = slice_col_par / (m_tile_group * n_tiles);
+            int group_m = min(m_tile_group, full_m - group * m_tile_group);
+            int tile = slice_col_par - group * m_tile_group * n_tiles;
+            par_id = group * m_tile_group + tile % group_m;
+            slice_col = tile / group_m;
+          }
+        }
+        slice_iters = k_tiles;
+        A = A0 + 16 * thread_m_blocks / 8 * par_id * lda;
+        C = C0 + 16 * thread_m_blocks / 8 * par_id * prob_n;
+      }
     }
   };
 
@@ -625,9 +666,11 @@ __global__ void Marlin(
   // needed if there are more threads than required for a certain tilesize or
   // when the batchsize is not a multiple of 16.
   bool a_sh_wr_pred[a_sh_wr_iters];
+  if constexpr (!partial_m_tiles) {
   #pragma unroll
-  for (int i = 0; i < a_sh_wr_iters; i++)
-    a_sh_wr_pred[i] = a_sh_wr_delta * i + a_sh_wr < a_sh_stride * prob_m;
+    for (int i = 0; i < a_sh_wr_iters; i++)
+      a_sh_wr_pred[i] = a_sh_wr_delta * i + a_sh_wr < a_sh_stride * prob_m;
+  }
 
   // To ensure that writing and reading A tiles to/from shared memory, the
   // latter in fragment format, is fully bank conflict free, we need to use a
@@ -1125,7 +1168,8 @@ __global__ void Marlin(
                 &sh_red[c_sh_wr + c_sh_wr_delta * i],
                 &C[c_gl_wr + c_gl_wr_delta_o * (i / 2) +
                    c_gl_wr_delta_i * (i % 2)],
-                i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m);
+                (!partial_m_tiles && i < (thread_m_blocks - 1) * 4) ||
+                    8 * (i / 2) + row < prob_m);
           }
         }
         cp_async_fence();
@@ -1134,8 +1178,9 @@ __global__ void Marlin(
 
   #pragma unroll
       for (int i = 0; i < (m_block_size_8 ? 2 : thread_m_blocks * 4); i++) {
-        bool mask = (!m_block_size_8) && (i < (thread_m_blocks - 1) * 4 ||
-                                          8 * (i / 2) + row < prob_m) ||
+        bool mask = (!m_block_size_8) &&
+                        ((!partial_m_tiles && i < (thread_m_blocks - 1) * 4) ||
+                         8 * (i / 2) + row < prob_m) ||
                     (m_block_size_8) && ((threadIdx.x % 4) * 2 + i < prob_m);
         if (mask) {
           if (!first) {
@@ -1346,6 +1391,12 @@ __global__ void Marlin(
 
   // Start global fetch and register load pipelines.
   auto start_pipes = [&]() {
+    if constexpr (partial_m_tiles) {
+      // The physical tile may change between full and partial row extents.
+  #pragma unroll
+      for (int i = 0; i < a_sh_wr_iters; i++)
+        a_sh_wr_pred[i] = a_sh_wr_delta * i + a_sh_wr < a_sh_stride * prob_m;
+    }
 
   #pragma unroll
     for (int i = 0; i < stages - 1; i++) {
@@ -1522,7 +1573,7 @@ __global__ void Marlin(
         slice_col_par += gridDim.x;
       } else {
         slice_col_par++;
-        slice_col++;
+        if constexpr (!group_all_mn_tiles) slice_col++;
       }
       is_first_matmul_in_slice = true;
       init_slice();

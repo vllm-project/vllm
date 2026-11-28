@@ -23,6 +23,7 @@
   #define MARLIN_NAMESPACE_NAME marlin
 #endif
 
+#include "core/utils.hpp"
 #include "kernel.h"
 
 #include <torch/csrc/stable/accelerator.h>
@@ -44,6 +45,10 @@ namespace marlin {
 __global__ void MarlinDefault(MARLIN_KERNEL_PARAMS){};
 
 using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
+
+#ifdef VLLM_MARLIN_GROUPED_NVFP4
+MarlinFuncPtr get_grouped_nvfp4_marlin_kernel(GroupedNvfp4Kernel kernel);
+#endif
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
 
@@ -239,7 +244,7 @@ exec_config_t determine_exec_config(
 
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* b_s, void* g_s, void* zp, int prob_m, int prob_n,
-               int prob_k, int lda, void* workspace,
+               int prob_k, int lda, void* workspace, int64_t workspace_size,
                vllm::ScalarType const& a_type, vllm::ScalarType const& b_type,
                vllm::ScalarType const& c_type, vllm::ScalarType const& s_type,
                bool has_bias, bool has_zp, int num_groups, int group_size,
@@ -290,27 +295,150 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                     "Turing only support FP16 activation.");
   }
 
-  int max_par = 16;
-  if (prob_n <= 4096) max_par = 16 * 8;
-  int max_shared_mem_new = max_shared_mem;
+  // Shape-based profiles apply to any matching Marlin call, independently
+  // of Mamba's backend selection.
+  const bool use_sm121_nvfp4_profile =
+      major_capability == 12 && minor_capability == 1 &&
+      !vllm::vllm_is_batch_invariant() && a_type == vllm::kBFloat16 &&
+      b_type == vllm::kFE2M1f && c_type == vllm::kBFloat16 &&
+      s_type == vllm::kFE4M3fn && lda == prob_k && group_blocks == 1 &&
+      !has_zp && !has_bias && !is_zp_float && !use_atomic_add &&
+      use_fp32_reduce;
+
+  const bool bolt_input = prob_n == 18560 && prob_k == 4096;
+  const bool bolt_output = prob_n == 4096 && prob_k == 8192;
+  #ifdef VLLM_MARLIN_GROUPED_NVFP4
+  if (use_sm121_nvfp4_profile && bolt_output && prob_m >= 97 && prob_m <= 127 &&
+      workspace_size >= sms && max_shared_mem >= 101376) {
+    auto kernel =
+        get_grouped_nvfp4_marlin_kernel(GroupedNvfp4Kernel::M64N256Partial);
+    // Keep two 64-row tiles while masking the final tile to its live rows.
+    constexpr int shared_mem = 101376;
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         shared_mem);
+    // clang-format off
+    kernel<<<sms, 256, shared_mem, stream>>>(
+        A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, b_s_ptr, g_s_ptr, zp_ptr,
+        prob_m, prob_n, prob_k, lda, locks, has_bias, use_atomic_add,
+        use_fp32_reduce, shared_mem);
+    // clang-format on
+    return;
+  }
+  #endif
+  const bool small_input_profile = use_sm121_nvfp4_profile && bolt_input &&
+                                   prob_m <= 8192 && max_shared_mem >= 22528;
+  bool use_input_profile = false;
+  bool use_output_profile = false;
+  bool use_grouped_output = false;
+  #ifdef VLLM_MARLIN_GROUPED_NVFP4
+  const bool grouped_capacity =
+      use_sm121_nvfp4_profile && workspace_size >= 2 * sms && prob_m <= 8192;
+  use_input_profile = grouped_capacity && bolt_input;
+  use_output_profile = grouped_capacity && bolt_output;
+  use_grouped_output =
+      use_output_profile && max_shared_mem >= 87040 && prob_m >= 256;
+  #endif
+  const bool use_output_tail =
+      use_sm121_nvfp4_profile && bolt_output && (prob_m == 96 || prob_m == 160);
+  int max_par = prob_n <= 4096 ? 16 * 8 : 16;
   int rest_m = prob_m;
-  int max_thread_m_blocks = 4;
+  int max_thread_m_blocks = use_output_tail ? 2 : 4;
   while (rest_m) {
-    int par_count = rest_m / (max_thread_m_blocks * 16);
-    if (par_count > max_par) par_count = max_par;
-    int prob_m_split =
-        par_count > 0 ? (par_count * (max_thread_m_blocks * 16)) : rest_m;
+    int max_shared_mem_new = max_shared_mem;
+    int profile_rows = 0;
+    int profile_m_blocks = 4;
+  #ifdef VLLM_MARLIN_GROUPED_NVFP4
+    GroupedNvfp4Kernel profile_kernel = GroupedNvfp4Kernel::M64Whole;
+    constexpr int m_tile_group = 8;
+    // Split a short input tile without adding padded rows.
+    const bool split_single_input_tile =
+        div_ceil(prob_m, 16) == 4 &&
+        div_ceil(2 * (prob_n / 128), 2 * sms) <= m_tile_group;
+    if (use_input_profile && (rest_m > 64 || split_single_input_tile)) {
+      if (rest_m >= m_tile_group * 64) {
+        profile_rows = rest_m / (m_tile_group * 64) * (m_tile_group * 64);
+      } else {
+        profile_rows = rest_m;
+        int tiles32 = div_ceil(profile_rows, 32);
+        int tiles64 = div_ceil(profile_rows, 64);
+        // Use narrower tiles for short inputs or padding savings.
+        bool narrow_tile =
+            split_single_input_tile ||
+            (tiles32 * 32 < tiles64 * 64 &&
+             div_ceil(tiles32 * (prob_n / 128), 2 * sms) <= m_tile_group);
+        if (narrow_tile) profile_m_blocks = 2;
+      }
+    } else if (use_output_profile) {
+      if (div_ceil(prob_m, 32) == 3) {
+        profile_rows = rest_m;
+        profile_m_blocks = 2;
+      } else if (div_ceil(prob_m, 64) == 3) {
+        profile_rows = rest_m;
+      } else if ((prob_m >= 512 && prob_m % 64 == 0) || prob_m >= 2048) {
+        profile_rows = rest_m / 64 * 64;
+      }
+    }
+    if (profile_rows) {
+      // Narrower tiles can avoid padded rows and cross-CTA K reductions.
+      if (bolt_output && profile_m_blocks == 4) {
+        int tiles32 = div_ceil(profile_rows, 32);
+        int tiles64 = div_ceil(profile_rows, 64);
+        int n_tiles = prob_n / 128;
+        if (tiles32 * 32 < tiles64 * 64 &&
+            (tiles32 * n_tiles) % (2 * sms) == 0 &&
+            (tiles64 * n_tiles) % (2 * sms) != 0) {
+          profile_m_blocks = 2;
+        }
+      }
+      int tile_m = profile_m_blocks * 16;
+      int profile_stages = profile_m_blocks == 2 ? 4 : 3;
+      if (is_valid_config({64, 128, 128}, profile_m_blocks, profile_rows,
+                          prob_n, prob_k, num_bits, group_size, has_zp,
+                          is_zp_float, profile_stages,
+                          max_shared_mem / 2 - 1024)) {
+        bool partial = profile_rows > tile_m && profile_rows % tile_m != 0;
+        if (profile_m_blocks == 2) {
+          profile_kernel = partial ? GroupedNvfp4Kernel::M32Partial
+                                   : GroupedNvfp4Kernel::M32Whole;
+        } else if (partial) {
+          profile_kernel = GroupedNvfp4Kernel::M64Partial;
+        } else if (bolt_input && profile_rows >= 4096) {
+          profile_kernel = GroupedNvfp4Kernel::M64WholeG16;
+        }
+      } else {
+        profile_rows = 0;
+      }
+    }
+  #endif
+    int prob_m_split = profile_rows;
+    if (prob_m_split == 0) {
+      int par_count = min(rest_m / (max_thread_m_blocks * 16), max_par);
+      prob_m_split =
+          par_count > 0 ? par_count * (max_thread_m_blocks * 16) : rest_m;
+    }
 
     int thread_k = thread_k_init;
     int thread_n = thread_n_init;
 
-    int thread_m_blocks = min(div_ceil(prob_m_split, 16), max_thread_m_blocks);
+    int thread_m_blocks =
+        profile_rows ? profile_m_blocks
+                     : min(div_ceil(prob_m_split, 16), max_thread_m_blocks);
     int m_block_size_8 = prob_m_split <= 8;
+    const bool small_input_part = small_input_profile && prob_m_split <= 8;
+    const bool grouped_m32_part = profile_rows && profile_m_blocks == 2;
+    const bool grouped_m64_part =
+        (profile_rows && profile_m_blocks == 4) ||
+        (use_grouped_output && prob_m_split >= 64 && prob_m_split % 64 == 0);
+    const bool grouped_part = grouped_m32_part || grouped_m64_part;
+    const int part_stages = grouped_m64_part ? 3 : stages;
 
     // Set thread config
     exec_config_t exec_cfg;
     thread_config_t thread_tfg;
-    if (thread_k != -1 && thread_n != -1) {
+    if (grouped_part || small_input_part) {
+      thread_tfg = {64, 128, 128};
+      exec_cfg = {grouped_part ? 2 : 1, thread_tfg};
+    } else if (thread_k != -1 && thread_n != -1) {
       thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
       exec_cfg = exec_config_t{1, thread_tfg};
       STD_TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
@@ -356,7 +484,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     STD_TORCH_CHECK(
         is_valid_config(thread_tfg, thread_m_blocks, prob_m_split, prob_n,
                         prob_k, num_bits, group_size, has_zp, is_zp_float,
-                        stages, max_shared_mem_new),
+                        part_stages, max_shared_mem_new),
         "Invalid thread config: thread_m_blocks = ", thread_m_blocks,
         ", thread_k = ", thread_tfg.thread_k,
         ", thread_n = ", thread_tfg.thread_n,
@@ -364,14 +492,49 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         ", ", prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
         ", prob_m_split = ", prob_m_split, ", group_size = ", group_size,
         ", has_zp = ", has_zp, ", is_zp_float = ", is_zp_float,
-        ", stages = ", stages, ", max_shared_mem_new = ", max_shared_mem_new);
+        ", stages = ", part_stages,
+        ", max_shared_mem_new = ", max_shared_mem_new);
 
-    auto kernel = get_marlin_kernel(
-        a_type, b_type, c_type, s_type, thread_m_blocks, thread_n_blocks,
-        thread_k_blocks, m_block_size_8, has_zp, group_blocks, num_threads,
-        is_zp_float, stages);
+    auto kernel = MarlinDefault;
+  #ifdef VLLM_MARLIN_GROUPED_NVFP4
+    if (grouped_part) {
+      kernel = get_grouped_nvfp4_marlin_kernel(
+          profile_rows ? profile_kernel : GroupedNvfp4Kernel::M64Prefix);
+      // The generic validator pads M and scale bytes beyond these NVFP4
+      // kernels' actual launch allocations.
+      max_shared_mem_new = grouped_m32_part ? 34816 : 43520;
+      if (grouped_m32_part && bolt_input) {
+        // Whole-K tiles per CTA avoid cross-CTA reductions at this shape.
+        int mn_tiles =
+            div_ceil(prob_m_split, 16 * thread_m_blocks) * (prob_n / thread_n);
+        int tiles_per_cta = div_ceil(mn_tiles, blocks);
+        if (mn_tiles % tiles_per_cta == 0) blocks = mn_tiles / tiles_per_cta;
+      }
+    } else
+  #endif
+    {
+      kernel = get_marlin_kernel(
+          a_type, b_type, c_type, s_type, thread_m_blocks, thread_n_blocks,
+          thread_k_blocks, m_block_size_8, has_zp, group_blocks, num_threads,
+          is_zp_float, stages);
+    }
 
-    if (kernel == MarlinDefault) {
+    const bool tuned_output =
+        use_sm121_nvfp4_profile && prob_m <= 8 && prob_m_split == prob_m &&
+        prob_n == 4096 && prob_k == 8192 && thread_m_blocks == 1 &&
+        thread_n_blocks == 8 && thread_k_blocks == 8 && num_threads == 256 &&
+        stages == 4 && m_block_size_8 && max_shared_mem >= 45056;
+    if (small_input_part) {
+      // Each CTA owns a complete K reduction, so locks and temporary storage
+      // are unused even though this grid is larger than the SM count.
+      blocks = prob_n / thread_n;
+      max_shared_mem_new = 22528;
+    } else if (tuned_output) {
+      blocks = prob_n / thread_n;
+      max_shared_mem_new = 45056;
+    }
+
+    if (kernel == nullptr || kernel == MarlinDefault) {
       STD_TORCH_CHECK(
           false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n, ", ",
           prob_k, "]", ", num_groups = ", num_groups,
@@ -383,7 +546,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     }
 
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         max_shared_mem_new);
+                         (small_input_part || tuned_output)
+                             ? max_shared_mem
+                             : max_shared_mem_new);
 
     bool part_use_atomic_add =
         use_atomic_add && div_ceil(prob_m_split, 64) * prob_n <= 2048;
@@ -657,8 +822,8 @@ torch::stable::Tensor marlin_gemm(
       c_tmp.mutable_data_ptr(), b_bias.mutable_data_ptr(),
       b_scales.mutable_data_ptr(), global_scale.mutable_data_ptr(),
       b_zeros.mutable_data_ptr(), size_m, size_n, size_k, a.stride(0),
-      workspace.mutable_data_ptr(), a_type, b_type, c_type, s_type, has_bias,
-      has_zp, num_groups, group_size, device_index,
+      workspace.mutable_data_ptr(), workspace.numel(), a_type, b_type, c_type,
+      s_type, has_bias, has_zp, num_groups, group_size, device_index,
       get_current_cuda_stream(device_index), thread_k, thread_n, sms,
       use_atomic_add, use_fp32_reduce, is_zp_float);
 

@@ -532,6 +532,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
 
         vllm_config = get_current_vllm_config()
+        from vllm.model_executor.layers.mamba.ops.marlin import (
+            select_mamba_marlin_kernels,
+        )
+
+        select_mamba_marlin_kernels(self, vllm_config)
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")

@@ -16,6 +16,104 @@ from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
 
+@pytest.mark.parametrize("disable_marlin", [False, True])
+def test_mamba_nvfp4_backend_selection(
+    tmp_path, dist_init, monkeypatch, disable_marlin
+):
+    """Mamba changes its projection backends without changing unrelated linears."""
+    from transformers import NemotronHConfig
+
+    from vllm.config import (
+        CacheConfig,
+        KernelConfig,
+        ModelConfig,
+        SchedulerConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.model_executor.kernels.linear.nvfp4.b12x import (
+        B12xNvFp4W4A16LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.nvfp4.marlin import MarlinNvFp4LinearKernel
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptLinearMethod,
+        ModelOptNvFp4Config,
+    )
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.to_int() not in (120, 121):
+        pytest.skip("requires SM120 or SM121")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    if disable_marlin:
+        monkeypatch.setenv("VLLM_DISABLED_KERNELS", "MarlinNvFp4LinearKernel")
+    else:
+        monkeypatch.delenv("VLLM_DISABLED_KERNELS", raising=False)
+    NemotronHConfig(
+        architectures=["NemotronHForCausalLM"],
+        layers_block_type=["linear_attention"],
+        vocab_size=128,
+        max_position_embeddings=1024,
+    ).save_pretrained(tmp_path)
+    model = ModelConfig(
+        model=str(tmp_path),
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        max_model_len=1024,
+    )
+    cache = CacheConfig(mamba_cache_dtype="bfloat16", mamba_ssm_cache_dtype="float16")
+    config = VllmConfig(
+        model_config=model,
+        cache_config=cache,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1, max_model_len=1024, is_encoder_decoder=False
+        ),
+        kernel_config=KernelConfig(linear_backend="b12x", moe_backend="b12x"),
+    )
+    quant = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4", is_checkpoint_nvfp4_serialized=True
+    )
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("meta"),
+    ):
+        layer = MambaMixer2(
+            hidden_size=4096,
+            ssm_state_size=128,
+            conv_kernel_size=4,
+            intermediate_size=8192,
+            use_conv_bias=True,
+            use_bias=False,
+            n_groups=8,
+            model_config=model,
+            cache_config=cache,
+            quant_config=quant,
+            prefix="model.layers.0.mixer",
+        )
+        attention = MergedColumnParallelLinear(
+            input_size=4096,
+            output_sizes=[4096],
+            params_dtype=torch.bfloat16,
+            quant_config=quant,
+            prefix="model.layers.1.attention.q_proj",
+        )
+    expected = B12xNvFp4W4A16LinearKernel if disable_marlin else MarlinNvFp4LinearKernel
+    for projection, kernel_type in (
+        (layer.in_proj, expected),
+        (layer.out_proj, expected),
+        (attention, B12xNvFp4W4A16LinearKernel),
+    ):
+        method = projection.quant_method
+        assert isinstance(method, ModelOptLinearMethod)
+        assert type(method.kernel) is kernel_type
+    assert config.kernel_config.linear_backend == "b12x"
+    assert config.kernel_config.moe_backend == "b12x"
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [128])

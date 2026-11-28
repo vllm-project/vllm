@@ -32,10 +32,23 @@ template <const vllm::ScalarTypeId a_type_id,  // A ScalarType id
                                       // only works when thread_m_blocks == 1
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
-          const int group_blocks,  // number of consecutive 16x16 blocks
-                                   // with a separate quantization scale
-          const bool is_zp_float   // is zero point of float16 type?
+          const int group_blocks,      // number of consecutive 16x16 blocks
+                                       // with a separate quantization scale
+          const bool is_zp_float,      // is zero point of float16 type?
+          const int m_tile_group = 1,  // M tiles grouped for weight reuse
+          const bool group_all_mn_tiles = false,  // include the Stream-K tail
+          const bool partial_m_tiles = false  // mask a partial physical M tile
           >
 __global__ void Marlin(MARLIN_KERNEL_PARAMS);
 
-}
+enum class GroupedNvfp4Kernel {
+  M32Whole,
+  M32Partial,
+  M64Prefix,
+  M64Whole,
+  M64Partial,
+  M64WholeG16,
+  M64N256Partial,
+};
+
+}  // namespace MARLIN_NAMESPACE_NAME
