@@ -1084,6 +1084,14 @@ def qsa_sparse_paged_attention(
         # tl.dot with fewer than 16 rows is slow on CDNA3/4; pad the head group.
         block_m = max(block_m, 16)
     small_profile_limit = 8 if block_m <= 8 else 4
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx11
+
+        # gfx11 WMMA needs M >= 16; with a smaller BLOCK_M Triton lowers these
+        # tl.dot calls to FMA instead, which is much slower. Heads past
+        # GROUP_SIZE are masked on load and store, so padding is safe.
+        if on_gfx11():
+            block_m = max(block_m, 16)
 
     if cdna_bf16 and base_programs >= 32:
         # Narrow tiles, one warp, and enough splits for about 2048 programs.
