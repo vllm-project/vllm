@@ -181,3 +181,62 @@ def test_fused_gated_rms_norm_fp8_matches_chain(
     dist = (codes(q) - codes(ref_q)).abs()
     assert dist.max().item() <= 1
     assert (dist > 0).float().mean().item() <= 1e-4
+
+
+@pytest.mark.parametrize("num_heads", [48, 32, 24, 12])
+@pytest.mark.parametrize("num_tokens", [0, 1, 37, 300])
+@pytest.mark.parametrize("norm_before_gate", [True, False])
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="dynamic per-token FP8 (e4m3fn) output requires NVIDIA SM89+",
+)
+@torch.inference_mode()
+def test_fused_gated_rms_norm_dynamic_fp8_matches_chain(
+    num_tokens: int, num_heads: int, norm_before_gate: bool
+) -> None:
+    """The dynamic per-token FP8 output (fused out_proj input quant) matches
+    the bf16 kernel followed by dynamic per-token scaled_fp8_quant."""
+    from vllm import _custom_ops as ops
+    from vllm.models.qwen3_5.common.fused_gdn_gated_norm import (
+        fused_gdn_gated_rms_norm,
+    )
+
+    g = torch.Generator(device="cuda").manual_seed(num_tokens + num_heads)
+    dtype = torch.bfloat16
+    head_dim = 128
+    qkvz_row = 2 * max(num_heads // 3, 1) * 128 + 2 * num_heads * head_dim
+    qkvz = torch.randn(num_tokens, qkvz_row, generator=g, dtype=dtype, device="cuda")
+    z_view = qkvz[:, qkvz_row - num_heads * head_dim :]
+    x = torch.randn(
+        num_tokens, num_heads * head_dim, generator=g, dtype=dtype, device="cuda"
+    )
+    if num_tokens >= 2:
+        x[0].zero_()
+    weight = (torch.rand(head_dim, generator=g, device="cuda") + 0.5).to(dtype)
+    kwargs = dict(
+        z=z_view,
+        weight=weight,
+        eps=1e-6,
+        num_v_heads=num_heads,
+        head_v_dim=head_dim,
+        norm_before_gate=norm_before_gate,
+        activation="silu",
+    )
+
+    q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+    s = torch.empty((num_tokens, 1), dtype=torch.float32, device="cuda")
+    fused_gdn_gated_rms_norm(x=x, out=q, out_scale=s, **kwargs)
+
+    if num_tokens > 0:
+        ref = torch.empty_like(x)
+        fused_gdn_gated_rms_norm(x=x, out=ref, **kwargs)
+        ref_q, ref_s = ops.scaled_fp8_quant(ref, use_per_token_if_dynamic=True)
+        torch.testing.assert_close(s, ref_s, atol=1e-6, rtol=1e-5)
+
+        def codes(t: torch.Tensor) -> torch.Tensor:
+            b = t.view(torch.uint8).int()
+            return torch.where(b >= 128, -(b & 0x7F), b)
+
+        dist = (codes(q) - codes(ref_q)).abs()
+        assert dist.max().item() <= 1
+        assert (dist > 0).float().mean().item() <= 1e-4

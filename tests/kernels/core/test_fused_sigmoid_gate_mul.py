@@ -138,3 +138,71 @@ def test_fused_sigmoid_gate_mul_fp8_strided_gate_falls_back():
 
     assert q.dtype == torch.float8_e4m3fn
     assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
+
+
+@requires_cuda
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="FP8 (e4m3fn) output requires NVIDIA SM89+",
+)
+@pytest.mark.parametrize(
+    "shape", [(0, 6144), (1, 6144), (37, 6144), (5, 3072), (300, 4096), (4, 10240)]
+)
+@torch.inference_mode()
+def test_fused_sigmoid_gate_mul_dynamic_fp8_matches_chain(shape: tuple[int, int]):
+    """The dynamic per-token FP8 output matches the bf16 kernel followed by
+    dynamic per-token scaled_fp8_quant (both fused <=8192 and fallback >8192)."""
+    from vllm import _custom_ops as ops
+    from vllm.kernels.triton.fused_sigmoid_gate_mul import (
+        fused_sigmoid_gate_mul_dynamic_fp8,
+    )
+
+    g = torch.Generator(device="cuda").manual_seed(shape[0] + shape[1])
+    x = torch.randn(shape, generator=g, dtype=torch.bfloat16, device="cuda") * 8
+    gate = torch.randn(shape, generator=g, dtype=torch.bfloat16, device="cuda") * 4
+    if shape[0] >= 2:
+        # Exercise the zero-row min_scaling_factor clamp path.
+        x[0].zero_()
+
+    q, s = fused_sigmoid_gate_mul_dynamic_fp8(x, gate)
+
+    assert q.dtype == torch.float8_e4m3fn
+    assert q.shape == shape
+    assert s.dtype == torch.float32
+    assert s.shape == (shape[0], 1)
+    if shape[0] > 0:
+        ref_q, ref_s = ops.scaled_fp8_quant(
+            fused_sigmoid_gate_mul(x, gate), use_per_token_if_dynamic=True
+        )
+        torch.testing.assert_close(s, ref_s, atol=1e-6, rtol=1e-5)
+        dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
+        assert dist.max().item() <= 1
+        assert (dist > 0).float().mean().item() <= 1e-4
+
+
+@requires_cuda
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="FP8 (e4m3fn) output requires NVIDIA SM89+",
+)
+@torch.inference_mode()
+def test_fused_sigmoid_gate_mul_dynamic_fp8_strided_gate_falls_back():
+    """A strided gate view falls back to eager + dynamic per-token FP8 quant."""
+    from vllm import _custom_ops as ops
+    from vllm.kernels.triton.fused_sigmoid_gate_mul import (
+        fused_sigmoid_gate_mul_dynamic_fp8,
+    )
+
+    x = torch.randn(5, 128, dtype=torch.bfloat16, device="cuda")
+    packed = torch.randn(5, 256, dtype=torch.bfloat16, device="cuda")
+    gate = packed[:, :128].view(5, 1, 128).reshape(5, 128)
+    assert not gate.is_contiguous()
+
+    ref_q, ref_s = ops.scaled_fp8_quant(
+        x * torch.sigmoid(gate), use_per_token_if_dynamic=True
+    )
+    q, s = fused_sigmoid_gate_mul_dynamic_fp8(x, gate)
+
+    assert q.dtype == torch.float8_e4m3fn
+    assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(s, ref_s)
