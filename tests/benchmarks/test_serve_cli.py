@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
+import aiohttp
 import pytest
 import requests
 import urllib3
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from prometheus_client.parser import text_string_to_metric_families
 
 from ..utils import RemoteOpenAIServer
@@ -74,6 +78,14 @@ class RemoteOpenAIServerSSL(RemoteOpenAIServer):
 @pytest.fixture(scope="function")
 def server():
     args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "dummy"]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="function")
+def real_weight_server():
+    args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "auto"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -225,3 +237,42 @@ def test_bench_serve_chat(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+@pytest.mark.benchmark
+@pytest.mark.asyncio
+async def test_multi_turn_non_streaming_json(real_weight_server, monkeypatch):
+    script_dir = Path(__file__).resolve().parents[2] / "benchmarks" / "multi_turn"
+    monkeypatch.syspath_prepend(str(script_dir))
+    from benchmark_serving_multi_turn import send_request
+
+    expected = []
+    async with aiohttp.ClientSession() as session:
+
+        async def pretty_completion(request):
+            async with session.post(
+                f"{real_weight_server.url_root}/v1/chat/completions",
+                json=await request.json(),
+            ) as upstream:
+                upstream.raise_for_status()
+                data = await upstream.json()
+            expected.append(data["choices"][0]["message"]["content"])
+            return web.Response(
+                text=json.dumps(data, indent=2), content_type="application/json"
+            )
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", pretty_completion)
+        async with TestServer(app) as proxy:
+            result = await send_request(
+                session,
+                [{"role": "user", "content": "Hello"}],
+                str(proxy.make_url("/v1/chat/completions")),
+                MODEL_NAME,
+                stream=False,
+                max_tokens=1,
+            )
+
+    assert result.valid
+    assert [result.content] == expected
+    assert result.ttft_ms == result.latency_ms
