@@ -985,7 +985,10 @@ def test_kv_cache_scale_sync_to_host_copies():
     checkpoint-load and runtime-calc paths that produce them.
     """
     layer = torch.nn.Module()
-    set_default_quant_scales(layer, register_buffer=True)
+    with torch.device(current_platform.device_type):
+        set_default_quant_scales(layer, register_buffer=True)
+    assert layer._k_scale_cpu.device.type == "cpu"
+    assert layer._v_scale_cpu.device.type == "cpu"
     layer.kv_cache_dtype = "fp8"
 
     method = BaseKVCacheMethod(quant_config=None)
