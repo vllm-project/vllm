@@ -560,7 +560,8 @@ def test_cpu_watermark_sampler_uses_cpu_sampler_pipeline(
     algorithm: str,
     watermarking: bool,
 ) -> None:
-    req_states = _make_req_states([1])
+    # One generated token, so the width-1 context is complete and watermarked.
+    req_states = _make_req_states([1, 3])
     req_idx = req_states.req_id_to_index["req"]
     watermarker = (
         GumbelWatermarker(key=42, context_width=1)
@@ -618,6 +619,117 @@ def test_cpu_watermark_sampler_uses_cpu_sampler_pipeline(
     else:
         assert torch.equal(sampled, expected)
         torch.testing.assert_close(output_logits, expected_logits)
+
+
+@pytest.mark.parametrize("deduplicate_contexts", ["none", "single_turn", "all"])
+def test_cpu_watermark_sampler_skips_incomplete_opening_contexts(
+    deduplicate_contexts: str,
+) -> None:
+    # Prompt [9] and one generated token: a width-2 context is still incomplete.
+    req_states = _make_req_states([9, 1], prompt_len=1)
+    req_idx = req_states.req_id_to_index["req"]
+    sampler = CPUWatermarkSampler(
+        GumbelWatermarker(key=42, context_width=2),
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+        deduplicate_contexts=deduplicate_contexts,
+    )
+    ordinary = CPUSampler(
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+    )
+    idx_mapping = torch.tensor([req_idx], dtype=torch.int64)
+    assert sampler._get_contexts(idx_mapping).tolist() == [[-1, 1]]
+
+    logits = torch.linspace(-1, 1, VOCAB_SIZE).unsqueeze(0)
+    sample_args = (
+        logits,
+        idx_mapping,
+        idx_mapping,
+        idx_mapping.numpy(),
+        torch.tensor([2], dtype=torch.int64),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        np.full(1, 2, dtype=np.int64),
+    )
+    sampled_by_seed = set()
+    for seed in range(16):
+        params = SamplingParams(temperature=1.0, seed=seed, watermarking=True)
+        sampler.add_request(req_idx, params)
+        ordinary.add_request(req_idx, params)
+        sampled, output_logits = sampler.sample(*sample_args)
+        expected, expected_logits = ordinary.sample(*sample_args)
+
+        assert torch.equal(sampled, expected)
+        torch.testing.assert_close(output_logits, expected_logits)
+        sampled_by_seed.add(sampled.item())
+
+    # A key-only context would give every seed the same token.
+    assert len(sampled_by_seed) > 1
+
+
+def test_cpu_watermark_sampler_skips_only_incomplete_rows() -> None:
+    req_states = CPURequestState(
+        max_num_reqs=4,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+    )
+    # Width-2 contexts: [-1, 1] is incomplete, [1, 2] is complete.
+    req_states.add_request("partial", 1, [9, 1], 2, 16)
+    req_states.add_request("complete", 1, [9, 1, 2], 3, 16)
+    req_indices = [req_states.req_id_to_index[r] for r in ("partial", "complete")]
+    params = SamplingParams(temperature=1.0, seed=7, watermarking=True)
+
+    sampler = CPUWatermarkSampler(
+        GumbelWatermarker(key=42, context_width=2),
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+        deduplicate_contexts="none",
+    )
+    ordinary = CPUSampler(
+        vllm_config=VllmConfig(),
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=torch.device("cpu"),
+        req_states=req_states,
+    )
+    for req_idx in req_indices:
+        sampler.add_request(req_idx, params)
+        ordinary.add_request(req_idx, params)
+
+    def sample_args(rows: list[int], pos: list[int]) -> tuple:
+        idx_mapping = torch.tensor([req_indices[r] for r in rows], dtype=torch.int64)
+        return (
+            torch.linspace(-1, 1, VOCAB_SIZE).repeat(len(rows), 1),
+            idx_mapping,
+            idx_mapping,
+            idx_mapping.numpy(),
+            torch.tensor(pos, dtype=torch.int64),
+            torch.ones(len(rows), dtype=torch.int32),
+            torch.zeros(len(rows), dtype=torch.int32),
+            np.array(pos, dtype=np.int64),
+        )
+
+    batch, _ = sampler.sample(*sample_args([0, 1], [2, 3]))
+    ordinary_batch, _ = ordinary.sample(*sample_args([0, 1], [2, 3]))
+    complete_alone, _ = sampler.sample(*sample_args([1], [3]))
+
+    assert sampler._get_contexts(
+        torch.tensor(req_indices, dtype=torch.int64)
+    ).tolist() == [[-1, 1], [1, 2]]
+    assert batch[0] == ordinary_batch[0]
+    assert batch[1] == complete_alone[0]
 
 
 def test_cpu_watermark_sampler_handles_mixed_rows() -> None:
