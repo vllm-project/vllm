@@ -10,7 +10,12 @@ import importlib
 import pytest
 import torch
 
+from tests.kernels.quant_utils import native_w8a8_block_matmul
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    w8a8_triton_block_scaled_mm,
+)
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
 
 device = current_platform.device_type
@@ -121,6 +126,62 @@ def test_scaled_mm(
     c_actual = torch_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.supports_fp8(),
+    reason="Block FP8 Triton requires CUDA with FP8 support.",
+)
+@pytest.mark.parametrize("M", [1, 8, 16, 17, 20, 21, 32, 33])
+@pytest.mark.parametrize(
+    "N,K",
+    [(14336, 5120), (16384, 5120), (34816, 5120), (5120, 17408), (5120, 6144)],
+)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16])
+@pytest.mark.parametrize("seed", [0])
+def test_w8a8_triton_block_scaled_mm(M, N, K, out_dtype, seed):
+    """Check block-FP8 shapes at the low-M configuration boundary."""
+    set_random_seed(seed)
+    fp8_dtype = current_platform.fp8_dtype()
+    fp8_info = torch.finfo(fp8_dtype)
+    a = (
+        (
+            (torch.rand((M, K), dtype=torch.float32, device=device) - 0.5)
+            * 2
+            * fp8_info.max
+        )
+        .clamp(min=fp8_info.min, max=fp8_info.max)
+        .to(fp8_dtype)
+    )
+    b = (
+        (
+            (torch.rand((N, K), dtype=torch.float32, device=device) - 0.5)
+            * 2
+            * fp8_info.max
+        )
+        .clamp(min=fp8_info.min, max=fp8_info.max)
+        .to(fp8_dtype)
+    )
+    block_size = [128, 128]
+    a_scales = (
+        torch.rand((M, cdiv(K, block_size[1])), dtype=torch.float32, device=device)
+        * 1e-2
+    )
+    b_scales = (
+        torch.rand(
+            (cdiv(N, block_size[0]), cdiv(K, block_size[1])),
+            dtype=torch.float32,
+            device=device,
+        )
+        * 1e-2
+    )
+
+    ref = native_w8a8_block_matmul(a, b, a_scales, b_scales, block_size, out_dtype)
+    out = w8a8_triton_block_scaled_mm(a, b, a_scales, b_scales, block_size, out_dtype)
+    assert torch.isfinite(ref).all()
+    assert torch.isfinite(out).all()
+    rel_diff = (out.float() - ref.float()).abs().mean() / ref.float().abs().mean()
+    assert rel_diff < 0.001
 
 
 @pytest.mark.parametrize("in_dtype", get_8bit_types())
