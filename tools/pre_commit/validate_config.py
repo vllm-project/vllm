@@ -47,22 +47,44 @@ def get_attr_docs(cls_node: ast.ClassDef) -> dict[str, str]:
     return out
 
 
+def _name(node: ast.expr) -> str | None:
+    """Return the trailing name of `Name` or (qualified) `Attribute` nodes."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _subscript_name(node: ast.expr) -> str | None:
+    return _name(node.value) if isinstance(node, ast.Subscript) else None
+
+
+def _union_members(annotation: ast.expr) -> list[ast.expr]:
+    """Return the flattened members of `Union[...]`, `Optional[...]` or PEP 604
+    `A | B` annotations, recursing so nested unions are fully flattened."""
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _union_members(annotation.left) + _union_members(annotation.right)
+    if _subscript_name(annotation) in {"Union", "Optional"}:
+        members = annotation.slice
+        elts = members.elts if isinstance(members, ast.Tuple) else [members]
+        return [m for elt in elts for m in _union_members(elt)]
+    return [annotation]
+
+
 class ConfigValidator(ast.NodeVisitor):
     def __init__(self): ...
 
     def visit_ClassDef(self, node):
         # Validate classes with a @config decorator
-        decorators = set()
-        for decorator in node.decorator_list:
-            if isinstance(decorator, ast.Call):
-                decorator = decorator.func
-            if isinstance(decorator, ast.Name) and decorator.id == "config":
-                decorators.add(decorator.id)
+        decorators = [
+            _name(d.func if isinstance(d, ast.Call) else d) for d in node.decorator_list
+        ]
 
-        if decorators == {"config"}:
+        if "config" in decorators:
+            if len(decorators) > 1:
+                fail(f"config decorator for {node.name} should be used alone", node)
             validate_class(node)
-        elif "config" in decorators:
-            fail(f"config decorator for {node.name} should be used alone", node)
 
         self.generic_visit(node)
 
@@ -76,11 +98,7 @@ def validate_class(class_node: ast.ClassDef):
             # Skip ClassVar and InitVar
             # see https://docs.python.org/3/library/dataclasses.html#class-variables
             # and https://docs.python.org/3/library/dataclasses.html#init-only-variables
-            if (
-                isinstance(stmt.annotation, ast.Subscript)
-                and isinstance(stmt.annotation.value, ast.Name)
-                and stmt.annotation.value.id in {"ClassVar", "InitVar"}
-            ):
+            if _subscript_name(stmt.annotation) in {"ClassVar", "InitVar"}:
                 continue
 
             if isinstance(stmt.target, ast.Name):
@@ -99,29 +117,20 @@ def validate_class(class_node: ast.ClassDef):
                         stmt,
                     )
 
-                if (
-                    isinstance(stmt.annotation, ast.Subscript)
-                    and isinstance(stmt.annotation.value, ast.Name)
-                    and stmt.annotation.value.id == "Union"
-                    and isinstance(stmt.annotation.slice, ast.Tuple)
-                ):
-                    args = stmt.annotation.slice.elts
-                    literal_args = [
-                        arg
-                        for arg in args
-                        if isinstance(arg, ast.Subscript)
-                        and isinstance(arg.value, ast.Name)
-                        and arg.value.id == "Literal"
-                    ]
-                    if len(literal_args) > 1:
-                        fail(
-                            f"Field '{field_name}' in {class_node.name} must "
-                            "use a single "
-                            "Literal type. Please use 'Literal[Literal1, "
-                            "Literal2]' instead of 'Union[Literal1, Literal2]'"
-                            ".",
-                            stmt,
-                        )
+                literal_args = [
+                    arg
+                    for arg in _union_members(stmt.annotation)
+                    if _subscript_name(arg) == "Literal"
+                ]
+                if len(literal_args) > 1:
+                    fail(
+                        f"Field '{field_name}' in {class_node.name} must "
+                        "use a single "
+                        "Literal type. Please use 'Literal[Literal1, "
+                        "Literal2]' instead of 'Union[Literal1, Literal2]'"
+                        ".",
+                        stmt,
+                    )
 
 
 def validate_ast(tree: ast.stmt):
@@ -154,7 +163,7 @@ def main():
             continue
         # Only run if the file contains @config
         with open(filename, encoding="utf-8") as f:
-            if "@config" in f.read():
+            if re.search(r"@(?:\w+\.)*config\b", f.read()):
                 validate_file(filename)
 
 
