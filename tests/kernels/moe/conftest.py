@@ -24,7 +24,6 @@ NEEDS_CLEAN_ENTRY = frozenset(
         "test_deepgemm.py",
         "test_grouped_topk.py",
         "test_mxfp4_moe.py",
-        "test_shared_fused_moe_routed_transform.py",
         "test_silu_mul_per_token_group_quant_fp8_colmajor.py",
         "test_situ_mul_fp8_quant.py",
     }
@@ -55,6 +54,21 @@ def should_do_global_cleanup_after_test() -> bool:
 
 
 _last_path = None
+# Whether the last test skipped from its body, leaving the state as it found it.
+_skipped_itself = False
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport():
+    global _skipped_itself
+    report = yield
+    if report.when == "call":
+        # An xfailed test also reports as skipped, but its body ran.
+        _skipped_itself = report.skipped and not hasattr(report, "wasxfail")
+    elif not report.passed:
+        # Fixtures may have changed state before a skip or failure outside the body.
+        _skipped_itself = False
+    return report
 
 
 def pytest_runtest_setup(item):
@@ -68,7 +82,7 @@ def pytest_runtest_setup(item):
     _last_path = item.path
     if (
         new_file
-        or item.path.name in NEEDS_CLEAN_ENTRY
+        or (item.path.name in NEEDS_CLEAN_ENTRY and not _skipped_itself)
         or "dist_init" in item.fixturenames
         or getattr(item.obj, "_uses_single_rank_groups", False)
     ):

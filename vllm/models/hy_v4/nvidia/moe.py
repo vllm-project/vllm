@@ -140,10 +140,8 @@ class HYV4MoEFused(nn.Module):
         raw_swiglu_limit = getattr(config, "swiglu_limit", 0)
         use_swiglu_clamp = bool(raw_swiglu_limit) and float(raw_swiglu_limit) > 0
         moe_swiglu_limit = float(raw_swiglu_limit) if use_swiglu_clamp else None
-        if routed_input_transform is not None:
-            self.routed_expert_down_proj = routed_input_transform
-        if routed_output_transform is not None:
-            self.routed_expert_up_proj = routed_output_transform
+        self.routed_expert_down_proj = routed_input_transform
+        self.routed_expert_up_proj = routed_output_transform
 
         self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,

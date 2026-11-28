@@ -238,6 +238,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_block_zeroer: KVBlockZeroer | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
+        masked = self.model_config.masked_token_ids
+        self.masked_token_ids = (
+            torch.tensor(masked, dtype=torch.int64, device=self.device)
+            if masked
+            else None
+        )
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
@@ -1759,6 +1765,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model_state.compute_sample_logits(sample_hidden_states)
 
+        if self.masked_token_ids is not None:
+            logits.index_fill_(-1, self.masked_token_ids, float("-inf"))
+
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
         if grammar_output is not None and logits.shape[0] > 0:
@@ -2543,6 +2552,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.eplb_state is not None:
+            self.eplb_state.stop_async_loop()
         torch.accelerator.synchronize()
         if current_platform.is_rocm():
             # RCCL's ncclCommAbort waits for live graphs that captured the comm:
