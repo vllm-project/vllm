@@ -48,17 +48,18 @@ pub(super) struct QuestionRead {
     pub output_tokens: usize,
     pub cached_tokens: usize,
     pub cache_write_tokens: usize,
+    /// Whether the greedy reply's first token is one of the labels.
+    pub argmax_is_label: bool,
 }
 
 /// Per-request settings shared by a decision's reads.
+#[derive(Default)]
 pub(super) struct ReadOptions {
     pub request_id: String,
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
     pub lora_request: Option<LoraRequest>,
     pub priority: i32,
     pub cache_salt: Option<String>,
-    pub data_parallel_rank: Option<u32>,
-    pub session_id: Option<String>,
 }
 
 impl NextTokenReads {
@@ -70,7 +71,7 @@ impl NextTokenReads {
             "decisions-probe".to_owned(),
             vec![ChatMessage::text(ChatRole::User, "x")],
             thinking_off(None),
-            &ReadOptions::probe(),
+            &ReadOptions::default(),
         );
         let rendered = (chat.request_processor().render(&request))
             .map_err(|error| error.to_report_string())?;
@@ -190,6 +191,8 @@ impl NextTokenReads {
             }
             let logprobs = label_logprobs(output, label_ids, index)?;
             let usage = &output.usage;
+            let argmax_is_label =
+                (output.token_ids.first()).is_some_and(|id| label_ids.contains(id));
             reads.push(QuestionRead {
                 probs: label_softmax(&logprobs),
                 label_mass: logprobs.iter().map(|logprob| logprob.exp()).sum(),
@@ -197,23 +200,10 @@ impl NextTokenReads {
                 output_tokens: usage.output_token_count,
                 cached_tokens: usage.prompt_cache_usage.cached_token_count,
                 cache_write_tokens: usage.prompt_cache_usage.cache_creation_token_count,
+                argmax_is_label,
             });
         }
         Ok(reads)
-    }
-}
-
-impl ReadOptions {
-    fn probe() -> Self {
-        Self {
-            request_id: String::new(),
-            chat_template_kwargs: None,
-            lora_request: None,
-            priority: 0,
-            cache_salt: None,
-            data_parallel_rank: None,
-            session_id: None,
-        }
     }
 }
 
@@ -234,7 +224,11 @@ fn sampling_params(label_ids: &[u32]) -> vllm_text::SamplingParams {
 /// label is the reply's first token.
 fn thinking_off(kwargs: Option<HashMap<String, Value>>) -> HashMap<String, Value> {
     let mut merged = HashMap::from([("enable_thinking".to_owned(), Value::Bool(false))]);
-    merged.extend(kwargs.unwrap_or_default());
+    // Like Python's `merge_kwargs`, `null` and `"auto"` leave a value unset.
+    merged.extend(
+        (kwargs.unwrap_or_default().into_iter())
+            .filter(|(_, value)| !value.is_null() && value.as_str() != Some("auto")),
+    );
     merged
 }
 
@@ -255,16 +249,27 @@ fn is_truthy(value: &Value) -> bool {
 fn chat_request(
     request_id: String,
     messages: Vec<ChatMessage>,
-    template_kwargs: HashMap<String, Value>,
+    mut template_kwargs: HashMap<String, Value>,
     options: &ReadOptions,
 ) -> ChatRequest {
     let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true)
         .expect("plain text messages declare no tools");
+    // Like Python, a `chat_template` kwarg replaces the model's template, which
+    // the renderer refuses without `--trust-request-chat-template`.
+    let chat_template = match template_kwargs.remove("chat_template") {
+        Some(Value::String(template)) => Some(template),
+        Some(other) => {
+            template_kwargs.insert("chat_template".to_owned(), other);
+            None
+        }
+        None => None,
+    };
     ChatRequest {
         request_id,
         messages,
         sampling_params: vllm_text::SamplingParams::default(),
         chat_options: ChatOptions {
+            chat_template,
             template_kwargs,
             ..ChatOptions::default()
         },
@@ -280,8 +285,9 @@ fn chat_request(
         documents: None,
         cache_salt: options.cache_salt.clone(),
         add_special_tokens: false,
-        data_parallel_rank: options.data_parallel_rank,
-        session_id: options.session_id.clone(),
+        // Like Python, reads run on any engine and outside any session.
+        data_parallel_rank: None,
+        session_id: None,
         lora_request: options.lora_request.clone(),
         return_prompt_text: false,
     }
