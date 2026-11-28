@@ -472,6 +472,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls._convert_tools(anthropic_request, req)
         return req
 
+    @staticmethod
+    def _strip_billing_header(text: str) -> str:
+        """Strip a leading Claude Code billing header line, keeping any remainder."""
+        if text.startswith("x-anthropic-billing-header"):
+            return text.partition("\n")[2]
+        return text
+
     @classmethod
     def _convert_system_message(
         cls,
@@ -486,15 +493,17 @@ class AnthropicServingMessages(OpenAIServingChat):
         # Top-level system field
         if anthropic_request.system:
             if isinstance(anthropic_request.system, str):
-                system_parts.append(anthropic_request.system)
+                text = cls._strip_billing_header(anthropic_request.system)
+                if text:
+                    system_parts.append(text)
             else:
                 for block in anthropic_request.system:
                     if block.type == "text" and block.text:
                         # Strip Claude Code's attribution header which contains
                         # a per-request hash that defeats prefix caching.
-                        if block.text.startswith("x-anthropic-billing-header"):
-                            continue
-                        system_parts.append(block.text)
+                        text = cls._strip_billing_header(block.text)
+                        if text:
+                            system_parts.append(text)
 
         # When the template requires system-first ordering, extract inline
         # system messages from the messages array and merge them into the
@@ -514,16 +523,14 @@ class AnthropicServingMessages(OpenAIServingChat):
     def _extract_system_text(cls, msg) -> str | None:
         """Extract text from a system message, stripping billing headers."""
         if isinstance(msg.content, str):
-            text = msg.content
-            if text.startswith("x-anthropic-billing-header"):
-                return None
-            return text
+            text = cls._strip_billing_header(msg.content)
+            return text or None
         parts: list[str] = []
         for block in msg.content:
             if block.type == "text" and block.text:
-                if block.text.startswith("x-anthropic-billing-header"):
-                    continue
-                parts.append(block.text)
+                text = cls._strip_billing_header(block.text)
+                if text:
+                    parts.append(text)
         return "".join(parts) if parts else None
 
     @classmethod
