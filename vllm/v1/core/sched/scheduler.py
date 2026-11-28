@@ -504,6 +504,7 @@ class Scheduler(SchedulerInterface):
             AuxOutputSchedulerConnector(
                 self.kv_cache_manager,
                 retained_objects(vllm_config, self.kv_cache_manager.kv_cache_config)[0],
+                vllm_config.aux_output_config.object_key_prefix,
             )
             if vllm_config.aux_output_config.enabled
             else None
@@ -2609,6 +2610,7 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
+            aux_objects = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
@@ -2649,6 +2651,7 @@ class Scheduler(SchedulerInterface):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+                    aux_objects = request.aux_objects
                     if (
                         prefill_stats is not None
                         and kv_transfer_params is not None
@@ -2707,6 +2710,7 @@ class Scheduler(SchedulerInterface):
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                         watermarking=watermarking,
+                        aux_objects=aux_objects,
                     )
                 )
             else:
@@ -2733,6 +2737,8 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_mismatch_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
+            if self.aux_output_connector is not None:
+                self.aux_output_connector.loads_failed(failed_kv_load_req_ids)
         if self.ec_connector is not None:
             # An encoder input the connector can no longer obtain. Failing is
             # retryable: re-issuing the request re-runs the encode.

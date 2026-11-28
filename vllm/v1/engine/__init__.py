@@ -334,6 +334,8 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    aux_objects: list[tuple[str, int, int]] | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

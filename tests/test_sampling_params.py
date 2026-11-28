@@ -7,6 +7,7 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
+from vllm.distributed.aux_output_connector.params import verify_aux_namespace
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
@@ -301,3 +302,28 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"aux_namespace": "g.1/s_0-a", "stop_token_ids": [2]}, None),
+        ({"aux_namespace": ""}, "must not be empty"),
+        ({"aux_namespace": "g", "stop": ["</s>"]}, "stop strings"),
+        ({"aux_namespace": "g", "n": 2}, "n > 1"),
+    ],
+    ids=[
+        "nested",
+        "empty",
+        "stop-string",
+        "parallel-sampling",
+    ],
+)
+def test_aux_namespace_is_validated(kwargs, error):
+    params = SamplingParams(**kwargs)
+    if error is None:
+        verify_aux_namespace(params)
+        return
+    with pytest.raises(VLLMValidationError, match=error) as exc_info:
+        verify_aux_namespace(params)
+    assert exc_info.value.parameter == "aux_namespace"

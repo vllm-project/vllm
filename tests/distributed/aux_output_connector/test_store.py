@@ -79,7 +79,9 @@ def _kv_cache_manager(
     )
     return SimpleNamespace(
         coordinator=SimpleNamespace(
-            single_type_managers=[manager], scheduler_block_size=manager.block_size
+            single_type_managers=[manager],
+            scheduler_block_size=manager.block_size,
+            enable_partial_hash_hits=False,
         ),
         block_pool=block_pool,
         kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
@@ -115,7 +117,9 @@ class _SchedulerRequest:
     num_in_flight_tokens: int = 0
     finished: bool = False
     sampling_params: SimpleNamespace = field(
-        default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0)
+        default_factory=lambda: SimpleNamespace(
+            aux_prompt_start=0, routed_experts_prompt_start=0
+        )
     )
 
     @property
@@ -211,6 +215,7 @@ def _make_worker(
     worker._pending_outputs = []
     worker._lock = threading.Lock()
     worker._max_concurrent_batches = max_concurrent_batches
+    worker._writer = None
     return worker
 
 
@@ -271,7 +276,7 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
 def test_next_step_does_not_consume_pending_output(monkeypatch):
     """begin_step must not wait for or consume an unconsumed step output."""
     event = Mock()
-    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
+    monkeypatch.setattr(torch, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
     worker = _make_worker(1)
     worker.begin_step(
@@ -1010,7 +1015,7 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
         prompt,
         logical[:8],
         ["first", "second"],
-        np.zeros(2),
+        np.zeros(2, dtype=np.int32),
         np.zeros(2, dtype=np.int32),
     )
 
@@ -1024,7 +1029,7 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
         first_decode,
         logical[8:28],
         ["first"],
-        np.zeros(1),
+        np.zeros(1, dtype=np.int32),
         np.zeros(1, dtype=np.int32),
     )
     assert len(worker._requests["first"].pending_blocks) == 5
@@ -1041,7 +1046,7 @@ def test_worker_releases_unscheduled_request_blocks_before_capture():
         second_decode,
         logical[28:48],
         ["second"],
-        np.zeros(1),
+        np.zeros(1, dtype=np.int32),
         np.zeros(1, dtype=np.int32),
     )
 
@@ -1492,7 +1497,10 @@ def _scheduler_request(
         num_tokens=num_tokens,
         num_output_tokens=num_output_tokens,
         num_computed_tokens=num_tokens,
-        sampling_params=SimpleNamespace(routed_experts_prompt_start=prompt_start),
+        sampling_params=SimpleNamespace(
+            aux_prompt_start=prompt_start,
+            routed_experts_prompt_start=0,
+        ),
     )
 
 
@@ -2067,14 +2075,22 @@ def test_retained_objects_follow_max_bytes(
 
 
 @pytest.mark.parametrize(
-    "num_output_tokens,prompt_start",
-    [(0, 17), (1, 0)],
-    ids=["prompt-start", "resumed"],
+    "num_output_tokens,field,prompt_start",
+    [
+        (0, "aux_prompt_start", 17),
+        (0, "routed_experts_prompt_start", 17),
+        (1, "aux_prompt_start", 0),
+    ],
+    ids=["prompt-start", "deprecated-alias", "resumed"],
 )
-def test_connector_hit_needs_rows_from_emit_start(num_output_tokens, prompt_start):
+def test_connector_hit_needs_rows_from_emit_start(
+    num_output_tokens, field, prompt_start
+):
+    # A request the Python input processor did not build (the Rust frontend)
+    # may carry only the deprecated alias.
     connector = _make_connector()
     request = _SchedulerRequest("request", [], 17, num_output_tokens=num_output_tokens)
-    request.sampling_params.routed_experts_prompt_start = prompt_start
+    setattr(request.sampling_params, field, prompt_start)
 
     assert connector.max_cache_hit(request) == 16
 
@@ -2083,7 +2099,7 @@ def test_connector_forgets_loaded_blocks_once_evicted():
     cached: dict = {}
     connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, 1), 2)
     decode = _SchedulerRequest("decode", list(_HASHES), 17, num_output_tokens=0)
-    decode.sampling_params.routed_experts_prompt_start = 16
+    decode.sampling_params.aux_prompt_start = 16
     request = _SchedulerRequest("request", list(_HASHES), 17, num_output_tokens=0)
     blocks = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
 
@@ -2103,7 +2119,7 @@ def test_connector_keeps_mark_of_partly_loaded_block():
     cached = {_HASHES[0]: [Mock()], _HASHES[1]: [Mock()]}
     connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached), 0)
     decode = _SchedulerRequest("decode", list(_HASHES[:3]), 13, num_output_tokens=0)
-    decode.sampling_params.routed_experts_prompt_start = 9
+    decode.sampling_params.aux_prompt_start = 9
     request = _SchedulerRequest("request", list(_HASHES[:3]), 13, num_output_tokens=0)
 
     assert connector.cap_external_hit(decode, 8, 1) == 1

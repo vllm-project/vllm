@@ -44,8 +44,9 @@ restorer; the existing buffer-write semantics are unchanged.
 | `/v1/completions`, `/v1/chat/completions` | `choices[i].routed_experts`: base64 `.npy`, **non-streaming only** |
 | `/inference/v1/generate` | `routed_experts` per choice (base64 `.npy`); with `stream: true`, on the final chunk |
 
-- **Shape:** `(num_tokens - 1 - routed_experts_prompt_start, num_moe_layers, num_experts_per_tok)`, `num_tokens` = prompt + output. The last sampled token has no row.
-- **Rows:** row `i` is position `routed_experts_prompt_start + i` of `prompt_token_ids + output_token_ids`.
+- **Shape:** `(num_tokens - 1 - aux_prompt_start, num_layer_visits, num_experts_per_tok)`, `num_tokens` = prompt + output. The layer axis has one entry per decoder layer visit, in execution order; the rows of dense layers are 0. The last sampled token has no row.
+- **Layer visits.** For most models a token visits each decoder layer once: `num_layer_visits` is `num_hidden_layers` and the layer axis is indexed by layer id. A loop transformer (Inkling 2 loop checkpoints) runs its core layers once per pass, so the axis follows `layer_visit_ids`: the prelude layers, every core layer of pass 0, of pass 1, and so on, then the coda. `loop_num_passes` is set for the engine, not per request: every request, and every object a namespace request writes, has the same number of visits, and objects written with a different pass count do not match the rows of this engine.
+- **Rows:** row `i` is position `aux_prompt_start + i` of `prompt_token_ids + output_token_ids`.
 - **dtype:** `uint8` for at most 256 experts, else `uint16`; logical expert IDs.
 - Filled only when the request finishes. `None` if the flag is off or the request aborted before any forward pass.
 
@@ -56,13 +57,13 @@ import numpy as np
 experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
 ```
 
-## `routed_experts_prompt_start`
+## `aux_prompt_start`
 
-Per-request, default `0`: drops the first N prompt-token rows (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it top-level on `/v1/*completions`, inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(routed_experts_prompt_start=...)`.
+Per-request, default `0`: drops the rows of the first N prompt positions (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it inside `sampling_params` on `/inference/v1/generate` or as `SamplingParams(aux_prompt_start=...)`. `routed_experts_prompt_start` is a deprecated alias, and the only form `/v1/*completions` accept (top-level) until a later change forwards `aux_prompt_start` there: it logs a warning once, and a request whose two values disagree (0 counts as unset) is rejected.
 
 ## Row storage
 
-The aux output connector (`vllm/distributed/aux_output_connector/`) stores routing rows per engine, keyed by KV block hash, in the host memory of the engine's first tensor-parallel worker. Each row exists once, in the engine that computed it; there is no separate object store to deploy. Every data-parallel rank is a separate engine with its own rows.
+The aux output connector (`vllm/distributed/aux_output_connector/`) stores routing rows per engine, keyed by KV block hash, in the host memory of the engine's first tensor-parallel worker. Each row exists once, in the engine that computed it; inline rows need no separate object store. Every data-parallel rank is a separate engine with its own rows.
 
 The scheduler holds the rows of every block it keeps in the GPU prefix cache, and, when a KV connector is configured, of blocks the connector may load back, up to the store capacity. It reuses a cached block only while it holds that block's rows and otherwise computes the block again, producing new rows. Positions before `routed_experts_prompt_start` need no rows: a request reuses cached KV up to that position even when their rows are gone.
 
@@ -80,7 +81,7 @@ Route every request of a session (a multi-turn rollout, or a group of samples sh
 - Fall back to another engine only when the target is down or saturated, and accept that the next turn of that session recomputes its prefix.
 - Set `routed_experts_prompt_start` to the number of tokens whose rows the client already holds. A hit then needs rows only for the positions it returns, and a shared KV store can serve the earlier turns on another engine.
 
-Sessions whose rows are written as objects to a shared Mooncake store, readable from every replica and released per session, are developed on the `aux-pr/` branches of the [aoshen02/vllm](https://github.com/aoshen02/vllm/tree/aux-pr/7-rename-recomputed-positions) fork. Switch to them when requests of a session cannot be pinned to one engine or replicas share KV through a store.
+When requests of a session cannot be pinned to one engine, or replicas share KV through a store, deliver the rows through a shared object store instead (see [Namespaces](#namespaces-delivering-routed-experts-through-a-shared-object-store)).
 
 ## Weight updates and cache resets
 
@@ -102,7 +103,7 @@ Keeping the cache or the connector tier across an update means later turns reuse
 
 ## Sizing `max_bytes`
 
-Rows per token take `num_hidden_layers × num_experts_per_tok × itemsize` bytes, with `itemsize` 1 for at most 256 experts and 2 above; every hidden layer counts, dense ones included.
+Rows per token take `num_layer_visits × num_experts_per_tok × itemsize` bytes, with `itemsize` 1 for at most 256 experts and 2 above; every layer visit counts, dense ones included.
 
 - **Default (`max_bytes` unset).** One block of rows per KV block: the KV cache token capacity, logged at startup as `KV cache size: N tokens`, times the bytes per token, doubled when a KV connector is configured. The arena is anonymous memory, committed as rows are written.
 - **A smaller `max_bytes` does not save memory.** Rows of blocks in the GPU prefix cache are never evicted. When they outgrow `max_bytes`, the store copies its whole arena into one at least twice as large and logs a warning, a latency spike for the steps that wait on the store. The LRU drops only rows of blocks the scheduler no longer holds, so the rows of a session last as long as its KV does.
@@ -118,3 +119,47 @@ Rows per token take `num_hidden_layers × num_experts_per_tok × itemsize` bytes
 For Qwen3-30B-A3B the rows are 0.4% of the bfloat16 KV of the same tokens (96 KiB per token), so host memory is never the limit; the same holds for every row of the table on a node with hundreds of GB of host memory. What limits reuse is the KV cache capacity and replica affinity, not the row store.
 
 Example: [examples/rl/routed_experts_e2e.py](../../../examples/rl/routed_experts_e2e.py).
+
+## Namespaces: delivering routed experts through a shared object store
+
+With inline return the client must hold every row it received and hand it to each request or trainer worker that needs the same prefix. With a namespace the engine writes the rows once to a shared object store and the response lists object keys; any process that can reach the store reads them. Requests without a namespace keep the inline behavior above. The design, its guarantees and its limits are in [Aux Outputs for RL](../../design/rl_aux_output.md).
+
+Start the server with an object store and a new key prefix per start. The default store is Mooncake in standalone-store mode, separate from any Mooncake KV store; `object_store` names another implementation of `AuxObjectStore` ([the store](../../design/rl_aux_output.md#the-store)):
+
+```bash
+vllm serve <model> --aux-output-config \
+  '{"enable_return_routed_experts": true, "object_key_prefix": "<run>",
+    "object_store_extra_config": {"config_path": "<mooncake config>"}}'
+```
+
+Send `aux_namespace` inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(aux_namespace=..., aux_prompt_start=...)` offline:
+
+- **Namespace.** Chosen per rollout as in [choosing a namespace](#choosing-a-namespace). A namespace is any non-empty string; `/` nests one in another for release. A namespace request is rejected with `n > 1`, with `stop` strings (use `stop_token_ids`), and as a streaming-input request.
+- **Response.** The final output carries `aux_objects`: `[key, start, end]` entries, the rows of positions `[start, end)` being the first `end - start` rows of object `key`. They cover `[aux_prompt_start, num_tokens - 1)`, the prefix-cache hits included.
+- **Turns.** Send `aux_prompt_start = min(positions held, longest common token prefix of the new prompt and the held tokens, prompt length - 1)`, and splice each listing onto the trajectory with the earlier copy winning ([turns and splicing](../../design/rl_aux_output.md#turns-and-splicing)).
+- **Reading.** `object_store.read_aux_rows(store, keys, "routed_experts")` from `vllm.distributed.aux_output_connector`, with `store = object_store.create_aux_object_store("mooncake", {"config_path": ...})`, reads the objects in order and concatenates their rows. Writes have no barrier: wait for a training batch's keys no shorter than the write deadline, 80% of `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS`; a key still missing then is lost, and the samples that need it are masked.
+- **Release.** Once every sample of a namespace is settled and none of its requests runs or will be sent, remove it with `store.remove_prefix(object_store.aux_namespace_prefix(object_key_prefix, aux_namespace))`, which also removes the namespaces under its prefix, or release its samples one by one as in [choosing a namespace](#choosing-a-namespace). Never send a released namespace again.
+- **KV cache layout.** Hybrid layouts are supported. With `object_key_prefix`, the engine refuses to start without prefix caching or with prefix replay (pass `--no-swa-bounded-replay` on DeepSeek-V4.1).
+
+### Choosing a namespace
+
+A namespace is the unit of sharing. Requests of one namespace reuse each other's KV and objects; requests of different namespaces share nothing, also when one name is under the other's prefix. Give every request that can reuse another one's prompt the same namespace, and choose how to release it by when the trainer is done with each sample:
+
+| Rollout | `aux_namespace` | Release |
+| --- | --- | --- |
+| Several samples per prompt, trained once the group is complete (GRPO, RLOO, best-of-n) | the group id, `g1` | `remove_prefix` of the namespace once every sample of the group is settled |
+| Several samples per prompt, each released before its group completes (asynchronous or partial rollouts) | the group id, `g1` | an `AuxSampleReleaser` per group: `add` each response's `aux_objects`, `release` each settled sample |
+| One sample per prompt (multi-turn agent rollouts) | the trajectory id, `t1` | `remove_prefix` of the namespace once the trajectory is settled |
+
+`object_store.AuxSampleReleaser(store, object_key_prefix, aux_namespace, num_samples, num_shared_tokens)` counts, for every object of the namespace, the registered samples that list it. `num_samples` is the exact number of samples that will be released. `num_shared_tokens` is the longest token prefix requests of different samples can have in common: the group prompt, or a longer prompt every sample's sub-agents start with, plus an output opening every sample produces, such as a fixed template. The objects of these positions stay until the last sample is released, the samples' own objects below it included, so a larger value releases less early. `add` each response's `aux_objects` as it arrives, not when its sample is consumed. A release removes the sample's other objects that no unreleased sample has registered, and the last release removes the namespace with the namespaces under its prefix, objects no response listed included. Call `release` for a sample dropped before it returned, too, keep a sample's id across its retries, and send no new sample into the namespace after its first release. Two samples whose tokens agree from the start through a whole span past `num_shared_tokens` share its object: a release that drops its last registration while another such sample has not registered a response listing it yet removes it, and that sample's listing names a missing key and is masked.
+
+A namespace per sample (`g1/s0`) also releases samples one by one, but every sample then computes and stores the prompt again. In a GRPO rollout of DeepSeek-V4.1-Flash with 4 samples per group and multi-turn tool use, group namespaces left generated tokens per second unchanged (0.997 of the run without objects, standard error 0.021) and per-sample namespaces lowered them to 0.907 (standard error 0.017), the first-turn hit rate falling from 82% to 0%. In a rollout of Qwen3.5-397B-A17B with 8 samples per group and 30k-60k-token prompts, per-sample namespaces ran at 0.43 of the run without objects, group namespaces at 0.98. Requests whose rows are returned inline, without a namespace, are not affected.
+
+### Sharing beyond one group (advanced)
+
+A request carries one namespace, so requests share KV and objects only inside it. Two kinds of rollout share more, and both put the sharing requests in one namespace and release them with an `AuxSampleReleaser`:
+
+- **A long system prompt shared by many groups** (agent harnesses, mixed-harness training). Give every sample that uses the prompt one namespace, such as `h1` for the harness. Warm the prompt up before sending the samples: send it alone with `max_tokens=1` and wait for the response, so that its spans are computed and stored once instead of by every sample that arrives first on a replica. It is shared up to its last full span. Create the releaser with `num_samples` the number of samples sent under the namespace and `num_shared_tokens` the prompt's length, `add` each response and `release` each settled sample: a release removes the sample's own objects, and the prompt's objects stay until the last release removes the namespace. When the number of samples is not known in advance, pass an upper bound and remove the namespace's prefix once the last sample is settled.
+- **Forked trajectories** (children that continue from a turn of a parent). A child must use its parent's namespace to hit the parent's KV. Use one releaser for the parent and its children, with `num_shared_tokens` the length of the turn they fork from.
+
+In both cases a weight update does not remove the shared objects: a sample that computes the prompt again lists the first copy ([limits](../../design/rl_aux_output.md#limits)).

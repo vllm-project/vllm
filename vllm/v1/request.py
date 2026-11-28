@@ -107,6 +107,8 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # Aux outputs: the object listing the final output carries.
+        self.aux_objects: list[tuple[str, int, int]] | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
         # P/D: M-RoPE position delta the KV producer's worker computed for the

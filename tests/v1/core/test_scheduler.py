@@ -519,12 +519,12 @@ def _aux_output_connector(scheduler: Scheduler) -> AuxOutputSchedulerConnector:
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2])
-def test_routed_experts_prompt_start_at_prompt_end(max_tokens):
+def test_aux_prompt_start_at_prompt_end(max_tokens):
     """A prompt-end offset should return empty routing data, not crash."""
     scheduler = create_scheduler()
     (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
     assert request.sampling_params is not None
-    request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
+    request.sampling_params.aux_prompt_start = request.num_prompt_tokens
     scheduler.aux_output_connector = _aux_output_connector(scheduler)
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -677,8 +677,8 @@ def test_kv_loaded_without_auxiliary_outputs_is_hit_before_emit_start(
     assert second.sampling_params is not None
     assert first.sampling_params is not None
     second.sampling_params = second.sampling_params.clone()
-    first.sampling_params.routed_experts_prompt_start = 80
-    second.sampling_params.routed_experts_prompt_start = prompt_start
+    first.sampling_params.aux_prompt_start = 80
+    second.sampling_params.aux_prompt_start = prompt_start
     scheduler.add_request(first)
     scheduler.update_from_output(
         scheduler.schedule(),
