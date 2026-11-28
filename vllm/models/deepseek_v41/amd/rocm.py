@@ -1371,6 +1371,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         if self._use_aiter_sparse_mla:
             assert swa_metadata.decode_swa_ragged_indices is not None
             assert swa_metadata.decode_swa_ragged_indptr is not None
+            max_keys_per_row = swa_metadata.decode_swa_width
+            if topk_ragged_indices is not None:
+                assert self.topk_indices_buffer is not None
+                max_keys_per_row += self.topk_indices_buffer.shape[1]
             # The kernel's store rotates (and for MXFP8, quantizes) every row.
             self._aiter_sparse_mla(
                 q,
@@ -1383,6 +1387,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_ragged_indptr,
                 positions=positions,
                 output_mxfp8=output_mxfp8,
+                max_keys_per_row=max_keys_per_row,
             )
             return q.shape[0]
 
@@ -1690,6 +1695,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         topk_indptr: torch.Tensor | None,
         positions: torch.Tensor | None = None,
         output_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+        max_keys_per_row: int | None = None,
     ) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
@@ -1707,6 +1713,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 topk_indptr,
                 positions=positions,
                 output_mxfp8=output_mxfp8,
+                max_keys_per_row=max_keys_per_row,
             )
             return
         # Both fp8 caches are read in place: the SWA window as the main segment,

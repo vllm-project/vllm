@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
     VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
+    VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -1452,6 +1453,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
     "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
+    ),
+    # Run DeepSeek V4.1 sparse MLA decode on a per-tensor fp8 KV cache
+    # (--kv-cache-dtype fp8_e4m3, 64 heads per rank, MXFP8 output into wo_a)
+    # on aiter's FlyDSL kernel instead of Triton. Needs an aiter with
+    # flydsl_sparse_mla_decode_fp8_h64; other calls stay on Triton. gfx950
+    # only, with VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA. Disabled by default.
+    "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA_FP8_DECODE", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter rope.
     # By default is disabled.

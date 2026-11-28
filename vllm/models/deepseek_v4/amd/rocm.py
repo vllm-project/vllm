@@ -197,10 +197,13 @@ def _plain_fp8_sparse_mla(
     topk_indptr: torch.Tensor | None,
     positions: torch.Tensor | None = None,
     output_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+    max_keys_per_row: int | None = None,
 ) -> None:
     """Sparse MLA through aiter on per-tensor fp8 rows, with fp8 dots. RoPE
     lives inside the 512-wide row, so it runs the rope-free geometry. Both
-    caches share one KV scale. The store can apply inverse RoPE and MXFP8."""
+    caches share one KV scale. The store can apply inverse RoPE and MXFP8.
+    `max_keys_per_row` bounds a row's SWA + top-k keys; it lets
+    `triton_sparse_mla_fwd` use aiter's FlyDSL decode kernel."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     assert output_mxfp8 is None or positions is not None
@@ -227,6 +230,7 @@ def _plain_fp8_sparse_mla(
             None if positions is None else layer.rotary_emb.cos_sin_cache
         ),
         out_mxfp8=output_mxfp8,
+        max_keys_per_row=max_keys_per_row,
     )
 
 
