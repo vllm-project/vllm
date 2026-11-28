@@ -8,7 +8,9 @@ For MoE models, particularly those like DeepSeek that employ MLA (Multi-head Lat
 
 In these cases, the data parallel ranks are not completely independent. Forward passes must be aligned, and expert layers across all ranks are required to synchronize during every forward pass, even when there are fewer requests to be processed than DP ranks.
 
-By default, expert layers form a tensor parallel group of size `DP × TP`. To use expert parallelism instead, include the `--enable-expert-parallel` CLI arg (on all nodes in the multi-node case). See [Expert Parallel Deployment](expert_parallel_deployment.md) for details on how attention and expert layers behave differently with EP enabled.
+By default, when participating GPUs are fully connected by direct NVLink/xGMI (or when a full model replica does not fit within per-rank GPU memory), expert layers form a tensor parallel group of size `DP × TP`. To use expert parallelism instead, include the `--enable-expert-parallel` CLI arg (on all nodes in the multi-node case). See [Expert Parallel Deployment](expert_parallel_deployment.md) for details on how attention and expert layers behave differently with EP enabled.
+
+With `--moe-dp-mode auto` (the default), if `DP > 1`, `--enable-expert-parallel` is not set, participating GPUs are not fully connected by direct NVLink/xGMI (e.g., PCIe topologies), and a full model replica fits within the per-replica GPU memory budget, vLLM automatically runs each DP rank as an independent replica (sharded only by its own `TP` size, with no cross-DP collectives or lockstep dummy forward passes). You can also control this explicitly with `--moe-dp-mode independent` or `--moe-dp-mode sharded`.
 
 In vLLM, each DP rank is deployed as a separate "core engine" process that communicates with front-end process(es) via ZMQ sockets. Data Parallel attention can be combined with Tensor Parallel attention, in which case each DP engine owns a number of per-GPU worker processes equal to the configured TP size.
 

@@ -44,6 +44,7 @@ def get_min_num_redundant_experts(num_logical_experts: int, ep_size: int) -> int
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+MoEDPMode = Literal["auto", "sharded", "independent"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 DBOSchedule = Literal["dispatch-combine-overlap", "all-reduce-overlap"]
@@ -301,6 +302,21 @@ class ParallelConfig:
     """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    moe_dp_mode: MoEDPMode = "auto"
+    """How MoE layers behave across data-parallel ranks when
+    `data_parallel_size > 1` and `enable_expert_parallel` is False:
+
+    - "auto": Check GPU interconnect topology and per-replica memory capacity.
+      When participating GPUs are not fully connected by direct NVLink/xGMI and
+      a full model replica fits within the per-replica GPU memory budget, run
+      each DP rank as an independent replica (no cross-DP collectives or
+      lockstep dummy steps); otherwise keep cross-DP MoE tensor parallelism.
+    - "sharded": Shard MoE layers across `DP x TP` ranks and step DP ranks in
+      lockstep.
+    - "independent": Force each DP rank to hold an independent MoE replica
+      sharded only by its own `TP` size (requires the model to fit per rank;
+      incompatible with `enable_expert_parallel`, `external_launcher`,
+      `data_parallel_external_lb`, and offline SPMD DP)."""
     enable_batch_sharded_sampling: bool | None = None
     """Use sharded sampling across tensor parallel ranks. Each rank samples
     a slice of the batch instead of every rank sampling all of it. Currently
@@ -606,6 +622,12 @@ class ParallelConfig:
     """Equal to the data parallel rank but not used for torch process groups
     and not overridden for dense models."""
 
+    _independent_moe_dp: bool = False
+    """Resolved flag indicating MoE DP ranks run as independent replicas."""
+
+    _independent_dp_size: int = 1
+    """DP size preserved before `reconfigure_for_independent_dp_rank` resets it."""
+
     _api_process_count: int = Field(default=1, gt=0)
     """
     The number of API processes initialized.
@@ -713,6 +735,21 @@ class ParallelConfig:
             raise ValueError(
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
+
+        if self.moe_dp_mode == "independent":
+            if self.enable_expert_parallel or self.enable_elastic_ep:
+                raise ValueError(
+                    "moe_dp_mode='independent' runs each DP rank as a full "
+                    "replica and cannot be combined with expert parallelism "
+                    "or elastic EP."
+                )
+            if self.data_parallel_size > 1 and self.data_parallel_external_lb:
+                raise ValueError(
+                    "moe_dp_mode='independent' is not supported with external "
+                    "data parallel load balancing; launch separate vLLM "
+                    "instances or route with the X-data-parallel-rank header."
+                )
+            self._independent_moe_dp = True
 
         if self.numa_bind_nodes is not None or self.numa_bind_cpus is not None:
             if self.numa_bind is False:
@@ -1141,6 +1178,8 @@ class ParallelConfig:
             "data_parallel_rank_local",
             "data_parallel_size_local",
             "data_parallel_index",
+            "moe_dp_mode",
+            "_independent_dp_size",
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
@@ -1221,6 +1260,15 @@ class ParallelConfig:
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
+            if (
+                self.distributed_executor_backend == "external_launcher"
+                and self.moe_dp_mode == "independent"
+                and self.data_parallel_size > 1
+            ):
+                raise ValueError(
+                    "moe_dp_mode='independent' is not supported with the "
+                    "external_launcher backend; run separate processes instead."
+                )
             if self.distributed_executor_backend == "external_launcher":
                 # For external launcher,
                 # we need to set the data parallel rank automatically
@@ -1255,6 +1303,11 @@ class ParallelConfig:
                 raise ValueError(
                     "Offline data parallel mode is not supported/useful"
                     " for dense models."
+                )
+            if self.data_parallel_size > 1 and self.moe_dp_mode == "independent":
+                raise ValueError(
+                    "Offline data parallel mode is not supported/useful with "
+                    "moe_dp_mode='independent'; run separate processes instead."
                 )
 
         max_dp_size = self.elastic_ep_max_dp_size
@@ -1410,11 +1463,22 @@ class ParallelConfig:
 
         return self
 
+    @property
+    def independent_moe_dp(self) -> bool:
+        """Whether MoE DP ranks run as independent full replicas."""
+        return self._independent_moe_dp
+
+    @property
+    def num_dp_replicas(self) -> int:
+        """Total DP size, preserving count after independent rank reconfigure."""
+        return max(self.data_parallel_size, self._independent_dp_size)
+
     def reconfigure_for_independent_dp_rank(self) -> None:
-        """Reconfigure for a single independent non-MoE DP rank."""
+        """Reconfigure for a single independent DP rank."""
         # Capture these before changing DP fields.
         nnodes = self.nnodes_within_dp
         node_rank = self.node_rank_within_dp
+        self._independent_dp_size = self.data_parallel_size
         self.data_parallel_size = 1
         self.data_parallel_size_local = 1
         self.data_parallel_rank = 0

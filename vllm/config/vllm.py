@@ -942,24 +942,35 @@ class VllmConfig:
         return enabled
 
     @property
+    def dp_ranks_in_lockstep(self) -> bool:
+        """Whether DP ranks must run their forward passes together.
+
+        True for MoE models, whose expert layers span the DP ranks by default,
+        unless `parallel_config.independent_moe_dp` makes every DP rank an
+        independent full replica.
+        """
+        return (
+            self.model_config is None or self.model_config.is_moe
+        ) and not self.parallel_config.independent_moe_dp
+
+    @property
     def needs_dp_coordinator(self) -> bool:
         """Determine if the DPCoordinator process is needed.
 
         The DPCoordinator is needed in two cases:
-        1. For MoE models with DP > 1: to handle wave coordination
+        1. For lockstep MoE models with DP > 1: to handle wave coordination
            (even in external LB mode, since wave coordination runs in the coordinator)
-        2. For non-MoE models in internal/hybrid LB mode: to collect and publish
-           queue stats for load balancing across DP ranks
+        2. For independent DP ranks in internal/hybrid LB mode: to collect and
+           publish queue stats for load balancing across DP ranks
 
         Returns:
             True if DPCoordinator process is needed, False otherwise.
 
         """
-        # For non-MoE models, only need coordinator in internal/hybrid LB mode
-        # (for stats collection).
+        # For independent DP ranks, only need coordinator in internal/hybrid LB
+        # mode (for stats collection).
         return self.parallel_config.data_parallel_size > 1 and (
-            self.model_config is None
-            or self.model_config.is_moe
+            self.dp_ranks_in_lockstep
             or not self.parallel_config.data_parallel_external_lb
         )
 
@@ -1214,9 +1225,9 @@ class VllmConfig:
             speculative_config is None
             or not speculative_config.uses_dynamic_speculative_decoding()
             or self.parallel_config.data_parallel_size <= 1
-            # Non-MoE DP ranks run as independent engines with no DP
-            # collectives, so each rank can pick its own K.
-            or (self.model_config is not None and not self.model_config.is_moe)
+            # Independent DP ranks run with no DP collectives, so each rank can
+            # pick its own speculative-token count.
+            or not self.dp_ranks_in_lockstep
         ):
             return
 
@@ -1590,6 +1601,246 @@ class VllmConfig:
                 )
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    @staticmethod
+    def _probe_dp_interconnect_and_memory(
+        parallel_config: ParallelConfig,
+    ) -> tuple[bool, int] | None:
+        """Probe whether local DP*TP GPUs are fully NVLink/xGMI connected and
+        return `(is_fully_connected, min_gpu_total_memory_bytes)`, or `None`
+        when the host cannot materialize all local ranks (e.g. single-GPU CI)."""
+        if not current_platform.is_cuda_alike():
+            return None
+        total_local_gpus = (
+            parallel_config.data_parallel_size_local * parallel_config.world_size
+        )
+        if total_local_gpus <= 1:
+            return None
+        try:
+            if current_platform.device_count() < total_local_gpus:
+                return None
+            physical_ids = [
+                current_platform.device_id_to_physical_device_id(i)
+                for i in range(total_local_gpus)
+            ]
+            fully_connected = current_platform.is_fully_connected(physical_ids)
+            min_gpu_mem = min(
+                current_platform.get_device_total_memory(pid) for pid in physical_ids
+            )
+            return fully_connected, min_gpu_mem
+        except Exception:
+            logger.debug(
+                "Failed to probe GPU interconnect topology for moe_dp_mode='auto'.",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _estimate_model_weights_bytes(
+        model_config: ModelConfig,
+        load_config: LoadConfig,
+    ) -> int | None:
+        """Estimate full single-replica model weight size in bytes."""
+        model_path = getattr(model_config, "model", None)
+        if (
+            load_config.load_format != "dummy"
+            and isinstance(model_path, str)
+            and os.path.isdir(model_path)
+        ):
+            try:
+                index_path = os.path.join(model_path, "model.safetensors.index.json")
+                if os.path.isfile(index_path):
+                    import json
+
+                    with open(index_path, encoding="utf-8") as f:
+                        weight_map = json.load(f).get("weight_map", {})
+                    shard_files = {
+                        os.path.join(model_path, s) for s in weight_map.values()
+                    }
+                    if shard_files and all(os.path.isfile(p) for p in shard_files):
+                        return sum(os.path.getsize(p) for p in shard_files)
+                entries = os.listdir(model_path)
+                st_files = [e for e in entries if e.endswith(".safetensors")]
+                sharded_st = [e for e in st_files if "-of-" in e]
+                chosen = sharded_st or st_files
+                if chosen:
+                    return sum(
+                        os.path.getsize(os.path.join(model_path, e)) for e in chosen
+                    )
+            except OSError:
+                pass
+
+        cfg = getattr(model_config, "hf_text_config", None)
+        hidden_size = getattr(cfg, "hidden_size", None)
+        num_layers = getattr(cfg, "num_hidden_layers", None)
+        if (
+            not isinstance(hidden_size, int)
+            or not isinstance(num_layers, int)
+            or hidden_size <= 0
+            or num_layers <= 0
+        ):
+            return None
+
+        get_experts = getattr(model_config, "get_num_experts", None)
+        num_experts = get_experts() if callable(get_experts) else 0
+        if num_experts <= 0:
+            return None
+
+        moe_inter = (
+            getattr(cfg, "moe_intermediate_size", None)
+            or getattr(cfg, "intermediate_size", None)
+            or hidden_size * 4
+        )
+        dense_inter = getattr(cfg, "intermediate_size", None) or moe_inter
+        shared_inter = getattr(cfg, "shared_expert_intermediate_size", 0) or 0
+        vocab_size = getattr(cfg, "vocab_size", 0) or 0
+        num_dense = min(getattr(cfg, "first_k_dense_replace", 0) or 0, num_layers)
+        num_moe = num_layers - num_dense
+
+        moe_layer_params = (
+            num_experts * 3 * hidden_size * moe_inter
+            + 3 * hidden_size * shared_inter
+            + 4 * hidden_size * hidden_size
+        )
+        dense_layer_params = (
+            3 * hidden_size * dense_inter + 4 * hidden_size * hidden_size
+        )
+        embed_mult = 1 if getattr(cfg, "tie_word_embeddings", False) else 2
+        total_params = (
+            num_moe * moe_layer_params
+            + num_dense * dense_layer_params
+            + vocab_size * hidden_size * embed_mult
+        )
+
+        quant_cfg = getattr(cfg, "quantization_config", None)
+        bits = None
+        if isinstance(quant_cfg, dict):
+            bits = quant_cfg.get("bits") or quant_cfg.get("weight_bits")
+        elif quant_cfg is not None:
+            bits = getattr(quant_cfg, "bits", None) or getattr(
+                quant_cfg, "weight_bits", None
+            )
+        quant_name = (getattr(model_config, "quantization", None) or "").lower()
+
+        if bits == 4 or (
+            bits is None
+            and any(
+                k in quant_name
+                for k in ("int4", "fp4", "nvfp4", "mxfp4", "awq", "gptq")
+            )
+        ):
+            bytes_per_param = 0.56
+        elif bits == 8 or (
+            bits is None
+            and any(k in quant_name for k in ("fp8", "int8", "mxfp8", "w8a8"))
+        ):
+            bytes_per_param = 1.05
+        else:
+            dtype = getattr(model_config, "dtype", torch.bfloat16)
+            bytes_per_param = float(torch.empty((), dtype=dtype).element_size())
+
+        return int(total_params * bytes_per_param)
+
+    def _resolve_and_verify_moe_dp_mode(self) -> None:
+        """Validate `moe_dp_mode` and resolve `"auto"` using GPU interconnect
+        topology and per-replica memory capacity."""
+        parallel_config = self.parallel_config
+        has_cross_dp_engram = self.engram_config is not None and bool(
+            self.engram_config.dp_shared_memory
+            or self.engram_config.embedding_across_dp
+        )
+
+        if parallel_config.moe_dp_mode == "independent":
+            if parallel_config.num_dp_replicas > 1:
+                if self.load_config.load_format == "ipc_cache":
+                    raise ValueError(
+                        "The IPC weight cache does not support "
+                        "moe_dp_mode='independent' yet: its daemons build the "
+                        "lockstep MoE layout."
+                    )
+                if has_cross_dp_engram:
+                    raise ValueError(
+                        "Engram cross-DP options (dp_shared_memory, "
+                        "embedding_across_dp) require lockstep DP groups and "
+                        "are not supported with moe_dp_mode='independent'."
+                    )
+            return
+
+        if (
+            parallel_config.moe_dp_mode != "auto"
+            or self.model_config is None
+            or not self.model_config.is_moe
+            or parallel_config.data_parallel_size <= 1
+            or parallel_config.enable_expert_parallel
+            or parallel_config.enable_elastic_ep
+            or parallel_config.enable_dbo
+            or parallel_config.nnodes != 1
+            or parallel_config.data_parallel_size_local
+            != parallel_config.data_parallel_size
+            or parallel_config.data_parallel_external_lb
+            or parallel_config.data_parallel_hybrid_lb
+            or parallel_config.distributed_executor_backend != "mp"
+            or parallel_config.prefill_context_parallel_size > 1
+            or self.load_config.load_format == "ipc_cache"
+            or has_cross_dp_engram
+        ):
+            return
+
+        probe = self._probe_dp_interconnect_and_memory(parallel_config)
+        if probe is None:
+            return
+        fully_connected, min_gpu_mem = probe
+        if fully_connected:
+            return
+
+        weights_bytes = self._estimate_model_weights_bytes(
+            self.model_config, self.load_config
+        )
+        replica_gpus = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.pipeline_parallel_size
+        )
+        gpu_mem_util = (
+            self.cache_config.gpu_memory_utilization
+            if self.cache_config.gpu_memory_utilization is not None
+            else getattr(self.cache_config, "DEFAULT_GPU_MEMORY_UTILIZATION", 0.90)
+        )
+        # Reserve at least 20% of the utilized GPU memory budget for KV cache,
+        # activations, and CUDA graphs before replicating MoE weights per rank.
+        replica_budget_bytes = int(replica_gpus * min_gpu_mem * gpu_mem_util * 0.80)
+
+        gib = 1024**3
+        if weights_bytes is not None and weights_bytes <= replica_budget_bytes:
+            parallel_config._independent_moe_dp = True
+            logger.warning_once(
+                "moe_dp_mode='auto': GPUs across data_parallel_size=%d are not "
+                "fully connected by direct NVLink/xGMI, and estimated model "
+                "weights (~%.2f GiB) fit within the per-replica GPU memory "
+                "budget (~%.2f GiB). Running each DP rank as an independent "
+                "replica instead of cross-DP MoE tensor parallelism. Pass "
+                "--moe-dp-mode sharded (or --enable-expert-parallel) to override.",
+                parallel_config.data_parallel_size,
+                weights_bytes / gib,
+                replica_budget_bytes / gib,
+            )
+        else:
+            weight_str = (
+                f" (~{weights_bytes / gib:.2f} GiB)"
+                if weights_bytes is not None
+                else ""
+            )
+            logger.warning_once(
+                "GPUs across data_parallel_size=%d are not fully connected by "
+                "direct NVLink/xGMI, so default cross-DP MoE tensor parallelism "
+                "(AllGather + ReduceScatter) may incur high communication "
+                "overhead, while a full replica%s exceeds the per-replica GPU "
+                "memory budget (~%.2f GiB). Consider passing "
+                "--enable-expert-parallel, or --moe-dp-mode independent if the "
+                "model fits per rank.",
+                parallel_config.data_parallel_size,
+                weight_str,
+                replica_budget_bytes / gib,
+            )
+
     def _reject_mismatched_float_kv_cache(self) -> None:
         """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
         cache_dtype = self.cache_config.cache_dtype
@@ -1731,6 +1982,7 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
         self._verify_direct_reload_compat()
+        self._resolve_and_verify_moe_dp_mode()
 
         # "dummy" reads no weights at all, and the sharded formats read a vLLM
         # state dict, which stores tied word embeddings under the lm_head only.
@@ -1828,8 +2080,9 @@ class VllmConfig:
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
-                if self.parallel_config.data_parallel_size > 1 and (
-                    self.model_config is None or self.model_config.is_moe
+                if (
+                    self.parallel_config.data_parallel_size > 1
+                    and self.dp_ranks_in_lockstep
                 ):
                     logger.info_once(
                         "Disabling NCCL for DP synchronization "
@@ -2270,9 +2523,7 @@ class VllmConfig:
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
-            self.parallel_config.data_parallel_size
-            if self.model_config is None or self.model_config.is_moe
-            else 1
+            self.parallel_config.data_parallel_size if self.dp_ranks_in_lockstep else 1
         )
         self.compilation_config.set_splitting_ops_for_v1(
             all2all_backend=self.parallel_config.all2all_backend,

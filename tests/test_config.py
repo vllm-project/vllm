@@ -6023,3 +6023,171 @@ def test_layer_range_with_prefill_context_parallel(monkeypatch):
         for rank in range(8)
     ]
     assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"enable_expert_parallel": True}, "moe_dp_mode='independent'"),
+        (
+            {
+                "enable_expert_parallel": True,
+                "enable_eplb": True,
+                "eplb_config": {"use_async": False},
+                "enable_elastic_ep": True,
+            },
+            "moe_dp_mode='independent'",
+        ),
+        (
+            {"distributed_executor_backend": "external_launcher"},
+            "external_launcher",
+        ),
+        (
+            {"data_parallel_external_lb": True, "data_parallel_size_local": 1},
+            "external data parallel",
+        ),
+    ],
+)
+def test_moe_dp_mode_independent_rejects(overrides, match, monkeypatch):
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    kwargs = {
+        "data_parallel_size": 2,
+        "data_parallel_size_local": 2,
+        "moe_dp_mode": "independent",
+        "distributed_executor_backend": "mp",
+    } | overrides
+    with pytest.raises(ValueError, match=match):
+        ParallelConfig(**kwargs)
+
+
+def test_moe_dp_mode_independent_rejects_offline_spmd(monkeypatch):
+    monkeypatch.setenv("VLLM_DP_SIZE", "2")
+    monkeypatch.setenv("VLLM_DP_RANK", "0")
+    with pytest.raises(ValueError, match="Offline data parallel mode"):
+        ParallelConfig(moe_dp_mode="independent", is_moe_model=True)
+
+
+def test_independent_dp_rank_reconfigure_preserves_replica_count():
+    parallel = ParallelConfig(
+        data_parallel_size=4,
+        data_parallel_size_local=4,
+        moe_dp_mode="independent",
+        distributed_executor_backend="mp",
+    )
+    assert parallel.independent_moe_dp is True
+    parallel.reconfigure_for_independent_dp_rank()
+    assert parallel.data_parallel_size == 1
+    assert parallel.num_dp_replicas == 4
+    assert parallel.independent_moe_dp is True
+
+
+def test_moe_dp_mode_independent_rejects_ipc_cache_and_engram():
+    parallel = ParallelConfig(
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        moe_dp_mode="independent",
+        distributed_executor_backend="mp",
+    )
+    cfg_ipc = SimpleNamespace(
+        parallel_config=parallel,
+        load_config=SimpleNamespace(load_format="ipc_cache"),
+        engram_config=None,
+    )
+    with pytest.raises(ValueError, match="IPC weight cache"):
+        VllmConfig._resolve_and_verify_moe_dp_mode(cfg_ipc)
+
+    cfg_engram = SimpleNamespace(
+        parallel_config=parallel,
+        load_config=SimpleNamespace(load_format="auto"),
+        engram_config=SimpleNamespace(dp_shared_memory=True, embedding_across_dp=False),
+    )
+    with pytest.raises(ValueError, match="Engram cross-DP"):
+        VllmConfig._resolve_and_verify_moe_dp_mode(cfg_engram)
+
+
+@pytest.mark.parametrize(
+    (
+        "moe_dp_mode",
+        "fully_connected",
+        "gpu_mem_gib",
+        "quantization",
+        "expected_independent",
+    ),
+    [
+        # Full NVLink: keep default cross-DP sharding even when model fits.
+        ("auto", True, 80, "gptq", False),
+        # No NVLink + 30B Int4 (~16 GiB) fits in 24 GiB PCIe GPU budget (~17.3 GiB):
+        # auto-switch to independent DP replicas!
+        ("auto", False, 24, "gptq", True),
+        # No NVLink + 30B BF16 (~60 GiB) exceeds 24 GiB PCIe GPU budget:
+        # stay sharded to avoid OOM!
+        ("auto", False, 24, None, False),
+        # Explicit "sharded" override keeps lockstep DP even without NVLink.
+        ("sharded", False, 80, "gptq", False),
+    ],
+)
+def test_moe_dp_mode_auto_topology_and_memory_resolution(
+    monkeypatch,
+    moe_dp_mode,
+    fully_connected,
+    gpu_mem_gib,
+    quantization,
+    expected_independent,
+):
+    gib = 1024**3
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
+    monkeypatch.setattr(
+        current_platform, "device_id_to_physical_device_id", lambda idx: idx
+    )
+    monkeypatch.setattr(
+        current_platform, "is_fully_connected", lambda ids: fully_connected
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_total_memory",
+        lambda pid: gpu_mem_gib * gib,
+    )
+
+    hf_text_config = SimpleNamespace(
+        hidden_size=2048,
+        num_hidden_layers=48,
+        moe_intermediate_size=768,
+        intermediate_size=768,
+        shared_expert_intermediate_size=0,
+        vocab_size=151936,
+        first_k_dense_replace=0,
+        tie_word_embeddings=False,
+        quantization_config={"bits": 4} if quantization == "gptq" else None,
+    )
+    model_config = SimpleNamespace(
+        model="nonexistent/qwen3-30b-a3b-mock",
+        is_moe=True,
+        hf_text_config=hf_text_config,
+        quantization=quantization,
+        dtype=torch.bfloat16,
+        get_num_experts=lambda: 128,
+    )
+    parallel_config = ParallelConfig(
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        moe_dp_mode=moe_dp_mode,
+        distributed_executor_backend="mp",
+        is_moe_model=True,
+    )
+    dummy_vllm_cfg = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=parallel_config,
+        load_config=SimpleNamespace(load_format="auto"),
+        cache_config=CacheConfig(),
+        engram_config=None,
+        _probe_dp_interconnect_and_memory=VllmConfig._probe_dp_interconnect_and_memory,
+        _estimate_model_weights_bytes=VllmConfig._estimate_model_weights_bytes,
+    )
+
+    VllmConfig._resolve_and_verify_moe_dp_mode(dummy_vllm_cfg)
+    assert parallel_config.independent_moe_dp is expected_independent
+    assert VllmConfig.dp_ranks_in_lockstep.fget(dummy_vllm_cfg) is (
+        not expected_independent
+    )
