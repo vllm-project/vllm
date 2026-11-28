@@ -266,7 +266,7 @@ class FileSystemTierManager(SecondaryTierManager):
         """Collect finished jobs; a failed promotion marks only its failed keys
         as a miss here (scheduler thread)."""
         results = []
-        for job_id, success, transfer_time in self._pool.get_finished():
+        for job_id, success, transfer_time, error_errno in self._pool.get_finished():
             block_count = self._job_block_counts.pop(job_id, None)
             transfer_bytes = (
                 block_count * self._block_size if block_count is not None else None
@@ -302,6 +302,7 @@ class FileSystemTierManager(SecondaryTierManager):
                         successful_keys=tuple(successful) if successful else None,
                         transfer_time=transfer_time,
                         transfer_bytes=transfer_bytes,
+                        error_errno=error_errno,
                     )
                 )
                 continue
@@ -311,6 +312,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     success=success,
                     transfer_time=transfer_time,
                     transfer_bytes=transfer_bytes,
+                    error_errno=None if success else error_errno,
                 )
             )
         return results

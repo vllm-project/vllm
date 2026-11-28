@@ -57,6 +57,10 @@ from vllm.v1.kv_offload.tiering.base import (
     SecondaryTierManager,
     TransferJob,
 )
+from vllm.v1.kv_offload.tiering.io_errors import (
+    classify_errno,
+    indicates_tier_pressure,
+)
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
@@ -704,7 +708,18 @@ class TieringOffloadingManager(OffloadingManager):
             )
             detector.update(tj.submit_time, num_bytes)
         else:
-            detector.on_store_failed()
+            kind = classify_errno(completed_job.error_errno)
+            if indicates_tier_pressure(kind):
+                detector.on_store_failed()
+            else:
+                logger.debug(
+                    "Tier %s store job %s failed with a %s error (errno %s); "
+                    "not counted as back-pressure",
+                    tier.tier_type,
+                    completed_job.job_id,
+                    kind.value,
+                    completed_job.error_errno,
+                )
         if detector.is_under_pressure() != was_under_pressure:
             tier_idx = self._tier_index[tier]
             logger.info(
