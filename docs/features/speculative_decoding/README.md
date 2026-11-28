@@ -11,6 +11,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [EAGLE](eagle.md)
 - [LiLiCorr](lilicorr.md)
 - [DSpine](#dspine)
+- [DNeo](#dneo)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [DFly](dfly.md)
 - [Draft Model](draft_model.md)
@@ -59,6 +60,34 @@ vllm serve Qwen/Qwen3.8-27B \
 ```
 
 Set `num_speculative_tokens` to the checkpoint's block size minus one.
+
+## DNeo
+
+[DNeo](https://arxiv.org/abs/2611.21925) is a DFlash-family block drafter. It
+encodes the target's context with a mixture of the target's normalized
+attention inputs (MoFA), uses DFlash-2's local convolutions, attends
+prefix-only (each draft query sees the context and its block's anchor), and
+samples the drafts left to right through a causal head. With rejection memory,
+the next block also attends to the target's features at the previous block's
+rejected positions.
+
+DNeo checkpoints are in the speculators format (`speculators_model_type:
+dneo`), e.g. the release `J-sandler/Qwen3-4B-DNeo` converted with speculators'
+DNeo converter:
+
+```bash
+vllm serve Qwen/Qwen3-4B \
+  --speculative-config '{
+    "method": "dneo",
+    "model": "/path/to/Qwen3-4B-DNeo-speculators",
+    "num_speculative_tokens": 15
+  }'
+```
+
+`num_speculative_tokens` defaults to, and may not exceed, the checkpoint's block
+size minus one. The checkpoint's `prefix_only_attention` and `rejection_memory`
+fields select those behaviors; serve a drafter with `rejection_memory` only if it
+was trained with it.
 
 ## DFlash query layouts
 

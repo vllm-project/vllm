@@ -70,6 +70,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         assert isinstance(speculator_config, DFlashSpeculatorConfig)
         self.sample_from_anchor = speculator_config.sample_from_anchor
         self.num_query_per_req = speculator_config.num_query_tokens
+        # How many of a request's query tokens the draft attention reads as keys.
+        self.num_query_kv_per_req = self.num_query_per_req
+        # Keep the rejected suffix's context K/V as keys for the next block.
+        self.rejection_memory = False
 
         self.parallel_drafting_token_id = get_parallel_drafting_token_id(
             self.draft_model_config.hf_config
@@ -598,6 +602,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_model_len,
                 self.sample_from_anchor,
                 num_reqs,
+                num_query_kv_per_req=self.num_query_kv_per_req,
+                rejection_memory=self.rejection_memory,
             )
 
         if num_speculative_tokens == 0:
@@ -790,6 +796,7 @@ def _prepare_dflash_inputs_kernel(
     block_size,
     block_stride,
     num_query_per_req,
+    num_query_kv_per_req,
     num_speculative_steps,
     max_num_reqs,
     max_num_tokens,
@@ -797,6 +804,7 @@ def _prepare_dflash_inputs_kernel(
     cp_rank,
     num_reqs,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
+    REJECTION_MEMORY: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
@@ -883,10 +891,42 @@ def _prepare_dflash_inputs_kernel(
         local_ctx_slot,
         PAD_SLOT_ID,
     )
+    if REJECTION_MEMORY:
+        # Rejection memory (DNeo): the rejected suffix rows' K/V become keys the
+        # next block attends to. Their K/V keep their own positions' RoPE but are
+        # stored one slot further, right after the anchor's key: positions
+        # [A, A + r) land in slots [A + 1, A + r + 1), where A = last_valid_pos + 1
+        # is the anchor. The block's other query rows write no K/V (they are not
+        # attended to), so these slots, inside the block's own span, are free.
+        is_rejected = is_ctx & ~is_valid_ctx
+        rej_pos = last_valid_pos + 1 + (j - num_valid_ctx)
+        mem_pos = rej_pos + 1
+        mem_block_num = tl.minimum(
+            mem_pos // (block_size * CP_SIZE), block_table_stride - 1
+        )
+        mem_block_id = tl.load(
+            block_table_ptr + req_idx * block_table_stride + mem_block_num,
+            mask=is_rejected,
+            other=0,
+        ).to(tl.int64)
+        mem_resident = is_rejected & (mem_block_id != 0) & (mem_pos < max_model_len)
+        mem_slot = cp_local_slot(
+            mem_pos,
+            mem_block_id,
+            block_size,
+            block_stride,
+            cp_rank,
+            CP_SIZE,
+            CP_INTERLEAVE,
+            PAD_SLOT_ID,
+        )
+        ctx_pos = tl.where(is_rejected, rej_pos, ctx_pos)
+        ctx_slot = tl.where(mem_resident, mem_slot, ctx_slot)
     # Stored over the full [0, num_ctx) span while the loads above are masked to
     # [0, num_valid_ctx): the rejected suffix rows in between get position 0 and
-    # PAD_SLOT_ID. That is intentional — those rows write no KV and their
-    # positions are never consumed, but the span must stay fully initialized so
+    # PAD_SLOT_ID (unless REJECTION_MEMORY keeps them). That is intentional —
+    # those rows write no KV and their positions are never consumed, but the
+    # span must stay fully initialized so
     # a replayed graph cannot observe a stale value from an earlier batch.
     tl.store(out_context_positions_ptr + ctx_start + j, ctx_pos, mask=is_ctx)
     tl.store(out_context_slot_mapping_ptr + ctx_start + j, ctx_slot, mask=is_ctx)
@@ -922,6 +962,9 @@ def _prepare_dflash_inputs_kernel(
         local_q_slot,
         PAD_SLOT_ID,
     )
+    if REJECTION_MEMORY:
+        # only the anchor's key is attended to; the memory owns the slots after it
+        q_slot = tl.where(query_off == 0, q_slot, PAD_SLOT_ID)
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
     tl.store(out_is_padding_ptr + query_idx, False, mask=is_query)
@@ -945,12 +988,14 @@ def _prepare_dflash_inputs_kernel(
     if block_idx == 0:
         tl.store(out_query_start_loc_ptr + req_idx, query_base)
         # seq_lens is the absolute sequence length the draft attention
-        # reads up to (context + query), not just the count of accepted
-        # tokens this step.
-        tl.store(
-            out_seq_lens_ptr + req_idx,
-            tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len),
-        )
+        # reads up to (context + the queries' own keys), not just the count of
+        # accepted tokens this step. Non-causal drafters that read only the
+        # first num_query_kv_per_req query keys (e.g. DNeo's prefix-only
+        # attention, which sees just the anchor) stop there.
+        seq_len = last_valid_pos + 1 + num_query_kv_per_req
+        if REJECTION_MEMORY:
+            seq_len += num_rejected
+        tl.store(out_seq_lens_ptr + req_idx, tl.minimum(seq_len, max_model_len))
         # Copy sampling state.
         tl.store(
             out_temperature_ptr + req_state_idx,
@@ -997,7 +1042,21 @@ def prepare_dflash_inputs(
     max_model_len: int,
     sample_from_anchor: bool = False,
     num_reqs_override: int | None = None,
+    num_query_kv_per_req: int | None = None,
+    rejection_memory: bool = False,
 ) -> None:
+    """Prepare the draft pass's inputs.
+
+    ``num_query_kv_per_req`` is how many of a request's query tokens the draft
+    attention reads as keys (all of them by default): ``seq_lens`` ends there.
+    With ``rejection_memory`` (which needs ``num_query_kv_per_req == 1``) the
+    rejected suffix rows' context K/V are kept as extra keys right after the
+    anchor's, and ``seq_lens`` covers them.
+    """
+    if num_query_kv_per_req is None:
+        num_query_kv_per_req = num_query_per_req
+    assert 1 <= num_query_kv_per_req <= num_query_per_req
+    assert not rejection_memory or num_query_kv_per_req == 1
     num_reqs = input_batch.num_reqs if num_reqs_override is None else num_reqs_override
     assert num_reqs <= input_batch.num_reqs
     assert num_reqs > 0
@@ -1036,6 +1095,7 @@ def prepare_dflash_inputs(
         block_size,
         block_stride,
         num_query_per_req,
+        num_query_kv_per_req,
         num_speculative_steps,
         max_num_reqs,
         max_num_tokens,
@@ -1043,6 +1103,7 @@ def prepare_dflash_inputs(
         cp_rank,
         num_reqs,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
+        REJECTION_MEMORY=rejection_memory,
         PAD_SLOT_ID=PAD_SLOT_ID,
         CP_SIZE=cp_size,
         CP_INTERLEAVE=cp_interleave,

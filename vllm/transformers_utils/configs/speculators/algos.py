@@ -117,6 +117,63 @@ def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
             pre_trained_config["dflash_config"][key] = config_dict[key]
 
 
+@register_speculator("dneo")
+def update_dneo(config_dict: dict, pre_trained_config: dict) -> None:
+    """Apply DNeo (arXiv:2611.21925) configuration transformations to the `dict`
+    used to construct the Transformers PreTrainedConfig.
+
+    DNeo runs on the DFlash runtime with DFlash-2's convolutions. Its encoder
+    reads each captured layer's hidden state as the target's attention input, so
+    `aux_hidden_state_layer_ids` are used as is: id `i` is the input of layer `i`
+    (the embeddings for 0), which is what the target captures for id `i`.
+
+    DNeo specific fields:
+    - feature_encoder / shared_feature_encoder / feature_source: only a shared
+        MoFA encoder over the normalized attention inputs is supported.
+    - prefix_only_attention: draft queries see the context and their anchor only.
+    - rejection_memory: draft queries also see the previous round's rejected
+        suffix (the verifier's features at the rejected positions), as K/V only.
+    - conv_kernel_size / conv_group_size: DFlash-2 convolutions.
+    - causal_head_rank / causal_head_folded_rank: the folded causal head.
+    """
+    encoder = (
+        config_dict.get("feature_encoder", "mofa"),
+        config_dict.get("shared_feature_encoder", True),
+        config_dict.get("feature_source", "attention_input"),
+    )
+    if encoder != ("mofa", True, "attention_input"):
+        raise ValueError(
+            "vLLM serves DNeo with a shared MoFA encoder over the target's "
+            "attention inputs only, got (feature_encoder, shared_feature_encoder, "
+            f"feature_source)={encoder}"
+        )
+    if config_dict.get("causal_head_rank", 0) <= 0:
+        raise ValueError("vLLM serves DNeo with its causal head only")
+    pre_trained_config["architectures"] = ["DNeoDraftModel"]
+    pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
+    aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
+    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
+    pre_trained_config["block_size"] = config_dict["block_size"]
+    pre_trained_config["dflash_config"] = {
+        "mask_token_id": config_dict["mask_token_id"],
+        "target_layer_ids": aux_layer_ids,
+        "sample_from_anchor": config_dict.get("sample_from_anchor", False),
+        "conv_kernel_size": config_dict.get("conv_kernel_size", 2),
+        "conv_group_size": config_dict.get("conv_group_size", 16),
+        # every draft layer is non-causal: prefix-only attention is realized by
+        # the speculator's seq_lens (context + the anchor's key)
+        "causal": False,
+    }
+    pre_trained_config["dneo_config"] = {
+        "prefix_only_attention": config_dict.get("prefix_only_attention", True),
+        "rejection_memory": config_dict.get("rejection_memory", False),
+        "causal_head_rank": config_dict["causal_head_rank"],
+        "causal_head_folded_rank": config_dict.get(
+            "causal_head_folded_rank", config_dict["causal_head_rank"]
+        ),
+    }
+
+
 @register_speculator("dspine")
 def update_dspine(config_dict: dict, pre_trained_config: dict) -> None:
     """Apply DSpine's causal injection and transition-cache configuration."""

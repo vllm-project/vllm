@@ -32,6 +32,9 @@ def _run_prepare(
     draft_dcp_size: int | None = None,
     num_scheduled_tokens: int = 4,
     attn_groups: list | None = None,
+    num_query_kv_per_req: int | None = None,
+    rejection_memory: bool = False,
+    sample_from_anchor: bool = True,
 ):
     device = torch.device(current_platform.device_type)
     max_num_reqs = 4
@@ -119,11 +122,17 @@ def _run_prepare(
         dcp_size=cp_size if draft_dcp_size is None else draft_dcp_size,
         parallel_drafting_token_id=123,
         num_query_per_req=num_speculative_steps,
+        num_query_kv_per_req=(
+            num_speculative_steps
+            if num_query_kv_per_req is None
+            else num_query_kv_per_req
+        ),
+        rejection_memory=rejection_memory,
         num_speculative_steps=num_speculative_steps,
         max_num_reqs=max_num_reqs,
         max_num_tokens=max_num_tokens,
         max_model_len=128,
-        sample_from_anchor=True,
+        sample_from_anchor=sample_from_anchor,
         context_kv_only=False,
     )
     with (
@@ -255,3 +264,54 @@ def test_prepare_dflash_inputs_compiles_once_for_all_query_lengths():
     warmed = compiled_variants()
     _run_prepare(**kwargs, num_scheduled_tokens=300)
     assert compiled_variants() == warmed
+
+
+def test_prepare_dflash_inputs_seq_lens_cover_context_and_queries():
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+    )
+    # last accepted position 11, then the 3 queries at 12, 13, 14
+    assert out.input_buffers.seq_lens[0].item() == 15
+
+
+def test_prepare_dflash_inputs_prefix_only_reads_one_query_key():
+    # DNeo's prefix-only attention: the queries see the context and the anchor.
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        num_query_kv_per_req=1,
+    )
+    assert out.input_buffers.seq_lens[0].item() == 13
+    # the layout is otherwise unchanged
+    assert out.context_slot_mapping[:4].tolist() == [30, 31, PAD_SLOT_ID, PAD_SLOT_ID]
+    assert out.query_slot_mapping[:3].tolist() == [32, 33, 34]
+
+
+def test_prepare_dflash_inputs_rejection_memory_keeps_rejected_rows_after_anchor():
+    # Positions 12/13 were rejected. With rejection memory their K/V keep their
+    # own positions (RoPE) but are stored one slot later, right after the
+    # anchor's key at 12: slots of positions 13/14. Only the anchor query writes
+    # K/V, and the draft attention reads the context, the anchor and the memory.
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        num_query_kv_per_req=1,
+        rejection_memory=True,
+        sample_from_anchor=False,
+    )
+    assert out.context_positions[:4].tolist() == [10, 11, 12, 13]
+    assert out.context_slot_mapping[:4].tolist() == [30, 31, 33, 34]
+    assert out.input_buffers.positions[:3].cpu().tolist() == [12, 13, 14]
+    assert out.query_slot_mapping[:3].tolist() == [32, PAD_SLOT_ID, PAD_SLOT_ID]
+    # context 0..11, the anchor at 12, two memory keys
+    assert out.input_buffers.seq_lens[0].item() == 15
+
+
+def test_prepare_dflash_inputs_rejection_memory_needs_prefix_only():
+    with pytest.raises(AssertionError):
+        _run_prepare(
+            target_positions=[10, 11, 12, 13],
+            block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+            rejection_memory=True,
+        )
