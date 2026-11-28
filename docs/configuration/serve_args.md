@@ -29,6 +29,17 @@ To use the above config file:
 vllm serve --config config.yaml
 ```
 
+Lists become repeated values, and nested mappings are passed as JSON, so
+JSON-valued arguments such as `--lora-modules` can be written in YAML:
+
+```yaml
+lora-modules:
+  - sql-lora=jeeejeee/llama32-3b-text2sql-spider
+  - name: sql-lora-2
+    path: jeeejeee/llama32-3b-text2sql-spider
+    base_model_name: meta-llama/Llama-3.2-3B-Instruct
+```
+
 ### Generate a configuration from vLLM Recipes
 
 [vLLM Recipes](https://recipes.vllm.ai/) can be converted into `config.yaml`
