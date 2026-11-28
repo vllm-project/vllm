@@ -313,6 +313,22 @@ def _platform_device_type() -> str:
         return "cpu"
 
 
+def _resolve_group_device(device_index: int) -> torch.device:
+    """Return the `torch.device` for a parallel group worker."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_cuda_alike():
+        visible_device_index = current_platform.logical_device_id_to_visible_device_id(
+            device_index
+        )
+        return torch.device(f"cuda:{visible_device_index}")
+    if current_platform.is_xpu():
+        return torch.device(f"xpu:{device_index}")
+    if current_platform.is_out_of_tree():
+        return current_platform.get_group_device(device_index)
+    return torch.device("cpu")
+
+
 def _device_backend_str(torch_distributed_backend: str | Backend) -> str:
     """Normalize `torch_distributed_backend` to the `"<device>:<backend>"`
     format required by `split_group`'s `backend` argument.
@@ -533,21 +549,7 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
 
-        if current_platform.is_cuda_alike():
-            visible_device_index = (
-                current_platform.logical_device_id_to_visible_device_id(
-                    self.device_index
-                )
-            )
-            self.device = torch.device(f"cuda:{visible_device_index}")
-        elif current_platform.is_xpu():
-            self.device = torch.device(f"xpu:{self.device_index}")
-        elif current_platform.is_out_of_tree():
-            self.device = torch.device(
-                f"{current_platform.device_name}:{self.device_index}"
-            )
-        else:
-            self.device = torch.device("cpu")
+        self.device = _resolve_group_device(self.device_index)
 
         self.use_device_communicator = use_device_communicator
         self.device_communicator = None

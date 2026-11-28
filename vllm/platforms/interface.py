@@ -1325,6 +1325,10 @@ class Platform:
         """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
+    def get_group_device(self, local_rank: int) -> torch.device:
+        """Return the `torch.device` for a parallel group worker."""
+        return torch.device(f"{self.device_name}:{local_rank}")
+
     @classmethod
     def supports_eplb(cls) -> bool:
         """Whether this platform can run expert parallel load balancing."""

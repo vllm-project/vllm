@@ -11,6 +11,7 @@ from vllm.distributed.parallel_state import (
     TensorMetadata,
     _get_unique_name,
     _register_group,
+    _resolve_group_device,
     _split_tensor_dict,
 )
 from vllm.distributed.utils import (
@@ -137,21 +138,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         self.device_group = self_device_group
         self.tcp_store_group = self_tcp_store_group
 
-        if current_platform.is_cuda_alike():
-            visible_device_index = (
-                current_platform.logical_device_id_to_visible_device_id(
-                    self.device_index
-                )
-            )
-            self.device = torch.device(f"cuda:{visible_device_index}")
-        elif current_platform.is_xpu():
-            self.device = torch.device(f"xpu:{self.device_index}")
-        elif current_platform.is_out_of_tree():
-            self.device = torch.device(
-                f"{current_platform.device_name}:{self.device_index}"
-            )
-        else:
-            self.device = torch.device("cpu")
+        self.device = _resolve_group_device(self.device_index)
 
         self.use_device_communicator = use_device_communicator
         self.device_communicator = None
