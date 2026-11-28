@@ -48,7 +48,8 @@ class xLAMToolParser(ToolParser):
 
         # Regex patterns for preprocessing
         self.json_code_block_patterns = [
-            r"```(?:json)?\s*([\s\S]*?)```",
+            # Consume leading whitespace without retrying it as block content.
+            r"```(?:json)?\s*+([\s\S]*?)```",
             r"\[TOOL_CALLS\]([\s\S]*?)(?=\n|$)",
             r"<tool_call>([\s\S]*?)</tool_call>",
         ]
