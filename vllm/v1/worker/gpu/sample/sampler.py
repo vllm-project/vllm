@@ -144,7 +144,11 @@ class Sampler:
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
-        num_nans = get_num_nans(logits) if self.compute_nans else None
+        num_nans = (
+            get_num_nans(logits, input_batch.cu_num_logits)
+            if self.compute_nans
+            else None
+        )
 
         logprobs_dims = self.get_logprobs_dims(idx_mapping_np)
 
