@@ -15,6 +15,7 @@ import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -609,7 +610,9 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         return routed + shared_out
 
 
-def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
+def _validate_aiter_mega_moe_config(
+    vllm_config: VllmConfig, supports_eplb: bool
+) -> None:
     parallel_config = vllm_config.parallel_config
     if not rocm_aiter_ops.is_fused_moe_enabled():
         raise ValueError(
@@ -638,7 +641,15 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
             "(without VLLM_MORI_EP_V2=1)."
         )
     if parallel_config.enable_eplb:
-        raise NotImplementedError("AITER MegaMoE does not support EPLB.")
+        if not supports_eplb:
+            raise NotImplementedError(
+                "AITER MegaMoE supports EPLB only for DeepSeek V4.1."
+            )
+        # Redundant slots are filled from EPLB's linear initial placement.
+        if parallel_config.expert_placement_strategy != "linear":
+            raise NotImplementedError(
+                "AITER MegaMoE with EPLB requires expert_placement_strategy='linear'."
+            )
     if getattr(vllm_config.model_config.hf_config, "expert_dtype", "fp4") != "fp4":
         raise NotImplementedError("AITER MegaMoE only supports fp4 experts.")
 
@@ -646,6 +657,8 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
 class DeepseekV4MoE(nn.Module):
     # None: use the padding vLLM added.
     experts_intermediate_pad: int | None = None
+    # Whether the model registers this layer's MegaMoE experts with EPLB.
+    supports_eplb: bool = False
 
     def __init__(
         self,
@@ -782,10 +795,27 @@ class DeepseekV4MoE(nn.Module):
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
         if self.use_mega_moe:
-            _validate_aiter_mega_moe_config(vllm_config)
+            parallel_config = vllm_config.parallel_config
+            _validate_aiter_mega_moe_config(vllm_config, self.supports_eplb)
+            ep_size = get_ep_group().world_size
+            self.n_logical_experts = config.n_routed_experts
+            self.n_redundant_experts = (
+                parallel_config.eplb_config.num_redundant_experts
+                if parallel_config.enable_eplb
+                else 0
+            )
+            self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+            if self.n_physical_experts % ep_size != 0:
+                raise ValueError(
+                    f"AITER MegaMoE needs n_physical_experts="
+                    f"{self.n_physical_experts} divisible by ep_size={ep_size}; "
+                    "adjust num_redundant_experts."
+                )
+            self.n_local_physical_experts = self.n_physical_experts // ep_size
             self.experts = DeepseekV4AiterMegaMoEExperts(
                 vllm_config,
-                num_experts=config.n_routed_experts,
+                num_experts=self.n_physical_experts,
+                num_logical_experts=self.n_logical_experts,
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,

@@ -114,6 +114,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
     # TODO: revert once https://github.com/ROCm/aiter/pull/6598 is in the
     # pinned AITER; with the padding set, its FlyDSL MoE can output NaN.
     experts_intermediate_pad = 0
+    supports_eplb = True
 
     def __init__(
         self,
@@ -168,12 +169,18 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
                 self.experts.router.bias_vl = self.gate.bias_vl
                 self.experts.router.image_sentinel_lo = self.image_sentinel_lo
         # Expose the MixtureOfExperts protocol fields expected by the V4.1
-        # outer model.  The current ROCm runner has no redundant EPLB copies,
-        # so logical and physical expert counts are identical.
-        self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = self.n_routed_experts
-        self.n_local_physical_experts = self.n_local_experts
-        self.n_redundant_experts = 0
+        # outer model. MegaMoE sets them with its EPLB layout; the fused-MoE
+        # path has no redundant copies.
+        if not self.use_mega_moe:
+            if vllm_config.parallel_config.enable_eplb:
+                raise NotImplementedError(
+                    "DeepSeek V4.1 on ROCm supports EPLB only with "
+                    "--moe-backend aiter_mega_moe."
+                )
+            self.n_logical_experts = self.n_routed_experts
+            self.n_physical_experts = self.n_routed_experts
+            self.n_local_physical_experts = self.n_local_experts
+            self.n_redundant_experts = 0
 
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:

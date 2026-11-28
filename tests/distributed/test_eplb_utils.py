@@ -586,3 +586,121 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
         model_state._commit_eplb_maps_for_layer(new_phy2log, layer=0)
     finally:
         torch.cuda.set_sync_debug_mode(prev_mode)
+
+
+def test_rank_load_imbalance_is_per_layer():
+    """Hot spots on different ranks in different layers must not cancel out."""
+    # 2 layers, 4 experts, 2 ranks; rank 0 holds experts 0-1, rank 1 holds 2-3.
+    identity = torch.arange(4).repeat(2, 1)
+    loads = torch.tensor([[3, 3, 1, 1], [1, 1, 3, 3]])
+    # Layer-summed rank loads are 8 and 8; each layer alone is 6 vs 2.
+    assert eplb_state_module._rank_load_imbalance(loads, identity, 2) == 1.5
+    balanced = torch.tensor([[0, 2, 1, 3], [0, 2, 1, 3]])
+    assert eplb_state_module._rank_load_imbalance(loads, balanced, 2) == 1.0
+
+
+def test_rank_load_imbalance_weights_layers_by_load_and_splits_replicas():
+    # Layer 0 carries 10x the load of layer 1, so it dominates the metric:
+    # sum of per-layer max (30 + 2) / sum of per-layer mean (20 + 2).
+    identity = torch.arange(4).repeat(2, 1)
+    loads = torch.tensor([[15, 15, 5, 5], [1, 1, 1, 1]])
+    assert eplb_state_module._rank_load_imbalance(loads, identity, 2) == pytest.approx(
+        32 / 22
+    )
+    # Expert 0 replicated on both ranks: its load is split over the replicas.
+    replicated = torch.tensor([[0, 1, 0, 2, 3, 0]])
+    loads = torch.tensor([[12, 1, 1, 1]])
+    assert eplb_state_module._rank_load_imbalance(
+        loads, replicated, 2
+    ) == pytest.approx(9 / 7.5)
+    # No load at all counts as balanced.
+    assert eplb_state_module._rank_load_imbalance(torch.zeros(2, 4), identity, 2) == 1.0
+
+
+def test_rank_load_imbalance_matches_logged_balancedness():
+    """The gate metric is the inverse of the balancedness EPLB logs."""
+    gen = torch.Generator().manual_seed(0)
+    num_layers, num_experts, ep_size = 3, 16, 4
+    loads = torch.randint(0, 100, (num_layers, num_experts), generator=gen)
+    mapping = torch.stack(
+        [torch.randperm(num_experts, generator=gen) for _ in range(num_layers)]
+    )
+    per_rank = torch.gather(loads, 1, mapping).reshape(num_layers, ep_size, -1)
+    avg_tokens, max_tokens = eplb_state_module._compute_eplb_load_stats(
+        per_rank.sum(-1).float()
+    )
+    assert eplb_state_module._rank_load_imbalance(
+        loads, mapping, ep_size
+    ) == pytest.approx((max_tokens / avg_tokens).item())
+
+
+class _SwapMiddleExpertsPolicy(AbstractEplbPolicy):
+    """Moves experts 1 and 2 across the two ranks in every layer."""
+
+    def rebalance_experts(
+        self,
+        stats: EplbStats,
+        old_global_expert_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert old_global_expert_indices is not None
+        return old_global_expert_indices[:, [0, 2, 1, 3]]
+
+
+@pytest.mark.parametrize(
+    ("layer_loads", "expect_rearrange"),
+    [
+        # Each layer is 3:1 between the ranks, but the hot rank alternates, so
+        # the layer-summed rank loads are equal. The swap balances every layer.
+        ([[3, 3, 1, 1], [1, 1, 3, 3]], True),
+        # Already balanced in every layer: the swap gains nothing.
+        ([[3, 1, 3, 1], [1, 3, 1, 3]], False),
+    ],
+)
+def test_rocm_rearrange_gate_uses_per_layer_imbalance(
+    monkeypatch, layer_loads, expect_rearrange
+):
+    monkeypatch.setattr(
+        parallel_config_module.current_platform, "supports_eplb", lambda: True
+    )
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        distributed_executor_backend="mp",
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(
+            window_size=4, step_interval=8, use_async=False, communicator="torch_gloo"
+        ),
+    )
+    monkeypatch.setattr(eplb_state_module, "CpuGpuEvent", _EplbTestEvent)
+    state = EplbState(parallel_config, torch.device("cpu"))
+    group = _EplbTestGroup()
+    monkeypatch.setattr(eplb_state_module, "get_ep_group", lambda: group)
+    monkeypatch.setattr(eplb_state_module, "get_eplb_group", lambda: group)
+    monkeypatch.setattr(eplb_state_module, "get_node_count", lambda: 1)
+    monkeypatch.setattr(eplb_state_module, "all_reduce", lambda tensor, group: None)
+    monkeypatch.setattr(
+        eplb_state_module,
+        "create_eplb_communicator",
+        lambda *args, **kwargs: SimpleNamespace(owned_expert_buffer=None),
+    )
+    rearrange_weights = MagicMock()
+    monkeypatch.setattr(
+        eplb_state_module, "rearrange_expert_weights_inplace", rearrange_weights
+    )
+    monkeypatch.setattr(eplb_state_module, "PIN_MEMORY", False)
+    monkeypatch.setattr(eplb_state_module.current_platform, "is_rocm", lambda: True)
+
+    model = _EplbTestModel(num_experts=4, num_redundant=0)
+    model.num_moe_layers = 2
+    model.expert_weights = [
+        [torch.zeros(model.num_local_physical_experts, 1)] for _ in range(2)
+    ]
+    model_config = _EplbTestModelConfig("target")
+    state.add_model(model, model_config)
+    state.policy = _SwapMiddleExpertsPolicy()
+    model_state = state.model_states[hash_config_cached(model_config)]
+    model_state.expert_load_window[0] = torch.tensor(layer_loads)
+
+    state.rearrange()
+
+    assert rearrange_weights.called == expect_rearrange
