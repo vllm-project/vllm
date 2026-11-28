@@ -22,6 +22,7 @@ Engram layers are declared by the checkpoint, not chosen at serve time:
 | --- | --- | --- |
 | `DeepseekV41ForCausalLM` | `engram_layer_ids` | e.g. `deepseek-ai/DeepSeek-V4.1-Flash` |
 | `Qwen4ExpForCausalLM` / `Qwen4ExpForConditionalGeneration` | `ple_layer_ids` | same mechanism, called PLE |
+| `HYV4FlashForCausalLM` / `HYV4FlashVLForConditionalGeneration` | `engram_layer_ids` | e.g. `tencent/Hy4-flash-FP8`; `dp_shared_memory` is opt-in |
 
 Passing `--engram-config` for a model without n-gram embedding layers fails at
 startup, as does running on a non-CUDA-alike platform.

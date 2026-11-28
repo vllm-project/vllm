@@ -63,8 +63,9 @@ class EngramConfig:
     by FABRIC handle where supported (on ROCm, HIP VMM host memory with
     VLLM_ROCM_ENGRAM_HIP_VMM=1), else /dev/shm (which then needs capacity and a
     shared IPC namespace). Defaults to enabled when the model and other settings
-    allow it; Flash uses private replicas. Falls back to per-replica tables when
-    DP replicas are not co-located on one node or the host cannot hold them."""
+    allow it; HY4-Flash defaults to private replicas and supports opt-in
+    sharing on CUDA only. Falls back to per-replica tables when DP replicas
+    are not co-located on one node or the host cannot hold them."""
 
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
@@ -159,7 +160,7 @@ class EngramConfig:
                 "embeddings and non-empty n-gram layer ids."
             )
         if model_config.architecture in _FLASH_ENGRAM_ARCHITECTURES:
-            for option in ("dp_shared_memory", "embedding_across_dp", "disk_offload"):
+            for option in ("embedding_across_dp", "disk_offload"):
                 if getattr(self, option):
                     raise ValueError(f"Flash Engram does not support {option}")
         if self.disk_offload:

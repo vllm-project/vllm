@@ -151,6 +151,9 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
             [0, 1, 2, 3],
         ),
         ("Qwen4ExpForConditionalGeneration", {}, 2, None, [0, 1]),
+        # HY4-Flash shares its Engram tables over the group only when asked.
+        ("HYV4FlashForCausalLM", {}, 2, None, [0, 1]),
+        ("HYV4FlashForCausalLM", {"dp_shared_memory": True}, 2, [0, 2], [0, 1]),
     ],
 )
 def test_engram_group_creation_honors_model_and_options(
@@ -248,6 +251,12 @@ def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
             _check_cumem_host_table(failure, packed_fp4)
         for shm_fits in (True, False):
             _check_ple_shared_table(shm_fits)
+        _check_flash_device_local_table()
+        if current_platform.is_cuda():
+            # The trailing True repeat re-initializes shared tables.
+            for shm_fits in (True, False, True):
+                _check_flash_shared_table(shm_fits)
+            _check_flash_shared_load_order()
         if tp_size == 1:
             _check_pool_tables(store_dir)
 
@@ -691,6 +700,120 @@ def _check_ple_shared_table(shm_fits):
     expected = 1.0 if shm_fits else group.rank_in_group + 1.0
     assert embedding.weight.is_pinned()
     assert torch.all(embedding.weight == expected)
+    group.barrier()
+
+
+def _check_flash_shared_table(shm_fits):
+    """HY4-Flash Engram tables - lazily allocated from the checkpoint dtype -
+    become one shared mapping per EDP group, written by the group leader;
+    without room in /dev/shm, every rank keeps a private table."""
+    from vllm.models.hy_v4_flash.common.engram import FlashEmbedding
+
+    group = get_engram_dp_group()
+    rank = torch.distributed.get_rank()
+    sizes = [4] * 8
+    with pytest.MonkeyPatch.context() as patch:
+        if not shm_fits:
+            patch.setattr(engram_ops, "_shm_shortfall", lambda num_bytes: "too small")
+
+        # Lazy allocation: the dtype arrives with the checkpoint tensor. Every
+        # rank offers its own rows, so a private slip shows up in the values.
+        embedding = FlashEmbedding(
+            sizes, 8, None, True, share_group=group, prefix="test.lazy"
+        )
+        offered = torch.full((sum(sizes), 8), rank + 1.0, dtype=torch.bfloat16)
+        embedding.load_weights([("embedding.weight", offered)])
+        expected = group.ranks[0] + 1.0 if shm_fits else rank + 1.0
+        assert embedding.embedding.weight.is_pinned()
+        assert torch.all(embedding.embedding.weight == expected)
+        # The CUDA lookup view reads the same shared rows.
+        table, scales = embedding.tables()
+        assert torch.all(table == expected)
+        assert scales is None
+
+        # Eager (dummy-style) allocation shares the same way.
+        eager = FlashEmbedding(
+            sizes, 8, torch.bfloat16, True, share_group=group, prefix="test.eager"
+        )
+        eager.load_weights([("embedding.weight", offered)])
+        assert torch.all(eager.embedding.weight == expected)
+        assert torch.all(eager.tables()[0] == expected)
+
+        # FP8 row scales may arrive before the table and share storage too.
+        fp8 = FlashEmbedding(sizes, 8, None, True, share_group=group, prefix="test.fp8")
+        scale = torch.full((sum(sizes),), rank + 3.0, dtype=torch.bfloat16)
+        table8 = torch.full((sum(sizes), 8), float(rank + 1), dtype=torch.float8_e4m3fn)
+        fp8.load_weights(
+            [
+                ("embedding.weight_scale_inv", scale),
+                ("embedding.weight", table8),
+            ]
+        )
+        assert fp8.fp8
+        assert torch.all(
+            fp8.embedding.weight_scale_inv
+            == (group.ranks[0] + 3.0 if shm_fits else rank + 3.0)
+        )
+        weight8, scale_view = fp8.tables()
+        assert torch.all(weight8.to(torch.float32) == expected)
+        assert scale_view is not None
+        assert torch.all(
+            scale_view == (group.ranks[0] + 3.0 if shm_fits else rank + 3.0)
+        )
+    group.barrier()
+
+
+def _check_flash_device_local_table():
+    """Disabling CPU offload preserves GPU storage for eager and lazy loads."""
+    from vllm.models.hy_v4_flash.common.engram import FlashEmbedding
+
+    sizes = [4] * 8
+    device = torch.device("cuda", torch.accelerator.current_device_index())
+    for dtype in (torch.bfloat16, torch.float8_e4m3fn):
+        for eager in (False, True):
+            with torch.device(device):
+                embedding = FlashEmbedding(
+                    sizes, 8, dtype if eager else None, cpu_offload=False
+                )
+            assert embedding.embedding.weight.device == device
+            offered = torch.full((sum(sizes), 8), 2.0, dtype=dtype, device="cpu")
+            weights = [("embedding.weight", offered)]
+            if dtype == torch.float8_e4m3fn:
+                scale = torch.full((sum(sizes),), 3.0, dtype=torch.bfloat16)
+                weights.insert(0, ("embedding.weight_scale_inv", scale))
+            embedding.load_weights(weights)
+            table, scales = embedding.tables()
+            assert table.device == device
+            assert torch.all(table.to(torch.float32) == 2.0)
+            if dtype == torch.float8_e4m3fn:
+                assert scales is not None and scales.device == device
+                assert torch.all(scales == 3.0)
+            else:
+                assert scales is None
+
+
+def _check_flash_shared_load_order():
+    """Equal-sized but different logical tables must not share a mapping."""
+    from vllm.models.hy_v4_flash.common.engram import FlashEmbedding
+
+    group = get_engram_dp_group()
+    sizes = [4] * 8
+    a = FlashEmbedding(sizes, 8, None, True, share_group=group, prefix="layer.a")
+    b = FlashEmbedding(sizes, 8, None, True, share_group=group, prefix="layer.b")
+    first = a if group.rank_in_group == 0 else b
+    offered = torch.ones((sum(sizes), 8), dtype=torch.bfloat16)
+    # The mismatch must be detected before entering the allocation collective.
+    with pytest.MonkeyPatch.context() as patch:
+
+        def unexpected_allocation(*args):
+            pytest.fail("Entered shared allocation with mismatched tensor order")
+
+        patch.setattr(
+            engram_ops.DPSharedEngramStorage, "share_shm_table", unexpected_allocation
+        )
+        with pytest.raises(RuntimeError, match="identical tensor load order"):
+            first.load_weights([("embedding.weight", offered)])
+    assert a.embedding.weight.numel() == b.embedding.weight.numel() == 0
     group.barrier()
 
 
