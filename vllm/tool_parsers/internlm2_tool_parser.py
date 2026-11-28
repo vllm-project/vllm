@@ -26,15 +26,27 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import find_common_prefix, is_complete_json
+from vllm.tool_parsers.utils import (
+    _step_open_arg_string_fast_path,
+    _try_arm_open_arg_string_fast_path,
+    find_common_prefix,
+    is_complete_json,
+)
 
 logger = init_logger(__name__)
 
 
 class Internlm2ToolParser(ToolParser):
+    _open_arg_key: str | None = None
+    _open_arg_consumed_pos: int = 0
+    _open_arg_pending_delta: str = ""
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
         self.position = 0
+        self._open_arg_key = None
+        self._open_arg_consumed_pos = 0
+        self._open_arg_pending_delta = ""
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -86,6 +98,45 @@ class Internlm2ToolParser(ToolParser):
         action = action.strip()
         action = action.split("<|action_end|>".strip())[0]
 
+        if (
+            self._open_arg_key is not None
+            and self.current_tool_name_sent
+            and 0 <= self.current_tool_id < len(self.prev_tool_call_arr)
+            and 0 <= self.current_tool_id < len(self.streamed_args_for_tool)
+            and "<|action_end|>" not in new_delta
+            and current_text.startswith(previous_text)
+            and len(action) >= self._open_arg_consumed_pos
+        ):
+            (
+                handled,
+                self._open_arg_consumed_pos,
+                self._open_arg_pending_delta,
+                argument_diff,
+            ) = _step_open_arg_string_fast_path(
+                action,
+                self._open_arg_key,
+                self._open_arg_consumed_pos,
+                self._open_arg_pending_delta,
+                self.prev_tool_call_arr[self.current_tool_id],
+                self.streamed_args_for_tool,
+                self.current_tool_id,
+                emit_empty_on_noop=True,
+            )
+            if handled:
+                return DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=argument_diff
+                            ).model_dump(exclude_none=True),
+                        )
+                    ]
+                )
+        self._open_arg_key = None
+        self._open_arg_consumed_pos = 0
+        self._open_arg_pending_delta = ""
+
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
         # an incomplete string since OpenAI only ever (as far as I have
@@ -132,6 +183,7 @@ class Internlm2ToolParser(ToolParser):
                     self.prev_tool_call_arr[self.current_tool_id]
                 )
                 cur_arguments = self.get_arguments(tool_call_arr)
+                cur_args_json: str | None = None
 
                 # not arguments generated
                 if not cur_arguments and not prev_arguments:
@@ -144,16 +196,14 @@ class Internlm2ToolParser(ToolParser):
                     delta = None
                 # first time to get parameters
                 elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
+                    cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
 
-                    match_start = cur_arguments_json.find(delta_text)
+                    match_start = cur_args_json.find(delta_text)
                     if match_start != -1:
-                        arguments_delta = cur_arguments_json[
-                            : match_start + len(delta_text)
-                        ]
+                        arguments_delta = cur_args_json[: match_start + len(delta_text)]
                     elif is_complete_json(parsable_arr):
                         # Complete in this delta: send whole, don't drop.
-                        arguments_delta = cur_arguments_json
+                        arguments_delta = cur_args_json
                     else:
                         # Still partial: wait for more text.
                         return None
@@ -195,6 +245,21 @@ class Internlm2ToolParser(ToolParser):
                         ]
                     )
                     self.streamed_args_for_tool[self.current_tool_id] += argument_diff
+
+                if "<|action_end|>" not in new_delta and not is_complete_json(
+                    parsable_arr
+                ):
+                    (
+                        self._open_arg_key,
+                        self._open_arg_consumed_pos,
+                        self._open_arg_pending_delta,
+                    ) = _try_arm_open_arg_string_fast_path(
+                        parsable_arr,
+                        0,
+                        cur_arguments,
+                        cur_args_json,
+                        self.streamed_args_for_tool[self.current_tool_id],
+                    )
 
             # check to see if the name is defined and has been sent. if so,
             # stream the name - otherwise keep waiting
