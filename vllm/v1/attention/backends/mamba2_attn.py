@@ -149,6 +149,8 @@ class Mamba2AttentionMetadataBuilder(
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        if torch.device(device).type == "cuda":
+            self.mamba_aligned_state_indices: torch.Tensor | None = None
         chunk_size = vllm_config.model_config.get_mamba_chunk_size()
         assert chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models"

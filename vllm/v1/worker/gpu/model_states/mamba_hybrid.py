@@ -95,6 +95,11 @@ class MambaHybridModelState(DefaultModelState):
         # the postprocess copy machinery, so the per-step src columns and the
         # running state_idx are kept GPU-resident.
         self.prefix_caching = self.cache_config.enable_prefix_caching
+        self._mamba_num_accepted_tokens_batch = (
+            torch.ones(self.max_num_reqs, dtype=torch.int32, device=self.device)
+            if self.prefix_caching and vllm_config.num_speculative_tokens > 0
+            else None
+        )
         self._use_replayssm_trackers = vllm_config.use_replayssm_trackers
         if self._use_replayssm_trackers:
             self._is_prefilling_gpu = torch.zeros(
@@ -272,7 +277,12 @@ class MambaHybridModelState(DefaultModelState):
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
-            num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
+            accepted_batch = self._mamba_num_accepted_tokens_batch
+            if accepted_batch is None:
+                num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
+            else:
+                num_accepted_tokens = accepted_batch[:num_reqs]
+                num_accepted_tokens[input_batch.num_reqs :].fill_(1)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
                 input_batch.idx_mapping
             ]
@@ -313,8 +323,17 @@ class MambaHybridModelState(DefaultModelState):
                 all_group_indices = ctx.compute_aligned_state_indices(
                     input_batch.seq_lens, num_reqs
                 )
+                assert ctx.aligned_state_indices is not None
                 for group_idx, builder in aligned_index_builders:
-                    builder.mamba_aligned_state_indices = all_group_indices[group_idx]
+                    aligned = all_group_indices[group_idx]
+                    builder.mamba_aligned_state_indices = aligned
+                    if isinstance(builder, Mamba2AttentionMetadataBuilder):
+                        graph_size = builder.decode_cudagraph_max_bs
+                        accepted = self._mamba_num_accepted_tokens_batch
+                        builder.bind_mrv2_graph_inputs(
+                            ctx.aligned_state_indices[group_idx, :graph_size],
+                            None if accepted is None else accepted[:graph_size],
+                        )
 
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
