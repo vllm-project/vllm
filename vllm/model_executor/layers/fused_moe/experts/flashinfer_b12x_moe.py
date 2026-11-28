@@ -27,6 +27,23 @@ from vllm.utils.flashinfer import (
 )
 
 
+def _resolve_padded_intermediate_size(
+    configured_intermediate_size: int,
+    is_gated: bool,
+    w13_rows: int,
+) -> int:
+    """Return the intermediate size present in the prepared FC1 weights.
+
+    For non-gated activations, ``prepare_nvfp4_moe_layer_for_fi_or_cutlass``
+    zero-pads ``w13`` rows (and ``w2`` / ``w2_scale`` columns) to the
+    128-row multiple produced by scale swizzling, and ``B12xMoEWrapper``
+    must be built with that padded width. Gated layers are not padded there.
+    """
+    if is_gated:
+        return configured_intermediate_size
+    return w13_rows
+
+
 class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121,
     RTX Pro 6000 / DGX Spark).
@@ -140,6 +157,12 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         assert self.w1_scale is not None
         num_experts_w1, m1, k1_sf = self.w1_scale.shape
         k1 = k1_sf * 16
+        # Must run before _ensure_wrapper() builds B12xMoEWrapper.
+        self.intermediate_size_per_partition = _resolve_padded_intermediate_size(
+            self.intermediate_size_per_partition,
+            is_gated=self.moe_config.is_act_and_mul,
+            w13_rows=m1,
+        )
         self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
             self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
             m=m1,
