@@ -171,6 +171,23 @@ class TokenShard:
     def gather(self, x: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_all_gather(x.contiguous(), 0)[: self.num_tokens]
 
+    def gather_rows(self, x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        """`gather(x)` with only the rows in `indices` filled; the rest are zero.
+
+        Each rank sends one row per index (zeros for the rows it does not own),
+        so the all-gather moves `world * len(indices)` rows instead of
+        `num_tokens`.
+        """
+        owner = torch.div(indices, self.rows, rounding_mode="floor")
+        rows = x[indices - owner * self.rows]
+        mine = (owner == get_tensor_model_parallel_rank())[:, None]
+        rows = torch.where(mine, rows, rows.new_zeros(()))
+        gathered = tensor_model_parallel_all_gather(rows, 0)
+        n = indices.shape[0]
+        out = x.new_zeros((self.num_tokens, *x.shape[1:]))
+        out[indices] = gathered[owner * n + torch.arange(n, device=indices.device)]
+        return out
+
     def reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
         pad = self.rows * self.world - x.shape[0]
         if pad:
@@ -1107,7 +1124,10 @@ class MuseSparkModel(LlamaModel):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        logits_indices: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """With `logits_indices`, a token-sharded step returns only those rows of
+        the final hidden states; the other rows are zero."""
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1172,7 +1192,10 @@ class MuseSparkModel(LlamaModel):
                 x, self.norm, out_dtype=self.default_dtype
             )
         if shard is not None:
-            output = shard.gather(output)
+            if logits_indices is not None and logits_indices.shape[0] < num_tokens:
+                output = shard.gather_rows(output, logits_indices)
+            else:
+                output = shard.gather(output)
         if aux_hidden_states:
             return output, aux_hidden_states
         return output
@@ -1314,6 +1337,24 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 moe.n_physical_experts = num_physical_experts
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
+
+    @staticmethod
+    def get_model_state_cls():
+        from .model_state import MuseSparkModelState
+
+        return MuseSparkModelState
+
+    def forward(  # type: ignore[override]
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        logits_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        return self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, logits_indices
+        )
 
     def compute_logits(
         self,
