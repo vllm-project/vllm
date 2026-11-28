@@ -29,8 +29,9 @@ vllm serve tencent/Hy4-flash-FP8 \
   quantization, native block FP8 checkpoints, or compressed-tensors checkpoints
   without a KV cache scheme or transforms. HY4 targets can use any layer scheme
   the model supports, such as NVFP4 experts. HY4 Flash targets are limited to
-  W8A8 FP8 (128×128 weight blocks, dynamic group-128 activations) and weight-only
-  MXFP4 (group-32). The shared embedding and LM head must be BF16.
+  W8A8 FP8 (128×128 weight blocks, dynamic group-128 activations), weight-only
+  MXFP4 (group-32) and ModelOpt NVFP4 experts (`modelopt_fp4`). The shared
+  embedding and LM head must be BF16.
 - Draft layers in BF16 or W8A8 FP8 with 128×128 weight blocks and dynamic
   activations, independent of the target's scheme.
 - Matching target and draft KV cache dtype: BF16 (`auto` or `bfloat16`)

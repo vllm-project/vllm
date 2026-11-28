@@ -24,7 +24,7 @@ from .engram import FlashEngram, FlashNgramHashState, loads_dummy_weights
 
 _EXPERT_WEIGHT = re.compile(
     r"(.*)\.experts\.(?:(\d+)\.)?(gate_proj|up_proj|down_proj|gate_up_proj)"
-    r"(\.weight(?:_packed|_scale(?:_inv)?)?|_scale(?:_inv)?)?"
+    r"(\.weight(?:_packed|_scale(?:_inv|_2)?)?|\.input_scale|_scale(?:_inv)?)?"
 )
 
 
@@ -116,12 +116,23 @@ class HYV4FlashModelMixin(nn.Module):
                     if not 0 <= index < self.config.num_experts:
                         raise ValueError(f"Expert index out of range: {name}")
                     tensor = value[index] if expert_id is None else value
-                    pieces = tensor.chunk(len(projections), dim=-2)
+                    # A per-tensor NVFP4 scale is a scalar: one projection takes it all
+                    pieces = (
+                        (tensor,)
+                        if len(projections) == 1
+                        else tensor.chunk(len(projections), dim=-2)
+                    )
                     for projection, piece in zip(projections, pieces):
                         param_name, mapped_expert, shard = expert_mapping[
                             f"experts.{index}.{projection}."
                         ]
-                        target = f"{prefix}.{param_name}weight{suffix}"
+                        # ModelOpt NVFP4: weight_scale_2 and input_scale per expert
+                        leaf = (
+                            "input_scale"
+                            if suffix == ".input_scale"
+                            else f"weight{suffix}"
+                        )
+                        target = f"{prefix}.{param_name}{leaf}"
                         if target not in parameters:
                             raise ValueError(f"Unknown Flash expert weight: {name}")
                         parameter = parameters[target]
@@ -171,7 +182,7 @@ class HYV4FlashModelMixin(nn.Module):
             module_name, _, leaf = name.rpartition(".")
             module = self.get_submodule(module_name)
             expected: set[Any]
-            if leaf.startswith(("w13_weight", "w2_weight")):
+            if leaf.startswith(("w13_", "w2_")):
                 expert_map = module.expert_map_manager.expert_map
                 local_ids = (
                     range(self.config.num_experts)
@@ -185,7 +196,10 @@ class HYV4FlashModelMixin(nn.Module):
             else:
                 # Engram stacks one checkpoint tensor per parameter row.
                 expected = set(range(getattr(module, leaf).shape[0]))
-            if parts != expected:
+            # NVFP4 per-tensor scales (input_scale, weight_scale_2) also load for
+            # experts another expert-parallel rank owns.
+            per_tensor = leaf.endswith(("_input_scale", "_weight_scale_2"))
+            if not (expected <= parts if per_tensor else parts == expected):
                 raise ValueError(f"Incomplete Flash checkpoint shards: {name}")
 
 

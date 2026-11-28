@@ -683,6 +683,10 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
     `HYV4FlashForConditionalGeneration`, which vLLM maps to
     `HYV4FlashVLForConditionalGeneration`.
 
+    On compute capability 12 (RTX 50, RTX PRO Blackwell, DGX Spark), attention
+    runs through FlashInfer's SM120 sparse MLA kernels with the `fp8_ds_mla` KV
+    cache. Expert weights may be blockwise FP8, MXFP4 or ModelOpt NVFP4.
+
 On ROCm, Unlimited-OCR-2 DASH defaults to `ROCM_AITER_FA` and uses AITER CK
 varlen attention; the vision encoder also defaults to `ROCM_AITER_FA`.
 Select the DASH path explicitly with
