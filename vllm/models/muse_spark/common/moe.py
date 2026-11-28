@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import torch
 
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     RoutingMethodType,
@@ -142,9 +143,39 @@ class MuseSparkConsolidatedRoutedExperts(RoutedExperts):
     Vendor subclasses supply `_get_quant_method`.
     """
 
+    def _physical_slots(self) -> list[list[int]]:
+        """Each logical expert's initial physical slots; [[0], [1], ...] without
+        redundant experts."""
+        num_logical = self.moe_config.num_logical_experts
+        placement = EplbState.build_initial_global_physical_to_logical_map(
+            num_logical, self.moe_config.num_experts - num_logical
+        )
+        slots: list[list[int]] = [[] for _ in range(num_logical)]
+        for physical_id, logical_id in enumerate(placement):
+            slots[logical_id].append(physical_id)
+        return slots
+
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
+        slots = self._physical_slots()
+
+        def _load_expert(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: str,
+            expert_id: int,
+        ) -> None:
+            for physical_id in slots[expert_id]:
+                param.weight_loader(
+                    param=param,
+                    loaded_weight=loaded_weight,
+                    weight_name=weight_name,
+                    shard_id=shard_id,
+                    expert_id=physical_id,
+                )
+
         for name, tensor in weights:
             param = getattr(self, name, None)
             if param is None:
@@ -156,42 +187,20 @@ class MuseSparkConsolidatedRoutedExperts(RoutedExperts):
                 for shard_id, col in (("w1", 0), ("w3", 1)):
                     shard = tensor.chunk(2, dim=1)[col]
                     for expert_id, loaded in enumerate(shard.unbind(0)):
-                        param.weight_loader(
-                            param=param,
-                            loaded_weight=loaded,
-                            weight_name=name,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                        )
+                        _load_expert(param, loaded, name, shard_id, expert_id)
             elif name in ("w2_weight", "w2_weight_scale"):
                 for expert_id, loaded in enumerate(tensor.unbind(0)):
-                    param.weight_loader(
-                        param=param,
-                        loaded_weight=loaded,
-                        weight_name=name,
-                        shard_id="w2",
-                        expert_id=expert_id,
-                    )
+                    _load_expert(param, loaded, name, "w2", expert_id)
             elif name in ("w13_weight_scale_2", "w13_input_scale"):
                 # [E, 2] -> per-expert, per-shard scalars
                 for expert_id in range(tensor.shape[0]):
                     for shard_id, col in (("w1", 0), ("w3", 1)):
-                        param.weight_loader(
-                            param=param,
-                            loaded_weight=tensor[expert_id, col],
-                            weight_name=name,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
+                        _load_expert(
+                            param, tensor[expert_id, col], name, shard_id, expert_id
                         )
             elif name in ("w2_weight_scale_2", "w2_input_scale"):
                 for expert_id in range(tensor.shape[0]):
-                    param.weight_loader(
-                        param=param,
-                        loaded_weight=tensor[expert_id],
-                        weight_name=name,
-                        shard_id="w2",
-                        expert_id=expert_id,
-                    )
+                    _load_expert(param, tensor[expert_id], name, "w2", expert_id)
             else:
                 raise ValueError(
                     f"{self.layer_name}: unsupported expert weight {name!r}"
