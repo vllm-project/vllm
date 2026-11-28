@@ -86,6 +86,7 @@ steps:
   - tests/models/deepseek_v41/nvidia/test_fused_markov.py
   - tests/models/transformers/test_layer_registry_e2e.py
   - tests/models/test_deepseek_v41_replay_start.py
+  - tests/models/test_qwen3_next.py
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_nvidia_shared_rope.py
   - tests/models/test_muse_spark_logits_local.py
@@ -123,6 +124,7 @@ steps:
       models/test_muse_spark_rocm_drafter.py
       models/hy_v4/test_dfly_config.py
       models/hy_v4/test_hy_v4_mrope.py
+      models/test_qwen3_next.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
