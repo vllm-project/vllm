@@ -357,6 +357,11 @@ def _support_torch_compile(
         # support decorating multiple times
         return cls
 
+    # `cls` is patched in place, so an instance built before this point (e.g. a
+    # Transformers model a trainer shares the process with) must keep calling
+    # the undecorated `__call__`.
+    old_call = cls.__call__
+
     # take care of method resolution order
     # make sure super().__init__ is called on the base class
     #  other than TorchCompileWithNoGuardsWrapper
@@ -523,6 +528,9 @@ def _support_torch_compile(
                             )
 
     def __call__(self: type[_T], *args: Any, **kwargs: Any) -> Any:
+        if "do_not_compile" not in self.__dict__:
+            # Not built by the decorated `__init__`.
+            return old_call(self, *args, **kwargs)
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
