@@ -3,7 +3,7 @@
 #ifndef CPU_ATTN_NEON_BFMMLA_HPP
 #define CPU_ATTN_NEON_BFMMLA_HPP
 
-#include "cpu_attn_impl.hpp"
+#include "../cpu_attn_impl.hpp"
 
 #include <arm_bf16.h>
 #include <arm_neon.h>
@@ -361,13 +361,20 @@ class AttentionImplNEONBFMMLA {
         c10::BFloat16* __restrict__ probability,
         const vec_op::FP32Vec16& values, const int32_t row,
         const int64_t row_stride) {
+      static_assert(vec_op::FP32Vec16::VEC_ELEM_NUM == 16);
+      alignas(64) float lanes[vec_op::FP32Vec16::VEC_ELEM_NUM];
+      values.save(lanes);  // Vec-width independent
+
       const int32_t row_in_pair = row & 1;
       auto* dst = reinterpret_cast<bfloat16_t*>(
           probability + row_in_pair * (BfmmlaGemm::KTile - row_stride));
-      vst1_bf16(dst, vcvt_bf16_f32(values.reg.val[0]));
-      vst1_bf16(dst + 2 * BfmmlaGemm::KTile, vcvt_bf16_f32(values.reg.val[1]));
-      vst1_bf16(dst + 4 * BfmmlaGemm::KTile, vcvt_bf16_f32(values.reg.val[2]));
-      vst1_bf16(dst + 6 * BfmmlaGemm::KTile, vcvt_bf16_f32(values.reg.val[3]));
+      vst1_bf16(dst, vcvt_bf16_f32(vld1q_f32(lanes)));
+      vst1_bf16(dst + 2 * BfmmlaGemm::KTile,
+                vcvt_bf16_f32(vld1q_f32(lanes + 4)));
+      vst1_bf16(dst + 4 * BfmmlaGemm::KTile,
+                vcvt_bf16_f32(vld1q_f32(lanes + 8)));
+      vst1_bf16(dst + 6 * BfmmlaGemm::KTile,
+                vcvt_bf16_f32(vld1q_f32(lanes + 12)));
     }
   };
 
