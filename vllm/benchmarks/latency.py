@@ -102,7 +102,8 @@ def main(args: argparse.Namespace):
         detokenize=not args.disable_detokenize,
     )
     dummy_prompt_token_ids = np.random.randint(
-        10000, size=(args.batch_size, args.input_len)
+        min(10000, llm.llm_engine.model_config.get_vocab_size()),
+        size=(args.batch_size, args.input_len),
     )
     dummy_prompts: list[TokensPrompt | TextPrompt] = [
         TokensPrompt(prompt_token_ids=batch)

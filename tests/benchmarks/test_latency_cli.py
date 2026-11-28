@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 @pytest.mark.benchmark
@@ -22,6 +22,9 @@ def test_bench_latency():
         "--enforce-eager",
         "--load-format",
         "dummy",
+        # Exercise a model whose embeddings have fewer than 10,000 rows.
+        "--hf-overrides",
+        '{"vocab_size": 1024}',
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     print(result.stdout)
