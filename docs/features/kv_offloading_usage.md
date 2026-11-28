@@ -23,6 +23,21 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+## Support Matrix
+
+What works with each offloading mode, for the KV cache layout vLLM picks by default. "Not yet validated" means no test covers the combination yet; treat it as unsupported until one does. CPU is `CPUOffloadingSpec`; Tiered is `TieringOffloadingSpec`, either storing each worker's pages as they are (direct, the default) or with [`"canonical_layout": true`](#canonical-layout).
+
+| Model family | CPU | Tiered (direct) | Tiered (canonical) | Restrictions |
+| --- | --- | --- | --- | --- |
+| Full attention | Supported | Supported | Supported | Canonical: KV heads must divide evenly across TP ranks, no per-token-head KV cache quantization. |
+| Sliding-window attention | Supported | Not yet validated | Supported | Same as full attention. |
+| MLA | Not yet validated | Not yet validated | Supported | |
+| Sparse MLA (for example DeepSeek-V3.2) | Supported with HiSparse only | Not yet validated | Not yet validated | |
+| Compressed MLA and packed caches (for example DeepSeek-V4) | Not yet validated | Not yet validated | Not supported | Each block is copied whole, as one region. |
+| Mamba/SSM and hybrid models | Supported | Not yet validated | Not supported | Only with the default layout; see [KV Cache Layouts](#kv-cache-layouts). |
+
+Instances that share a secondary tier in direct mode must use the same KV cache layout: direct mode does not record the layout in its storage namespace ([#55904](https://github.com/vllm-project/vllm/issues/55904)). Canonical blocks carry it.
+
 ## Per-request load control
 
 Individual requests can cap how many tokens are loaded from offloaded storage
@@ -194,6 +209,31 @@ Requirements and limitations:
 - Packed and cross-layer KV cache layouts are not supported.
 - If a layer can't be mapped to the canonical layout, the engine fails at startup with an error that says to remove `canonical_layout`, rather than silently storing non-portable bytes.
 - Every load and store goes through a scatter/gather copy instead of a straight page copy, which adds some transfer overhead. Leave it off if you need none of the capabilities above.
+
+## KV Cache Layouts
+
+The connector copies KV cache blocks as raw bytes, so the physical KV cache layout decides what works. vLLM names the six layouts (`KVCacheLayout`) by the order of the axes `[L, B, H, N, C]` (layer, block, head, token, content) in memory.
+
+The layout is chosen once at startup:
+
+- By default the connector asks for `LBHNC`, or `BLHNC` when HiSparse is enabled. If the attention backend doesn't support that layout, vLLM logs a warning and uses the backend's first choice.
+- `VLLM_KV_CACHE_LAYOUT` overrides the connector's choice. Startup fails if the attention backend doesn't support the layout you set.
+- With the extensible KV cache (`--enable-extensible-kv-cache`, on by default on CUDA and ROCm with the V2 model runner), any KV connector limits the choice to the layouts in which each layer's page of a block is one contiguous run: `LBHNC`, `LBNHC`, `BLHNC` and `BLNHC`. Setting `VLLM_KV_CACHE_LAYOUT` to `LHBNC` or `BHLNC` then fails at startup.
+
+### Advanced: support by layout
+
+The `LHBNC` and `BHLNC` rows apply only with the extensible KV cache off.
+
+| Layout | CPU | Tiered (direct) | Tiered (canonical) |
+| --- | --- | --- | --- |
+| `LBHNC` (the default) | Supported | Supported | Supported |
+| `LBNHC` | Not yet validated | Not yet validated | Supported |
+| `LHBNC` | Not supported: wrong output after a reload from CPU ([#60004](https://github.com/vllm-project/vllm/issues/60004)), and not yet rejected at startup ([#60005](https://github.com/vllm-project/vllm/pull/60005)) | Not yet validated | Not yet validated |
+| `BLHNC` | Supported with HiSparse only | Not yet validated | Not supported (cross-layer) |
+| `BLNHC` | Not yet validated | Not yet validated | Not supported (cross-layer) |
+| `BHLNC` | Not yet validated | Not yet validated | Not supported (cross-layer) |
+
+Mamba/SSM and hybrid models with `BLHNC`, `BLNHC` or `BHLNC` are not supported: local store and restore checks found incorrect addressing. Layout support is tracked in [#63718](https://github.com/vllm-project/vllm/issues/63718).
 
 ## Info Metric Labels
 
