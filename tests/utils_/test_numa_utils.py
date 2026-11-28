@@ -1035,3 +1035,47 @@ def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
     assert numa_utils._is_auto_numa_available(
         verbose=False, require_unbound_process=True
     ) is (affinity == [3, 2, 1, 0])
+
+
+def test_configure_subprocess_is_thread_safe(monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0])
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+
+    state = {"executable": "/usr/bin/python3"}
+    monkeypatch.setattr(
+        numa_utils.multiprocessing.spawn,
+        "get_executable",
+        lambda: state["executable"],
+    )
+    monkeypatch.setattr(
+        numa_utils.multiprocessing.spawn,
+        "set_executable",
+        lambda exe: state.__setitem__("executable", exe),
+    )
+
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+    vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0, 0, 0, 0])
+
+    def run_worker(rank: int) -> str:
+        nonlocal active, max_active
+        with numa_utils.configure_subprocess(vllm_config, local_rank=rank):
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with guard:
+                active -= 1
+            return os.environ[numa_utils._NUMACTL_PYTHON_EXECUTABLE_ENV]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(run_worker, range(4)))
+
+    assert max_active == 1
+    assert results == ["/usr/bin/python3"] * 4
+    assert state["executable"] == "/usr/bin/python3"
