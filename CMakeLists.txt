@@ -400,6 +400,30 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "${CMAKE_CURRENT_BINARY_DIR}/csrc/attention/octave_decode_mfma_cdna.hip"
       PROPERTIES COMPILE_FLAGS "-mllvm -amdgpu-mfma-vgpr-form")
   endif()
+
+  set(VLLM_OCTAVE_RDNA4_ARCHES)
+  foreach(_arch IN LISTS VLLM_GPU_ARCHES)
+    if(_arch STREQUAL "gfx1200" OR _arch STREQUAL "gfx1201")
+      list(APPEND VLLM_OCTAVE_RDNA4_ARCHES ${_arch})
+    endif()
+  endforeach()
+  if(VLLM_OCTAVE_RDNA4_ARCHES)
+    # Compile the native HIP kernels only for RDNA4 in multi-arch builds.
+    add_library(octave_rdna4 OBJECT
+      "csrc/attention/octave_rdna4/geometry.hip"
+      "csrc/attention/octave_rdna4/decode.hip"
+      "csrc/attention/octave_rdna4/prefill.hip"
+      "csrc/attention/octave_rdna4/prefix.hip")
+    set_target_properties(octave_rdna4 PROPERTIES
+      HIP_STANDARD 20
+      HIP_STANDARD_REQUIRED ON
+      HIP_ARCHITECTURES "${VLLM_OCTAVE_RDNA4_ARCHES}"
+      POSITION_INDEPENDENT_CODE ON)
+    target_sources(_C PRIVATE "csrc/attention/octave_rdna4/torch_bindings.cpp")
+    target_link_libraries(_C PRIVATE octave_rdna4)
+    message(STATUS
+      "Building RDNA4 Octave ops for ${VLLM_OCTAVE_RDNA4_ARCHES}")
+  endif()
 endif() # _C HIP endif
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")

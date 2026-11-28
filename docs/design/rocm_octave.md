@@ -1,8 +1,9 @@
 # Octave KV: a 3-bit KV cache for ROCm
 
 `ROCM_OCTAVE` is an attention backend for AMD GPUs that keeps the KV cache of
-full-attention layers at 3-4 bits per value, with native kernels (HIP today). It is
-selected with `--kv-cache-dtype octave_k3v3_compact`, `octave_k3v3` or
+full-attention layers at 3-4 bits per value, with native HIP kernels on RDNA3,
+CDNA3, and RDNA4. Select it with `--kv-cache-dtype octave_k3v3_compact`,
+`octave_k3v3` or
 `octave_k3v4` (the backend is picked from the cache dtype;
 `--attention-backend ROCM_OCTAVE` also works). The name comes from the 3-bit
 codes: each one indexes an eight-level codebook.
@@ -19,14 +20,14 @@ is bounded by compute. The existing options on ROCm were:
   fused multi-step MTP draft.
 
 Octave KV targets the same bit budget as TurboQuant with HIP kernels written for
-the AMD matrix instructions (WMMA on RDNA3, MFMA on CDNA as a contract slot),
-reading the packed cache directly in both decode and prefill, and with
+the AMD matrix instructions (WMMA on RDNA3 and RDNA4, MFMA on CDNA3),
+reading the packed cache directly in decode, and with
 multi-token verification (MTP / speculative decoding) as a first-class case.
 
 ## Supported models
 
 The format exploits *partial rotary embeddings*: models whose attention heads
-apply RoPE to a fraction of the head dims. Today the kernels are built for
+apply RoPE to a fraction of the head dims. The native kernels are built for
 head size 256 with 64 rotary dims (`partial_rotary_factor = 0.25`), the
 attention shape of the Qwen3-Next / Qwen3.5 / Qwen3.6 / Qwen3.8 family (dense
 and MoE, e.g. Qwen3.8-27B, Qwen3.6-35B-A3B, Qwen3.5-122B-A10B). Like the MLA
@@ -34,12 +35,15 @@ backends, which serve only models with multi-head latent attention, Octave KV is
 tied to an attention shape, not to a model.
 
 Models with full RoPE (Llama, Qwen3, Mistral, ...) or other head sizes are
-rejected at startup with an explicit error. Sliding window, ALiBi, attention
+rejected with an explicit error. Sliding window, ALiBi, attention
 sinks, soft-capping and encoder attention are not supported.
 
-The decode kernels cover GQA groups of 1, 2, 4, 6 or 8 query heads per KV
-head on each GPU. Under tensor parallelism the group is counted per GPU, so
-models with 32 query heads and 2 KV heads (Qwen3.5-122B-A10B) need TP ≥ 4.
+RDNA3 and CDNA3 decode support GQA groups of 1, 2, 4, 6, or 8 query heads per
+KV head. RDNA4 dense decode also supports these groups and has a generic
+kernel for other positive integer ratios. The ratio is computed per GPU.
+For example, Qwen3.5-122B-A10B has 32 query heads and 2 KV heads. TP=2 gives
+a local ratio of 16, which RDNA4 can handle. TP=4 gives a local ratio of 8,
+which all three tiers support.
 
 ## Format
 
@@ -127,22 +131,28 @@ naming what is missing. The kernels in this tree are HIP; a FlyDSL kernel
 (for example a CDNA prefill) must keep the same signature and semantics, pass
 the same tests, and report a clear error when `flydsl` is not installed.
 
-Octave is enabled only on RDNA3 and CDNA3, validated on gfx1100 and gfx942
-(MI300). The backend rejects any other family at selection
-(`supports_compute_capability`, via `get_rdna_version()` and
-`get_cdna_version()`), and the kernel tests skip elsewhere. CMake builds the
-Octave sources and registers the ops only when the target list includes
-gfx1100 or gfx942; other targets in the same build compile the
-architecture-specific kernels as empty stubs, and the kernel dispatch reports
-any other RDNA3 chip as not validated.
+`ROCM_OCTAVE` selects the native implementation for RDNA3, CDNA3, or RDNA4.
+Runtime testing covers `gfx1100`, `gfx942` (MI300), `gfx1201` (ROCm 10), and
+`gfx1200`. CMake builds the RDNA3/CDNA3 sources and registers
+their ops when the target list includes `gfx1100` or `gfx942`. For other
+targets in the same build, those architecture-specific kernels compile as
+empty stubs. Kernel dispatch identifies other RDNA3 targets as unvalidated.
 
-| Piece | gfx1100 (RDNA3) | gfx942 (MI300) |
-| --- | --- | --- |
-| int8 dot4 (`octave_arch.cuh`) | `v_dot4_i32_iu8` | `v_dot4_i32_i8` |
-| Codebook lookup (`octave_format.cuh`) | `v_perm_b32` | `v_perm_b32` |
-| Cache store, reduce, rotate | portable | portable (decode reduce: gfx942 kernel) |
-| Decode | WMMA | MFMA (`v_mfma_i32_16x16x32_i8`) |
-| Prefill | WMMA | MFMA |
+| Piece | gfx1100 (RDNA3) | gfx942 (CDNA3 / MI300) | gfx1201/gfx1200 (RDNA4) |
+| --- | --- | --- | --- |
+| int8 dot4 | `v_dot4_i32_iu8` | `v_dot4_i32_i8` | Signed `sudot4` |
+| Cache store, reduce, rotate | portable | portable (decode reduce: gfx942 kernel) | Native HIP |
+| Decode | WMMA | MFMA (`v_mfma_i32_16x16x32_i8`) | WMMA and scalar kernels |
+| Prefill | WMMA | MFMA | Streamed WMMA, FP16-expanded WMMA, and packed HIP |
+
+For RDNA4 targets, CMake compiles the kernels in `csrc/attention/octave_rdna4/`
+into the same `_C` extension. The kernels use the same Octave cache formats
+and causal metadata. Dense prefill selects a path based on the chunk size,
+prefix length, query/head tiling, and available workspace. Streamed prefill
+reads the packed prefix directly. Expanded prefill unpacks the prefix for reuse
+across query positions. The packed path can run with one split and no split
+scratch. The metadata builder reserves shared workspace before graph capture.
+RDNA4 also provides packed sparse attention for QSA.
 
 The portable dot4 decode stays as the reference tier the tests compare the
 native tiers against.
@@ -162,10 +172,10 @@ To add an architecture:
 
 ## Results
 
-All measurements on 4× RX 7900 XTX (gfx1100), Qwen3.8-27B W4A16, tensor
-parallel 4, MTP k=3, 8 GB of KV cache per GPU.
-
 ### Capacity
+
+**RDNA3 (gfx1100).** 4× RX 7900 XTX, Qwen3.8-27B W4A16, tensor
+parallel 4, MTP k=3, 8 GB of KV cache per GPU.
 
 | KV cache | Tokens that fit |
 | --- | --- |
@@ -173,6 +183,20 @@ parallel 4, MTP k=3, 8 GB of KV cache per GPU.
 | `turboquant_k3v4_nc` | 1,790,625 |
 | `octave_k4v4` | 1,402k |
 | `octave_k3v3` | 1,679k |
+
+**RDNA4 (gfx1201).** 2× Radeon AI PRO R9700, Qwen3.8-27B-FP8 with BF16
+activations, tensor parallel 2, and a fixed KV-cache budget of 8,393,906,176
+bytes per GPU. The server used a 65,536-token model limit, a batch limit of
+8,192 tokens, and a limit of 256 sequences. Token capacity is the engine's
+startup estimate for the model's attention and recurrent-state cache.
+
+| KV cache | Engine KV capacity (tokens) |
+| --- | ---: |
+| BF16 (Triton attention) | 228,631 |
+| FP8 (segmented attention) | 419,430 |
+| `octave_k3v4` | 707,788 |
+| `octave_k3v3` | 793,713 |
+| `octave_k3v3_compact` | 854,589 |
 
 ### Speed
 

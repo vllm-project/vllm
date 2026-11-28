@@ -3,9 +3,8 @@
 """Octave attention backend for AMD GPUs (native kernels: HIP or FlyDSL).
 
 KV cache format and reference: `vllm/v1/attention/ops/rocm_octave.py`.
-Kernels: `csrc/attention/octave_attn.cu` and the per-architecture tiers in
-`_kernel_tier`; RDNA3 and CDNA3, validated on gfx1100 and gfx942. See
-`docs/design/rocm_octave.md`.
+RDNA3/CDNA3 use the kernel tiers in `csrc/attention/octave_attn.cu`.
+RDNA4 uses `rocm_octave_rdna4_attn.py`. See `docs/design/rocm_octave.md`.
 
 Decode, MTP verification and short continuation chunks (every request with
 at most `_DECODE_MAX_QUERY_LEN` query tokens) run the split-KV decode
@@ -43,6 +42,14 @@ from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
+
+
+def _on_rdna4() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_rdna4
+
+    return on_rdna4()
 
 
 # Native kernel tier per architecture family; any other family is rejected at
@@ -103,11 +110,19 @@ class RocmOctaveAttentionBackend(AttentionBackend):
         return "ROCM_OCTAVE"
 
     @staticmethod
-    def get_impl_cls() -> type["RocmOctaveAttentionImpl"]:
+    def get_impl_cls() -> type[AttentionImpl]:
+        if _on_rdna4():
+            from .rocm_octave_rdna4_attn import RocmOctaveRdna4AttentionImpl
+
+            return RocmOctaveRdna4AttentionImpl
         return RocmOctaveAttentionImpl
 
     @staticmethod
     def get_builder_cls() -> type["RocmOctaveMetadataBuilder"]:
+        if _on_rdna4():
+            from .rocm_octave_rdna4_attn import RocmOctaveRdna4MetadataBuilder
+
+            return RocmOctaveRdna4MetadataBuilder
         return RocmOctaveMetadataBuilder
 
     @staticmethod
@@ -122,7 +137,7 @@ class RocmOctaveAttentionBackend(AttentionBackend):
 
         # DeviceCapability is unreliable on ROCm; use the gcnArchName.
         return current_platform.is_rocm() and (
-            get_rdna_version() == 3 or get_cdna_version() == 3
+            get_rdna_version() == 3 or get_cdna_version() == 3 or _on_rdna4()
         )
 
     @classmethod
@@ -149,11 +164,18 @@ class RocmOctaveAttentionBackend(AttentionBackend):
         """One packed K+V slot per (token, KV head)."""
         if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_octave:
             return spec
-        fmt = sq.OctaveFormat.from_cache_dtype(
-            spec.kv_quant_mode.name.lower(),
-            spec.head_size,
-            sq.registered_rope_dim(spec.head_size),
-        )
+        if _on_rdna4():
+            from vllm.v1.attention.ops.rocm_octave_rdna4 import OctaveGeometry
+
+            fmt = OctaveGeometry(
+                spec.head_size, sq.registered_rope_dim(spec.head_size)
+            ).layout(spec.kv_quant_mode.name.lower())
+        else:
+            fmt = sq.OctaveFormat.from_cache_dtype(
+                spec.kv_quant_mode.name.lower(),
+                spec.head_size,
+                sq.registered_rope_dim(spec.head_size),
+            )
         return replace(spec, state_content_bytes=fmt.slot_bytes)
 
 
@@ -171,6 +193,8 @@ class RocmOctaveMetadata:
     # Per query token: its request and its causal K length (0 for padding).
     q_to_req: torch.Tensor
     q_to_klen: torch.Tensor
+    max_seq_len: int = 0
+    uniform_prefill_prefix: int = 0
 
 
 class RocmOctaveMetadataBuilder(AttentionMetadataBuilder[RocmOctaveMetadata]):
@@ -225,6 +249,7 @@ class RocmOctaveMetadataBuilder(AttentionMetadataBuilder[RocmOctaveMetadata]):
             num_decode_tokens=num_decode_tokens,
             q_to_req=self._q_to_req[:n],
             q_to_klen=self._q_to_klen[:n],
+            max_seq_len=cm.max_seq_len,
         )
         self._fill_query_maps(md)
         return md
