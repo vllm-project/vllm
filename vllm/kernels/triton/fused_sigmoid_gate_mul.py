@@ -20,11 +20,16 @@ def _fused_sigmoid_gate_mul_kernel(
     out_stride_t,
     BLOCK: tl.constexpr,
     QUANT_FP8: tl.constexpr,
+    launch_pdl: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < hidden
 
+    if launch_pdl:
+        # PDL: this grid may start before the preceding kernel has finished;
+        # wait for it before the first load.
+        tl.extra.cuda.gdc_wait()
     x = tl.load(x_ptr + row * x_stride_t + offs, mask=mask, other=0.0)
     g = tl.load(gate_ptr + row * gate_stride_t + offs, mask=mask, other=0.0)
     out = x.to(tl.float32) * tl.sigmoid(g.to(tl.float32))
@@ -105,5 +110,6 @@ def fused_sigmoid_gate_mul(
         BLOCK=block,
         QUANT_FP8=scale is not None,
         num_warps=num_warps,
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out
