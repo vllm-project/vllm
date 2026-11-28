@@ -50,14 +50,7 @@ fn validate_temperature(value: f32) -> Result<(), SamplingParamsError> {
 }
 
 fn validate_top_p(value: f32) -> Result<(), SamplingParamsError> {
-    if value > 0.0 && value <= 1.0 {
-        return Ok(());
-    }
-    Err(SamplingParamsError::OutOfRange {
-        parameter: "top_p",
-        value,
-        expected: "(0, 1]",
-    })
+    validate_closed_range("top_p", value, 0.0, 1.0, "[0, 1]")
 }
 
 fn validate_min_p(value: f32) -> Result<(), SamplingParamsError> {
