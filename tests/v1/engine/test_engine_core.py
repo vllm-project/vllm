@@ -8,7 +8,7 @@ import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
 import torch
@@ -25,6 +25,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.config.parallel import LocalDPState, SyncedDPState
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -751,11 +752,12 @@ def _cadenced_dp_engine_core(
     core.step_counter = 0
     core.pending_pause = False
     core.ignore_start_dp_wave = False
+    core.scheduler = MagicMock(**{"get_dp_state.return_value": None})
     synced: list[int] = []
 
-    def scripted_sync(dp_group, has_unfinished, pending_pause):
+    def scripted_sync(dp_group, local_state):
         synced.append(core.step_counter)
-        return results.pop(0)
+        return SyncedDPState(*results.pop(0))
 
     monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
     return core, synced
@@ -790,6 +792,28 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     assert synced == [1]
     assert core.ignore_start_dp_wave
     assert not core.pending_pause
+
+
+def test_scheduler_dp_state_syncs_every_step(monkeypatch):
+    """A scheduler that provides DP state forces the all-reduce every step and
+    receives the synced DP state back each time."""
+    core, _ = _cadenced_dp_engine_core(monkeypatch, [], dp_sync_interval=32)
+    core.scheduler.get_dp_state.return_value = [1.0, 2.0, 3.0]
+    states = [[4.0] * 3, [1.0, 2.0, 3.0]]
+    results = [True, True, False]
+
+    def scripted_sync(dp_group, local_state):
+        assert local_state == LocalDPState(True, False, [1.0, 2.0, 3.0])
+        return SyncedDPState(results.pop(0), False, states)
+
+    monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
+    for expected in (True, True, False):
+        assert DPEngineCoreProc._has_global_unfinished_reqs(core, True) is expected
+    assert core.scheduler.update_dp_state.call_args_list == [
+        call(SyncedDPState(True, False, states)),
+        call(SyncedDPState(True, False, states)),
+        call(SyncedDPState(False, False, states)),
+    ]
 
 
 @pytest.mark.parametrize(

@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from vllm.config.parallel import LocalDPState, ParallelConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.distributed.utils import (
     cpu_all_reduce_,
@@ -72,6 +73,18 @@ def _worker(rank: int, world_size: int, port: int, stateless_port: int):
     t = _make_input(rank, world_size, 0)
     cpu_all_reduce_(t, stateless_pg)
     torch.testing.assert_close(t, expected, rtol=0, atol=0)
+
+    # The DP state sync all-gathers per-rank scheduler state in the same reduce.
+    dp_state = ParallelConfig().sync_dp_state(
+        stateless_pg,
+        LocalDPState(
+            has_unfinished=rank == 0,
+            pending_pause=True,
+            scheduler_state=[rank + 0.1, -rank / 3],
+        ),
+    )
+    assert dp_state.has_unfinished and dp_state.pause_consensus
+    assert dp_state.scheduler_states == [[r + 0.1, -r / 3] for r in range(world_size)]
 
     dist.destroy_process_group()
 

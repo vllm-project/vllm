@@ -141,3 +141,32 @@ The coordinator process also runs in this scenario, co-located with the DP rank 
 </figure>
 
 In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+
+## Cross-DP Prefill Hold
+
+In MoE DP attention + EP deployments, all DP ranks execute forward passes in lockstep, so a prefill scheduled on a single rank stalls running decodes across every rank. Cross-DP prefill hold coordinates all ranks to briefly hold prefills and release them together in aligned mixed steps, improving decode interactivity (ITL) while bounding TTFT.
+
+Disabled by default (`--prefill-hold-ttft-target` is `None`). Enable it by setting a TTFT target in seconds (for example, `5`):
+
+```bash
+vllm serve $MODEL --data-parallel-size 8 --enable-expert-parallel \
+                  --prefill-hold-ttft-target 5
+```
+
+`--prefill-hold-ttft-target` (`T`) is the wall-clock budget that holding may spend out of each request's TTFT: a hold ends with a `deadline` release once some held request is projected to miss `T`. It bounds the delay added by holding and is not a TTFT guarantee. A prompt that needs `k` releases splits the budget across them (about `T / k` per hold), so a few very long uncached prompts can end holds long before any hold has lasted `T`.
+
+`--prefill-hold-ttft-weight` (default `1.0`) sets when a hold ends with a `cost` release instead: higher values hold less (favouring TTFT), lower values hold longer (favouring ITL).
+
+Tuning:
+
+- **Raising `T`** lengthens the TTFT tail but barely moves the median, and lowers ITL and raises throughput at high load. The gain flattens once `deadline` releases are rare.
+- **Raise `T` before lowering the weight.** While `T` is binding, a lower weight has little effect and can worsen ITL by forcing more releases. Avoid weights close to zero, which reduce throughput under closed-loop load.
+- **Check whether `T` is binding** in the summary DP rank 0 logs every 30 s (`DP prefill hold: cost=... deadline=... wait=... | ...`): it is when `deadline` is a sizeable share of `cost + deadline`. TTFT p99 is a poor indicator, since `deadline` releases usually come from a small fraction of requests and p99 can sit well below `T`.
+
+Notes and limitations:
+
+- Requires `--data-parallel-size > 1` on a MoE model and cannot be combined with `--prefill-schedule-interval > 1`.
+- Performs a per-step DP CPU all-reduce (overriding `--dp-sync-interval`), which may add overhead on high-latency multi-node networks with very short decode steps.
+- With `--pipeline-parallel-size > 1`, overlapped pipeline stages add noise to the online step-cost fit (a startup warning is logged).
+- The step-cost model is calibrated for text prefills; multimodal vision encoder time is not modeled separately.
+- Has no effect on prefill-only or decode-only instances of disaggregated serving.
