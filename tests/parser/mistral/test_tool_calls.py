@@ -50,10 +50,46 @@ from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
+SAMPLE_TOOLS_DICTS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add",
+            "description": "Add two numbers",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                    "b": {"type": "number"},
+                },
+                "required": ["a", "b"],
+            },
+        },
+    },
+]
+
+
 _DUMMY_REQUEST = ChatCompletionRequest(messages=[], model="test")
-# Minimal request for the engine driver: tool_choice=None falls through to
-# auto extraction without triggering "tools must be set" validation.
-_ENGINE_REQUEST = ChatCompletionRequest(messages=[], model="test", tool_choice=None)
+# Minimal request for the engine driver: tool_choice="auto" with tools set
+# allows auto extraction through parse_delta_streaming.
+_ENGINE_REQUEST = ChatCompletionRequest(
+    messages=[],
+    model="test",
+    tools=SAMPLE_TOOLS_DICTS,
+    tool_choice="auto",
+)
 
 
 @pytest.fixture(scope="module")
@@ -257,13 +293,7 @@ def stream_delta_message_generator(
         assert _parser_cls is not None
         _engine_parser = _parser_cls(mistral_tokenizer, None)
         if reasoning_parser is not None:
-            _req_with_tools = ChatCompletionRequest(
-                messages=[],
-                model="test",
-                tools=SAMPLE_TOOLS_DICTS,
-                tool_choice="auto",
-            )
-            _engine_req = _engine_parser.adjust_request(_req_with_tools)
+            _engine_req = _engine_parser.adjust_request(_ENGINE_REQUEST)
         else:
             _engine_req = _ENGINE_REQUEST
 
@@ -1775,36 +1805,6 @@ def test_extract_tool_calls_streaming_exception_returns_none(
         )
     assert result is None
 
-
-SAMPLE_TOOLS_DICTS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the weather",
-            "parameters": {
-                "type": "object",
-                "properties": {"city": {"type": "string"}},
-                "required": ["city"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add",
-            "description": "Add two numbers",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"},
-                },
-                "required": ["a", "b"],
-            },
-        },
-    },
-]
 
 
 def _make_request(**kwargs) -> ChatCompletionRequest:
