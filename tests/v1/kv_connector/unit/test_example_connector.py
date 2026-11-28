@@ -16,6 +16,8 @@ from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 
+from .utils import FailedSyncLoadConnector
+
 MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
 
 SAMPLING_PARAMS = SamplingParams(temperature=0.0, top_k=1, max_tokens=128)
@@ -31,6 +33,50 @@ class InputCase(NamedTuple):
     img: list[Image]
     expected_len: int
     info: str
+
+
+def test_aborted_failed_sync_load_does_not_poison_next_request(
+    vllm_runner, monkeypatch, tmp_path
+):
+    """After an abort, the next prompt must recompute the missing external KV."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    block_size = 32 if current_platform.is_cpu() else 16
+    prompt = {"prompt_token_ids": [42] * (8 * block_size)}
+    params = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+    with vllm_runner(
+        "vllm-project/tiny-random-LlamaForCausalLM",
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        async_scheduling=False,
+        block_size=block_size,
+        max_num_batched_tokens=4 * block_size,
+        max_num_seqs=1,
+        max_model_len=512,
+        dtype="float32" if current_platform.is_cpu() else "auto",
+        gpu_memory_utilization=0.1,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector=FailedSyncLoadConnector.__name__,
+            kv_connector_module_path=FailedSyncLoadConnector.__module__,
+            kv_role="kv_consumer",
+            kv_load_failure_policy="recompute",
+            kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+        ),
+    ) as runner:
+        llm = runner.llm
+        reference = llm.generate(prompt, params, use_tqdm=False)[0]
+        assert llm.reset_prefix_cache()
+
+        engine = llm.llm_engine
+        engine.add_request(FailedSyncLoadConnector.failure_request_id, prompt, params)
+        assert engine.step() == []
+        assert engine.has_unfinished_requests()
+        engine.abort_request([FailedSyncLoadConnector.failure_request_id])
+        assert not engine.has_unfinished_requests()
+
+        output = llm.generate(prompt, params, use_tqdm=False)[0]
+        assert output.num_cached_tokens == 0
+        assert output.outputs[0].token_ids == reference.outputs[0].token_ids
 
 
 def _check_path_len(path):

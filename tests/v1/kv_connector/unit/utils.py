@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector,
+    ExampleConnectorMetadata,
 )
 from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256
@@ -67,6 +68,53 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
 
 EOS_TOKEN_ID = 50256
+
+
+class FailedSyncLoadConnector(ExampleConnector):
+    """Reject one named request's external KV without copying any blocks."""
+
+    failure_request_id = "failed-sync-load"
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig,
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
+        self._failed_blocks: set[int] = set()
+
+    def get_num_new_matched_tokens(
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int, bool]:
+        if not request.request_id.startswith(self.failure_request_id):
+            return 0, False
+        cached_tokens = (request.num_prompt_tokens - 1) // self._block_size
+        return max(0, cached_tokens * self._block_size - num_computed_tokens), False
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        metadata = super().build_connector_meta(scheduler_output)
+        assert isinstance(metadata, ExampleConnectorMetadata)
+        metadata.requests = [
+            request for request in metadata.requests if not request.is_store
+        ]
+        return metadata
+
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, ExampleConnectorMetadata)
+        self._failed_blocks = {
+            block_id
+            for request in metadata.requests
+            for block_id in (
+                request.slot_mapping[:: self._block_size] // self._block_size
+            ).tolist()
+        }
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        return self._failed_blocks
 
 
 def create_mock_connector() -> Mock:

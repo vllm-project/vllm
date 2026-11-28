@@ -4001,6 +4001,10 @@ class Scheduler(SchedulerInterface):
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
+                    if self.recompute_kv_load_failures:
+                        self.kv_cache_manager.rewind_cache(
+                            req_id, request.num_computed_tokens
+                        )
 
             if is_affected:
                 if not marked_invalid_block:
@@ -4088,10 +4092,9 @@ class Scheduler(SchedulerInterface):
         if not total_failed_requests:
             return set()
 
-        # evict invalid blocks and downstream dependent blocks from cache
-        # only when not using recompute policy (where blocks will be recomputed
-        # and reused by other requests sharing them)
-        if sync_blocks_to_evict and not self.recompute_kv_load_failures:
+        # Eviction preserves allocated blocks for in-place recomputation, but
+        # prevents cache hits if the owner finishes before repairing them.
+        if sync_blocks_to_evict:
             self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
 
         if should_fail:

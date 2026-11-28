@@ -117,7 +117,11 @@ class KVTransferConfig:
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
     """Policy for handling KV cache load failures.
     'recompute': reschedule the request to recompute failed blocks
-    'fail': immediately fail the request with an error finish reason (default)"""
+    'fail': immediately fail the request with an error finish reason (default)
+
+    With `recompute`, failed synchronous loads and their dependent suffix are
+    removed from the prefix cache while being recomputed. If the request stops
+    before repairing them, those blocks remain uncached."""
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.

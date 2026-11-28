@@ -744,6 +744,15 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
+    def rewind_cache(self, request_id: str, num_computed_tokens: int) -> None:
+        """Allow invalidated blocks to be cached again as they are recomputed."""
+        for manager in self.coordinator.single_type_managers:
+            num_cached_blocks = manager.num_cached_block.get(request_id)
+            if num_cached_blocks is not None:
+                manager.num_cached_block[request_id] = min(
+                    num_cached_blocks, num_computed_tokens // manager.block_size
+                )
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
