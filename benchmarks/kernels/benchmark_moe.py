@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
@@ -1083,7 +1084,11 @@ def main(args: argparse.Namespace):
     num_gpus = int(ray.available_resources()["GPU"])
     workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
 
-    def _distribute(method: str, inputs: list[Any]) -> list[Any]:
+    def _distribute(
+        method: str,
+        inputs: list[Any],
+        on_result: Callable[[int, Any], None] | None = None,
+    ) -> list[Any]:
         outputs = []
         worker_idx = 0
         for input_args in inputs:
@@ -1092,7 +1097,18 @@ def main(args: argparse.Namespace):
             output = worker_method.remote(*input_args)
             outputs.append(output)
             worker_idx = (worker_idx + 1) % num_gpus
-        return ray.get(outputs)
+        if on_result is None:
+            return ray.get(outputs)
+        # Hand each result over as soon as it is ready, in completion order.
+        index = {ref: i for i, ref in enumerate(outputs)}
+        results: list[Any] = [None] * len(outputs)
+        pending = list(outputs)
+        while pending:
+            [ready], pending = ray.wait(pending, num_returns=1)
+            i = index[ready]
+            results[i] = ray.get(ready)
+            on_result(i, results[i])
+        return results
 
     if args.tune:
         # int4_w4a16 weights are uint8-packed, not fp16; treat like fp8 for
@@ -1116,7 +1132,27 @@ def main(args: argparse.Namespace):
                 "kernels. Please remove the flag."
             )
         start = time.time()
-        configs = _distribute(
+        best_configs: dict[int, BenchmarkConfig] = {}
+
+        def _save_finished(i: int, config: BenchmarkConfig) -> None:
+            # Rewrite the file after every finished batch size, so an interrupted
+            # run keeps the batch sizes it already tuned.
+            best_configs[batch_sizes[i]] = sort_config(config)
+            save_configs(
+                dict(sorted(best_configs.items())),
+                E,
+                shard_intermediate_size,
+                hidden_size,
+                topk,
+                dtype,
+                use_fp8_w8a8,
+                use_int8_w8a16,
+                use_int4_w4a16,
+                block_quant_shape,
+                args.save_dir,
+            )
+
+        _distribute(
             "tune",
             [
                 (
@@ -1136,22 +1172,7 @@ def main(args: argparse.Namespace):
                 )
                 for batch_size in batch_sizes
             ],
-        )
-        best_configs = {
-            M: sort_config(config) for M, config in zip(batch_sizes, configs)
-        }
-        save_configs(
-            best_configs,
-            E,
-            shard_intermediate_size,
-            hidden_size,
-            topk,
-            dtype,
-            use_fp8_w8a8,
-            use_int8_w8a16,
-            use_int4_w4a16,
-            block_quant_shape,
-            args.save_dir,
+            on_result=_save_finished,
         )
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
