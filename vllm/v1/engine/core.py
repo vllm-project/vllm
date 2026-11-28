@@ -1092,6 +1092,11 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        if self.model_executor.is_sleeping:
+            raise ValueError(
+                "Cannot resume generation while the engine is asleep; "
+                "wake up the engine first (e.g. via /wake_up)."
+            )
         if not self._checkpoint_state.is_restored:
             raise RuntimeError(
                 f"Cannot resume scheduling while the checkpoint state is "

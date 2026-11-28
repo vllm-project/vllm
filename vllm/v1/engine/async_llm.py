@@ -1057,7 +1057,16 @@ class AsyncLLM(EngineClient):
 
     async def resume_generation(self) -> None:
         """Resume generation after `pause_generation`."""
-        await self.engine_core.resume_scheduler_async()
+        try:
+            await self.engine_core.resume_scheduler_async()
+        except ValueError:
+            raise
+        except Exception as e:
+            # Engine core utility failures come back as a plain Exception, so
+            # restore the ValueError for a resume refused while asleep.
+            if "while the engine is asleep" in str(e):
+                raise ValueError(str(e)) from e
+            raise
 
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
