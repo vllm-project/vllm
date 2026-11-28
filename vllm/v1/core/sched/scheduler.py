@@ -2854,11 +2854,18 @@ class Scheduler(SchedulerInterface):
                 ec_connector_stats=ec_connector_stats,
             )
         ) is not None:
-            # Return stats to only one of the front-ends.
-            if (eco := next(iter(engine_core_outputs.values()), None)) is None:
+            # Normally piggyback on a request output. Route order-sensitive
+            # samples through one FIFO so a slower frontend cannot publish an
+            # older gauge value after a newer one.
+            stats_client = (
+                0
+                if kv_connector_stats and kv_connector_stats.requires_ordered_delivery()
+                else next(iter(engine_core_outputs), 0)
+            )
+            if (eco := engine_core_outputs.get(stats_client)) is None:
                 # We must return the stats even if there are no request
-                # outputs this step.
-                engine_core_outputs[0] = eco = EngineCoreOutputs()
+                # outputs for this frontend.
+                engine_core_outputs[stats_client] = eco = EngineCoreOutputs()
             stats.iteration_records = model_runner_output.iteration_records
             eco.scheduler_stats = stats
 

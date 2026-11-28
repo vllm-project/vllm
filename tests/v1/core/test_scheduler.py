@@ -897,6 +897,60 @@ def test_scheduler_stats_route_to_existing_output_client():
     assert len(engine_core_outputs[1].outputs) == 1
 
 
+@pytest.mark.parametrize("multi_connector", [False, True])
+def test_push_backlog_samples_share_one_frontend(multi_connector):
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiKVConnectorStats,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+        NixlKVConnectorStats,
+    )
+
+    scheduler = create_scheduler()
+    samples = []
+    # First frontend 1 has a result, then frontend 0. A slow frontend 1
+    # must not be able to publish the older depth after the queue clears.
+    for request, (client, depth) in zip(
+        create_requests(3, max_tokens=1), [(1, 1), (0, 0), (1, None)]
+    ):
+        request.client_index = client
+        scheduler.add_request(request)
+        scheduled = scheduler.schedule()
+        stats = NixlKVConnectorStats()
+        if depth is None:
+            stats.record_failed_notification()
+        else:
+            stats.data["push_backlog"] = {"0": (depth, 0)}
+        payload = MultiKVConnectorStats({"push": stats}) if multi_connector else stats
+        outputs = scheduler.update_from_output(
+            scheduled,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                sampled_token_ids=[[1000]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                kv_connector_output=KVConnectorOutput(kv_connector_stats=payload),
+            ),
+        )
+        assert [o.request_id for o in outputs[client].outputs] == [request.request_id]
+        if depth is None:
+            assert 0 not in outputs
+            assert outputs[client].scheduler_stats is not None
+            continue
+        if client != 0:
+            assert outputs[client].scheduler_stats is None
+            assert not outputs[0].outputs
+        scheduler_stats = outputs[0].scheduler_stats
+        assert scheduler_stats is not None
+        snapshot = scheduler_stats.kv_connector_stats
+        assert snapshot is not None
+        if multi_connector:
+            snapshot = snapshot["push"]
+        samples.append(snapshot["push_backlog"]["0"])
+    assert samples == [(1, 0), (0, 0)]
+
+
 def test_scheduler_publishes_lookahead_blocks_at_allocation():
     """A lookahead block is published once its lookahead token exists: prompt
     blocks at their own allocation, the block ending at the first sampled

@@ -113,6 +113,9 @@ class MultiKVConnectorStats(KVConnectorStats):
     def is_empty(self) -> bool:
         return all(stats.is_empty() for stats in self.data.values())
 
+    def requires_ordered_delivery(self) -> bool:
+        return any(stats.requires_ordered_delivery() for stats in self.data.values())
+
     def __getitem__(self, connector_id: str) -> KVConnectorStats:
         return self.data[connector_id]
 
