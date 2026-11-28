@@ -90,9 +90,10 @@ class DeepseekV4CPUIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         max_logits_bytes: int,
         request_offset: int = 0,
         fused_mqa_topk_eligible: bool = False,
+        logit_bytes: int = torch.float32.itemsize,
     ) -> list[tuple[slice, slice]]:
-        # workspace_size/max_logits_bytes/fused_mqa_topk_eligible are unused: no
-        # flat-gather workspace or dense M*N buffer is allocated.
+        # workspace_size/max_logits_bytes/fused_mqa_topk_eligible/logit_bytes
+        # are unused: no flat-gather workspace or dense M*N buffer is allocated.
         num_reqs = compressed_seq_lens_cpu.shape[0]
         total_query_len = int(prefill_query_lens_cpu.sum().item())
         return [

@@ -136,6 +136,7 @@ class AmpereIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             self.max_prefill_buffer_size,
             envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
             request_offset=num_decodes,
+            logit_bytes=self.prefill_logit_bytes,
         )
         chunks = []
         for req_slice, query_slice in chunk_specs:

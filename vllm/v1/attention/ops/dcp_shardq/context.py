@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
     DeepseekV32IndexerPrefillChunkMetadata,
     build_prefill_chunk_metadata,
+    config_prefill_logit_bytes,
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.ops.cp_common import symm_mem
@@ -280,6 +281,7 @@ def build_dcp_shardq_context(
     world: int,
     rank: int,
     device: torch.device,
+    logit_bytes: int = torch.float32.itemsize,
 ) -> DcpShardQContext | None:
     """The context plan of `split`'s step on DCP rank `rank` of `world`, or
     None when its prefill requests do not fit `max_pages` workspace pages.
@@ -346,6 +348,7 @@ def build_dcp_shardq_context(
         max_indexer_keys,
         max_logits_bytes,
         request_offset=num_decodes,
+        logit_bytes=logit_bytes,
     )
     indexer_chunks = [
         build_prefill_chunk_metadata(
@@ -411,6 +414,8 @@ def make_dcp_shardq_planner(
         max_pages=workspace_pages(vllm_config),
         max_indexer_keys=get_max_prefill_buffer_size(vllm_config),
         max_logits_bytes=envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
+        # ShardQ prefill scores gathered keys without the DCP merge.
+        logit_bytes=config_prefill_logit_bytes(vllm_config, 1),
         world=world,
         rank=get_dcp_group().rank_in_group,
         device=device,

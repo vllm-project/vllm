@@ -45,7 +45,6 @@ from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
     get_indexer_topk,
-    is_deep_select_supported,
 )
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -721,8 +720,9 @@ def sparse_attn_indexer(
         # prefill chunk's, or the decode logits, which eager and piecewise
         # steps allocate outside the CUDA graph pools. DeepGEMM emits them in
         # `logits_dtype`, each row holding whole KV splits at a 1024-byte
-        # stride; an FP32 copy of BF16 logits keeps that stride. Prefill always
-        # reads FP32 logits, and the chunk splitter caps them at the budget.
+        # stride; an FP32 copy of BF16 logits keeps that stride. The chunk
+        # splitter caps the prefill logits, with their FP32 copy if any, at the
+        # budget.
         split_kv = 384 if current_platform.is_device_capability_family(100) else 256
         row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
         copy_bytes = 0 if logits_dtype == torch.float32 else torch.float32.itemsize
@@ -742,9 +742,7 @@ def sparse_attn_indexer(
             )
         prefill_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         max_logits_bytes = max(
-            prefill_budget
-            // torch.float32.itemsize
-            * (logits_dtype.itemsize + copy_bytes),
+            prefill_budget,
             max_decode_tokens
             * round_up(decode_width, row_align)
             * (logits_dtype.itemsize + decode_copy_bytes),
@@ -865,6 +863,10 @@ def sparse_attn_indexer(
             prefill_chunks = gathered_context.indexer_chunks
             prefill_dcp_world_size = 1
             indices = gathered_context.gather_indices
+        # Bytes per dense logit the chunk planner budgeted these chunks with.
+        logit_bytes = get_indexer_topk(topk_backend).prefill_logit_bytes(
+            logits_dtype, prefill_dcp_world_size
+        )
 
         # Get the shared workspace buffers once, sized for this batch's largest
         # chunk rather than the profiled bound (total_seq_lens), so the scratch
@@ -955,7 +957,7 @@ def sparse_attn_indexer(
             # cu_seqlen_ks[i]. None means every row starts at column zero.
             row_starts: torch.Tensor | None = None
             # Rows per dense logits call under the logits budget.
-            dense_rows = dense_logits_rows(chunk.max_seqlen_k)
+            dense_rows = dense_logits_rows(chunk.max_seqlen_k, logit_bytes=logit_bytes)
             use_deep_select = False
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
@@ -1034,11 +1036,10 @@ def sparse_attn_indexer(
                         )
                         # DeepSelect ranks the bf16 logits in place of their exact
                         # fp32 copy; fp32 logits keep the per-row top-k.
-                        use_deep_select = (
-                            topk_backend == "deep_select"
-                            and logits.dtype == torch.bfloat16
-                            and prefill_dcp_world_size == 1
-                            and is_deep_select_supported(logits, topk_tokens)
+                        use_deep_select = get_indexer_topk(
+                            topk_backend
+                        ).prefill_takes_bf16_logits(
+                            logits, topk_tokens, prefill_dcp_world_size
                         )
                         if not use_deep_select:
                             logits = as_fp32_logits(logits, row_ends)
@@ -1071,6 +1072,7 @@ def sparse_attn_indexer(
                             topk_tokens,
                             end=row_ends,
                             output_idx=topk_indices[rows],
+                            mask_out_of_range=True,
                         )
                     else:
                         get_indexer_topk(topk_backend).forward_prefill(
