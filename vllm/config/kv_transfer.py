@@ -6,11 +6,37 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
+from pydantic import BaseModel, ConfigDict, model_validator
+
 from vllm.config.utils import CompileFactors, config
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
+
+
+class KVLoadPolicyConfig(BaseModel):
+    """Opt-in prefix load/recompute policy for KV offload connectors.
+
+    Parsed from the ``kv_load_policy`` field of ``--kv-transfer-config``.
+    ``KVTransferConfig`` is a pydantic dataclass with ``forbid`` extra fields, so
+    values are validated and normalized by pydantic (no manual conversion) and a
+    typo such as ``tao1`` fails at argument-parsing time (fail-closed).
+    """
+
+    mode: Literal["static_threshold_window"] = "static_threshold_window"
+    tau1: int = 1024
+    tau2: int | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _check_window(self) -> "KVLoadPolicyConfig":
+        if self.tau1 < 1:
+            raise ValueError("tau1 must be >= 1")
+        if self.tau2 is not None and self.tau2 <= self.tau1:
+            raise ValueError("tau2 must be > tau1")
+        return self
 
 
 def hisparse_host_pool_gib(
@@ -118,6 +144,11 @@ class KVTransferConfig:
     """Policy for handling KV cache load failures.
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
+
+    kv_load_policy: KVLoadPolicyConfig | None = None
+    """Optional policy deciding whether the scheduler relies on externally
+    matched KV tokens (load) or recomputes them. ``None`` keeps native
+    behavior."""
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.
