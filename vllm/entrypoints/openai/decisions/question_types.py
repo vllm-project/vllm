@@ -28,6 +28,10 @@ class Option:
     name: str
     description: str | None = None
 
+    @property
+    def text(self) -> str:
+        return f"{self.name} - {self.description}" if self.description else self.name
+
 
 @dataclass(frozen=True, slots=True)
 class Question:
@@ -59,11 +63,7 @@ class QuestionType(ABC):
         `label_mass` is the labels' total probability over the vocabulary."""
 
     def reply_line(self, label: str, option: Option) -> str:
-        return (
-            f"{label}: {option.name} - {option.description}"
-            if option.description
-            else f"{label}: {option.name}"
-        )
+        return f"{label}: {option.text}"
 
     def body(self, question: Question) -> str:
         """The options and the reply instruction, after the question's heading."""

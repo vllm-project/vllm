@@ -56,9 +56,10 @@ def _check_ihc_rows(worker, sequence_parallel):
     model.register_forward_pre_hook(begin_step, with_kwargs=True)
     for layer in model.layers:
         # The fused boundaries replace the pre layers when the op is built.
+        # The ROCm decoder layer has no fused boundaries.
         for boundary, hc_layer in (
-            (layer.ihc_attn_boundary, layer.hc_attn_layer),
-            (layer.ihc_mlp_boundary, layer.hc_mlp_layer),
+            (getattr(layer, "ihc_attn_boundary", None), layer.hc_attn_layer),
+            (getattr(layer, "ihc_mlp_boundary", None), layer.hc_mlp_layer),
         ):
             (boundary or hc_layer.hc_pre).register_forward_pre_hook(
                 partial(check_rows, layer)

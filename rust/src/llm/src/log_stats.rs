@@ -305,8 +305,9 @@ async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>, interval
         }
         write!(
             msg,
-            ", GPU KV cache used: {:.1}%, \
+            ", {} KV cache used: {:.1}%, \
              Prefix cache hit rate: {prefix_cache_hit_rate:.1}%",
+            METRICS.scheduler.kv_cache_device(),
             kv_cache_usage * 100.0,
         )
         .unwrap();
