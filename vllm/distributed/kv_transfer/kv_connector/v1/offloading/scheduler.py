@@ -1039,14 +1039,27 @@ class OffloadingConnectorScheduler:
         events: list[tuple[int, int, CacheHitSource]] = [
             (end, 0, CacheHitSource.EXTERNAL_UNSPECIFIED)
         ]
+        # Adjacent chunks from the same tier need only one pair of endpoints.
+        # Overlapping ranges still go through the sweep below.
+        run_start = run_end = start
+        run_source = CacheHitSource.EXTERNAL_UNSPECIFIED
+        get_load_source = self.manager.get_load_source
         for lo, hi, key in req_status.load_key_ranges:
-            lo, hi = max(start, lo), min(end, hi)
+            if lo < start:
+                lo = start
+            if hi > end:
+                hi = end
             if lo >= hi:
                 continue
-            source = CacheHitSource(
-                self.manager.get_load_source(key, req_status.req_context)
-            )
-            events.extend(((lo, 1, source), (hi, -1, source)))
+            source = get_load_source(key, req_status.req_context)
+            if lo == run_end and source == run_source:
+                run_end = hi
+                continue
+            if run_start < run_end:
+                events.extend(((run_start, 1, run_source), (run_end, -1, run_source)))
+            run_start, run_end, run_source = lo, hi, CacheHitSource(source)
+        if run_start < run_end:
+            events.extend(((run_start, 1, run_source), (run_end, -1, run_source)))
 
         # Sweep endpoints instead of rescanning every range for each interval.
         active: Counter[CacheHitSource] = Counter()

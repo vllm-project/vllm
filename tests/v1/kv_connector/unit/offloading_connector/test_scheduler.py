@@ -1844,6 +1844,16 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
     ("ranges", "expected"),
     [
         pytest.param(
+            [(4, 8, "host"), (8, 12, "host"), (12, 16, "host")],
+            {CacheHitSource.HOST: 12},
+            id="adjacent-same-source-ranges",
+        ),
+        pytest.param(
+            [(0, 8, "host"), (8, 12, "host"), (8, 12, "disk"), (12, 20, "host")],
+            {CacheHitSource.HOST: 8, CacheHitSource.DISK: 4},
+            id="clipped-adjacent-run-with-overlapping-tier",
+        ),
+        pytest.param(
             [(8, 12, "host"), (0, 8, "host"), (4, 10, "host")],
             {CacheHitSource.HOST: 8, CacheHitSource.EXTERNAL_UNSPECIFIED: 4},
             id="overlapping-same-source-and-adjacent-endpoints",
