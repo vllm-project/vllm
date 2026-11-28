@@ -54,7 +54,10 @@ def test_normalize_trace_replay_params():
 
     request = _make_request(params)
     assert request.max_tokens == 3
-    request.append_output_token_ids([10, 20, 30])
+    request.append_output_token_ids([10, 20])
+    # The cleared user stop token id must not end the replay early.
+    assert not check_stop(request, max_model_len=128)
+    request.append_output_token_ids([30])
     assert check_stop(request, max_model_len=128)
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 

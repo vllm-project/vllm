@@ -836,6 +836,7 @@ class SamplingParams(
                     assert self.stop_token_ids is not None
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
+                    self._stop_token_ids_set = frozenset(self.stop_token_ids)
 
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
