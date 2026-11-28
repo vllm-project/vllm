@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The folded q_b_proj + W_UK decode-query weight of the AMD Kimi-K3 MLA wrapper."""
+"""The folded q_b_proj + W_UK decode-query weight: Kimi-K3 MLA and K3.1 DSA."""
 
 import pytest
 import torch
@@ -130,3 +130,66 @@ def test_rebuild_refills_fold_in_place(monkeypatch) -> None:
     assert attn._w_fold is first and attn._w_fold.data_ptr() == ptr
     expect = compute_w_fold(attn.q_b_proj.weight, kv_b["w_uk"], num_heads, P, R)
     torch.testing.assert_close(attn._w_fold, expect, rtol=0, atol=0)
+
+
+def _dsa_attn(w_qb: torch.Tensor, w_uk: torch.Tensor, num_heads: int, quantized=False):
+    """The MLAAttention fields `_build_wuk_fold` reads, for a Kimi-K3.1 DSA layer."""
+    from types import SimpleNamespace
+
+    method = type("Fp8LinearMethod" if quantized else "UnquantizedLinearMethod", (), {})
+    q_b = SimpleNamespace(weight=w_qb, quant_method=method())
+    return SimpleNamespace(
+        wuk_fold_q_b=q_b,
+        wuk_fold_weight=None,
+        num_heads=num_heads,
+        qk_nope_head_dim=P,
+        qk_rope_head_dim=R,
+        kv_lora_rank=L,
+        W_UK_T=w_uk.permute(1, 2, 0),
+        q_pad_num_heads=None,
+        dcp_q_replicate=False,
+        use_pcp=False,
+        kv_b_proj=SimpleNamespace(),
+    )
+
+
+@pytest.mark.parametrize("num_heads", [12, 96])
+@pytest.mark.parametrize("num_tokens", [1, 40, 2048])
+def test_dsa_fold_matches_unfused_query(num_heads: int, num_tokens: int) -> None:
+    """The DSA fold writes the token-major [B, N, L + R] MQA query directly."""
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
+    w_qb, w_uk = _weights(num_heads)
+    attn = _dsa_attn(w_qb, w_uk, num_heads)
+    MLAAttention._build_wuk_fold(attn)
+    assert attn.wuk_fold_weight.shape == (num_heads * (L + R), LQ)
+    x = torch.randn(num_tokens, LQ, device="cuda").to(torch.bfloat16)
+    q = (x.float() @ attn.wuk_fold_weight.float().T).view(-1, num_heads, L + R)
+    ql_nope_ref, q_pe_ref = _reference(x, w_qb, w_uk, num_heads)
+    torch.testing.assert_close(q[..., :L], ql_nope_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(q[..., L:], q_pe_ref, rtol=1e-4, atol=1e-4)
+
+
+def test_dsa_fold_skips_quantized_q_b() -> None:
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
+    w_qb, w_uk = _weights(12)
+    attn = _dsa_attn(w_qb, w_uk, 12, quantized=True)
+    MLAAttention._build_wuk_fold(attn)
+    assert attn.wuk_fold_q_b is None and attn.wuk_fold_weight is None
+
+
+def test_dsa_fold_rebuild_refills_in_place() -> None:
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
+    w_qb, w_uk = _weights(12)
+    attn = _dsa_attn(w_qb.clone(), w_uk, 12)
+    MLAAttention._build_wuk_fold(attn)
+    first = attn.wuk_fold_weight
+    ptr = first.data_ptr()
+    attn.wuk_fold_q_b.weight.mul_(-2)
+    MLAAttention._build_wuk_fold(attn)
+    assert attn.wuk_fold_weight is first and first.data_ptr() == ptr
+    expect = _dsa_attn(attn.wuk_fold_q_b.weight, w_uk, 12)
+    MLAAttention._build_wuk_fold(expect)
+    torch.testing.assert_close(first, expect.wuk_fold_weight, rtol=0, atol=0)

@@ -265,7 +265,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import refill_derived, replace_parameter
 from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.flashinfer import has_flashinfer
@@ -424,6 +424,10 @@ def _get_kv_b_proj_input_dtype(
         if not use_fp8_prefill:
             return None
     return weight_dtype
+
+
+# Above this many MQA rows (prefill chunks) the folded GEMM's 2.5x FLOPs lose.
+_WUK_FOLD_MAX_TOKENS = 2048
 
 
 def split_kv_b_proj(
@@ -678,6 +682,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
+        # Set by a model to fold W_UK into this q_b_proj (see _build_wuk_fold).
+        self.wuk_fold_q_b: torch.nn.Module | None = None
+        self.wuk_fold_weight: torch.Tensor | None = None
         # AMX reads kv_b_proj's weight directly and never calls it live; the
         # reference CPU MLA backend calls it but isn't perf-critical. Skip
         # the packed-kernel dispatch either way.
@@ -1009,6 +1016,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
         mqa_q_prepared: torch.Tensor | None = None,
+        q_latent: bool = False,
     ) -> torch.Tensor:
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
@@ -1053,6 +1061,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output=output,
                 q_dcp_replicated=q_dcp_replicated,
                 mqa_q_prepared=mqa_q_prepared,
+                q_latent=q_latent,
             )
             return output
         else:
@@ -1076,6 +1085,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
                 q_dcp_replicated=q_dcp_replicated,
                 mqa_q_prepared=mqa_q_prepared,
+                q_latent=q_latent,
             )
             return output
 
@@ -1095,7 +1105,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_tma_aligned: bool | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
         mqa_q_prepared: torch.Tensor | None = None,
+        q_latent: bool = False,
     ) -> torch.Tensor:
+        """With `q_latent`, `q` is q_b_proj's input; see `_build_wuk_fold`."""
         assert output is not None, "Output tensor must be provided."
 
         quant_key = _detect_output_quant_key(
@@ -1222,7 +1234,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mha_output_scale = None
 
             self.impl.forward_mha(  # type: ignore[attr-defined]
-                q[num_mqa_tokens:],
+                self._wuk_unfolded_q(q[num_mqa_tokens:])
+                if q_latent
+                else q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
                 k_pe[num_mqa_tokens:],
                 kv_cache,
@@ -1246,11 +1260,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q = self._prepare_mqa_query(
                     q_dcp_replicated[:num_mqa_tokens], qrep_decode=True
                 )
+            elif q_latent and num_mqa_tokens <= _WUK_FOLD_MAX_TOKENS:
+                mqa_q = self._prepare_folded_mqa_query(
+                    q[:num_mqa_tokens], gather_query=gathered_context is None
+                )
             else:
                 # A DCP ShardQ step exchanges the local heads' query (shard_q)
                 # instead of gathering it.
                 mqa_q = self._prepare_mqa_query(
-                    q[:num_mqa_tokens],
+                    self._wuk_unfolded_q(q[:num_mqa_tokens])
+                    if q_latent
+                    else q[:num_mqa_tokens],
                     qrep_decode=False,
                     fused_q_heads=self._fused_decode_query_heads(attn_metadata),
                     gather_query=gathered_context is None,
@@ -1562,6 +1582,32 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
         if not gather_query:
             return mqa_q
+        return self._gather_mqa_query(mqa_q, qrep_decode)
+
+    def _prepare_folded_mqa_query(
+        self, q_c: torch.Tensor, gather_query: bool = True
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """The absorbed `[ql_nope | q_pe]` query of q_b_proj's input, one GEMM."""
+        assert self.wuk_fold_weight is not None
+        mqa_q = torch.ops.vllm.rocm_unquantized_gemm(
+            q_c, self.wuk_fold_weight, None
+        ).view(-1, self.num_heads, self.kv_lora_rank + self.qk_rope_head_dim)
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.impl.supports_quant_query_input
+        ):
+            mqa_q = self._decode_concat_quant_fp8_op(
+                mqa_q, mqa_q[..., :0], self._q_scale
+            )
+        if not gather_query:
+            return mqa_q
+        return self._gather_mqa_query(mqa_q, qrep_decode=False)
+
+    def _gather_mqa_query(
+        self,
+        mqa_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        qrep_decode: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
         if self.impl.dcp_world_size > 1:
             assert self.dcp_manager is not None
@@ -1721,6 +1767,45 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
+        if self.wuk_fold_q_b is not None:
+            self._build_wuk_fold()
+
+    @torch.no_grad()
+    def _build_wuk_fold(self) -> None:
+        """Fold W_UK into q_b_proj, as #60110 does for Kimi-K3's MLA wrapper.
+
+        Rows are per head, `[W_UK^T W_qb_nope ; W_qb_pe]`, so one GEMM of
+        q_b_proj's input writes the token-major `[B, N, L + R]` MQA query that
+        `_prepare_mqa_query` builds from a bmm and a concat."""
+        q_b = self.wuk_fold_q_b
+        assert q_b is not None
+        w = getattr(q_b, "weight", None)
+        N, P, R = self.num_heads, self.qk_nope_head_dim, self.qk_rope_head_dim
+        if (
+            w is None
+            or type(q_b.quant_method).__name__ != "UnquantizedLinearMethod"
+            or w.dtype not in (torch.bfloat16, torch.float16)
+            or w.shape[0] != N * (P + R)
+            or getattr(self, "W_UK_T", None) is None
+            or self.q_pad_num_heads is not None
+            or self.dcp_q_replicate
+            or self.use_pcp
+            or hasattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora")
+        ):
+            self.wuk_fold_q_b = None
+            return
+        wq = w.float().view(N, P + R, -1)
+        nope = torch.einsum("npl,npk->nlk", self.W_UK_T.float(), wq[:, :P])
+        refill_derived(
+            self,
+            "wuk_fold_weight",
+            torch.cat([nope, wq[:, P:]], 1).flatten(0, 1).to(w.dtype).contiguous(),
+        )
+
+    def _wuk_unfolded_q(self, q_c: torch.Tensor) -> torch.Tensor:
+        assert self.wuk_fold_q_b is not None
+        heads, dim = self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim
+        return self.wuk_fold_q_b(q_c)[0].view(-1, heads, dim)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
@@ -1886,6 +1971,7 @@ def unified_mla_attention_with_output(
     quant_tma_aligned: bool | None = None,
     q_dcp_replicated: torch.Tensor | None = None,
     mqa_q_prepared: torch.Tensor | None = None,
+    q_latent: bool = False,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1914,6 +2000,7 @@ def unified_mla_attention_with_output(
         quant_tma_aligned=quant_tma_aligned,
         q_dcp_replicated=q_dcp_replicated,
         mqa_q_prepared=mqa_q_prepared,
+        q_latent=q_latent,
     )
 
 

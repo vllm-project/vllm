@@ -814,6 +814,9 @@ class KimiK3DSAAttention(nn.Module):
             quant_config,
             prefix,
         )
+        # Decode builds the absorbed query with one GEMM (#60110's fold).
+        if rocm_aiter_ops.is_enabled() and self.q_lora_rank is not None:
+            self.mla_attn.mla_attn.wuk_fold_q_b = self.mla_attn.q_b_proj
 
     def get_input_quant_key(self) -> None:
         # The generic MLA wrapper also feeds these activations to the gate.
