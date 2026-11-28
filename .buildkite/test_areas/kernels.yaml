@@ -632,6 +632,7 @@ steps:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - vllm/model_executor/kernels/linear/
+  - vllm/config/kernel.py
   - tests/kernels/quantization
   - tests/models/quantization/test_mxfp8.py
   commands:
