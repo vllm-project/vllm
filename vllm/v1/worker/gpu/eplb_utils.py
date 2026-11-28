@@ -199,6 +199,15 @@ class EPLBController:
         log_stats = self.parallel_config.eplb_config.log_balancedness
         self.state.step(is_dummy, is_profile, log_stats=log_stats)
 
+    def set_batch_phase(self, batch_has_prefill: bool) -> None:
+        """Use the target batch's phase for every forward in this iteration."""
+        if (
+            self.state is not None
+            and not self.suppressed
+            and self.parallel_config.eplb_config.load_collection_phase != "all"
+        ):
+            self.state.set_batch_phase(batch_has_prefill)
+
     def prepare_forward(
         self,
         model_config: ModelConfig,

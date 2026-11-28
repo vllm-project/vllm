@@ -16,6 +16,8 @@ steps:
   - tests/distributed/test_eplb_extension_hooks.py
   - vllm/config/parallel.py
   - vllm/platforms/interface.py
+  - vllm/v1/worker/gpu/eplb_utils.py
+  - vllm/v1/worker/gpu/model_runner.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_migration_scheduler.py
@@ -37,6 +39,8 @@ steps:
       - tests/distributed/test_eplb_extension_hooks.py
       - vllm/config/parallel.py
       - vllm/platforms/interface.py
+      - vllm/v1/worker/gpu/eplb_utils.py
+      - vllm/v1/worker/gpu/model_runner.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) [Nightly] EPLB Execution"

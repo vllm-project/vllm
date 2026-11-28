@@ -287,6 +287,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
+| `load_collection_phase` | Collect load from `"all"`, `"prefill"`, or `"decode"` target batches | `"all"` |
 | `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
 | `draft_num_redundant_experts` | Redundant expert count for a speculative MoE draft; inherits a valid target count for matching routed expert counts, otherwise computed when unset. Invalid explicit values fail validation with a suggested minimum when possible. Ignored without a speculative MoE draft. | `auto` |
 | `use_async` | Use non-blocking EPLB with policy computation in a persistent CPU subprocess per worker | `true` |
@@ -302,6 +303,10 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
   --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
+
+Phase filtering is supported by the built-in Model Runner V2. Out-of-tree and custom runners must pass their target batch's prefill flag to `EPLBController.set_batch_phase()` before the target forward; setting the configuration field alone does not enable filtering in those runners.
+
+To balance experts using decode load, add `"load_collection_phase":"decode"` to `--eplb-config`. A batch containing any prefill request, including a mixed prefill/decode batch, belongs to the prefill phase. Decode collection includes only batches without prefill requests. Draft-model forwards inherit the target batch's phase, and DBO microbatches share that phase. Filtering affects load collection only: every rank continues stepping EPLB and participating in rearrangement collectives, including ranks whose local batch is excluded. Excluded batches contribute zero load to slots where the existing sampling schedule would record a batch. Filtering does not pause the rearrangement interval.
 
 ??? tip "Prefer individual arguments instead of JSON?"
 

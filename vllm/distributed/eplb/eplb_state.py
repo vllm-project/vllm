@@ -370,6 +370,8 @@ class EplbState:
         """
         self._should_record_value: bool | None = None
         """Last value written to `should_record_tensor`."""
+        self._load_collection_phase_matched = True
+        """Whether this target iteration belongs to the selected load phase."""
         self._pending_balancedness: deque[
             tuple[int, torch.Event, list[tuple[str, str, torch.Tensor]]]
         ] = deque()
@@ -888,12 +890,23 @@ class EplbState:
         should_record_for_log = steps_until_next_log <= self.expert_load_window_size
         return should_record_for_rearrange or should_record_for_log
 
+    def set_batch_phase(self, batch_has_prefill: bool) -> None:
+        """Select load recording for the target and its draft forwards."""
+        phase = self.parallel_config.eplb_config.load_collection_phase
+        self._load_collection_phase_matched = phase == "all" or (
+            batch_has_prefill == (phase == "prefill")
+        )
+        self._update_layer_should_record(
+            log_stats=self.parallel_config.eplb_config.log_balancedness
+        )
+
     def _update_layer_should_record(self, log_stats: bool = False) -> None:
         """Update the shared `should_record_tensor` for all layers."""
         if self.should_record_tensor is None:
             return
-        should_record = self._should_record_current_step(log_stats=log_stats)
-        # The value only flips at window edges; skip the per-step fill kernel.
+        should_record = self._should_record_current_step(log_stats=log_stats) and (
+            self._load_collection_phase_matched
+        )
         if should_record != self._should_record_value:
             self.should_record_tensor.fill_(should_record)
             self._should_record_value = should_record

@@ -209,6 +209,12 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
+    load_collection_phase: Literal["all", "prefill", "decode"] = "all"
+    """Collect expert load from all batches, batches containing prefill, or
+    decode-only batches in the built-in Model Runner V2. Mixed batches count as
+    prefill. Target and draft models use the target batch's phase. Out-of-tree
+    runners must integrate phase updates before each target forward.
+    """
     use_async: bool = True
     """Whether to use non-blocking EPLB. Async policy computation runs in a
     persistent CPU subprocess per worker. The policy and its CPU inputs must
