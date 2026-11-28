@@ -50,7 +50,7 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-# Arena sizing — internal constants (kept off the env/CLI surface).
+# Default arena sizing (ParallelConfig.shm_tensor_arena_slots / _slot_mb).
 _ARENA_SLOTS = 8
 _ARENA_SLOT_BYTES = 256 * 1024 * 1024
 # Minimum contiguous CPU-tensor size to divert into the arena; smaller tensors

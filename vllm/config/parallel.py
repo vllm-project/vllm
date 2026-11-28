@@ -384,6 +384,20 @@ class ParallelConfig:
     most beneficial for multimodal serving with large images and tensor
     parallelism. Active only when all queue readers are node-local; reserves
     slots in `/dev/shm`."""
+    shm_tensor_arena_slots: int = Field(default=8, ge=1)
+    """Number of slots in the shared-memory tensor arena
+    (`enable_shm_tensor_arena`). Each large CPU tensor (at least 8 MiB, such as
+    the `pixel_values` of one image) takes one slot, which stays in use until
+    every worker has dropped the tensor. With more such tensors in flight than
+    slots, the rest take the copying fallback path. The arena reserves slots x
+    `shm_tensor_arena_slot_mb` of `/dev/shm`, and on CUDA-alike platforms the
+    readers page-lock all of it (`cudaHostRegister`), so that much host memory
+    is resident and pinned for each engine (every data-parallel replica has its
+    own arena). Only used with `enable_shm_tensor_arena`."""
+    shm_tensor_arena_slot_mb: int = Field(default=256, ge=1)
+    """Size of one shared-memory tensor arena slot, in MiB (at least 8, the
+    smallest tensor the arena takes). A tensor larger than a slot takes the
+    copying fallback path. Only used with `enable_shm_tensor_arena`."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
@@ -1159,6 +1173,8 @@ class ParallelConfig:
             "cpu_distributed_timeout_seconds",
             "disable_custom_all_reduce",
             "enable_shm_tensor_arena",
+            "shm_tensor_arena_slots",
+            "shm_tensor_arena_slot_mb",
             "ray_workers_use_nsight",
             "ray_runtime_env",
             "placement_group",
@@ -1346,6 +1362,34 @@ class ParallelConfig:
             isinstance(self.distributed_executor_backend, type)
             and getattr(self.distributed_executor_backend, "uses_ray", False)
         )
+
+    @model_validator(mode="after")
+    def _verify_shm_tensor_arena(self) -> Self:
+        from vllm.distributed.device_communicators.shm_tensor_arena import (
+            _ARENA_MIN_BYTES,
+            _ARENA_SLOT_BYTES,
+            _ARENA_SLOTS,
+        )
+
+        if not self.enable_shm_tensor_arena:
+            if (
+                self.shm_tensor_arena_slots != _ARENA_SLOTS
+                or self.shm_tensor_arena_slot_mb != _ARENA_SLOT_BYTES >> 20
+            ):
+                logger.warning_once(
+                    "shm_tensor_arena_slots / shm_tensor_arena_slot_mb are set "
+                    "but enable_shm_tensor_arena is off; they have no effect. "
+                    "Pass --enable-shm-tensor-arena to use the arena."
+                )
+            return self
+        if self.shm_tensor_arena_slot_mb * 1024 * 1024 < _ARENA_MIN_BYTES:
+            raise ValueError(
+                f"shm_tensor_arena_slot_mb={self.shm_tensor_arena_slot_mb} is "
+                f"below the {_ARENA_MIN_BYTES >> 20} MiB minimum tensor size the "
+                "shared-memory tensor arena takes, so no tensor would ever use "
+                "it."
+            )
+        return self
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:

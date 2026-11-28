@@ -100,8 +100,8 @@ and wires it in but otherwise treats it as an internal implementation detail.
 
 A second shared-memory region created alongside the existing `ShmRingBuffer`:
 
-- **N slots × slot_bytes** (default 8 × 256 MB, internal constants -- see
-  §3), plus per-slot metadata `[written_flag, reader0_done … readerN_done]`.
+- **N slots × slot_bytes** (default 8 × 256 MiB, configurable -- see §3),
+  plus per-slot metadata `[written_flag, reader0_done … readerN_done]`.
 - Concurrency uses the **same lock-free single-writer/N-reader protocol as
   `ShmRingBuffer`** (memory fences, per-reader done flags), so the model is one
   the codebase already trusts.
@@ -225,15 +225,17 @@ frame does not have.)
 
 ## 3. Configuration
 
-A single CLI flag toggles the arena; the slot count/size and divert threshold
-are internal constants (no env vars).
+One CLI flag toggles the arena and two size it; the divert threshold is an
+internal constant (no env vars).
 
 | Flag (`ParallelConfig` field) | Default | Meaning |
 | --- | --- | --- |
 | `--enable-shm-tensor-arena` / `--disable-shm-tensor-arena` (`enable_shm_tensor_arena`) | **off** | Opt in to route large CPU tensors through the arena (reserves slots in `/dev/shm`). Off = the out-of-band `_reduce_tensor` path only, identical to stock behavior. |
+| `--shm-tensor-arena-slots` (`shm_tensor_arena_slots`) | 8 | Slots in the arena. Each large tensor (at least 8 MiB, such as one image's `pixel_values`) takes one slot until every worker has dropped it, so more such tensors in flight than slots send the rest down the out-of-band path. |
+| `--shm-tensor-arena-slot-mb` (`shm_tensor_arena_slot_mb`) | 256 | Slot size in MiB (at least 8). A tensor larger than a slot takes the out-of-band path. The arena reserves, and on CUDA-alike platforms pins, slots × slot size of host memory. |
 
-Internal constants in `shm_tensor_arena.py`: **8 slots × 256 MB**; tensors larger
-than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
+Tensors larger than a slot, or smaller than the **8 MiB** divert threshold (an
+internal constant in `shm_tensor_arena.py`), take the out-of-band
 `_reduce_tensor` path.
 
 ## 4. Validation
