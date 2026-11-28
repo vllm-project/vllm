@@ -347,7 +347,7 @@ class DSparkDrafter:
             if md is None:
                 return "attn-metadata"
             _, _, kv_cache, slots = get_attention_context(name)
-            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads)
+            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads, kv_fp8=False)
             if reason is not None:
                 return reason
             # uniform causal decodes of QUERY_ROWS rows (host counts of the metadata)
