@@ -33,7 +33,10 @@ from vllm.entrypoints.generate.base.serving import (
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_encoding,
+    is_function_recipient,
+)
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -793,6 +796,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = []
+            function_call_seen = False
             harmony_msgs = context.messages[context.num_init_messages :]
             # Streamed messages are a subsequence of harmony_msgs, in order.
             streamed = iter(context.streamed_items_by_message)
@@ -813,7 +817,15 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if next_streamed is not None and next_streamed[0] is msg:
                     reuse_streamed_item_ids(items, next_streamed[1])
                     next_streamed = next(streamed, None)
-                output.extend(items)
+                for item in items:
+                    if (
+                        request.parallel_tool_calls is False
+                        and item.type == "function_call"
+                    ):
+                        if function_call_seen:
+                            continue
+                        function_call_seen = True
+                    output.append(item)
 
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
@@ -1342,6 +1354,8 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        limit_function_calls = request.parallel_tool_calls is False
+        function_call_seen = False
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
@@ -1350,6 +1364,22 @@ class OpenAIServingResponses(GenerateBaseServing):
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
             for segment in ctx.last_append_segments:
+                completed_message = segment.completed_message
+                if limit_function_calls:
+                    # The parser may clear the current recipient at completion.
+                    recipient = (
+                        completed_message.recipient
+                        if completed_message is not None
+                        else segment.recipient
+                    )
+                    if recipient and is_function_recipient(
+                        recipient, ctx.function_tool_names
+                    ):
+                        if function_call_seen:
+                            continue
+                        if completed_message is not None:
+                            function_call_seen = bool(completed_message.content)
+
                 if segment.token_logprobs is not None:
                     state.pending_logprobs.append(segment.token_logprobs)
 
@@ -1365,7 +1395,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     ):
                         yield _increment_sequence_number_and_return(event)
 
-                elif completed_message := segment.completed_message:
+                elif completed_message is not None:
                     done_items: list[ResponseOutputItem] = []
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(

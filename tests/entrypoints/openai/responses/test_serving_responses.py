@@ -32,8 +32,8 @@ from openai.types.responses.tool import (
     Mcp,
     Tool,
 )
+from openai_harmony import Conversation, Role
 from openai_harmony import Message as OpenAIHarmonyMessage
-from openai_harmony import Role
 from pydantic import ValidationError
 from starlette.requests import Request
 
@@ -46,6 +46,7 @@ from vllm.entrypoints.generate.base.protocol import (
     RequestResponseMetadata,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -1704,6 +1705,7 @@ def _make_simple_context_with_output(
 
 def _make_serving_instance(
     *,
+    model_type: str = "test",
     reasoning_parser: str = "",
     tool_parser: str | None = None,
     enable_per_request_metrics: bool = False,
@@ -1711,7 +1713,7 @@ def _make_serving_instance(
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.max_model_len = 100
-    model_config.hf_config.model_type = "test"
+    model_config.hf_config.model_type = model_type
     model_config.hf_text_config = MagicMock()
     model_config.get_diff_sampling_param.return_value = {}
     engine_client.model_config = model_config
@@ -2561,6 +2563,95 @@ async def test_harmony_stream_unstreamed_item_keeps_own_id():
     assert first.content[0].text == "skipped"
     assert first.id != streamed.id
     assert second.id == streamed.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("parallel_tool_calls", "num_calls"), [(False, 1), (True, 2)])
+async def test_harmony_streaming_parallel_tool_calls(parallel_tool_calls, num_calls):
+    class TokenOnlyHarmonyParser(HarmonyParser):
+        reasoning_parser_cls = None
+        tool_parser_cls = None
+
+    serving = _make_serving_instance(model_type="gpt_oss")
+    calls = [
+        ("get_weather", '{"city": "Paris"}'),
+        ("get_forecast", '{"city": "Berlin"}'),
+    ]
+    request = ResponsesRequest(
+        input="hi",
+        tools=[
+            {"type": "function", "name": name, "parameters": {}} for name, _ in calls
+        ],
+        parallel_tool_calls=parallel_tool_calls,
+        stream=True,
+        store=False,
+    )
+    encoding = get_encoding()
+    context = HarmonyContext(
+        messages=[],
+        available_tools=[],
+        function_tool_names=frozenset(name for name, _ in calls),
+        response_parser=TokenOnlyHarmonyParser(encoding),
+        request=request,
+    )
+    prompt = OpenAIHarmonyMessage.from_role_and_content(Role.USER, "hi")
+    prompt_tokens = encoding.render_conversation_for_completion(
+        Conversation.from_messages([prompt]), Role.ASSISTANT
+    )
+    messages = [
+        prompt,
+        _harmony_msg("commentary", calls[0][1], "functions.get_weather"),
+        _harmony_msg("commentary", calls[1][1], "get_forecast"),
+        _harmony_msg("final", "Sunny"),
+    ]
+    tokens = encoding.render_conversation(Conversation.from_messages(messages))
+    assert tokens[: len(prompt_tokens)] == prompt_tokens
+
+    async def result_generator():
+        for token_id in tokens[len(prompt_tokens) :]:
+            context.append_output(_make_request_output("", [token_id]))
+            yield context
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=64),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=encoding,
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    assert events[-1].type == "response.completed"
+    output = events[-1].response.output
+    assert [item.type for item in output] == ["function_call"] * num_calls + ["message"]
+    assert [(item.name, item.arguments) for item in output[:-1]] == calls[:num_calls]
+    assert output[-1].content[0].text == "Sunny"
+
+    for event_type in ("response.output_item.added", "response.output_item.done"):
+        assert [e.output_index for e in events if e.type == event_type] == list(
+            range(len(output))
+        )
+    assert all(0 <= getattr(event, "output_index", 0) < len(output) for event in events)
+
+    for index, item in enumerate(output[:-1]):
+        added, *deltas, arguments_done, done = [
+            e for e in events if getattr(e, "output_index", None) == index
+        ]
+        assert added.type == "response.output_item.added"
+        assert added.item.id == item.id
+        assert added.item.call_id == item.call_id
+        assert all(e.type == "response.function_call_arguments.delta" for e in deltas)
+        assert all(e.item_id == item.id for e in [*deltas, arguments_done])
+        assert "".join(e.delta for e in deltas) == item.arguments
+        assert arguments_done.type == "response.function_call_arguments.done"
+        assert arguments_done.arguments == item.arguments
+        assert done.type == "response.output_item.done"
+        assert (done.item.id, done.item.call_id) == (item.id, item.call_id)
+        assert (done.item.name, done.item.arguments) == (item.name, item.arguments)
 
 
 @pytest.mark.asyncio
