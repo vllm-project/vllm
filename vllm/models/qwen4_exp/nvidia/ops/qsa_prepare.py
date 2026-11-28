@@ -230,7 +230,8 @@ def _qsa_prepare_kernel(
                 tl.store(dst + MAIN_D + dims, _to_dst_dtype(v, dst, main_v_scale))
         else:
             out = (token * MAIN_HQ + head) * MAIN_D
-            _store_rotated(main_q_out_ptr + out, y, o1, o2, None)
+            # Unit scale for FP8: normalized Q is far inside e4m3's range.
+            _store_rotated(main_q_out_ptr + out, y, o1, o2, 1.0)
             gate = tl.load(src + MAIN_D + dims)
             tl.store(main_gate_out_ptr + out + dims, gate)
         return
@@ -534,14 +535,14 @@ def qsa_prepare(
     """Normalize Q, compress K, then update the circular raw state.
 
     Also prepares the main attention (QK-norm/RoPE, gate copy, K/V cache write)
-    and returns its Q and gate.
+    and returns its Q (in the cache's dtype, so FP8 with an FP8 cache) and gate.
     """
     num_tokens = q.shape[0]
     main_head_dim = main_kv_cache.shape[-1] // 2
     num_main_kv_heads = main_kv_cache.shape[2]
     num_main_q_heads = main_qkv.shape[1] // (2 * main_head_dim) - num_main_kv_heads
-    main_q_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
-    main_gate_out = torch.empty_like(main_q_out)
+    main_gate_out = main_qkv.new_empty(num_tokens, num_main_q_heads, main_head_dim)
+    main_q_out = torch.empty_like(main_gate_out, dtype=main_kv_cache.dtype)
     if num_tokens == 0:
         return main_q_out, main_gate_out
     num_q_heads, head_dim = q_out.shape[1:]
