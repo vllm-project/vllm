@@ -1035,13 +1035,21 @@ class RoutedExperts(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        expert_mapping = self.get_expert_mapping(include_fused=True)
+        # Checkpoint names do not depend on LoRA wrapping: match plain names
+        # and drop PEFT's `base_layer` segment from incoming ones.
+        prefix = self.lora_base_layer_prefix
+        expert_mapping = [
+            (param, weight.replace(prefix, "") if prefix else weight, expert, shard)
+            for param, weight, expert, shard in self.get_expert_mapping(
+                include_fused=True
+            )
+        ]
         mapping_by_expert = _index_expert_mapping(expert_mapping)
         quant_method = getattr(self, "quant_method", None)
         source_method = getattr(quant_method, "requantization_source", None)
 
         for expert_name, loaded_weight in weights:
-            qual_name = f"{self.layer_name}.{expert_name}"
+            qual_name = f"{self.layer_name}.{expert_name.replace('.base_layer.', '.')}"
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (
                 mapping_by_expert.get(expert_key)

@@ -1527,12 +1527,16 @@ def test_direct_reload_keeps_lm_head_untied(vllm_runner, monkeypatch, tmp_path):
         assert llm.collective_rpc(_lm_head_state) == [(False, True)]
 
 
-def _reload_with_lora_expert_names(worker) -> None:
-    """Reload the checkpoint under the names that LoRA-wrapped experts load."""
+def _reload_with_lora_expert_names(worker, base_layer_names: bool = True) -> None:
+    """Reload the checkpoint under PEFT (`base_layer`) or plain expert names."""
 
     def lora_name(name: str) -> str:
         parts = name.split(".")
-        if "experts" in parts[:-2] and parts[parts.index("experts") + 1].isdigit():
+        if (
+            base_layer_names
+            and "experts" in parts[:-2]
+            and parts[parts.index("experts") + 1].isdigit()
+        ):
             parts.insert(parts.index("experts") + 3, "base_layer")
         return ".".join(parts)
 
@@ -1547,8 +1551,11 @@ def _reload_with_lora_expert_names(worker) -> None:
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="LoRA on quantized MoE requires CUDA"
 )
+@pytest.mark.parametrize("base_layer_names", [True, False])
 @pytest.mark.parametrize("reload_mode", ["layerwise", "direct"])
-def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch, reload_mode):
+def test_reload_weights_with_lora_moe(
+    vllm_runner, monkeypatch, reload_mode, base_layer_names
+):
     monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
@@ -1587,7 +1594,10 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch, reload_mode):
     ) as llm:
         before = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 1)]
         assert before[0] != before[1]
-        llm.collective_rpc(_reload_with_lora_expert_names)
+        llm.collective_rpc(
+            _reload_with_lora_expert_names,
+            kwargs={"base_layer_names": base_layer_names},
+        )
         after = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 2)]
     assert after == before
 
