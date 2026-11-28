@@ -263,7 +263,8 @@ def _conv(
         + (safe_slot % N)[:, None] * stride_c_n
         + cache_col[None, :]
     )
-    tl.store(dst, cur, mask=tc_mask & valid[:, None])
+    # Block 0 is the null block: positions InklingSconvTailManager leaves unbacked.
+    tl.store(dst, cur, mask=tc_mask & (valid & (slot >= N))[:, None])
 
     tap_args = (
         x_ptr,

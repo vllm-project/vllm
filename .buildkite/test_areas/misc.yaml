@@ -394,6 +394,7 @@ steps:
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
+    - vllm/models/inkling/nvidia/sconv_swa_attn.py
     - vllm/multimodal/
     - vllm/outputs.py
     - vllm/platforms/

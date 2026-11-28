@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.v1.core.utils import new_kv_cache_group
+from vllm.models.inkling.nvidia.sconv_swa_attn import InklingSconvTailManager
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -607,6 +608,62 @@ def test_dflash_window_chunk_after_load_backs_only_its_tail(
     blocks = manager.req_to_blocks["r"]
     assert [i for i, b in enumerate(blocks) if not b.is_null] == resident_blocks
     assert num_free_blocks - block_pool.get_num_free_blocks() == num_blocks
+
+
+def new_inkling_sconv_layer():
+    # Inkling's conv state: a 4-token window over 8-token blocks.
+    return InklingSconvTailManager.layer_config(
+        AttentionSpec(block_size=8, num_kv_heads=1, head_size=1, dtype=torch.float32),
+        sliding_window=4,
+        max_in_flight_steps=2,
+    )
+
+
+def test_inkling_sconv_admission_ignores_in_flight_tokens():
+    """Plain sliding window reserves window + in-flight tokens of conv state per
+    request; the tail manager holds three tails and three boundary blocks."""
+    config = new_inkling_sconv_layer().manager_config
+    for max_in_flight_tokens in (512, 4096, 32768):
+        assert (
+            InklingSconvTailManager.max_admission_blocks(
+                config, 8, max_in_flight_tokens, 1 << 20
+            )
+            == 9
+        )
+    plain = SlidingWindowManager.config(sliding_window=4)
+    assert SlidingWindowManager.max_admission_blocks(plain, 8, 32768, 1 << 20) == 4098
+
+
+def test_inkling_sconv_backs_step_reads_and_next_turn_boundary():
+    """A chunked prefill backs exactly the blocks later steps read and the block
+    a next-turn prefix hit at `floor(prompt / 64) * 64` resumes from."""
+    layer = new_inkling_sconv_layer()
+    manager = layer.manager_cls(
+        new_kv_cache_group(["layer"], layer),
+        block_pool=BlockPool(
+            num_gpu_blocks=256, enable_caching=True, hash_block_size=8
+        ),
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=64,
+        max_admission_blocks_per_request=9,
+        retention_interval=0,
+    )
+    num_prompt_tokens, chunk, backed = 1000, 256, set()
+    for start in range(0, num_prompt_tokens, chunk):
+        end = min(start + chunk, num_prompt_tokens)
+        # Async scheduling: the previous chunk is still in flight.
+        manager.remove_skipped_blocks(
+            "r", max(start - chunk, 0), num_prompt_tokens=num_prompt_tokens
+        )
+        num_blocks = manager.get_num_blocks_to_allocate("r", end, [], start, start, end)
+        first = len(manager.req_to_blocks["r"])
+        new_blocks = manager.allocate_new_blocks("r", end, end)
+        assert num_blocks == sum(not b.is_null for b in new_blocks)
+        backed |= {first + i for i, b in enumerate(new_blocks) if not b.is_null}
+    # Chunk tails 248-255, 504-511, 760-767, 992-999 and 952-959 before the
+    # next-turn hit at 960.
+    assert backed == {31, 63, 95, 119, 124}
 
 
 def get_chunked_local_attention_manager(
