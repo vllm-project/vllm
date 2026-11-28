@@ -65,9 +65,17 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             input_parallel = split_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
+        # Add the bias after the all-reduce when reducing across ranks, so
+        # every rank executes the same operations (see RowParallelLinear).
+        defer_bias = (
+            self.base_layer.reduce_results
+            and self.tp_size > 1
+            and not self.base_layer.skip_bias_add
+            and self.base_layer.bias is not None
+        )
         bias_ = (
             None
-            if (self.tp_rank > 0 or self.base_layer.skip_bias_add)
+            if (defer_bias or self.tp_rank > 0 or self.base_layer.skip_bias_add)
             else self.base_layer.bias
         )
         output_parallel = self.apply(input_parallel, bias_)
@@ -75,6 +83,9 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel
+
+        if defer_bias:
+            output = output + self.base_layer.bias
 
         output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
         if not self.base_layer.return_bias:
