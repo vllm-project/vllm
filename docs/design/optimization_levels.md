@@ -35,7 +35,7 @@ This level is good for initial phases of development and debugging.
 Settings:
 
 - `-cc.cudagraph_mode=NONE`
-- `-cc.mode=NONE` (also resulting in `-cc.custom_ops=["none"]`)
+- `-cc.mode=NONE` (also resulting in `-cc.custom_ops=["all"]`)
 - `-cc.pass_config.fuse_...=False` (all fusions disabled)
 - `--disable-flashinfer-autotune`
 
