@@ -142,6 +142,19 @@ def _is_compatible(
     )
 
 
+def graph_capture_free_memory() -> int:
+    """Free device memory, for measuring what graph capture takes.
+
+    hipMemGetInfo counts each allocation as at least 2 MB, and every captured
+    hipGraph makes a small one, so it overstates capture memory by about 2 MB
+    per graph: GiBs for PIECEWISE, which captures a graph per piece and size.
+    The ROCm platform corrects free memory by amdgpu's exact VRAM count.
+    """
+    if current_platform.is_rocm():
+        return current_platform.free_device_memory()
+    return torch.accelerator.get_memory_info()[0]
+
+
 def has_compiled_submodule(model: nn.Module) -> bool:
     """Whether any submodule is an active @support_torch_compile module."""
     return any(
@@ -530,7 +543,7 @@ class CudaGraphManager:
                         get_offloader().sync_prev_onload()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
-                            free_before = torch.accelerator.get_memory_info()[0]
+                            free_before = graph_capture_free_memory()
                         with (
                             capture_pool(self.pool, self.vllm_config) as pool,
                             torch.cuda.graph(
@@ -545,7 +558,7 @@ class CudaGraphManager:
                             get_offloader().join_after_forward()
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
-                            free_after = torch.accelerator.get_memory_info()[0]
+                            free_after = graph_capture_free_memory()
                             self._capture_mem_samples.append(free_before - free_after)
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1

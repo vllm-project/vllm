@@ -121,6 +121,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    graph_capture_free_memory,
     has_compiled_submodule,
     make_cudagraph_stats,
 )
@@ -1189,7 +1190,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         with freeze_gc_for_cudagraph_capture():
             torch.accelerator.empty_cache()
-            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            start_free_gpu_memory = graph_capture_free_memory()
 
             with self.maybe_setup_dummy_loras(self.lora_config):
                 if capture_encoder:
@@ -1233,7 +1234,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Warmup activations stay cached on the capture streams, which
             # nothing allocates from after capture; release them.
             torch.accelerator.empty_cache()
-            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            end_free_gpu_memory = graph_capture_free_memory()
 
         if not profile_only:
             # Lock workspace to prevent resizing during execution. A resize after
