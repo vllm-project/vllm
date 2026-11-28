@@ -77,6 +77,13 @@ class AttentionConfig:
     Fixes the split count so grid dimensions are constant across captures,
     and buffers can be pre-allocated to avoid inflating the memory estimate."""
 
+    rocm_aiter_fa_flydsl_decode: bool = False
+    """Use AITER's FlyDSL paged-attention decode in the `ROCM_AITER_FA` backend
+    on gfx950. It takes single-token decodes and uniform speculative verify
+    steps of layers with an FP8 KV cache that the installed AITER supports
+    (head size 256), and makes the backend prefer 64-token KV cache blocks.
+    Other layers and batches keep the default decode."""
+
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
