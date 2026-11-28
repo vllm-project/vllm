@@ -12,6 +12,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.platforms import current_platform
 
 
 def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
@@ -48,6 +49,12 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
 _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK = 1024
 
 
+def _is_current_stream_capturing() -> bool:
+    if current_platform.is_xpu():
+        return torch.xpu.is_current_stream_capturing()
+    return torch.cuda.is_current_stream_capturing()
+
+
 @lru_cache
 def _has_fused_all_gather_matmul() -> bool:
     try:
@@ -57,13 +64,18 @@ def _has_fused_all_gather_matmul() -> bool:
     return hasattr(torch.ops.symm_mem, "fused_all_gather_matmul")
 
 
-def can_sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> bool:
-    """Whether `sp_all_gather_matmul` applies to this shard and weight."""
+def can_sp_all_gather_matmul(
+    x: torch.Tensor, weight: torch.Tensor, min_tokens: int | None = None
+) -> bool:
+    """Whether `sp_all_gather_matmul` applies to this shard and weight.
+    `min_tokens` overrides the default minimum tokens per rank."""
+    if min_tokens is None:
+        min_tokens = _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK
     return (
-        x.shape[0] >= _FUSED_AG_MATMUL_MIN_TOKENS_PER_RANK
+        x.shape[0] >= min_tokens
         and x.dtype == weight.dtype == torch.bfloat16
         and weight.ndim == 2
-        and not torch.cuda.is_current_stream_capturing()
+        and not _is_current_stream_capturing()
         and _has_fused_all_gather_matmul()
     )
 
@@ -77,6 +89,43 @@ def sp_all_gather_matmul(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         group_name=get_tp_group().device_group.group_name,
     )
     return outputs[0]
+
+
+@lru_cache
+def _has_fused_matmul_reduce_scatter() -> bool:
+    try:
+        import torch.distributed._symmetric_memory  # noqa: F401
+    except ImportError:
+        return False
+    return hasattr(torch.ops.symm_mem, "fused_matmul_reduce_scatter")
+
+
+def can_sp_matmul_reduce_scatter(
+    x: torch.Tensor, weight: torch.Tensor, min_tokens: int | None = None
+) -> bool:
+    """Whether `sp_matmul_reduce_scatter` applies to this input and weight.
+    If given, `x` must have at least `min_tokens` tokens."""
+    return (
+        (min_tokens is None or x.shape[0] >= min_tokens)
+        and x.dtype == weight.dtype == torch.bfloat16
+        and weight.ndim == 2
+        and not _is_current_stream_capturing()
+        and _has_fused_matmul_reduce_scatter()
+    )
+
+
+def sp_matmul_reduce_scatter(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """`sp_reduce_scatter(x @ weight.T)`, overlapping the GEMM with the scatter."""
+    sp_pad = (-x.shape[0]) % get_tensor_model_parallel_world_size()
+    if sp_pad > 0:
+        x = torch.nn.functional.pad(x, (0, 0, 0, sp_pad))
+    return torch.ops.symm_mem.fused_matmul_reduce_scatter(
+        x.contiguous(),
+        weight.t(),
+        "sum",
+        scatter_dim=0,
+        group_name=get_tp_group().device_group.group_name,
+    )
 
 
 def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:

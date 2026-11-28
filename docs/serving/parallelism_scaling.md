@@ -19,6 +19,34 @@ INFO 07-23 13:56:04 [kv_cache_utils.py:779] Maximum concurrency for 40,960 token
 
 The `GPU KV cache size` line reports the total number of tokens that can be stored in the GPU KV cache at once. The `Maximum concurrency` line provides an estimate of how many requests can be served concurrently if each request requires the specified number of tokens (40,960 in the example above). The tokens-per-request number is taken from the model configuration's maximum sequence length, `ModelConfig.max_model_len`. If these numbers are lower than your throughput requirements, add more GPUs or nodes to your cluster.
 
+## Sequence Parallelism
+
+Sequence Parallelism (SP) reduces duplicate token-wise work across tensor
+parallel ranks. It shards tokens for norm and residual regions, while
+communication boundaries gather or scatter tensors around GEMM operations.
+
+Dense Qwen3.5 models on XPU use SP automatically in eager mode with
+tensor parallelism:
+
+```bash
+vllm serve <model-path> \
+  --tensor-parallel-size 4 \
+  --enforce-eager
+```
+
+SP runs only on forwards of at least `VLLM_RESIDUAL_SP_MIN_TOKENS` tokens
+(default: 1024; `0` disables SP); other forwards use the normal
+tensor-parallel path.
+
+For unquantized BF16 layers, the all-gather before a column-parallel GEMM is
+fused with it via symmetric memory once a forward has enough tokens per rank
+for the overlap to pay off; otherwise vLLM runs the all-gather and the GEMM
+separately.
+
+With pipeline or context parallelism, torch.compile, LoRA, batch-invariant
+mode, or speculative decoding that uses auxiliary hidden states, vLLM uses the
+normal tensor-parallel path.
+
 !!! note "Edge case: uneven GPU splits"
     If the model fits within a single node but the GPU count doesn't evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario, set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs. Furthermore, if the GPUs on the node do not have NVLINK interconnect (e.g. L40S), leverage pipeline parallelism instead of tensor parallelism for higher throughput and lower communication overhead.
 
