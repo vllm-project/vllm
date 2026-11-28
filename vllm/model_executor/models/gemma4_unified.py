@@ -29,6 +29,7 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 )
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -49,6 +50,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing.processor import PromptUpdateDetails
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .utils import (
@@ -149,11 +151,11 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
     """ProcessingInfo for the Gemma4 Unified variant.
 
     Two field-name differences from the tower-based parent:
-      * config → ``Gemma4UnifiedConfig`` (not ``Gemma4Config``)
-      * vision_config.``num_soft_tokens`` (not ``default_output_length``)
+      * config → `Gemma4UnifiedConfig` (not `Gemma4Config`)
+      * vision_config.`num_soft_tokens` (not `default_output_length`)
 
-    Everything else (token sequencing, audio limits, video frame budget,
-    parser construction) is inherited unchanged.
+    Audio token counts follow raw frames instead of tower subsampling.
+    Audio limits, video frame budget, and parser construction are inherited.
     """
 
     def get_hf_config(self):
@@ -188,28 +190,44 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
+    def get_audio_repl(
+        self,
+        *,
+        audio_len: int,
+        processor: Gemma4UnifiedProcessor | None,
+    ) -> PromptUpdateDetails:
+        """Emit one audio token per raw frame, without tower downsampling."""
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        samples_per_token = processor.feature_extractor.audio_samples_per_token
+        num_tokens = math.ceil(audio_len / samples_per_token)
+        config = self.get_hf_config()
+        token_ids = (
+            [config.boa_token_id]
+            + [processor.audio_token_id] * num_tokens
+            + [getattr(config, "eoa_token_id", config.eoa_token_index)]
+        )
+        return PromptUpdateDetails.select_token_id(token_ids, processor.audio_token_id)
+
     def _compute_num_soft_tokens(
         self,
         image_width: int,
         image_height: int,
         max_soft_tokens: int | None = None,
+        do_resize: bool = True,
+        *,
+        is_video_frame: bool = False,
     ) -> int:
-        vision_cfg = self.get_hf_config().vision_config
-        patch_size = vision_cfg.patch_size
-        pooling_kernel_size = vision_cfg.pooling_kernel_size
-
         if max_soft_tokens is None:
-            max_soft_tokens = vision_cfg.num_soft_tokens
-
-        unit = patch_size * pooling_kernel_size
-        max_patches = max_soft_tokens * pooling_kernel_size**2
-        num_patches_orig = (image_height / patch_size) * (image_width / patch_size)
-        scale = math.sqrt(max_patches / num_patches_orig)
-        target_h = max(unit, int(math.floor(image_height * scale / unit)) * unit)
-        target_w = max(unit, int(math.floor(image_width * scale / unit)) * unit)
-        num_patches = (target_h // patch_size) * (target_w // patch_size)
-        num_soft_tokens = num_patches // (pooling_kernel_size**2)
-        return min(num_soft_tokens, max_soft_tokens)
+            max_soft_tokens = self.get_hf_config().vision_config.num_soft_tokens
+        return super()._compute_num_soft_tokens(
+            image_width,
+            image_height,
+            max_soft_tokens=max_soft_tokens,
+            do_resize=do_resize,
+            is_video_frame=is_video_frame,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -227,16 +245,16 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
 
     Inherits multimodal embedding routing, PLE handling, bidirectional
     attention helpers, language-model forward, LoRA, and pipeline-parallel
-    support from :class:`Gemma4ForConditionalGeneration`.  Overrides only:
+    support from `Gemma4ForConditionalGeneration`.  Overrides only:
 
-      * ``__init__`` — builds the encoder-free vision embedder instead of
-        SigLIP/audio towers (LightOnOCR-style: ``nn.Module.__init__`` +
-        full rebuild, no ``super().__init__()``).
-      * ``hf_to_vllm_mapper`` — adds the ``model.vision_embedder.`` prefix.
-      * ``_process_image_input`` / ``_process_video_input`` /
-        ``_process_audio_input`` — encoder-free projection paths.
-      * ``load_weights`` — ignore-prefix list excludes the absent towers.
-      * ``get_mm_mapping`` — no tower entries.
+      * `__init__` — builds the encoder-free vision embedder instead of
+        SigLIP/audio towers (LightOnOCR-style: `nn.Module.__init__` +
+        full rebuild, no `super().__init__()`).
+      * `hf_to_vllm_mapper` — adds the `model.vision_embedder.` prefix.
+      * `_process_image_input` / `_process_video_input` /
+        `_process_audio_input` — encoder-free projection paths.
+      * `load_weights` — ignore-prefix list excludes the absent towers.
+      * `get_mm_mapping` — no tower entries.
     """
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -276,6 +294,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "vision_embedder"),
         )
+        self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
         self.embed_vision = Gemma4MultimodalEmbedder(
             config.vision_config,
             config.text_config,
@@ -374,6 +393,9 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         pixel_values: torch.Tensor,
         pixel_position_ids: torch.Tensor,
     ) -> torch.Tensor:
+        pixel_values = self._normalize_pixel_values(
+            pixel_values, self.vision_embedder.pos_embedding.dtype
+        )
         weight = self.embed_vision.embedding_projection.weight
         target_dtype = weight.dtype
         if pixel_values.numel() == 0:

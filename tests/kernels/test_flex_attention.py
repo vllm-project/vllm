@@ -4,7 +4,6 @@
 
 import pytest
 import torch
-from packaging import version
 
 from tests.utils import set_random_seed
 from tests.v1.attention.utils import (
@@ -12,6 +11,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
+    registered_attention_layers,
 )
 from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention import Attention
@@ -23,28 +23,20 @@ from vllm.v1.attention.backends.flex_attention import (
 
 from ..models.utils import check_embeddings_close, check_logprobs_close
 
-TORCH_VERSION = version.parse(torch.__version__)
-MINIMUM_TORCH_VERSION = version.parse("2.7.0")
-DIRECT_BUILD_VERSION = version.parse("2.9.dev0")
-
 
 @pytest.mark.parametrize(
-    ("supports_small_blocks", "uses_paged_kv", "expected"),
+    ("uses_paged_kv", "expected"),
     [
-        (True, True, (16, 16)),
-        (True, False, (128, 128)),
-        (False, True, (128, 128)),
-        (False, False, (128, 128)),
+        (True, (16, 16)),
+        (False, (128, 128)),
     ],
 )
 def test_flex_attention_default_block_sizes(
-    supports_small_blocks: bool,
     uses_paged_kv: bool,
     expected: tuple[int, int],
 ):
     block_sizes = FlexAttentionMetadataBuilder._get_block_sizes(
         AttentionConfig(),
-        supports_small_blocks=supports_small_blocks,
         cache_block_size=16,
         uses_paged_kv=uses_paged_kv,
     )
@@ -57,7 +49,6 @@ def test_flex_attention_explicit_block_sizes_override_encoder_defaults():
             flex_attn_q_block_size=64,
             flex_attn_kv_block_size=32,
         ),
-        supports_small_blocks=True,
         cache_block_size=16,
         uses_paged_kv=False,
     )
@@ -65,8 +56,8 @@ def test_flex_attention_explicit_block_sizes_override_encoder_defaults():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
-    reason="CUDA not available or PyTorch version < 2.7",
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
 )
 def test_flex_attention_full_cudagraphs(vllm_runner):
     """Test the numerics for flex attention full cudagraphs support."""
@@ -122,8 +113,8 @@ def windowed_causal_mask_mod(b, h, q_idx, kv_idx):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
-    reason="CUDA not available or PyTorch version < 2.7",
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
 )
 def test_flex_attention_custom_mask_full_cudagraphs(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -184,8 +175,8 @@ def test_flex_attention_custom_mask_full_cudagraphs(vllm_runner, monkeypatch):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
-    reason="CUDA not available or PyTorch version < 2.7",
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
 )
 def test_flex_attention_vs_default_backend(vllm_runner):
     """Test that FlexAttention produces the same outputs as the default backend.
@@ -240,8 +231,8 @@ def test_flex_attention_vs_default_backend(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
-    reason="CUDA not available or PyTorch version < 2.7",
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
 )
 def test_encoder_flex_attention_vs_default_backend(vllm_runner):
     """Test that FlexAttention produces the same outputs as the default backend.
@@ -291,8 +282,8 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
-    reason="CUDA not available or PyTorch version < 2.7",
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
 )
 def test_block_mask_direct_vs_slow_path():
     """Test that direct path block mask is a superset of slow path.
@@ -316,7 +307,10 @@ def test_block_mask_direct_vs_slow_path():
         batch_spec, vllm_config.cache_config.block_size, device
     )
 
-    builder = FlexAttentionMetadataBuilder(kv_cache_spec, [], vllm_config, device)
+    with registered_attention_layers(vllm_config, ["layer"]):
+        builder = FlexAttentionMetadataBuilder(
+            kv_cache_spec, ["layer"], vllm_config, device
+        )
 
     metadata_direct = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
@@ -358,8 +352,8 @@ def test_block_mask_direct_vs_slow_path():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
-    reason="CUDA not available or PyTorch version < 2.9",
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
 )
 @pytest.mark.parametrize("direct_build", [True, False])
 @torch.inference_mode()
@@ -379,9 +373,10 @@ def test_flex_attention_request_count_changes_reuse_compiled_graph(direct_build)
         max_num_seqs=8,
         max_num_batched_tokens=128,
     )
-    builder = FlexAttentionMetadataBuilder(
-        create_standard_kv_cache_spec(config), [], config, device
-    )
+    with registered_attention_layers(config, ["layer"]):
+        builder = FlexAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config), ["layer"], config, device
+        )
     builder.direct_build = direct_build
     query = torch.randn(1, 2, 32, 64, device=device)
     key = torch.randn(1, 2, 640, 64, device=device)
@@ -471,8 +466,8 @@ def test_physical_to_logical_mapping_handles_reused_blocks():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
-    reason="CUDA not available or PyTorch version < 2.9",
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
 )
 def test_block_sparsity_hint_prunes_blocks():
     """Test that BlockSparsityHint prunes KV blocks from the direct build path.
@@ -499,7 +494,10 @@ def test_block_sparsity_hint_prunes_blocks():
         batch_spec, vllm_config.cache_config.block_size, device
     )
 
-    builder = FlexAttentionMetadataBuilder(kv_cache_spec, [], vllm_config, device)
+    with registered_attention_layers(vllm_config, ["layer"]):
+        builder = FlexAttentionMetadataBuilder(
+            kv_cache_spec, ["layer"], vllm_config, device
+        )
 
     metadata_no_hint = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata

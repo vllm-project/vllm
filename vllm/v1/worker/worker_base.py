@@ -9,6 +9,10 @@ import torch.nn as nn
 
 import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -20,7 +24,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -39,6 +43,9 @@ _R = TypeVar("_R")
 class CompilationTimes(NamedTuple):
     language_model: float
     encoder: float
+    num_kv_blocks: int | None = None
+    """KV cache blocks that fit in the memory measured after warmup, reported
+    by workers with an extensible KV cache."""
 
 
 class WorkerBase:
@@ -100,9 +107,13 @@ class WorkerBase:
             vllm_config.compilation_config.ir_enable_torch_wrap
         )
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
+
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Assign the Mamba block size resolved by the core."""
+        self.vllm_config.cache_config.mamba_block_size = mamba_block_size
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
@@ -122,18 +133,50 @@ class WorkerBase:
         """Prepare model for execution through compilation/warmup.
 
         Returns:
-            Compilation times (language_model, encoder) in seconds.
+            Compilation times (language_model, encoder) in seconds, and the
+            measured KV cache size for an extensible KV cache.
 
         """
         raise NotImplementedError
+
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        """Why this worker cannot back an extensible KV cache, or None."""
+        return f"{type(self).__name__} does not support the extensible KV cache"
+
+    def disable_extensible_kv_cache(self) -> None:
+        self.vllm_config.cache_config.enable_extensible_kv_cache = False
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit the final size of an extensible KV cache."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support the extensible KV cache."
+        )
 
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
         return
 
+    def probe_forward(self) -> str | None:
+        """Readiness probe for `/health_generate`: run a dummy forward pass and
+        wait for it to complete on the device.
+
+        Returns:
+            None if the probe passed, else the error. Errors are returned, not
+            raised, so the executor reads every worker's reply and its reply
+            queues stay in step.
+
+        """
+        return f"{type(self).__name__} does not implement probe_forward"
+
+    def notify_kv_cache_ready(self) -> None:
+        """Finish startup device work before notifying the worker connector."""
+        if has_kv_transfer_group():
+            self.synchronize_device()
+            get_kv_transfer_group().on_kv_cache_ready()
+
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
-        ``torch.accelerator`` must override with their own wait."""
+        `torch.accelerator` must override with their own wait."""
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 
@@ -160,6 +203,11 @@ class WorkerBase:
 
     def supports_draft_weight_updates(self) -> bool:
         """Whether this worker can update its configured speculative model."""
+        return False
+
+    def has_incomplete_weight_update(self) -> bool:
+        """Whether a weight update started and has not finished successfully,
+        so the model weights may be incomplete."""
         return False
 
     def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
@@ -191,12 +239,6 @@ class WorkerBase:
         self, grammar_output: GrammarOutput
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         """Should be called immediately after execute_model iff it returned None."""
-        raise NotImplementedError
-
-    def get_cache_block_size_bytes(self) -> int:
-        """Return the size of a single cache block, in bytes. Used in
-        speculative decoding.
-        """
         raise NotImplementedError
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -288,8 +330,8 @@ class WorkerWrapperBase:
 
         load_general_plugins()
 
-        # Let the platform replace core Triton kernels (e.g. CPU fallback
-        # implementations) before any worker or model code can launch them.
+        # Let the platform replace core Triton kernels before any worker or
+        # model code can launch them.
         from vllm.platforms import current_platform
 
         current_platform.register_triton_kernel_overrides()
@@ -357,6 +399,12 @@ class WorkerWrapperBase:
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        # The KV connector created here reads the current config.
+        assert self.vllm_config is not None
+        with set_current_vllm_config(self.vllm_config):
+            self.worker.extend_kv_cache(num_blocks)  # type: ignore
 
     def init_device(self):
         assert self.vllm_config is not None

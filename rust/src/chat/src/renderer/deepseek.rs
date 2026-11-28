@@ -6,19 +6,22 @@
 //! Official Python reference:
 //! <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/encoding/encoding_dsv4.py>
 
+mod writer;
+
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
 use serde_json_fmt::JsonFormat;
 
-use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
+use vllm_text::Prompt;
 
+use self::writer::DsPromptWriter;
+pub(super) use self::writer::SpecialTokenizer;
 use super::MediaPartSource;
 use crate::EffortValue;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_messages};
 use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
@@ -31,6 +34,9 @@ const DSML_TOKEN: &str = "｜DSML｜";
 const USER_SP_TOKEN: &str = "<｜User｜>";
 const SYSTEM_SP_TOKEN: &str = "<｜System｜>";
 const ASSISTANT_SP_TOKEN: &str = "<｜Assistant｜>";
+const FIM_BEGIN_TOKEN: &str = "<｜fim▁begin｜>";
+const FIM_HOLE_TOKEN: &str = "<｜fim▁hole｜>";
+const FIM_END_TOKEN: &str = "<｜fim▁end｜>";
 const REASONING_EFFORT_HIGH: &str = concat!(
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n",
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n",
@@ -86,21 +92,31 @@ struct RenderedToolSchema<'a> {
     strict: Option<bool>,
 }
 
+/// Fill-in-the-middle prompt, as vLLM's Python `DeepseekV4Renderer` renders a
+/// completions `suffix`.
+pub(super) fn render_completion_suffix(prompt: &str, suffix: &str) -> String {
+    format!("{FIM_BEGIN_TOKEN}{prompt}{FIM_HOLE_TOKEN}{suffix}{FIM_END_TOKEN}")
+}
+
 /// Render one chat request into the final prompt string.
 pub(super) fn render_request(
     request: &ChatRequest,
     dialect: DsDialect,
     reasoning: &ReasoningControl,
-) -> Result<String> {
-    render_request_with_media_order(request, dialect, reasoning).map(|(prompt, _)| prompt)
+) -> Result<Prompt> {
+    render_request_with_media_order(request, dialect, reasoning, None).map(|(prompt, _)| prompt)
 }
 
-/// Render one chat request and record media in placeholder order.
+/// Render one chat request and record media in placeholder order. With a
+/// tokenizer, the prompt is token IDs in which only the template's special
+/// tokens, the image placeholders of image parts, and the grounding tokens of
+/// replayed assistant text are special, as in deepseek-recipe.
 pub(super) fn render_request_with_media_order(
     request: &ChatRequest,
     dialect: DsDialect,
     reasoning: &ReasoningControl,
-) -> Result<(String, Vec<MediaPartSource>)> {
+    tokenizer: Option<&SpecialTokenizer>,
+) -> Result<(Prompt, Vec<MediaPartSource>)> {
     let thinking_mode = if reasoning.is_enabled() {
         ThinkingMode::Thinking
     } else {
@@ -113,7 +129,12 @@ pub(super) fn render_request_with_media_order(
         && !rendered_tools_present(request, request_tools);
     let drop_historical_developers = thinking_mode == ThinkingMode::Thinking && drop_thinking;
     if dialect == DsDialect::V41 {
-        reject_image_placeholder_text(&request.messages)?;
+        // As deepseek-recipe: V4.1 lists deferred tools only once a tool
+        // search result references them, so at least one tool, request-level
+        // or message-scoped, must be listed.
+        if !request.tools().is_empty() && request.tools().iter().all(is_deferred) {
+            return Err(Error::AllToolsDeferred);
+        }
     }
     let last_user_like_message_index = (0..request.messages.len())
         .rev()
@@ -125,17 +146,18 @@ pub(super) fn render_request_with_media_order(
         last_user_like_message_index,
         dialect,
     );
-    let mut out = String::from(BOS_TOKEN);
+    let mut out = DsPromptWriter::new(tokenizer);
+    out.control(BOS_TOKEN);
     let mut media_order = Vec::new();
     if dialect == DsDialect::V41
         && (thinking_mode == ThinkingMode::Thinking
             || synthetic_tool_system
             || matches!(request.messages.first(), Some(ChatMessage::System { .. })))
     {
-        out.push_str(SYSTEM_SP_TOKEN);
+        out.control(SYSTEM_SP_TOKEN);
     }
     if thinking_mode == ThinkingMode::Thinking {
-        out.push_str(&reasoning_effort_prompt);
+        out.control(&reasoning_effort_prompt);
     }
 
     let mut request_tools_attached = false;
@@ -164,7 +186,7 @@ pub(super) fn render_request_with_media_order(
         match message {
             ChatMessage::System { content } => {
                 if dialect == DsDialect::V41 && current_render_index > 0 {
-                    out.push_str(SYSTEM_SP_TOKEN);
+                    out.control(SYSTEM_SP_TOKEN);
                 }
                 let tools = if !request_tools_attached {
                     request_tools_attached = true;
@@ -199,6 +221,9 @@ pub(super) fn render_request_with_media_order(
                     dialect,
                     &mut media_order,
                 )?;
+                if dialect == DsDialect::V41 {
+                    write_updated_tool_schemas(&mut out, request, message_index)?;
+                }
             }
             ChatMessage::Assistant { content } => {
                 // Mirror Python: thinking block (reasoning + </think>) is
@@ -259,7 +284,7 @@ pub(super) fn render_request_with_media_order(
         }
     }
 
-    Ok((out, media_order))
+    Ok((out.finish()?, media_order))
 }
 
 /// Map the shared reasoning decision to the selected DeepSeek effort dialect.
@@ -423,36 +448,6 @@ fn starts_user_turn(
     is_user_like_entry(message, render_index, dialect)
 }
 
-/// Reject literal V4.1 image placeholders in message text.
-fn reject_image_placeholder_text(messages: &[ChatMessage]) -> Result<()> {
-    let has_placeholder = |text: &str| text.contains(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
-    let found = messages.iter().any(|message| match message {
-        ChatMessage::System { content }
-        | ChatMessage::Developer { content, .. }
-        | ChatMessage::User { content }
-        | ChatMessage::ToolResponse { content, .. }
-        | ChatMessage::Custom { content, .. } => match content {
-            ChatContent::Text(text) => has_placeholder(text),
-            ChatContent::Parts(parts) => parts.iter().any(
-                |part| matches!(part, ChatContentPart::Text { text } if has_placeholder(text)),
-            ),
-        },
-        ChatMessage::Assistant { content } => content.iter().any(|block| {
-            matches!(
-                block,
-                AssistantContentBlock::Text { text } | AssistantContentBlock::Reasoning { text }
-                    if has_placeholder(text)
-            )
-        }),
-    });
-    if found {
-        return Err(Error::UnsupportedMultimodalContent(
-            "image placeholder token in message text",
-        ));
-    }
-    Ok(())
-}
-
 /// Return whether a developer entry precedes another user-like turn.
 fn is_historical_developer(
     message: &ChatMessage,
@@ -491,12 +486,15 @@ fn next_rendered_entry(
 }
 
 /// Render the tool preamble shown to the model for one DeepSeek dialect.
-fn render_tools(out: &mut String, tools: &[ChatTool], dialect: DsDialect) -> Result<()> {
+fn render_tools(
+    out: &mut DsPromptWriter<'_>,
+    tools: &[ChatTool],
+    dialect: DsDialect,
+) -> Result<()> {
     let tool_calls_tag = dialect.tool_calls_tag();
     let invoke_tag = dialect.invoke_tag();
     let parameter_tag = dialect.parameter_tag();
-    write!(
-        out,
+    out.control(&format!(
         r#"## Tools
 
 You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<｜DSML｜{tool_calls_tag}>" block like the following:
@@ -520,25 +518,28 @@ Otherwise, output directly after </think> with tool calls or final response.
 ### Available Tool Schemas
 
 "#,
-    )
-    .expect("writing to String cannot fail");
+    ));
 
-    for (index, tool) in tools.iter().enumerate() {
+    // V4.1 leaves deferred tools out until a tool search result references
+    // them (`write_updated_tool_schemas`); V4 lists every tool, as
+    // deepseek-recipe ignores `defer_loading` there.
+    let listed = tools.iter().filter(|tool| dialect == DsDialect::V4 || !is_deferred(tool));
+    for (index, tool) in listed.enumerate() {
         if index > 0 {
-            out.push('\n');
+            out.control("\n");
         }
         render_tool_schema(out, tool)?;
     }
 
-    out.push_str(
+    out.control(
         "\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n",
     );
     Ok(())
 }
 
 /// Serialize one typed tool schema into the JSON shape embedded in the prompt.
-fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
-    out.push_str(&json_dumps(&RenderedToolSchema {
+fn render_tool_schema(out: &mut DsPromptWriter<'_>, tool: &ChatTool) -> Result<()> {
+    out.ordinary(&json_dumps(&RenderedToolSchema {
         name: &tool.name,
         description: tool.description.as_deref(),
         parameters: &tool.parameters,
@@ -547,9 +548,49 @@ fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
     Ok(())
 }
 
+/// Return whether the tool's schema is loaded on demand by tool search.
+fn is_deferred(tool: &ChatTool) -> bool {
+    tool.defer_loading == Some(true)
+}
+
+/// V4.1: after a user turn whose tool results reference tools, write a system
+/// turn with the referenced tools' schemas, as deepseek-recipe does for tools
+/// found by tool search. References keep their order, duplicates included.
+fn write_updated_tool_schemas(
+    out: &mut DsPromptWriter<'_>,
+    request: &ChatRequest,
+    message_index: usize,
+) -> Result<()> {
+    let messages = request.messages.as_slice();
+    let (block_start, block_end) = user_content_block_bounds(messages, message_index);
+    // A referenced tool is missing only when `tool_choice: none` excluded the
+    // request-level tools from the prompt; it stays unlisted then.
+    let tools = messages[block_start..block_end]
+        .iter()
+        .filter_map(|message| match message {
+            ChatMessage::ToolResponse { content, .. } => Some(content),
+            _ => None,
+        })
+        .flat_map(ChatContent::tool_references)
+        .filter_map(|name| request.tool(name))
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        return Ok(());
+    }
+    out.control(SYSTEM_SP_TOKEN);
+    out.control("\n\n### Updated Tool Schemas\n\n");
+    for (index, tool) in tools.into_iter().enumerate() {
+        if index > 0 {
+            out.control("\n");
+        }
+        render_tool_schema(out, tool)?;
+    }
+    Ok(())
+}
+
 /// Render a system turn, optionally followed by the V4 tool preamble.
 fn render_system_message(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     content: Option<(usize, &ChatContent)>,
     tools: &[ChatTool],
     dialect: DsDialect,
@@ -559,7 +600,7 @@ fn render_system_message(
         write_chat_content(out, content, dialect, message_index, media_order)?;
     }
     if !tools.is_empty() {
-        out.push_str("\n\n");
+        out.control("\n\n");
         render_tools(out, tools, dialect)?;
     }
     Ok(())
@@ -567,7 +608,7 @@ fn render_system_message(
 
 /// Developer messages are rendered as user-like turns with optional tools.
 fn render_developer_message(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     message_index: usize,
     content: &ChatContent,
     tools: &[ChatTool],
@@ -575,15 +616,13 @@ fn render_developer_message(
     media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     if content.is_empty() {
-        return Err(Error::ChatTemplate(
-            "invalid DeepSeek developer message: empty content".to_string(),
-        ));
+        bail_invalid_messages!("invalid DeepSeek developer message: empty content");
     }
 
-    out.push_str(USER_SP_TOKEN);
+    out.control(USER_SP_TOKEN);
     write_chat_content(out, content, dialect, message_index, media_order)?;
     if !tools.is_empty() {
-        out.push_str("\n\n");
+        out.control("\n\n");
         render_tools(out, tools, dialect)?;
     }
     Ok(())
@@ -591,7 +630,7 @@ fn render_developer_message(
 
 /// Render contiguous user and tool-response messages as one V4 user turn.
 fn render_user_content_block(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     messages: &[ChatMessage],
     message_index: usize,
     tool_call_order: &HashMap<String, usize>,
@@ -602,10 +641,10 @@ fn render_user_content_block(
     let mut sorted_tool_indices =
         sorted_tool_response_indices(messages, block_start, block_end, tool_call_order).into_iter();
 
-    out.push_str(USER_SP_TOKEN);
+    out.control(USER_SP_TOKEN);
     for (offset, message_index) in (block_start..block_end).enumerate() {
         if offset > 0 {
-            out.push_str("\n\n");
+            out.control("\n\n");
         }
         match &messages[message_index] {
             ChatMessage::User { content } => {
@@ -666,37 +705,37 @@ fn sorted_tool_response_indices(
 
 /// Render one tool response payload inside a V4 `<tool_result>` block.
 fn write_tool_result(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     content: &ChatContent,
     dialect: DsDialect,
     message_index: usize,
     media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
-    out.push_str("<tool_result>");
+    out.control("<tool_result>");
     write_chat_content(out, content, dialect, message_index, media_order)?;
-    out.push_str("</tool_result>");
+    out.control("</tool_result>");
     Ok(())
 }
 
 /// Append the assistant transition token after a user-like or system turn.
 fn write_assistant_transition(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     thinking_mode: ThinkingMode,
     drop_thinking: bool,
     opens_thinking: bool,
 ) {
-    out.push_str(ASSISTANT_SP_TOKEN);
+    out.control(ASSISTANT_SP_TOKEN);
     if thinking_mode == ThinkingMode::Thinking && (!drop_thinking || opens_thinking) {
-        out.push_str(THINKING_START_TOKEN);
+        out.control(THINKING_START_TOKEN);
     } else {
-        out.push_str(THINKING_END_TOKEN);
+        out.control(THINKING_END_TOKEN);
     }
 }
 
 /// Render one assistant turn, including optional reasoning, DSML tool calls,
 /// and the trailing EOS marker.
 fn render_assistant_message(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     emit_thinking_block: bool,
     append_eos: bool,
     content: &[AssistantContentBlock],
@@ -708,44 +747,41 @@ fn render_assistant_message(
         if content.has_reasoning() {
             write_assistant_reasoning(out, content);
         }
-        out.push_str(THINKING_END_TOKEN);
+        out.control(THINKING_END_TOKEN);
     }
 
     write_assistant_text(out, content);
 
     if has_tool_calls {
         let tool_calls_tag = dialect.tool_calls_tag();
-        writeln!(out, "\n\n<{DSML_TOKEN}{tool_calls_tag}>").expect("writing to String cannot fail");
+        out.control(&format!("\n\n<{DSML_TOKEN}{tool_calls_tag}>\n"));
         for (index, tool_call) in content.tool_calls().enumerate() {
             if index > 0 {
-                out.push('\n');
+                out.control("\n");
             }
             render_tool_call(out, tool_call, dialect)?;
         }
-        write!(out, "\n</{DSML_TOKEN}{tool_calls_tag}>").expect("writing to String cannot fail");
+        out.control(&format!("\n</{DSML_TOKEN}{tool_calls_tag}>"));
     }
 
     if append_eos {
-        out.push_str(EOS_TOKEN);
+        out.control(EOS_TOKEN);
     }
     Ok(())
 }
 
 /// Render one assistant tool call in DSML XML-like format.
 fn render_tool_call(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     tool_call: &AssistantToolCall,
     dialect: DsDialect,
 ) -> Result<()> {
     let invoke_tag = dialect.invoke_tag();
-    writeln!(
-        out,
-        "<{DSML_TOKEN}{invoke_tag} name=\"{}\">",
-        tool_call.name
-    )
-    .expect("writing to String cannot fail");
+    out.control(&format!("<{DSML_TOKEN}{invoke_tag} name=\""));
+    out.ordinary(&tool_call.name);
+    out.control("\">\n");
     encode_arguments_to_dsml(out, tool_call, dialect)?;
-    write!(out, "\n</{DSML_TOKEN}{invoke_tag}>").expect("writing to String cannot fail");
+    out.control(&format!("\n</{DSML_TOKEN}{invoke_tag}>"));
     Ok(())
 }
 
@@ -754,7 +790,7 @@ fn render_tool_call(
 /// String values are emitted raw with `string="true"`, while all other JSON
 /// values are rendered with JSON syntax and `string="false"`.
 fn encode_arguments_to_dsml(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     tool_call: &AssistantToolCall,
     dialect: DsDialect,
 ) -> Result<()> {
@@ -772,23 +808,24 @@ fn encode_arguments_to_dsml(
     let mut wrote_parameter = false;
     for (key, value) in &arguments {
         if wrote_parameter {
-            out.push('\n');
+            out.control("\n");
         }
 
         let is_string = matches!(value, Value::String(_));
-        write!(
-            out,
-            "<{DSML_TOKEN}{parameter_tag} name=\"{key}\" string=\"{}\">",
-            if is_string { "true" } else { "false" }
-        )
-        .expect("writing to String cannot fail");
+        out.control(&format!("<{DSML_TOKEN}{parameter_tag} name=\""));
+        out.ordinary(key);
+        out.control(if is_string {
+            "\" string=\"true\">"
+        } else {
+            "\" string=\"false\">"
+        });
 
         match value {
-            Value::String(value) => out.push_str(value),
-            value => out.push_str(&json_dumps(value)?),
+            Value::String(value) => out.ordinary(value),
+            value => out.ordinary(&json_dumps(value)?),
         }
 
-        write!(out, "</{DSML_TOKEN}{parameter_tag}>").expect("writing to String cannot fail");
+        out.control(&format!("</{DSML_TOKEN}{parameter_tag}>"));
         wrote_parameter = true;
     }
 
@@ -799,33 +836,35 @@ fn encode_arguments_to_dsml(
 /// it into an intermediate `String`.
 ///
 /// Content parts are joined by a blank line for every role, as the reference
-/// Chat Completions conversion joins content blocks. The V4.1 dialect inlines
-/// the image placeholder at each image part's position unconditionally
-/// (matching the Python encoding's `IMAGE_PLACEHOLDER`); other dialects reject
-/// multimodal parts.
+/// Chat Completions conversion joins content blocks, and a tool reference is
+/// written as the tool's name, as deepseek-recipe's Messages conversion does.
+/// The V4.1 dialect inlines the image placeholder at each image part's
+/// position unconditionally (matching the Python encoding's
+/// `IMAGE_PLACEHOLDER`); other dialects reject multimodal parts.
 fn write_chat_content(
-    out: &mut String,
+    out: &mut DsPromptWriter<'_>,
     content: &ChatContent,
     dialect: DsDialect,
     message_index: usize,
     media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     match content {
-        ChatContent::Text(text) => out.push_str(text),
+        ChatContent::Text(text) => out.ordinary(text),
         ChatContent::Parts(parts) => {
             for (index, part) in parts.iter().enumerate() {
                 if index > 0 {
-                    out.push_str("\n\n");
+                    out.control("\n\n");
                 }
                 match part {
                     ChatContentPart::ImageUrl { .. } if dialect == DsDialect::V41 => {
-                        out.push_str(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
+                        out.image();
                         media_order.push(MediaPartSource {
                             message_index,
                             content_part_index: index,
                         });
                     }
-                    _ => out.push_str(part.as_text()?),
+                    ChatContentPart::ToolReference { name } => out.ordinary(name),
+                    _ => out.ordinary(part.as_text()?),
                 }
             }
         }
@@ -834,26 +873,26 @@ fn write_chat_content(
 }
 
 /// Write all reasoning blocks in encounter order.
-fn write_assistant_reasoning(out: &mut String, content: &[AssistantContentBlock]) {
+fn write_assistant_reasoning(out: &mut DsPromptWriter<'_>, content: &[AssistantContentBlock]) {
     for block in content {
         if let AssistantContentBlock::Reasoning { text } = block {
-            out.push_str(text);
+            out.assistant(text);
         }
     }
 }
 
 /// Write all visible assistant text blocks in encounter order, joined by a
 /// blank line like any other content parts.
-fn write_assistant_text(out: &mut String, content: &[AssistantContentBlock]) {
+fn write_assistant_text(out: &mut DsPromptWriter<'_>, content: &[AssistantContentBlock]) {
     let texts = content.iter().filter_map(|block| match block {
         AssistantContentBlock::Text { text } => Some(text.as_str()),
         _ => None,
     });
     for (index, text) in texts.enumerate() {
         if index > 0 {
-            out.push_str("\n\n");
+            out.control("\n\n");
         }
-        out.push_str(text);
+        out.assistant(text);
     }
 }
 

@@ -4,7 +4,7 @@
 
 This test suite validates vLLM's automatic chunking functionality for handling
 text inputs that exceed the model's maximum token length, specifically targeting
-the intfloat/multilingual-e5-small model (max token length: 512).
+the vllm/multilingual-e5-small model (max token length: 512).
 """
 
 import random
@@ -12,9 +12,12 @@ import random
 import openai
 import pytest
 import pytest_asyncio
+import requests
+import torch
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
+from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 
 
 def _generate_random_text(word_count: int) -> str:
@@ -193,7 +196,7 @@ def _generate_random_text(word_count: int) -> str:
     return " ".join(result)
 
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm/multilingual-e5-small"
 DTYPE = "bfloat16"
 
 # Test text: Generate text with approximately 1500 words to exceed 1024 tokens
@@ -450,3 +453,46 @@ async def test_chunked_processing_response_format(
     assert 0.8 < vector_norm < 1.2, (
         f"Vector norm should be reasonable, actual: {vector_norm}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_pooling_endpoint_with_chunked_processing(
+    server_with_chunked_processing: RemoteOpenAIServer,
+    client_with_chunked_processing: openai.AsyncOpenAI,
+    model_name: str,
+):
+    """/pooling does not chunk, but must still work on a chunked-processing
+    server and match /v1/embeddings for inputs within max_model_len."""
+    text = "Artificial intelligence technology is changing our world."
+    response = requests.post(
+        server_with_chunked_processing.url_for("pooling"),
+        json={"model": model_name, "input": text, "encoding_format": "float"},
+    )
+    response.raise_for_status()
+    poolings = PoolingResponse.model_validate(response.json())
+
+    embeddings = await client_with_chunked_processing.embeddings.create(
+        model=model_name, input=[text], encoding_format="float"
+    )
+    assert torch.allclose(
+        torch.tensor(poolings.data[0].data),
+        torch.tensor(embeddings.data[0].embedding),
+        atol=1e-6,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_truncate_prompt_tokens_above_max_model_len(
+    client_with_chunked_processing: openai.AsyncOpenAI, model_name: str
+):
+    """With chunked processing, truncation is bounded by max_embed_len rather
+    than max_model_len, as it already is for truncate_prompt_tokens=-1."""
+    embedding_response = await client_with_chunked_processing.embeddings.create(
+        model=model_name,
+        input=[LONG_TEXT_1500_WORDS],
+        extra_body={"truncate_prompt_tokens": 600},
+    )
+
+    assert embedding_response.usage.prompt_tokens == 600

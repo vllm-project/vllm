@@ -18,10 +18,10 @@ use super::{
     MESSAGE_TOOL, MESSAGE_USER,
 };
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode};
+use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
 use crate::{ChatRenderer, Error};
 
-struct FixtureTokenizer;
+pub(super) struct FixtureTokenizer;
 
 impl Tokenizer for FixtureTokenizer {
     fn encode(
@@ -125,7 +125,7 @@ fn assert_fixture(input_name: &str, expected: ExpectFile) {
     expected.assert_eq(&rendered);
 }
 
-fn render_symbolic_tokens(token_ids: &[u32]) -> String {
+pub(super) fn render_symbolic_tokens(token_ids: &[u32]) -> String {
     let mut out = String::new();
     let mut text_bytes = Vec::new();
     for token_id in token_ids {
@@ -193,6 +193,31 @@ fn renders_reasoning_text_tool_call_and_tool_response() {
     assert_fixture(
         "tool_round_trip_input.json",
         expect_file!["fixtures/tool_round_trip_output.txt"],
+    );
+}
+
+#[test]
+fn renders_tool_response_media_and_coalesces_text_parts() {
+    assert_fixture(
+        "tool_media_input.json",
+        expect_file!["fixtures/tool_media_output.txt"],
+    );
+}
+
+#[test]
+fn rejects_tool_response_video() {
+    let request = ChatRequest {
+        messages: vec![ChatMessage::tool_response(
+            vec![ChatContentPart::video_url("data:video/mp4;base64,")],
+            "call_1",
+        )],
+        ..ChatRequest::for_test()
+    };
+    let error = renderer().render(&request).unwrap_err();
+    assert!(
+        matches!(error, Error::UnsupportedMultimodalContent("video_url")),
+        "{}",
+        error.as_report()
     );
 }
 
@@ -378,7 +403,16 @@ fn rejects_continue_final_message() {
     };
 
     let error = renderer().render(&request).unwrap_err();
-    assert!(matches!(error, Error::ChatTemplate(_)));
+    assert!(matches!(
+        error,
+        Error::UnsupportedContinueFinalMessage {
+            renderer: "Inkling"
+        }
+    ));
+    assert_eq!(
+        error.kind(),
+        crate::ErrorKind::invalid_param("continue_final_message")
+    );
     assert!(error.as_report().to_string().contains("continue_final_message"));
 }
 
@@ -398,18 +432,32 @@ fn renders_developer_messages_as_system() {
 }
 
 #[test]
-fn rejects_non_object_tool_call_arguments() {
-    let request = ChatRequest {
-        messages: vec![ChatMessage::assistant_blocks(vec![
-            AssistantContentBlock::ToolCall(AssistantToolCall {
-                id: "call_1".to_string(),
-                name: "get_weather".to_string(),
-                arguments: "[]".to_string(),
-            }),
-        ])],
-        ..ChatRequest::for_test()
+fn coerces_tool_call_arguments_that_are_not_an_object_to_empty() {
+    let render_arguments = |arguments: &str| {
+        let request = ChatRequest {
+            messages: vec![ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: arguments.to_string(),
+                }),
+            ])],
+            ..ChatRequest::for_test()
+        };
+        renderer().render(&request).unwrap().prompt
     };
 
-    let error = renderer().render(&request).unwrap_err();
-    assert!(error.as_report().to_string().contains("JSON object"));
+    let empty = render_arguments("{}");
+    for arguments in [
+        r#"{"city": "Par"#,
+        "   ",
+        "[]",
+        "42",
+        "true",
+        r#""hello""#,
+        "null",
+    ] {
+        assert_eq!(render_arguments(arguments), empty, "{arguments:?}");
+    }
+    assert_ne!(render_arguments(r#"{"city":"Paris"}"#), empty);
 }

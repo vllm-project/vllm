@@ -14,11 +14,11 @@ from tests.v1.shutdown.utils import (
 from vllm import LLM
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.models.transformers import TransformersForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
+MODELS = ["vllm/tiny-random-LlamaForCausalLM"]
 
 
 def evil_method(self, *args, **kwargs):
@@ -26,7 +26,7 @@ def evil_method(self, *args, **kwargs):
     if get_tensor_model_parallel_rank() == 0:
         raise Exception("Simulated Error in startup!")
 
-    return self.model(*args, **kwargs, intermediate_tensors=None)
+    return super(TransformersForCausalLM, self).forward(*args, **kwargs)
 
 
 @pytest.fixture
@@ -34,9 +34,9 @@ def evil_method_fixture(spawn_sitecustomize_factory, request):
     failing_method = request.getfixturevalue("failing_method")
     lines = [
         "from vllm.distributed import get_tensor_model_parallel_rank",
-        "from vllm.model_executor.models.llama import LlamaForCausalLM",
+        "from vllm.model_executor.models.transformers import TransformersForCausalLM",
         inspect.getsource(evil_method),
-        f"LlamaForCausalLM.{failing_method} = {evil_method.__name__}",
+        f"TransformersForCausalLM.{failing_method} = {evil_method.__name__}",
     ]
     spawn_sitecustomize_factory(lines)
 
@@ -60,7 +60,7 @@ def test_async_llm_startup_error(
         pytest.skip(reason="Not enough CUDA devices")
 
     # Monkeypatch an error in the model.
-    monkeypatch.setattr(LlamaForCausalLM, failing_method, evil_method)
+    monkeypatch.setattr(TransformersForCausalLM, failing_method, evil_method)
 
     engine_args = AsyncEngineArgs(
         model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
@@ -94,10 +94,10 @@ def test_llm_startup_error(
     Test profiling (forward()) and load weights failures.
     TODO(andy) - LLM without multiprocessing.
     """
-    # Skip non-Llama models since we monkeypatch LlamaForCausalLM specifically.
+    # Skip non-Llama models since we monkeypatch TransformersForCausalLM specifically.
     # If MODELS list grows, each architecture needs its own test variant.
-    if model != "JackFram/llama-68m":
-        pytest.skip(reason="Only test JackFram/llama-68m")
+    if model != "vllm/llama-68m":
+        pytest.skip(reason="Only test vllm/llama-68m")
     if current_platform.device_count() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
@@ -106,7 +106,7 @@ def test_llm_startup_error(
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", MP_VALUE)
 
         # Monkeypatch an error in the model.
-        monkeypatch.setattr(LlamaForCausalLM, failing_method, evil_method)
+        monkeypatch.setattr(TransformersForCausalLM, failing_method, evil_method)
 
         with pytest.raises(
             Exception,

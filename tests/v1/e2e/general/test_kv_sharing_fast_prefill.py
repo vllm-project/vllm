@@ -51,22 +51,19 @@ use_fork_for_test = (
 
 @use_fork_for_test
 @pytest.mark.parametrize(
-    "kv_sharing_fast_prefill,use_v2_model_runner",
+    "kv_sharing_fast_prefill,enforce_eager",
     [
-        (False, False),
-        (True, False),
         (True, True),
-        # (False, True) omitted: fast-prefill-off behavior is runner-generic,
-        # and skipping it saves ~9 min of mostly torch.compile time in CI. The
-        # no-silent-fallback assertion below is exercised by the V2 cases.
+        (True, False),
+        # (False, False) omitted: it saves ~9 min of mostly torch.compile time
+        # in CI.
+        (False, True),
     ],
 )
-@pytest.mark.parametrize("enforce_eager", [True, False])
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     kv_sharing_fast_prefill: bool,
     enforce_eager: bool,
-    use_v2_model_runner: bool,
 ):
     if not enforce_eager and current_platform.is_rocm():
         # Relevant context: https://github.com/vllm-project/vllm/pull/29244
@@ -74,18 +71,9 @@ def test_kv_sharing_fast_prefill(
             "ROCm: torch.compile produces incorrect output for gemma-3n's GELU "
             "with tanh approximation. Use enforce_eager=True instead."
         )
-    if not enforce_eager and not use_v2_model_runner and current_platform.is_cuda():
-        pytest.skip(
-            "cublasCreate fails with CUBLAS_STATUS_ALLOC_FAILED during memory "
-            "profiling with torch 2.14: "
-            "https://github.com/pytorch/pytorch/issues/199944"
-        )
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
-        # This allows vLLM compilation backend to handle allocating and
-        # managing buffers for cudagraph
-        cudagraph_copy_inputs=True,
         mode=CompilationMode.VLLM_COMPILE
         if not enforce_eager
         else CompilationMode.NONE,
@@ -99,7 +87,6 @@ def test_kv_sharing_fast_prefill(
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         else:
             m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-        m.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_model_runner else "0")
 
         prompts, answer, indices = prep_prompts(batch_size)
 
@@ -111,8 +98,6 @@ def test_kv_sharing_fast_prefill(
             kv_sharing_fast_prefill=kv_sharing_fast_prefill,
             attention_backend="TRITON_ATTN",
         )
-        # Guard against a silent fallback to the other model runner.
-        assert llm.llm_engine.vllm_config.use_v2_model_runner == use_v2_model_runner
         responses = llm.generate(prompts, sampling_params)
         check_answers(
             indices,

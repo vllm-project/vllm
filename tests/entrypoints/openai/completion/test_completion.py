@@ -9,6 +9,7 @@ import pytest_asyncio
 import regex as re
 from openai import BadRequestError
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.sampling_params import SamplingParams
@@ -34,8 +35,11 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module")
-def server(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+def server(default_server_args, request):
+    model_name, env_dict = getattr(request, "param", (MODEL_NAME, None))
+    with RemoteOpenAIServer(
+        model_name, default_server_args, env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 
@@ -114,6 +118,86 @@ async def test_completion_truncation_side_controls_prompt_truncation(
         },
     )
     assert left_completion.choices[0].prompt_token_ids == prompt_token_ids[-4:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    # Exercise the Python renderer even when this module runs in Rust frontend CI.
+    [("facebook/opt-125m", {"VLLM_USE_RUST_FRONTEND": "0"})],
+    indirect=True,
+    ids=["python-opt"],
+)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("max_tokens", [0, 3])
+@pytest.mark.parametrize(
+    "prompt,keep,truncation_side,expected",
+    [
+        ("Hello, my name is", 4, "right", "Hello, my"),
+        ("</s>Hello, my name is", 4, "right", "</s>Hello,"),
+        ("Hello, my name is", 1, "right", ""),
+        # Unset leaves truncation to the tokenizer, which defaults to the left.
+        ("Hello, my name is", 4, None, " my name is"),
+        ("Hello, my name is", 1, None, ""),
+    ],
+)
+async def test_truncated_echo_excludes_only_added_special_tokens(
+    client: openai.AsyncOpenAI,
+    prompt: str,
+    keep: int,
+    truncation_side: str | None,
+    expected: str,
+    stream: bool,
+    max_tokens: int,
+) -> None:
+    extra_body = {"truncate_prompt_tokens": keep, "truncation_side": truncation_side}
+    generated = await client.completions.create(
+        model="facebook/opt-125m",
+        prompt=prompt,
+        max_tokens=max(1, max_tokens),
+        temperature=0.0,
+        extra_body={**extra_body, "return_token_ids": True},
+    )
+    tokenizer = get_tokenizer("facebook/opt-125m")
+    expected_ids = (
+        tokenizer.encode(prompt)[:keep]
+        if truncation_side
+        else tokenizer.encode(prompt, truncation=True, max_length=keep)
+    )
+    assert generated.choices[0].prompt_token_ids == expected_ids
+    assert generated.usage is not None
+    assert generated.usage.prompt_tokens == keep
+    response = await client.completions.create(
+        model="facebook/opt-125m",
+        prompt=prompt,
+        echo=True,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        logprobs=0,
+        stream=stream,
+        extra_body=extra_body,
+    )
+    choices = (
+        [chunk.choices[0] async for chunk in response] if stream else response.choices
+    )
+    if not stream:
+        assert response.usage is not None
+        assert response.usage.prompt_tokens == keep
+    text = "".join(choice.text for choice in choices)
+    generated_text = generated.choices[0].text if max_tokens else ""
+    assert text == expected + generated_text
+    offset = 0
+    for choice in choices:
+        assert choice.logprobs is not None
+        assert len(choice.logprobs.tokens) == len(choice.logprobs.token_logprobs)
+        assert len(choice.logprobs.tokens) == len(choice.logprobs.top_logprobs)
+        for token, text_offset in zip(
+            choice.logprobs.tokens, choice.logprobs.text_offset, strict=True
+        ):
+            assert text_offset == offset
+            assert text[text_offset : text_offset + len(token)] == token
+            offset += len(token)
+    assert offset == len(text)
 
 
 @pytest.mark.asyncio
@@ -231,6 +315,57 @@ async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
     assert set(returned_top_logprobs[0]) == {"token_id:42", "token_id:5000"}
 
 
+# 8158 is a leading-byte fragment of U+0E58 (Thai digit 8); 3023 and 378 are
+# other leading fragments. All three decode to "" on their own. After "Hello",
+# 8158 is the most likely of the three, so the "" entry is the sampled token's.
+FRAGMENT_REQUEST = dict(
+    model=MODEL_NAME,
+    prompt="Hello",
+    max_tokens=1,
+    temperature=0.0,
+    # Required with logprob_token_ids, which returns every requested token
+    # whatever the count.
+    logprobs=0,
+    extra_body={"allowed_token_ids": [8158], "logprob_token_ids": [3023, 378]},
+)
+
+# The Rust frontend keeps the last of the candidates with the same text until
+# #68488 lands, and decodes byte fragments to "\ufffd" until #63926 lands.
+skip_on_rust_frontend = pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not keep the sampled top_logprobs entry yet",
+)
+
+
+@pytest.mark.asyncio
+@skip_on_rust_frontend
+async def test_top_logprobs_keep_sampled_entry_on_string_collision(
+    client: openai.AsyncOpenAI,
+):
+    completion = await client.completions.create(**FRAGMENT_REQUEST)
+    logprobs = completion.choices[0].logprobs
+    assert logprobs is not None
+    assert logprobs.tokens == [""]
+    assert logprobs.top_logprobs == [{"": logprobs.token_logprobs[0]}]
+
+
+@pytest.mark.asyncio
+@skip_on_rust_frontend
+async def test_top_logprobs_keep_sampled_entry_on_string_collision_stream(
+    client: openai.AsyncOpenAI,
+):
+    stream = await client.completions.create(**FRAGMENT_REQUEST, stream=True)
+    tokens, token_logprobs, top_logprobs = [], [], []
+    async for chunk in stream:
+        logprobs = chunk.choices[0].logprobs
+        if logprobs is not None and logprobs.tokens:
+            tokens += logprobs.tokens
+            token_logprobs += logprobs.token_logprobs
+            top_logprobs += logprobs.top_logprobs
+    assert tokens == [""]
+    assert top_logprobs == [{"": token_logprobs[0]}]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
@@ -265,7 +400,7 @@ async def test_too_many_completion_logprobs(
             logprobs=30,
             stream=True,
         )
-        async for chunk in stream:
+        async for _ in stream:
             ...
 
     # the server should still work afterwards
@@ -415,7 +550,9 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     async for chunk in stream:
         index = chunk.choices[0].index
         text = chunk.choices[0].text
-        chunks[index].append(text)
+        # The last chunk of a sample may carry only the finish_reason (Rust).
+        if text or chunk.choices[0].finish_reason is None:
+            chunks[index].append(text)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
     # Assert `n` completions with correct finish reasons

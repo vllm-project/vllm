@@ -8,10 +8,12 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 from vllm.tokenizers.deepseek_v4 import DeepseekV4Tokenizer
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
+from .base import SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+from .hf import BaseHfRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
@@ -21,7 +23,9 @@ _FIM_HOLE = "<｜fim▁hole｜>"
 _FIM_END = "<｜fim▁end｜>"
 
 
-class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
+class DeepseekV4Renderer(BaseHfRenderer[DeepseekV4Tokenizer]):
+    _server_owned_chat_template_kwargs = SERVER_OWNED_CHAT_TEMPLATE_KWARGS
+
     def __init__(
         self,
         config: VllmConfig,
@@ -39,11 +43,24 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
     def _build_prompt(self, rendered, mm_data, mm_uuids) -> DictPrompt:
         prompt_raw, image_order = rendered
         prompt = parse_dec_only_prompt(prompt_raw)
-        if image_order is not None:
+        image_uuids = (mm_uuids or {}).get("image", [])
+        if image_order is not None and (
+            not image_order or image_order != list(range(len(image_uuids)))
+        ):
             for items in (mm_data, mm_uuids):
                 if items is not None and "image" in items:
                     if image_order:
-                        items["image"] = [items["image"][i] for i in image_order]
+                        images = items["image"]
+                        if isinstance(images, dict):
+                            processor = self.get_mm_processor()
+                            parsed = processor.info.parse_mm_data({"image": images})
+                            items["image"] = _get_embeds_data(
+                                "image",
+                                [dict(parsed["image"][i]) for i in image_order],
+                                processor,
+                            )
+                        else:
+                            items["image"] = [images[i] for i in image_order]
                     else:
                         del items["image"]
         if mm_data:

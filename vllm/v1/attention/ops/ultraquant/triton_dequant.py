@@ -149,9 +149,9 @@ def ultraquant_full_dequant_kv(
     v_out: torch.Tensor,
     alloc_len: int,
 ) -> None:
-    """Dequant ``alloc_len`` cached positions into ``k_out`` / ``v_out``.
+    """Dequant `alloc_len` cached positions into `k_out` / `v_out`.
 
-    ``k_out`` / ``v_out`` are ``[B, Hk, alloc_len, D]`` in fp16 or bf16.
+    `k_out` / `v_out` are `[B, Hk, alloc_len, D]` in fp16 or bf16.
     """
     B = block_table.shape[0]
     Hk = kv_cache.shape[2]

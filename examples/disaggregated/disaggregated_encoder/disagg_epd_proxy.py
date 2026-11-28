@@ -5,7 +5,7 @@
 
 Use static server URLs, or --dynamic-registration for launcher-managed HTTP
 registration of E, P/PD and D instances. Both modes route OpenAI-compatible
-``/v1/chat/completions`` requests through encoder and inference clusters and
+`/v1/chat/completions` requests through encoder and inference clusters and
 share encoder fan-out, metadata-only rewriting, prefill, and retry/streaming
 forwarding.
 
@@ -58,7 +58,7 @@ DEFAULT_FAIL_THRESHOLD = 3
 DEFAULT_EVICTED_TTL = 900.0
 
 
-class InstanceRole(str, enum.Enum):
+class InstanceRole(enum.StrEnum):
     ENCODE = "encode"
     PREFILL = "prefill"
     DECODE = "decode"
@@ -71,7 +71,7 @@ class InstanceRecord:
 
     Attributes:
         role: Which stage this instance serves.
-        url: Base OpenAI-compatible URL, e.g. ``http://host:8000``.
+        url: Base OpenAI-compatible URL, e.g. `http://host:8000`.
         ec_zmq_addrs: Mooncake TP-rank-0 control addresses, one per DP replica,
             supplied by the launcher from the consumer's fixed port config.
         dp_size: Data-parallel replicas behind `url`, so the proxy can pick
@@ -319,6 +319,7 @@ class EPDProxyConfig:
     probe_timeout: float = 2.0
     fail_threshold: int = 3
     evicted_ttl: float = 900.0
+    enable_per_video_kwargs_slicing: bool = False
 
 
 @dataclass
@@ -385,6 +386,7 @@ class EPDProxy:
 
 
 app = FastAPI()
+app.state.enable_per_video_kwargs_slicing = False
 encode_session: aiohttp.ClientSession | None = None
 prefill_session: aiohttp.ClientSession | None = None
 decode_session: aiohttp.ClientSession | None = None
@@ -409,6 +411,13 @@ EMBEDS_TYPES = {
     "input_audio": "audio_embeds",
     "video_url": "video_embeds",
 }
+
+# Processor kwargs whose list value applies element-wise to a request's videos
+# in order (Qwen3-VL `fps`/`num_frames`). A child
+# request that carries a subset of the videos must carry the matching subset
+# of the list, or the encoder samples every child with the first element and
+# publishes under a hash the consumer never looks up.
+PER_VIDEO_MM_KWARGS = ("fps", "num_frames")
 
 
 def encoder_rr_assignment(
@@ -468,6 +477,16 @@ def content_uuid(item: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _loads_audio_from_video(mm_kwargs: Any) -> bool:
+    """Resolve the request setting with the same precedence as the renderer."""
+    if not isinstance(mm_kwargs, dict):
+        return False
+    load_audio = mm_kwargs.get("load_audio_from_video")
+    if load_audio is None:
+        load_audio = mm_kwargs.get("use_audio_in_video")
+    return bool(load_audio)
+
+
 def rewrite_for_decode(req_data: dict, item_meta: dict[int, list[dict]]) -> dict:
     """Replace each media item with a metadata-only reference for the decoder.
 
@@ -478,14 +497,12 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, list[dict]]) -> dict
     Their modalities, cache keys and placeholder metadata come from the encoder.
     """
     mm_items = extract_mm_items(req_data)
+    load_audio = _loads_audio_from_video(req_data.get("mm_processor_kwargs"))
     # Audio processors may consume placeholders from other modalities too.
     # Keep the whole request raw if any item cannot be rewritten safely.
     raw_audio_request = any(
         item["type"] in {"audio_url", "input_audio"}
-        or (
-            item["type"] == "video_url"
-            and (req_data.get("mm_processor_kwargs") or {}).get("use_audio_in_video")
-        )
+        or (item["type"] == "video_url" and load_audio)
         for item in mm_items
     ) and any(
         not item_meta.get(i) or any(not feature["metadata"] for feature in item_meta[i])
@@ -573,11 +590,79 @@ def extract_mm_items(request_data: dict) -> list[dict]:
     return items
 
 
+def _per_video_list_options(
+    mm_kwargs: dict[str, Any],
+) -> list[tuple[dict[str, Any], str, list[Any]]]:
+    """Resolve active per-video lists without modifying the request."""
+    scoped = mm_kwargs.get("videos_kwargs")
+    options = []
+    for key in PER_VIDEO_MM_KWARGS:
+        scope = scoped if isinstance(scoped, dict) and key in scoped else mm_kwargs
+        value = scope.get(key)
+        if isinstance(value, list):
+            options.append((scope, key, value))
+    return options
+
+
+def _validate_per_video_kwargs(mm_kwargs: Any, num_videos: int) -> None:
+    if not isinstance(mm_kwargs, dict) or not num_videos:
+        return
+    load_audio = _loads_audio_from_video(mm_kwargs)
+    for scope, key, value in _per_video_list_options(mm_kwargs):
+        if load_audio and scope is mm_kwargs:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Move mm_processor_kwargs.{key} to "
+                    f"mm_processor_kwargs.videos_kwargs.{key} when slicing "
+                    "per-video lists for videos with audio."
+                ),
+            )
+        if len(value) < num_videos:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"mm_processor_kwargs: {key} needs at least {num_videos}"
+                    " entries, one per video."
+                ),
+            )
+
+
+def _validate_per_video_request(req_data: dict) -> None:
+    num_videos = sum(item["type"] == "video_url" for item in extract_mm_items(req_data))
+    _validate_per_video_kwargs(req_data.get("mm_processor_kwargs"), num_videos)
+
+
+def _slice_mm_processor_kwargs(mm_kwargs: Any, video_indices: list[int]) -> Any:
+    """Slice per-video list kwargs down to the videos a child carries.
+
+    `video_indices` are the positions of those videos among the original
+    request's videos. Scalars and unrelated kwargs pass through unchanged, in
+    whatever scope (flat or `videos_kwargs`) the request used. Children without
+    videos keep the original kwargs. The sliced value stays a list so both
+    sides of the transfer fold the same element into the cache hash.
+    """
+    if not isinstance(mm_kwargs, dict) or not video_indices:
+        return mm_kwargs
+
+    child = dict(mm_kwargs)
+    scoped = mm_kwargs.get("videos_kwargs")
+    if isinstance(scoped, dict):
+        child["videos_kwargs"] = dict(scoped)
+
+    # Keep shadowed values intact; the effective list alone is partitioned.
+    for scope, key, value in _per_video_list_options(child):
+        scope[key] = [value[i] for i in video_indices]
+    return child
+
+
 async def fanout_encoder_primer(
     orig_request: dict,
     e_urls: list[str],
     req_id: str,
     consumer_zmq: str | None = None,
+    *,
+    enable_per_video_kwargs_slicing: bool = False,
 ) -> tuple[dict[int, list[dict]], dict[str, Any]]:
     """1. Group images by encoder, retaining per-item round-robin assignment.
     2. Send them concurrently to the encode cluster.
@@ -600,6 +685,17 @@ async def fanout_encoder_primer(
         return {}, {}  # nothing to do
 
     logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
+    mm_kwargs = orig_request.get("mm_processor_kwargs")
+    load_audio = _loads_audio_from_video(mm_kwargs)
+
+    # Per-video kwargs index by position among the videos, not among all
+    # media items, so images interleaved with videos do not shift them.
+    video_positions: dict[int, int] = {}
+    if enable_per_video_kwargs_slicing:
+        for idx, item in enumerate(mm_items):
+            if item["type"] == "video_url":
+                video_positions[idx] = len(video_positions)
+        _validate_per_video_kwargs(mm_kwargs, len(video_positions))
 
     tasks = []
     item_uuids: dict[int, str] = {}
@@ -647,14 +743,7 @@ async def fanout_encoder_primer(
             item_uuid = None if NO_REWRITE else (item.get("uuid") or content_uuid(item))
             if item_uuid is not None:
                 item_uuids[idx] = item_uuid
-            num_features = 1 + int(
-                item["type"] == "video_url"
-                and bool(
-                    (orig_request.get("mm_processor_kwargs") or {}).get(
-                        "use_audio_in_video"
-                    )
-                )
-            )
+            num_features = 1 + int(item["type"] == "video_url" and load_audio)
             item_transfer_ids[idx] = [uuid.uuid4().hex for _ in range(num_features)]
             content.append(item if item_uuid is None else {**item, "uuid": item_uuid})
 
@@ -670,8 +759,15 @@ async def fanout_encoder_primer(
             # once the prompt is encoded and its embeddings are published.
             "stream": False,
         }
+        if "mm_processor_kwargs" in orig_request:
+            kwargs = mm_kwargs
+            if enable_per_video_kwargs_slicing:
+                kwargs = _slice_mm_processor_kwargs(
+                    kwargs,
+                    [video_positions[idx] for idx in indices if idx in video_positions],
+                )
+            encoder_req["mm_processor_kwargs"] = kwargs
         for key in (
-            "mm_processor_kwargs",
             "media_io_kwargs",
             "priority",
             "session_id",
@@ -1004,6 +1100,8 @@ async def prepare_for_decode(
     p_url: str,
     consumer_zmq: str | None,
     prefill_dp_rank: int | None = None,
+    *,
+    enable_per_video_kwargs_slicing: bool = False,
 ) -> tuple[dict, float, float]:
     """Encode, rewrite and prefill, returning the body to send to decode.
 
@@ -1012,7 +1110,11 @@ async def prepare_for_decode(
     """
     _t0 = time.perf_counter()
     item_meta, ec_params = await fanout_encoder_primer(
-        req_data, e_urls, req_id, consumer_zmq
+        req_data,
+        e_urls,
+        req_id,
+        consumer_zmq,
+        enable_per_video_kwargs_slicing=enable_per_video_kwargs_slicing,
     )
     _t1 = time.perf_counter()
     prepared = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
@@ -1037,12 +1139,20 @@ async def forward_non_stream(
     consumer_zmq: str | None,
     dp_rank: int | None = None,
     prefill_dp_rank: int | None = None,
+    *,
+    enable_per_video_kwargs_slicing: bool = False,
 ) -> Response:
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
             prepared, encode_s, rewrite_s = await prepare_for_decode(
-                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
+                req_data,
+                req_id,
+                e_urls,
+                p_url,
+                consumer_zmq,
+                prefill_dp_rank,
+                enable_per_video_kwargs_slicing=enable_per_video_kwargs_slicing,
             )
             _t2 = time.perf_counter()
 
@@ -1117,12 +1227,20 @@ async def forward_stream(
     consumer_zmq: str | None,
     dp_rank: int | None = None,
     prefill_dp_rank: int | None = None,
+    *,
+    enable_per_video_kwargs_slicing: bool = False,
 ) -> AsyncIterator[bytes]:
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
             prepared, encode_s, rewrite_s = await prepare_for_decode(
-                req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
+                req_data,
+                req_id,
+                e_urls,
+                p_url,
+                consumer_zmq,
+                prefill_dp_rank,
+                enable_per_video_kwargs_slicing=enable_per_video_kwargs_slicing,
             )
             _t2 = time.perf_counter()
 
@@ -1191,6 +1309,9 @@ async def chat_completions(request: Request):
     try:
         req_data = msgspec.json.decode(await request.body())
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        enable_slicing = app.state.enable_per_video_kwargs_slicing
+        if enable_slicing:
+            _validate_per_video_request(req_data)
 
         e_urls = app.state.e_urls  # we want the full list for fan-out
         p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
@@ -1210,12 +1331,26 @@ async def chat_completions(request: Request):
         if is_streaming:
             return StreamingResponse(
                 forward_stream(
-                    req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
+                    req_data,
+                    req_id,
+                    e_urls,
+                    p_url,
+                    d_url,
+                    consumer_zmq,
+                    dp_rank,
+                    enable_per_video_kwargs_slicing=enable_slicing,
                 ),
                 media_type="text/event-stream",
             )
         return await forward_non_stream(
-            req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
+            req_data,
+            req_id,
+            e_urls,
+            p_url,
+            d_url,
+            consumer_zmq,
+            dp_rank,
+            enable_per_video_kwargs_slicing=enable_slicing,
         )
 
     except HTTPException:
@@ -1281,11 +1416,12 @@ async def _post_if_available(
 ) -> dict | None:
     """POST `payload` to `url`.
 
-    Returns
-    -------
-    • The decoded JSON body on success (2xx)
-    • None if the endpoint does not exist (404)
-    • Raises for anything else.
+    Returns:
+        The decoded JSON body on success (2xx), or None if the endpoint does
+        not exist (404).
+
+    Raises:
+        aiohttp.ClientResponseError: For any other status.
 
     """
     try:
@@ -1416,6 +1552,9 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
     async def chat_completions(request: Request):
         req_data = msgspec.json.decode(await request.body())
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        enable_slicing = config.enable_per_video_kwargs_slicing
+        if enable_slicing:
+            _validate_per_video_request(req_data)
         route = proxy.route(len(extract_mm_items(req_data)))
         args = (
             req_data,
@@ -1431,9 +1570,18 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
         }
         if req_data.get("stream", False):
             return StreamingResponse(
-                forward_stream(*args, **ranks), media_type="text/event-stream"
+                forward_stream(
+                    *args,
+                    **ranks,
+                    enable_per_video_kwargs_slicing=enable_slicing,
+                ),
+                media_type="text/event-stream",
             )
-        return await forward_non_stream(*args, **ranks)
+        return await forward_non_stream(
+            *args,
+            **ranks,
+            enable_per_video_kwargs_slicing=enable_slicing,
+        )
 
     @app.get("/v1/models")
     async def list_models():
@@ -1515,6 +1663,16 @@ if __name__ == "__main__":
         help="Forward images to the decoder unchanged (for stage-timing A/B).",
     )
     parser.add_argument(
+        "--enable-per-video-kwargs-slicing",
+        action="store_true",
+        help=(
+            "Opt in to slicing per-video fps/num_frames lists. Only enable if "
+            "all encoder and consumer instances use compatible partition-invariant "
+            "per-video hashing (e.g. Qwen3-VL). For videos with audio, put "
+            "per-video lists in mm_processor_kwargs.videos_kwargs. Off by default."
+        ),
+    )
+    parser.add_argument(
         "--encode-servers-urls",
         default="",
         help='Comma-separated encode URLs ("http://e1:8001,http://e2:8001")',
@@ -1589,6 +1747,7 @@ if __name__ == "__main__":
                 probe_timeout=args.probe_timeout,
                 fail_threshold=args.fail_threshold,
                 evicted_ttl=args.evicted_ttl,
+                enable_per_video_kwargs_slicing=args.enable_per_video_kwargs_slicing,
             )
         )
         if args.log_requests:
@@ -1599,6 +1758,7 @@ if __name__ == "__main__":
                 "Static routing requires --encode-servers-urls "
                 "and --decode-servers-urls"
             )
+        app.state.enable_per_video_kwargs_slicing = args.enable_per_video_kwargs_slicing
         app.state.e_urls = [
             u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
         ]

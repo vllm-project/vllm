@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Cohere v2 -> OpenAI request / response conversion
-implemented in ``vllm/entrypoints/cohere/serving.py``.
+implemented in `vllm/entrypoints/cohere/serving.py`.
 
 These cover the pure-Python classmethods so we don't need an engine.
-For the instance methods that read ``self._is_reasoning_model`` we
-build a lightweight :class:`_FakeServing` subclass that skips the
-heavy ``OpenAIServingChat.__init__`` chain (which would otherwise need
+For the instance methods that read `self._is_reasoning_model` we
+build a lightweight `_FakeServing` subclass that skips the
+heavy `OpenAIServingChat.__init__` chain (which would otherwise need
 a real engine client, model registry, etc.) — the same pattern used in
-``test_serving_streaming.py``.
+`test_serving_streaming.py`.
 """
 
 import json
@@ -103,11 +103,11 @@ def _convert(request: CohereChatV2Request) -> ChatCompletionRequest:
 
 
 class _FakeServing(CohereServingChatV2):
-    """Lightweight stand-in for :class:`CohereServingChatV2` that skips
-    the heavy ``OpenAIServingChat.__init__`` chain.
+    """Lightweight stand-in for `CohereServingChatV2` that skips
+    the heavy `OpenAIServingChat.__init__` chain.
 
-    Only ``_is_reasoning_model`` is read by the methods under test
-    (``_chat_completion_to_v2`` and friends); the rest of the parent
+    Only `_is_reasoning_model` is read by the methods under test
+    (`_chat_completion_to_v2` and friends); the rest of the parent
     state is dead weight for unit testing.
     """
 
@@ -313,9 +313,11 @@ class TestConvertUserMessage:
             ]
         )
         result = _convert(req)
-        assert result.messages[0]["content"][0]["image_url"] == {
-            "url": "https://x/i.png"
-        }
+        content = result.messages[0]["content"]
+        assert isinstance(content, list)
+        part = content[0]
+        assert not isinstance(part, str) and part["type"] == "image_url"
+        assert part["image_url"] == {"url": "https://x/i.png"}
 
     def test_text_plus_image_keeps_list(self):
         req = _make_request(
@@ -442,6 +444,7 @@ class TestConvertAssistantMessage:
         asst = result.messages[1]
         assert asst["content"] == "I'll call a tool."
         assert asst["reasoning"] == "plan: use calculator"
+        assert asst["tool_calls"] is not None
         assert asst["tool_calls"][0]["function"] == {
             "name": "calc",
             "arguments": "{}",
@@ -467,7 +470,9 @@ class TestConvertAssistantMessage:
             ]
         )
         result = _convert(req)
-        tc = result.messages[1]["tool_calls"][0]
+        tool_calls = result.messages[1]["tool_calls"]
+        assert tool_calls is not None
+        tc = tool_calls[0]
         assert tc["id"] == "c1"
         assert tc["type"] == "function"
         assert tc["function"] == {"name": "", "arguments": "{}"}
@@ -533,17 +538,17 @@ class TestConvertToolMessage:
         """Document blocks must not survive on the OpenAI-shaped tool
         message.
 
-        vLLM's shared ``parse_chat_message_content_parts`` runs a
-        Pydantic ``ValidatorIterator`` over the OpenAI content-part
-        union, which only knows ``text`` / ``image_url`` / etc. and
-        rejects ``{"type": "document", ...}`` blocks outright. We
-        therefore JSON-serialize each document into its own ``text``
+        vLLM's shared `parse_chat_message_content_parts` runs a
+        Pydantic `ValidatorIterator` over the OpenAI content-part
+        union, which only knows `text` / `image_url` / etc. and
+        rejects `{"type": "document", ...}` blocks outright. We
+        therefore JSON-serialize each document into its own `text`
         content part so the request survives OpenAI validation; the
         cohere renderer still resolves outbound citations against
-        the original cohere v2 messages via ``POSITION_TO_SOURCE_KEY``
-        and reconstructs structured melody ``document`` blocks from the
+        the original cohere v2 messages via `POSITION_TO_SOURCE_KEY`
+        and reconstructs structured melody `document` blocks from the
         original v2 content forwarded via
-        ``TOOL_MESSAGE_V2_CONTENT_KEY``.
+        `TOOL_MESSAGE_V2_CONTENT_KEY`.
         """
         req = self._request_with_tool_message(
             [
@@ -567,7 +572,7 @@ class TestConvertToolMessage:
 
     def test_document_only_content_serialized_as_text_part(self):
         """Document-only tool results must also produce a text-typed
-        content part (no ``text`` block above them), so a single-doc
+        content part (no `text` block above them), so a single-doc
         result still passes the OpenAI content-parts validator.
         """
         req = self._request_with_tool_message(
@@ -588,24 +593,24 @@ class TestConvertToolMessage:
     def test_converted_tool_message_content_survives_openai_validation(self):
         """Regression for the reported crash.
 
-        ``vllm/renders/chat_message_content.py:parse_chat_message_content_parts``
-        runs a Pydantic ``ValidatorIterator`` over
-        ``list[ChatCompletionContentPartParam]``, which is a
-        discriminated union that only accepts ``text`` / ``image_url``
-        / ``input_audio`` / ``refusal`` / ``file`` types. Previously
-        the converted tool message carried ``{"type": "document",
-        "document": {...}}`` blocks, which the validator rejected with:
+        `vllm/renders/chat_message_content.py:parse_chat_message_content_parts`
+        runs a Pydantic `ValidatorIterator` over
+        `list[ChatCompletionContentPartParam]`, which is a
+        discriminated union that only accepts `text` / `image_url`
+        / `input_audio` / `refusal` / `file` types. Previously
+        the converted tool message carried `{"type": "document",
+        "document": {...}}` blocks, which the validator rejected with:
 
             2 validation errors for ValidatorIterator
             0.text  Field required
             0.type  Input should be 'text', got 'document'
 
-        The fix rewrites every ``DocumentToolContent`` into a
-        JSON-serialized ``text`` part. This test asserts the invariant
+        The fix rewrites every `DocumentToolContent` into a
+        JSON-serialized `text` part. This test asserts the invariant
         that keeps the validator happy: on the OpenAI-shaped request,
-        every content entry a tool message carries must be a ``text``
+        every content entry a tool message carries must be a `text`
         part (or a bare string) -- so no future refactor accidentally
-        re-introduces a ``document``-typed content part.
+        re-introduces a `document`-typed content part.
         """
         req = self._request_with_tool_message(
             [
@@ -834,6 +839,7 @@ class TestApplyTools:
                 ],
             )
         )
+        assert result.tools is not None
         assert result.tools[0].function.strict is True
 
 
@@ -923,22 +929,26 @@ class TestApplyCohereTemplateKwargs:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         docs = result.chat_template_kwargs["documents"]
         assert docs[0] == {"id": "custom", "data": {"text": "t"}}
         assert docs[1]["id"] == "doc_1"
 
     def test_safety_mode_normalized_to_lowercase(self):
         result = _convert(_make_request(safety_mode="CONTEXTUAL"))
+        assert result.chat_template_kwargs is not None
         assert result.chat_template_kwargs["safety_mode"] == "contextual"
 
     def test_citation_options_forwarded_as_dict(self):
         result = _convert(_make_request(citation_options={"mode": "accurate"}))
+        assert result.chat_template_kwargs is not None
         assert result.chat_template_kwargs["citation_options"] == {"mode": "accurate"}
 
     def test_thinking_forwarded_as_dict(self):
         result = _convert(
             _make_request(thinking={"type": "enabled", "token_budget": 16})
         )
+        assert result.chat_template_kwargs is not None
         assert result.chat_template_kwargs["thinking"] == {
             "type": "enabled",
             "token_budget": 16,
@@ -956,6 +966,7 @@ class TestApplyCohereTemplateKwargs:
                 safety_mode="CONTEXTUAL",
             )
         )
+        assert result.chat_template_kwargs is not None
         assert result.chat_template_kwargs["safety_mode"] == "user-explicit"
         assert result.chat_template_kwargs["extra"] == "x"
 
@@ -973,16 +984,16 @@ class TestApplyCohereTemplateKwargs:
 
 
 class TestEngineChatTemplateKwargs:
-    """The internal ``_``-prefixed entries must not reach the engine core.
+    """The internal `_`-prefixed entries must not reach the engine core.
 
-    ``OpenAIServingChat`` uses one ``chat_template_kwargs`` dict twice:
+    `OpenAIServingChat` uses one `chat_template_kwargs` dict twice:
     to build the API-server-side parser, and to populate
-    ``EngineCoreRequest.reasoning_parser_kwargs``, which crosses ZMQ as
+    `EngineCoreRequest.reasoning_parser_kwargs`, which crosses ZMQ as
     msgpack. This handler's reserved keys are only meaningful to the
-    former, and ``_position_to_source`` holds ``CitationSource`` models
+    former, and `_position_to_source` holds `CitationSource` models
     that msgpack cannot encode at all -- forwarding them fails the
-    request with a ``TypeError``. The
-    ``_engine_chat_template_kwargs`` override drops them.
+    request with a `TypeError`. The
+    `_engine_chat_template_kwargs` override drops them.
     """
 
     @staticmethod
@@ -997,6 +1008,7 @@ class TestEngineChatTemplateKwargs:
             citation_options={"mode": "accurate"},
         )
         full = _convert(request).chat_template_kwargs
+        assert full is not None
         # Sanity: the key we expect to be dropped is actually present.
         assert POSITION_TO_SOURCE_KEY in full
 
@@ -1014,6 +1026,7 @@ class TestEngineChatTemplateKwargs:
         """
         request = _make_request(messages=_TOOL_ROUND_TRIP_MESSAGES)
         full = _convert(request).chat_template_kwargs
+        assert full is not None
         internal = {k for k in full if k.startswith("_")}
         # Sanity: this request really does populate all three.
         assert internal == {
@@ -1049,6 +1062,7 @@ class TestEngineChatTemplateKwargs:
         """
         request = _make_request(documents=[{"id": "d1", "data": {"text": "hi"}}])
         full = _convert(request).chat_template_kwargs
+        assert full is not None
         before = set(full)
 
         self._engine_kwargs(request)
@@ -1076,19 +1090,19 @@ class TestEngineChatTemplateKwargs:
 
 class TestToolMessageV2ContentForwarding:
     """The cohere renderer needs the original v2 tool-message content
-    (text / document blocks) to reconstruct melody's ``document``-block
+    (text / document blocks) to reconstruct melody's `document`-block
     shape, but the OpenAI content-parts validator on the way in only
     accepts text / image / audio / etc. blocks. So
-    :meth:`CohereServingChatV2._convert_tool_message` rewrites each
-    content block into a plain ``text`` part on the request that
+    `CohereServingChatV2._convert_tool_message` rewrites each
+    content block into a plain `text` part on the request that
     survives validation, and
-    :meth:`CohereServingChatV2._collect_v2_tool_message_content`
-    forwards the *original* v2 content blocks -- as ``model_dump``'d
+    `CohereServingChatV2._collect_v2_tool_message_content`
+    forwards the *original* v2 content blocks -- as `model_dump`'d
     dicts -- to the renderer under
-    :data:`TOOL_MESSAGE_V2_CONTENT_KEY`. These tests pin the
+    `TOOL_MESSAGE_V2_CONTENT_KEY`. These tests pin the
     forwarding contract (presence, dict-shape, index-alignment); the
     v2 → melody mapping the renderer applies to these blocks lives in
-    ``tests/renderers/test_cohere.py``.
+    `tests/renderers/test_cohere.py`.
     """
 
     def _request_with_tool_message(self, content: Any) -> CohereChatV2Request:
@@ -1243,10 +1257,10 @@ def _forwarded_v2_content(
 
 
 class TestMessageCitations:
-    """Covers the ``_messages_citations`` chat_template_kwargs entry
-    that carries ``AssistantChatMessageV2.citations`` from the request
-    through to the Cohere renderer. Response-shape ``Citation`` ->
-    melody ``FilterCitation`` conversion is best-effort: some
+    """Covers the `_messages_citations` chat_template_kwargs entry
+    that carries `AssistantChatMessageV2.citations` from the request
+    through to the Cohere renderer. Response-shape `Citation` ->
+    melody `FilterCitation` conversion is best-effort: some
     melody-side fields have no equivalent on the Cohere wire and get
     defaulted.
     """
@@ -1294,6 +1308,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         citations_by_index = result.chat_template_kwargs["_messages_citations"]
         assert list(citations_by_index.keys()) == [1]
         cite = citations_by_index[1][0]
@@ -1371,6 +1386,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][1]
         assert cite["sources"] == [{"tool_call_index": 0, "tool_result_indices": [1]}]
 
@@ -1450,6 +1466,7 @@ class TestMessageCitations:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][5]
         assert cite["sources"] == [
             {"tool_call_index": 1, "tool_result_indices": [1]},
@@ -1504,6 +1521,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][3]
         assert cite["sources"] == [
             {"tool_call_index": 1, "tool_result_indices": [0]},
@@ -1564,6 +1582,7 @@ class TestMessageCitations:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][3]
         assert cite["sources"] == [
             {"tool_call_index": 0, "tool_result_indices": [0, 1]},
@@ -1654,6 +1673,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][1]
         assert cite["is_thinking"] is True
         # And the source resolved (sanity: is_thinking is meaningful
@@ -1684,6 +1704,7 @@ class TestMessageCitations:
                 ],
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][1]
         assert cite["is_thinking"] is True
 
@@ -1831,6 +1852,7 @@ class TestMessageCitations:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][3]
         assert cite["sources"] == [
             {"tool_call_index": 0, "tool_result_indices": [1, 3]},
@@ -1900,6 +1922,7 @@ class TestMessageCitations:
                 ]
             )
         )
+        assert result.chat_template_kwargs is not None
         (cite,) = result.chat_template_kwargs["_messages_citations"][4]
         # ``d2`` is at position 0 within its own message's content,
         # but the previous tool message contributed 2 slots, so its
@@ -2049,6 +2072,8 @@ class TestBuildUsage:
         )
         usage = CohereServingChatV2._build_usage(resp)
         assert usage is not None
+        assert usage.billed_units is not None
+        assert usage.tokens is not None
         assert usage.billed_units.input_tokens == 10
         assert usage.billed_units.output_tokens == 5
         assert usage.tokens.input_tokens == 10
@@ -2061,6 +2086,7 @@ class TestBuildUsage:
             usage={"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
         )
         usage = CohereServingChatV2._build_usage(resp)
+        assert usage is not None and usage.billed_units is not None
         assert usage.billed_units.output_tokens == 0
 
     def test_cached_tokens_propagated(self):
@@ -2074,6 +2100,7 @@ class TestBuildUsage:
             },
         )
         usage = CohereServingChatV2._build_usage(resp)
+        assert usage is not None
         assert usage.cached_tokens == 3
 
 
@@ -2086,15 +2113,15 @@ class TestExtractCitations:
     """Test the parser-output -> wire-shape citation coercion.
 
     Sources are already fully resolved by the reasoning parser (see
-    ``_melody_sources_to_vllm`` in
-    ``vllm/reasoning/cohere_command_reasoning_parser.py``, which
-    consumes the position map forwarded via ``chat_template_kwargs``).
+    `_melody_sources_to_vllm` in
+    `vllm/reasoning/cohere_command_reasoning_parser.py`, which
+    consumes the position map forwarded via `chat_template_kwargs`).
     The serving layer's remaining responsibilities on the outbound
-    path are: coerce to :class:`cohere.types.Citation`, apply the
-    ``THINKING_CONTENT`` -> ``PLAN`` rewrite for non-reasoning models,
-    and drop citations whose ``sources`` list is entirely empty
+    path are: coerce to `cohere.types.Citation`, apply the
+    `THINKING_CONTENT` -> `PLAN` rewrite for non-reasoning models,
+    and drop citations whose `sources` list is entirely empty
     (unattributable anchors). Id-less sources with a payload are
-    preserved to match the cohere api's optional-``id`` source shape.
+    preserved to match the cohere api's optional-`id` source shape.
     """
 
     @staticmethod
@@ -2269,10 +2296,10 @@ class TestExtractCitations:
 class TestBuildPositionToSource:
     """Pin the outbound numbering invariant.
 
-    ``_build_position_to_source`` inverts the same numbering rule that
-    ``_build_doc_id_to_prompt_position`` follows on the inbound path
-    (melody's ``PromptRenderIds::from_messages`` -- see
-    ``melody/src/templating/util.rs``). These tests exist to catch
+    `_build_position_to_source` inverts the same numbering rule that
+    `_build_doc_id_to_prompt_position` follows on the inbound path
+    (melody's `PromptRenderIds::from_messages` -- see
+    `melody/src/templating/util.rs`). These tests exist to catch
     numbering drift between the two helpers, which would cause
     outbound citations to attribute to the wrong document.
     """

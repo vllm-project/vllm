@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from openai.types.chat.chat_completion_audio import (
@@ -18,15 +19,20 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     AnyResponseFormat,
+    BadWordsParam,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
     MMPayload,
     PerRequestMetrics,
     StopParam,
+    StopTokenIdsParam,
     StreamOptions,
     ToolCall,
     TopLogprobsParam,
@@ -71,6 +77,25 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+
+
+def _coerce_tool_calls_to_list(tool_calls: Any) -> Any:
+    """Materialize one-shot tool_calls iterators without crashing on bad types.
+
+    Generators must be converted to lists before union-type matching, but
+    `list()` on a non-iterable scalar (for example `tool_calls: 1`) raises
+    `TypeError`, which escapes Pydantic as an HTTP 500. Non-iterable scalars
+    are surfaced so field validation can reject them (400). Strings and
+    mappings are left to field validation, and handling of empty
+    string/object — normalized to [] — is unchanged by this patch.
+    """
+    if tool_calls is None or isinstance(tool_calls, list):
+        return tool_calls
+    if isinstance(tool_calls, (str, bytes, bytearray, Mapping)) or not isinstance(
+        tool_calls, Iterable
+    ):
+        return tool_calls
+    return list(tool_calls)
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -291,7 +316,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     watermarking: bool | None = None
     length_penalty: float = 1.0
-    stop_token_ids: list[int] | None = []
+    stop_token_ids: StopTokenIdsParam = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -320,7 +345,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     allowed_token_ids: list[int] | None = None
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: BadWordsParam = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -402,8 +427,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
-        ge=_INT64_MIN,
-        le=_INT64_MAX,
+        ge=PRIORITY_MIN,
+        le=PRIORITY_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -489,9 +514,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "What the render response's `features` carry for multimodal "
             "items. 'tensors' serializes the processed tensors into "
-            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
-            "callers that need only the token layout and item hashes, such as "
-            "cache-aware routers. Do not send a 'none' response to "
+            "`kwargs_data` and `mm_metadata`. 'metadata' sets `kwargs_data` to "
+            "null and keeps `mm_metadata` for prefill with "
+            "`ec_transfer_params`. 'none' sets both to null for callers that "
+            "need only the token layout and item hashes, such as cache-aware "
+            "routers. `mm_metadata` is null if any modality has no metadata, "
+            "which 'metadata' rejects. Do not send a 'none' response to "
             "`/inference/v1/generate` which reads a null `kwargs_data` as "
             "every item being cached. Only supported on the render endpoints. "
             "Ignored on regular generation endpoints."
@@ -583,8 +611,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         Performs two normalizations in a single pass:
         - Converts tool_calls generators/iterators to lists so one-shot
           generators are not consumed during union type matching.
-        - Renames the deprecated ``reasoning_content`` field to
-          ``reasoning`` so downstream code only needs to check one field.
+        - Renames the deprecated `reasoning_content` field to
+          `reasoning` so downstream code only needs to check one field.
         """
         if not isinstance(data, dict):
             return data
@@ -596,7 +624,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+                msg["tool_calls"] = _coerce_tool_calls_to_list(tool_calls)
             reasoning_content = msg.pop("reasoning_content", None)
             if reasoning_content is not None and msg.get("reasoning") is None:
                 msg["reasoning"] = reasoning_content
@@ -617,7 +645,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 continue
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
-                msg["tool_calls"] = list(tool_calls)
+                msg["tool_calls"] = _coerce_tool_calls_to_list(tool_calls)
         return self
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
@@ -680,6 +708,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # model-visible tool-choice instruction only for requests with a
             # tools block.
             tool_choice=self.tool_choice if self.tools else None,
+            parallel_tool_calls=self.parallel_tool_calls is not False,
             response_format=self.response_format,
         )
 
@@ -704,7 +733,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     # Default sampling parameters for chat completion requests
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
@@ -741,7 +770,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
-        """Normalize request constraints into ``StructuredOutputsParams``."""
+        """Normalize request constraints into `StructuredOutputsParams`."""
         return structured_outputs_from_response_format(
             self.structured_outputs,
             self.response_format,
@@ -979,83 +1008,77 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
 
-        # Reject empty tools array, matching OpenAI API behavior
-        if data.get("tools") == []:
-            raise VLLMValidationError(
-                "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely.",
-                parameter="tools",
-            )
+        tools = data.get("tools")
+        # normalize empty or omitted tools to None
+        if tools == []:
+            tools = None
+            data["tools"] = tools
 
-        # if "tool_choice" is not specified but tools are provided,
-        # default to "auto" tool_choice
-        if "tool_choice" not in data and data.get("tools"):
-            data["tool_choice"] = "auto"
+        tool_choice = data.get("tool_choice")
+        if tools is not None:
+            # omitted tool_choice defaults to auto if tools are provided
+            if tool_choice is None:
+                tool_choice = "auto"
+                data["tool_choice"] = tool_choice
+        else:
+            # omitted tool_choice defaults to none if tools are not provided
+            # auto tool_choice degrades to none if no tool is provided
+            if tool_choice is None or tool_choice == "auto":
+                tool_choice = "none"
+                data["tool_choice"] = tool_choice
 
-        # if "tool_choice" is "none" -- no validation is needed for tools
-        if "tool_choice" in data and data["tool_choice"] == "none":
+        # no validation needed
+        if tool_choice is None or tool_choice == "none":
             return data
 
-        # if "tool_choice" is specified -- validation
-        if "tool_choice" in data and data["tool_choice"] is not None:
-            # ensure that if "tool choice" is specified, tools are present
-            if "tools" not in data or data["tools"] is None:
-                raise VLLMValidationError(
-                    "When using `tool_choice`, `tools` must be set.",
-                    parameter="tool_choice",
-                )
-
-            # make sure that tool choice is either a named tool
-            # OR that it's set to "auto" or "required"
-            if data["tool_choice"] not in ["auto", "required"] and not isinstance(
-                data["tool_choice"], dict
-            ):
-                raise VLLMValidationError(
-                    f"Invalid value for `tool_choice`: {data['tool_choice']}! "
-                    'Only named tools, "none", "auto" or "required" '
-                    "are supported.",
-                    parameter="tool_choice",
-                )
-
-            # ensure that if "tool_choice" is specified as an object,
-            # it matches a valid tool
-            correct_usage_message = (
-                'Correct usage: `{"type": "function",'
-                ' "function": {"name": "my_function"}}`'
+        # any other tool_choice requires tools
+        if tools is None:
+            raise VLLMValidationError(
+                "When using `tool_choice`, `tools` must be set.",
+                parameter="tool_choice",
             )
-            if isinstance(data["tool_choice"], dict):
-                valid_tool = False
-                function = data["tool_choice"].get("function")
-                if not isinstance(function, dict):
-                    raise VLLMValidationError(
-                        f"Invalid value for `function`: `{function}` in "
-                        f"`tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function",
-                    )
-                if "name" not in function:
-                    raise VLLMValidationError(
-                        f"Expected field `name` in `function` in "
-                        f"`tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function.name",
-                    )
-                function_name = function["name"]
-                if not isinstance(function_name, str) or len(function_name) == 0:
-                    raise VLLMValidationError(
-                        f"Invalid `name` in `function`: `{function_name}`"
-                        f" in `tool_choice`! {correct_usage_message}",
-                        parameter="tool_choice.function.name",
-                    )
-                for tool in data["tools"]:
-                    if tool["function"]["name"] == function_name:
-                        valid_tool = True
-                        break
-                if not valid_tool:
-                    raise VLLMValidationError(
-                        "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`",
-                        parameter="tool_choice",
-                    )
-        return data
+
+        if tool_choice in ("required", "auto"):
+            return data
+
+        if not isinstance(tool_choice, dict):
+            raise VLLMValidationError(
+                f"Invalid value for `tool_choice`: {tool_choice}! "
+                'Only named tools, "none", "auto" or "required" '
+                "are supported.",
+                parameter="tool_choice",
+            )
+
+        correct_usage_message = (
+            'Correct usage: `{"type": "function", "function": {"name": "my_function"}}`'
+        )
+        function = tool_choice.get("function")
+        if not isinstance(function, dict):
+            raise VLLMValidationError(
+                f"Invalid value for `function`: `{function}` in "
+                f"`tool_choice`! {correct_usage_message}",
+                parameter="tool_choice.function",
+            )
+        if "name" not in function:
+            raise VLLMValidationError(
+                f"Expected field `name` in `function` in "
+                f"`tool_choice`! {correct_usage_message}",
+                parameter="tool_choice.function.name",
+            )
+        function_name = function["name"]
+        if not isinstance(function_name, str) or len(function_name) == 0:
+            raise VLLMValidationError(
+                f"Invalid `name` in `function`: `{function_name}`"
+                f" in `tool_choice`! {correct_usage_message}",
+                parameter="tool_choice.function.name",
+            )
+        if any(tool["function"]["name"] == function_name for tool in tools):
+            return data
+        raise VLLMValidationError(
+            f"The tool `{function_name}` specified in `tool_choice` does not"
+            " match any of the specified `tools`",
+            parameter="tool_choice",
+        )
 
     @model_validator(mode="before")
     @classmethod
@@ -1142,21 +1165,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
 class BatchChatCompletionRequest(OpenAIBaseModel):
     """Request model for the /v1/chat/completions/batch endpoint.
 
-    Accepts the same fields as ChatCompletionRequest except that ``messages``
+    Accepts the same fields as ChatCompletionRequest except that `messages`
     is a list of conversations (each conversation is a
-    ``list[ChatCompletionMessageParam]``).  Each conversation is processed
+    `list[ChatCompletionMessageParam]`).  Each conversation is processed
     independently and the response contains one choice per conversation,
     indexed 0, 1, ..., N-1.
 
     Current limitations compared to the single-conversation endpoint:
-    - Streaming is not supported (``stream`` must be False or omitted).
-    - Tool use is not supported (``tools`` must be omitted).
-    - Beam search is not supported (``use_beam_search`` must be False or omitted).
-    - The ``n`` parameter must be 1 (or omitted).
+    - Streaming is not supported (`stream` must be False or omitted).
+    - Tool use is not supported (`tools` must be omitted).
+    - Beam search is not supported (`use_beam_search` must be False or omitted).
+    - The `n` parameter must be 1 (or omitted).
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1)
+        Field(..., min_length=1, max_length=envs.VLLM_MAX_COMPLETION_PROMPTS)
     )
     model: str | None = None
 

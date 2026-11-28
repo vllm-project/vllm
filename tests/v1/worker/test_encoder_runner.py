@@ -3,7 +3,7 @@
 """Tests for EncoderRunner.gather_mm_embeddings (model runner V2).
 
 Covers the speculative-drafter encoder-cache handling: the drafter reads one
-position ahead of the target model (``draft_lookahead``). The +1 look-ahead
+position ahead of the target model (`draft_lookahead`). The +1 look-ahead
 feature past the processed boundary is used when its encoder output is present
 and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
@@ -27,9 +27,11 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
+from vllm.multimodal.utils import get_mm_embedding_modality_masks
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.utils import reserve_encoder_cache_residency
 
 pytestmark = pytest.mark.cpu_test
 
@@ -74,6 +76,9 @@ def test_encoder_graph_unsupported_modality_uses_eager_output():
     manager.is_captured.return_value = True
     manager.supports_modality.side_effect = lambda modality: (
         EncoderCudaGraphManager.supports_modality(manager, modality)
+    )
+    manager.supports_batch.side_effect = lambda modality, mm_kwargs: (
+        EncoderCudaGraphManager.supports_batch(manager, modality, mm_kwargs)
     )
     runner.cudagraph_manager = manager
     with patch(
@@ -121,7 +126,7 @@ def _make_runner(
     cache = EncoderCache()
     cache.mm_features["req0"] = features
     for f in cached:
-        length = f.mm_position.length
+        length = f.mm_position.get_num_embeds()
         cache.encoder_outputs[f.identifier] = torch.arange(
             length * HIDDEN, dtype=torch.float32
         ).reshape(length, HIDDEN)
@@ -152,6 +157,72 @@ def _gather(
         num_computed_tokens=np.array([num_computed]),
         draft_lookahead=draft_lookahead,
     )
+
+
+def test_empty_pcp_segment_inside_image_span():
+    """An idle PCP rank must not gather a zero-width slice of an image."""
+    feature = _feature("image", offset=8, length=10)
+    runner = _make_runner([feature], cached=[feature])
+
+    mm_embeds, is_mm_embed = _gather(
+        runner, num_scheduled=0, num_computed=10, draft_lookahead=0
+    )
+
+    assert mm_embeds == []
+    assert is_mm_embed.numel() == 0
+
+
+@pytest.mark.parametrize("with_embed_mask", [False, True])
+def test_pcp_segments_gather_image_embeddings_in_local_order(with_embed_mask):
+    """Repeated request IDs use each segment's absolute image offset."""
+    feature = _feature("image", offset=8, length=10)
+    if with_embed_mask:
+        feature = replace(
+            feature,
+            mm_position=PlaceholderRange(
+                offset=8,
+                length=10,
+                is_embed=torch.tensor(
+                    [True, False, True, True, False, True, True, False, True, True]
+                ),
+            ),
+        )
+    runner = _make_runner([feature], cached=[feature])
+    image = runner.encoder_cache.encoder_outputs[feature.identifier]
+    # A leading text row, two noncontiguous parts of the same image, and an
+    # empty PCP segment whose cursor is inside the image.
+    starts = np.array([6, 14, 10])
+    lengths = np.array([5, 5, 0])
+    mm_embeds, is_mm_embed = runner.gather_mm_embeddings(
+        req_ids=["req0"] * 3,
+        total_num_scheduled_tokens=10,
+        num_scheduled_tokens=lengths,
+        query_start_loc=np.array([0, 5, 10, 10]),
+        prefill_lens=np.full(3, 1000),
+        num_computed_tokens=starts,
+    )
+
+    assert len(mm_embeds) == 2
+    if with_embed_mask:
+        expected = [image[:2], image[4:7]]
+        expected_mask = [
+            False,
+            False,
+            True,
+            False,
+            True,
+            True,
+            False,
+            True,
+            True,
+            False,
+        ]
+    else:
+        expected = [image[:3], image[6:10]]
+        expected_mask = [False, False, True, True, True, True, True, True, True, False]
+    for actual, reference in zip(mm_embeds, expected, strict=True):
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    assert is_mm_embed.tolist() == expected_mask
 
 
 def test_draft_lookahead_uses_boundary_feature_when_cached():
@@ -471,3 +542,94 @@ def test_consumed_cpu_input_releases_storage_before_request_finishes():
     cache.update_encoder_inputs("a", {0: None})
     assert ref() is None
     assert "a" in cache.mm_features
+
+
+# ------------------ encoder cache residency profiling ------------------ #
+def _dummy_outputs(num_items: int, tokens: int, hidden: int = 16):
+    return [torch.zeros(tokens, hidden, dtype=torch.bfloat16) for _ in range(num_items)]
+
+
+def test_residency_reservation_covers_the_cache_shortfall():
+    """The dummy batch only covers the compute budget; the cache may hold more."""
+    cache: dict[str, torch.Tensor] = {}
+    outputs = _dummy_outputs(num_items=2, tokens=100)
+
+    cache_bytes = reserve_encoder_cache_residency(cache, outputs, 1000)
+
+    # 1000 tokens of capacity, 200 already resident in the dummy outputs.
+    assert cache["tmp_residency"].shape == (800, 16)
+    assert cache["tmp_residency"].dtype == torch.bfloat16
+    assert cache_bytes == 1000 * 16 * 2
+
+
+def test_residency_reservation_is_a_noop_when_the_batch_already_fills_the_cache():
+    cache: dict[str, torch.Tensor] = {}
+    outputs = _dummy_outputs(num_items=2, tokens=100)
+
+    cache_bytes = reserve_encoder_cache_residency(cache, outputs, 200)
+
+    assert cache == {}
+    assert cache_bytes == 200 * 16 * 2
+
+
+def test_residency_reservation_tolerates_no_dummy_outputs():
+    cache: dict[str, torch.Tensor] = {}
+    assert reserve_encoder_cache_residency(cache, [], 1000) == 0
+    assert cache == {}
+
+
+def test_gather_attaches_batch_placement():
+    """Each gathered embedding carries the batch positions it fills, so Omni
+    models can rebuild per-modality masks without reading input_ids. Covers an
+    audio-in-video span (shared by both items, split by is_embed) of a second,
+    chunked request."""
+    pattern = ["v", "v", "a", "v", "a", "a", "v", "a"]
+    span_features = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality=modality,
+            identifier=modality,
+            mm_position=PlaceholderRange(
+                offset=2,
+                length=len(pattern),
+                is_embed=torch.tensor([m == modality[0] for m in pattern]),
+            ),
+        )
+        for modality in ("video", "audio")
+    ]
+    image = _feature("image", offset=0, length=4)
+    cache = EncoderCache()
+    cache.mm_features["req0"] = [image]
+    cache.mm_features["req1"] = span_features
+    cache.encoder_outputs["image"] = torch.zeros(4, HIDDEN)
+    for f in span_features:
+        cache.encoder_outputs[f.identifier] = torch.zeros(4, HIDDEN)
+    runner = EncoderRunner(
+        model=None,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+    # req0 schedules 3 image tokens; req1 resumes at token 5 (span index 3).
+    mm_embeds, is_mm_embed = runner.gather_mm_embeddings(
+        req_ids=["req0", "req1"],
+        total_num_scheduled_tokens=8,
+        num_scheduled_tokens=np.array([3, 5]),
+        query_start_loc=np.array([0, 3]),
+        prefill_lens=np.array([1000, 1000]),
+        num_computed_tokens=np.array([0, 5]),
+    )
+
+    masks = get_mm_embedding_modality_masks(mm_embeds, is_mm_embed)
+    assert masks is not None
+    batch = ["i"] * 3 + pattern[3:]
+    for modality, mask in masks.items():
+        assert mask.tolist() == [m == modality[0] for m in batch], modality
+    assert sum(int(m.sum()) for m in masks.values()) == int(is_mm_embed.sum())
+    for embeds, mask in zip(
+        mm_embeds, (masks["image"], masks["video"], masks["audio"])
+    ):
+        assert embeds.shape[0] == int(mask.sum())

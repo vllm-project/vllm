@@ -2,27 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Single-node MoRIIO P/D checks on dummy weights, in WRITE and READ mode.
 
-Each case serves a real model architecture with ``--load-format dummy``, widened
-by ``moriio_wide_dummy`` (see ``DUMMY_WEIGHT_RANGE``): the
+Each case serves a real model architecture with `--load-format dummy`, widened
+by `moriio_wide_dummy` (see `DUMMY_WEIGHT_RANGE`): the
 config keeps the real hidden size, head geometry, MLA ranks and recurrent-state
 shapes, so the connector registers and transfers exactly the production cache
 layout, but the layer stack is cut to a few layers that still contain every
 cache-group kind and the MoE is cut to a handful of experts. Dummy weights are
 seeded, so the prefill, decode and reference servers hold identical weights.
-Cases marked ``HMA_off`` run every server with
-``--disable-hybrid-kv-cache-manager``, so all layers, sliding-window ones
+Cases marked `HMA_off` run every server with
+`--disable-hybrid-kv-cache-manager`, so all layers, sliding-window ones
 included, share a single cache group.
 
 Prefill runs on one GPU, decode on another, and MoRI moves the KV over xGMI:
 prefill pushes it in WRITE mode, and decode pulls it in READ mode (cases
-marked ``READ``). The proxy runs a READ request's prefill to completion before
+marked `READ`). The proxy runs a READ request's prefill to completion before
 it sends the request to decode.
 Either way decode computes the last prompt token itself. For hybrid models
-prefill computes only the first ``n - 1`` tokens and transfers the KV and the
+prefill computes only the first `n - 1` tokens and transfers the KV and the
 recurrent state after them. For attention-only models prefill computes and
-transfers all ``n``, and decode's scheduler, seeing the whole prompt cached,
+transfers all `n`, and decode's scheduler, seeing the whole prompt cached,
 recomputes the last token. A direct serve splits the same prompt the same way
-when the first ``n - 1`` tokens end on a chunk boundary that both servers share,
+when the first `n - 1` tokens end on a chunk boundary that both servers share,
 so the prompts are chosen to make that happen: one is a single chunk plus one
 token, the others are a whole number of hybrid cache blocks plus one token
 (prefix caching ends chunks on block boundaries) or, for attention-only models,
@@ -36,8 +36,8 @@ separately started servers can drift apart by a few bf16 logit steps. Guards:
 * decode must report an external prefix-cache hit for every transferred token
   of every prompt, so the match is not a local recompute;
 * changing the first half of a prompt must move the direct serve's log-probs by
-  at least ``MIN_CONTEXT_EFFECT``, so a wrong prefix would be visible;
-* ``test_corrupted_prefill_state_is_detected`` makes prefill compute its KV with
+  at least `MIN_CONTEXT_EFFECT`, so a wrong prefix would be visible;
+* `test_corrupted_prefill_state_is_detected` makes prefill compute its KV with
   a different norm epsilon (same shapes, different values) and requires every
   prompt to fail the comparison.
 """
@@ -56,9 +56,9 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -185,7 +185,7 @@ def _gemma3_overrides(cfg) -> dict[str, Any]:
     }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ArchCase:
     model: str
     overrides: Callable[[Any], dict[str, Any]]
@@ -204,7 +204,7 @@ ARCHS: dict[str, ArchCase] = {
         overrides=_kimi_linear_overrides,
         corrupt_overrides={"rms_norm_eps": 1.0},
         env={"VLLM_ROCM_USE_AITER": "1"},
-        args=("--trust-remote-code", "--mamba-ssm-cache-dtype", "float32"),
+        args=("--mamba-ssm-cache-dtype", "float32"),
     ),
     "qwen3_5_moe": ArchCase(
         model="Qwen/Qwen3.5-35B-A3B",
@@ -220,6 +220,20 @@ ARCHS: dict[str, ArchCase] = {
         overrides=_qwen3_dense_overrides,
         corrupt_overrides={"rms_norm_eps": 1.0},
         env={"VLLM_ROCM_USE_AITER": "0"},
+        hybrid=False,
+    ),
+    "qwen3_dense_aiter": ArchCase(
+        model="Qwen/Qwen3-32B",
+        overrides=_qwen3_dense_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "0"},
+        hybrid=False,
+    ),
+    "qwen3_dense_aiter_shuffled": ArchCase(
+        model="Qwen/Qwen3-32B",
+        overrides=_qwen3_dense_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1"},
         hybrid=False,
     ),
     "deepseek_v3": ArchCase(
@@ -245,7 +259,7 @@ ARCHS: dict[str, ArchCase] = {
 def _arch_overrides(arch: ArchCase) -> dict[str, Any]:
     from vllm.transformers_utils.config import get_config
 
-    return arch.overrides(get_config(arch.model, trust_remote_code=True))
+    return arch.overrides(get_config(arch.model, trust_remote_code=False))
 
 
 def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
@@ -262,7 +276,7 @@ def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
 # Serving
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Case:
     arch: str
     attention_backend: str
@@ -320,6 +334,22 @@ CASES = [
     # Attention-only: prefill transfers the whole prompt.
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT),
     Case("qwen3_dense", "ROCM_AITER_UNIFIED_ATTN", _DEFAULT, _DEFAULT),
+    # AITER FA exposes two 32-token kernel pages per 64-token manager block.
+    Case(
+        "qwen3_dense_aiter",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "64"),
+    ),
+    Case(
+        "qwen3_dense_aiter_shuffled",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        # AITER's shuffled BF16 decode kernel uses 16-token pages.
+        server_args=("--block-size", "16"),
+    ),
     # Without the hybrid KV cache manager: one cache group per model.
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, hma_off=True),
     Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, hma_off=True),
@@ -353,6 +383,22 @@ HETEROGENEOUS_TP_CASES = [
 # READ mode, equal TP: one case per cache-group kind (KDA + MLA, Gated DeltaNet
 # + full attention, full attention, and single-group MLA and sliding window).
 READ_CASES = [
+    Case(
+        "qwen3_dense_aiter",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "64"),
+        read_mode=True,
+    ),
+    Case(
+        "qwen3_dense_aiter_shuffled",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "16"),
+        read_mode=True,
+    ),
     Case("kimi_linear", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, read_mode=True),
     Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
@@ -533,10 +579,10 @@ def _open_port() -> int:
 
 
 def _open_port_block(size: int = _PORT_BLOCK) -> int:
-    """First port of ``size`` consecutive free ports no other server got.
+    """First port of `size` consecutive free ports no other server got.
 
     The block is below the kernel's ephemeral range: MoRIIO binds these ports
-    only after the model loads, and until then any ``bind(0)`` (RCCL, gloo,
+    only after the model loads, and until then any `bind(0)` (RCCL, gloo,
     ZMQ) could be given a released ephemeral port.
     """
     with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
@@ -572,7 +618,7 @@ def _moriio_config(
 
 
 @contextlib.contextmanager
-def _proxy(ping_port: int) -> Iterator[str]:
+def _proxy(ping_port: int) -> Generator[str]:
     # Free ports for both sockets, so cases from parallel shards on one host
     # do not collide.
     port = _open_port()
@@ -615,7 +661,7 @@ def _pd_pair(
     prefill_overrides: dict[str, Any],
     decode_overrides: dict[str, Any],
     case: Case,
-) -> Iterator[tuple[str, RemoteOpenAIServer, RemoteOpenAIServer]]:
+) -> Generator[tuple[str, RemoteOpenAIServer, RemoteOpenAIServer]]:
     selector, devices = _visible_devices()
     prefill_devices = devices[: case.prefill_tp]
     decode_devices = devices[case.prefill_tp : case.prefill_tp + case.decode_tp]
@@ -785,7 +831,7 @@ def _external_hits(server: RemoteOpenAIServer) -> float:
     return sum(sample.value for sample in samples)
 
 
-@dataclass
+@dataclass(slots=True)
 class Reference:
     prompts: list[list[int]]
     logprobs: list[dict[str, float]]
@@ -811,7 +857,7 @@ def _reference(
 ) -> Reference:
     """Direct serve; also checks that the comparison can see a wrong prefix.
 
-    It runs at the decode TP size unless ``tp`` is given.
+    It runs at the decode TP size unless `tp` is given.
     """
     selector, devices = _visible_devices()
     devices = devices[: tp or case.decode_tp]
@@ -919,8 +965,8 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
     changes the top tokens entirely, so log-probs only show the transfer did
     not hang and decode consumed the transferred KV. That every head and state
     slice lands at the right offset is pinned byte for byte by
-    tests/v1/kv_connector/unit/test_moriio_hetero_tp_write.py and
-    tests/v1/kv_connector/unit/test_moriio_read_tp.py.
+    tests/v1/kv_connector/unit/moriio/test_moriio_hetero_tp_write.py and
+    tests/v1/kv_connector/unit/moriio/test_moriio_read_tp.py.
     """
     _, devices = _visible_devices()
     if len(devices) < case.prefill_tp + case.decode_tp:
@@ -961,12 +1007,10 @@ def test_corrupted_prefill_state_is_detected_read(arch_name: str):
 def _check_corrupted_prefill_state_is_detected(arch_name: str, read_mode: bool) -> None:
     arch = ARCHS[arch_name]
     default = next(c for c in CASES if c.arch == arch_name)
-    case = Case(
-        arch_name,
-        default.attention_backend,
-        _DEFAULT,
-        _DEFAULT,
-        default.hma_off,
+    case = replace(
+        default,
+        prefill_graph=_DEFAULT,
+        decode_graph=_DEFAULT,
         read_mode=read_mode,
     )
     overrides = _arch_overrides(arch)

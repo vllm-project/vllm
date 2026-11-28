@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``vllm/renderers/cohere.py``.
+"""Unit tests for `vllm/renderers/cohere.py`.
 
 The tests focus on the pure-Python helpers that produce the render-config
-dicts passed to ``cohere_melody.render_cmd3`` / ``render_cmd4``. We also
+dicts passed to `cohere_melody.render_cmd3` / `render_cmd4`. We also
 include a class-level instantiation + async-non-blocking test that
-mirrors the analogous ``test_mistral.py`` pattern, exercising the
-:class:`CohereRenderer` end-to-end with mocked ``model_config`` /
+mirrors the analogous `test_mistral.py` pattern, exercising the
+`CohereRenderer` end-to-end with mocked `model_config` /
 tokenizer / melody bindings.
 """
 
@@ -313,7 +313,7 @@ class TestToolToMelody:
 class TestV2ToolContentToMelodyBlock:
     """Pins the v2 → melody mapping applied to every tool-message
     content block. The serving layer forwards the original v2 blocks
-    verbatim under :data:`TOOL_MESSAGE_V2_CONTENT_KEY`; the renderer
+    verbatim under `TOOL_MESSAGE_V2_CONTENT_KEY`; the renderer
     owns this mapping so cmd3 / cmd4 render each result field as its
     own entry rather than a single stringified-JSON blob.
     """
@@ -882,13 +882,6 @@ class TestBuildRenderConfig:
 
     @pytest.mark.parametrize("cohere_only_key", ["template_jinja", "template"])
     def test_cohere_only_template_kwargs_are_rejected(self, cohere_only_key):
-        # ``chat_template_kwargs.template_jinja`` / ``.template`` are
-        # accepted at Cohere's own API surface but not at vLLM's -- raw
-        # template source in vLLM must flow through the standard
-        # ``chat_template`` request field so the
-        # ``--trust-request-chat-template`` guard applies uniformly.
-        # Silently dropping these keys would hide client misconfiguration,
-        # so we reject them loudly instead.
         with pytest.raises(
             ValueError,
             match=f"chat_template_kwargs.{cohere_only_key!r}",
@@ -911,9 +904,7 @@ class TestBuildRenderConfig:
         assert "additional_template_fields" not in cfg
 
     def test_chat_template_arg_populates_template_jinja(self):
-        # The standard vLLM ``chat_template`` request field is the sole
-        # supported channel for raw template source and is forwarded to
-        # melody under its ``template_jinja`` config key.
+        # The server-configured template is still forwarded to Melody.
         _, cfg = _build_render_config(
             self._conv(),
             {},
@@ -976,12 +967,12 @@ class TestBuildRenderConfig:
 # regressions in either path are caught uniformly.
 
 
-@dataclass
+@dataclass(slots=True)
 class _MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class _MockModelConfig:
     runner_type = "generate"
     model: str = "cohere-test"
@@ -1001,12 +992,12 @@ class _MockModelConfig:
     renderer_num_workers: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class _MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _MockVllmConfig:
     model_config: _MockModelConfig
     parallel_config: _MockParallelConfig
@@ -1070,7 +1061,7 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
 class TestRequestCitationsReachRenderedPrompt:
     """End-to-end verification that assistant-message citations on the
     request survive the OpenAI-shape round-trip and land in the melody-
-    rendered prompt as inline ``<co>...</co>`` markers.
+    rendered prompt as inline `<co>...</co>` markers.
 
     The chain covered here:
 
@@ -1081,7 +1072,7 @@ class TestRequestCitationsReachRenderedPrompt:
                         -> cohere_melody.render_cmd4 (renders <co>...</co>)
 
     A regression that drops the citations or mangles the melody
-    ``FilterCitation`` payload would remove the citation markers from
+    `FilterCitation` payload would remove the citation markers from
     the output, so a text-in / text-out assertion is enough.
     """
 
@@ -1104,14 +1095,14 @@ class TestRequestCitationsReachRenderedPrompt:
     def _openai_msgs_to_conversation(
         openai_messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Cheap stand-in for ``parse_chat_messages`` on text-only inputs.
+        """Cheap stand-in for `parse_chat_messages` on text-only inputs.
 
-        ``_convert_v2_to_chat_completion`` emits OpenAI-shape assistant
-        dicts with ``content`` as a plain string. The real chat-utils
-        pipeline calls ``parse_chat_messages`` (which requires a full
+        `_convert_v2_to_chat_completion` emits OpenAI-shape assistant
+        dicts with `content` as a plain string. The real chat-utils
+        pipeline calls `parse_chat_messages` (which requires a full
         model config / mm tracker), but for text-only content it's
-        essentially a passthrough -- we normalize ``content`` to the
-        list-of-parts shape ``_conversation_to_melody_messages`` expects
+        essentially a passthrough -- we normalize `content` to the
+        list-of-parts shape `_conversation_to_melody_messages` expects
         and preserve every other key the renderer reads.
         """
         conv: list[dict[str, Any]] = []

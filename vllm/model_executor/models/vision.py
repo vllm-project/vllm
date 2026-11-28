@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
+import torch.nn.functional as F
 from transformers import PreTrainedConfig
 
 from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
@@ -114,9 +115,9 @@ def get_vit_attn_backend(
 
 
 def get_multimodal_config() -> MultiModalConfig | None:
-    """Return the current ``MultiModalConfig``, or ``None`` when no engine
+    """Return the current `MultiModalConfig`, or `None` when no engine
     config context is active (e.g., during unit tests) or when the current
-    ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
+    `model_config` does not carry a `multimodal_config` (e.g., minimal
     stubs used in tests)."""
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None or vllm_config.model_config is None:
@@ -126,10 +127,10 @@ def get_multimodal_config() -> MultiModalConfig | None:
 
 def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
     """Return the padded hidden size for FP8 ViT encoder attention, or
-    ``None`` when FP8 is not enabled.
+    `None` when FP8 is not enabled.
 
-    cuDNN FP8 prefill attention requires ``head_dim`` to be a multiple of
-    16. For non-aligned ``head_dim`` (e.g. 72), Q/K/V are padded to the
+    cuDNN FP8 prefill attention requires `head_dim` to be a multiple of
+    16. For non-aligned `head_dim` (e.g. 72), Q/K/V are padded to the
     nearest multiple of 16.
     """
     mm_cfg = get_multimodal_config()
@@ -476,13 +477,38 @@ def run_dp_sharded_mrope_vision_model(
             vision_model.spatial_merge_size * vision_model.spatial_merge_size
         )
 
+    # rope_2d towers pool frames in the patch merger, so t adds no output rows.
+    if rope_type == "rope_2d":
+        patches_per_output_image = [
+            math.prod(grid_thw[-2:]) // embed_dim_reduction_factor
+            for grid_thw in grid_thw_list
+        ]
+    else:
+        patches_per_output_image = [
+            patch_size // embed_dim_reduction_factor for patch_size in patches_per_image
+        ]
+    output_len_per_rank = [
+        sum(
+            patches_per_output_image[i]
+            for i in image_to_tp_rank[
+                cum_gpu_sample_counts[rank] : cum_gpu_sample_counts[rank + 1]
+            ]
+        )
+        for rank in range(tp_size)
+    ]
+
     # Find the max length across all ranks
     # The output embedding of every DP rank has to be
     # padded to this length for tensor_model_parallel_all_gather
     # to work
-    max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
+    max_len_per_rank = max(output_len_per_rank)
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-    embed_dtype = next(vision_model.parameters()).dtype
+    # Ranks without images all-gather placeholders of this dtype, so it must
+    # match the output dtype of ranks with images; the first parameter's dtype
+    # can differ (e.g. an fp32 patch embedding in a bf16 tower).
+    embed_dtype = (
+        getattr(vision_model, "dtype", None) or next(vision_model.parameters()).dtype
+    )
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
@@ -542,14 +568,8 @@ def run_dp_sharded_mrope_vision_model(
     rank_embeddings = list[torch.Tensor]()
     for rank in range(tp_size):
         start_idx = rank * max_len_per_rank
-        end_idx = start_idx + (
-            grouped_pixel_values_len[rank] // embed_dim_reduction_factor
-        )
+        end_idx = start_idx + output_len_per_rank[rank]
         rank_embeddings.append(gathered_embeds[start_idx:end_idx])
-
-    patches_per_output_image = [
-        (patch_size // embed_dim_reduction_factor) for patch_size in patches_per_image
-    ]
 
     # Reconstruct embeddings in the original order
     original_order_embeddings = [None] * len(grid_thw_list)
@@ -579,3 +599,174 @@ def run_dp_sharded_mrope_vision_model(
         "Found unassigned embeddings"
     )
     return out_embeddings
+
+
+_MAX_POS_EMBED_CACHE_BYTES = 16 * 1024 * 1024  # 16 MiB per module instance
+_POS_EMBED_CACHE_ALIGN_BYTES = 256
+
+
+def interpolate_cls_abs_pos(abs_pos: torch.Tensor, tgt_grid: int) -> torch.Tensor:
+    """Bicubic-interpolate 2-D patch embeddings while keeping a leading CLS token."""
+    dim = abs_pos.size(-1)
+    abs_pos_new = abs_pos.squeeze(0)
+    cls_token, old_pos_embed = abs_pos_new[:1], abs_pos_new[1:]
+    src_size = int(math.sqrt(abs_pos_new.shape[0] - 1))
+    old_pos_embed = (
+        old_pos_embed.view(1, src_size, src_size, dim)
+        .permute(0, 3, 1, 2)
+        .contiguous()
+        .to(torch.float32)
+    )
+    new_pos_embed = (
+        F.interpolate(
+            old_pos_embed,
+            size=(tgt_grid, tgt_grid),
+            mode="bicubic",
+            antialias=True,
+            align_corners=False,
+        )
+        .to(abs_pos.dtype)
+        .permute(0, 2, 3, 1)
+        .reshape(tgt_grid * tgt_grid, dim)
+    )
+    vision_pos_embed = torch.cat([cls_token, new_pos_embed], dim=0)
+    return vision_pos_embed.view(1, tgt_grid * tgt_grid + 1, dim)
+
+
+class InterpolatedPosEmbedCache(torch.nn.Module):
+    """Pre-allocated per-module cache for interpolated positional embeddings.
+
+    Allocates a fixed non-persistent byte buffer at module initialization so
+    its memory footprint is accounted for during model loading and profiling
+    with zero growth during inference. Safe across weight loading/reloads
+    (`process_weights_after_loading`), encoder graph capture (refreshes slots
+    in place and never evicts live slots), and `torch.compile` (bypasses cache).
+    """
+
+    _buffer: torch.Tensor
+
+    def __init__(self, max_bytes: int = _MAX_POS_EMBED_CACHE_BYTES) -> None:
+        super().__init__()
+        self._max_bytes = max_bytes
+        self._offset = 0
+        self._buffer_ptr = 0
+        self.register_buffer(
+            "_buffer",
+            torch.empty(max_bytes, dtype=torch.uint8),
+            persistent=False,
+        )
+        # (tgt_size, dtype, device) -> (cached_tensor, weight_data_ptr, weight_version)
+        self._entries: dict[
+            tuple[int, torch.dtype, torch.device],
+            tuple[torch.Tensor, int, int],
+        ] = {}
+
+    def _sync_buffer(self) -> torch.Tensor:
+        buf = self._buffer
+        buf_ptr = buf.data_ptr()
+        if buf_ptr != self._buffer_ptr:
+            self._entries.clear()
+            self._offset = 0
+            self._buffer_ptr = buf_ptr
+        return buf
+
+    def _alloc_slot(
+        self, buf: torch.Tensor, tensor: torch.Tensor
+    ) -> torch.Tensor | None:
+        aligned_offset = (
+            (self._offset + _POS_EMBED_CACHE_ALIGN_BYTES - 1)
+            // _POS_EMBED_CACHE_ALIGN_BYTES
+        ) * _POS_EMBED_CACHE_ALIGN_BYTES
+        nbytes = tensor.nbytes
+        if aligned_offset + nbytes > buf.numel():
+            return None
+        slot = (
+            buf[aligned_offset : aligned_offset + nbytes]
+            .view(tensor.dtype)
+            .view(tensor.shape)
+        )
+        slot.copy_(tensor)
+        self._offset = aligned_offset + nbytes
+        return slot
+
+    def get_or_compute(
+        self,
+        weight: torch.Tensor,
+        tgt_size: int,
+        compute_fn: Callable[[torch.Tensor, int], torch.Tensor],
+    ) -> torch.Tensor:
+        if torch.compiler.is_compiling() or (
+            torch.is_grad_enabled() and weight.requires_grad
+        ):
+            return compute_fn(weight, tgt_size)
+
+        buf = self._sync_buffer()
+        if buf.device != weight.device:
+            return compute_fn(weight, tgt_size)
+
+        key = (tgt_size, weight.dtype, weight.device)
+        ptr = weight.data_ptr()
+        version = weight._version
+        entry = self._entries.get(key)
+        if entry is not None:
+            cached, cached_ptr, cached_version = entry
+            if cached_ptr == ptr and cached_version == version:
+                return cached
+
+        if current_platform.is_current_stream_capturing():
+            return compute_fn(weight, tgt_size)
+
+        # Materialize slot views outside `inference_mode` so `refresh` can
+        # update them in place after weight reloads, keeping graph addresses valid.
+        with torch.inference_mode(False), torch.no_grad():
+            new_pos_embed = compute_fn(weight, tgt_size).contiguous()
+            if entry is not None:
+                cached = entry[0]
+                if cached.shape == new_pos_embed.shape:
+                    cached.copy_(new_pos_embed)
+                    self._entries[key] = (cached, ptr, version)
+                    return cached
+                del self._entries[key]
+
+            slot = self._alloc_slot(buf, new_pos_embed)
+            if slot is not None:
+                self._entries[key] = (slot, ptr, version)
+                return slot
+
+        if new_pos_embed.nbytes > buf.numel():
+            logger.warning_once(
+                "Interpolated positional embedding for size %s (%d bytes) "
+                "exceeds cache buffer size (%d bytes); skipping cache.",
+                tgt_size,
+                new_pos_embed.nbytes,
+                buf.numel(),
+            )
+        return new_pos_embed
+
+    def refresh(
+        self,
+        weight: torch.Tensor,
+        compute_fn: Callable[[torch.Tensor, int], torch.Tensor],
+    ) -> None:
+        """Refresh cached entries in place after weights are loaded or updated."""
+        if not self._entries or weight.device.type == "meta":
+            return
+        buf = self._sync_buffer()
+        if buf.device != weight.device:
+            self._entries.clear()
+            self._offset = 0
+            return
+        ptr = weight.data_ptr()
+        version = weight._version
+        with torch.no_grad():
+            for key, (cached, _, _) in list(self._entries.items()):
+                tgt_size, dtype, device = key
+                if dtype != weight.dtype or device != weight.device:
+                    del self._entries[key]
+                    continue
+                new_pos_embed = compute_fn(weight, tgt_size).contiguous()
+                if cached.shape == new_pos_embed.shape:
+                    cached.copy_(new_pos_embed)
+                    self._entries[key] = (cached, ptr, version)
+                else:
+                    del self._entries[key]

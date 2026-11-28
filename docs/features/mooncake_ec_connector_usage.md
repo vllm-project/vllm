@@ -69,7 +69,6 @@ CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
 ```bash
 CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
   --port 19537 \
-  --gpu-memory-utilization 0.75 \
   --enable-mm-embeds \
   --enable-request-id-headers \
   --disable-prefix-caching \
@@ -129,7 +128,7 @@ Producer and consumer must use the same `mooncake_protocol`.
 | `ec_ip` / `ec_port` | consumer `ECTransferConfig` | `127.0.0.1` / `14579` | First ZMQ control port. Tensor-parallel rank `r` listens on `ec_port + dp_index * tp_size + r`. |
 | `ec_buffer_size` | `ECTransferConfig` | `1e9` | Registered receive arena on the consumer, in bytes. |
 | `control_timeout_s` | `ec_connector_extra_config` | `30` | Reservation RPC timeout. |
-| `push_wait_timeout_s` | `ec_connector_extra_config` | `60` | How long the consumer waits for a matching encoder push. |
+| `push_wait_timeout_s` | `ec_connector_extra_config` | `60` | How long the consumer waits for a matching encoder push. Requests without `ec_transfer_params` do not wait and are encoded locally. |
 | `WITH_NVIDIA_PEERMEM` | process environment | `1` | Read by Mooncake. Set `0` on hosts without `nvidia-peermem` (DMA-BUF path). |
 | `--ec-consumer-zmq-addrs` | proxy | empty | `tcp://<ec_ip>:<ec_port>` for each PD replica. Required for Mooncake EC. |
 

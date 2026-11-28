@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -15,12 +16,12 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -38,7 +39,7 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
 ):
     """Workers with different local blocks must use the global interleave."""
     config = VllmConfig(
-        cache_config=CacheConfig(block_size=64),
+        cache_config=CacheConfig(block_size=64, enable_extensible_kv_cache=False),
         device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(
             tensor_parallel_size=2,
@@ -60,16 +61,10 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
         worker.vllm_config = deepcopy(config)
         worker.vllm_config.cache_config.kv_cache_layout = None
         workers.append(worker)
-        specs.append(
-            {
-                f"layer{i}": FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=64,
-                    dtype=torch.float16,
-                )
-            }
+        spec = AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=64, dtype=torch.float16
         )
+        specs.append({f"layer{i}": FullAttentionManager.layer_config(spec)})
     parallel_configs = [config.parallel_config] + [
         worker.vllm_config.parallel_config for worker in workers
     ]
@@ -80,7 +75,7 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
     class LocalExecutor:
         set_kv_cache_layout = Executor.set_kv_cache_layout
 
-        def get_kv_cache_specs(self):
+        def get_kv_cache_layer_configs(self):
             return specs
 
         def get_supported_kv_cache_layouts(self):
@@ -107,7 +102,7 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
         engine._initialize_kv_caches(config)
 
 
-def _make_engine_core_with_dcp_manager() -> EngineCore:
+def _make_engine_core_with_dcp_manager() -> tuple[EngineCore, KVCacheManager]:
     mla_spec = MLAAttentionSpec(
         block_size=BASE_BLOCK_SIZE,
         num_kv_heads=1,
@@ -118,14 +113,15 @@ def _make_engine_core_with_dcp_manager() -> EngineCore:
         block_size=BASE_BLOCK_SIZE,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     config = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla"], mla_spec),
-            KVCacheGroupSpec(["mamba"], mamba_spec),
+            new_kv_cache_group(["mla"], mla_spec),
+            new_kv_cache_group(
+                ["mamba"], mamba_spec, MambaManager.config(enable_prefix_caching=True)
+            ),
         ],
     )
     manager = KVCacheManager(
@@ -138,11 +134,11 @@ def _make_engine_core_with_dcp_manager() -> EngineCore:
     scheduler = SimpleNamespace(kv_cache_config=config, kv_cache_manager=manager)
     engine_core = object.__new__(EngineCore)
     engine_core.scheduler = scheduler
-    return engine_core
+    return engine_core, manager
 
 
 def test_kv_cache_group_metadata_uses_effective_dcp_block_sizes() -> None:
-    engine_core = _make_engine_core_with_dcp_manager()
+    engine_core, manager = _make_engine_core_with_dcp_manager()
 
     metadata = engine_core.get_kv_cache_group_metadata()
 
@@ -150,7 +146,7 @@ def test_kv_cache_group_metadata_uses_effective_dcp_block_sizes() -> None:
     assert [item["block_size"] for item in metadata] == [12288, 1536]
     assert [item["kind"] for item in metadata] == ["mla_attention", "mamba"]
 
-    managers = engine_core.scheduler.kv_cache_manager.coordinator.single_type_managers
+    managers = manager.coordinator.single_type_managers
     assert [item["block_size"] for item in metadata] == [
         manager.block_size for manager in managers
     ]

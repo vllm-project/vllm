@@ -18,8 +18,8 @@ from ...utils import check_embeddings_close
 
 # BC for method that was deleted in Transformers v5.
 # Only needed for generating the HF reference.
-transformers.utils.is_flash_attn_greater_or_equal_2_10 = (
-    lambda: transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
+transformers.utils.is_flash_attn_greater_or_equal_2_10 = lambda: (
+    transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
 )
 
 HF_TEXT_PROMPTS = [
@@ -68,13 +68,15 @@ def _run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(
-        model, runner="pooling", dtype=dtype, enforce_eager=True
+        model, runner="pooling", dtype=dtype, enforce_eager=True, trust_remote_code=True
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
     hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model, dtype=dtype, model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, model_kwargs=hf_model_kwargs, trust_remote_code=True
+    ) as hf_model:
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []
@@ -119,7 +121,7 @@ def test_models_text(
         hf_runner,
         vllm_runner,
         input_texts,
-        input_images,  # type: ignore
+        input_images,
         model,
         dtype=dtype,
     )

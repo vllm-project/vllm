@@ -11,8 +11,9 @@ use serde_json::{Map, Value, json};
 use vllm_tokenizer::Tokenizer;
 
 use super::super::MediaPartSource;
+use super::KimiK3Variant;
 use crate::EffortValue;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, invalid_messages};
 use crate::reasoning::ReasoningControl;
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
@@ -26,7 +27,6 @@ pub(super) const END_OF_MSG: &str = "<|end_of_msg|>";
 pub(super) const IMAGE_PLACEHOLDER: &str = "<|media_pad|>";
 
 const DEFAULT_THINKING_EFFORT: &str = "max";
-const VALID_THINKING_EFFORTS: &[&str] = &["low", "high", "max"];
 
 /// K3 prompt encoder preserving Python's per-segment tokenization boundaries.
 pub(super) struct K3TokenWriter<'a> {
@@ -90,8 +90,8 @@ pub(super) fn render_request_with_media_order(
     }
 
     if let Some(effort) = thinking_effort {
-        // Preserve the checkpoint's literal guidance text: it still names
-        // `medium`, although the validator above no longer accepts it.
+        // Preserve the checkpoint's literal guidance text: it names `medium`
+        // even for K3, whose encoder does not accept it.
         write_internal_system(
             &mut out,
             "thinking-effort",
@@ -146,11 +146,10 @@ pub(super) fn render_request_with_media_order(
 
         for (position, message_index, content, name) in resolved {
             let tool_name = name.as_deref().ok_or_else(|| {
-                Error::ChatTemplate(
+                invalid_messages!(
                     "Kimi K3 tool messages need a resolvable tool name: \
                          carry a matching tool_call_id against a preceding \
                          assistant tool_call"
-                        .to_string(),
                 )
             })?;
             write_tool_message(out, tool_name, position, message_index, &content)?;
@@ -231,7 +230,11 @@ pub(super) fn render_request_with_media_order(
                  You MUST NOT call any tools in the next message.",
             )?;
         }
-        ChatToolChoice::None | ChatToolChoice::Auto | ChatToolChoice::Function { .. } => {}
+        // Like the reference encoder, an object choice injects no message.
+        ChatToolChoice::None
+        | ChatToolChoice::Auto
+        | ChatToolChoice::Function { .. }
+        | ChatToolChoice::AllowedTools { .. } => {}
     }
 
     write_response_format(&mut out, request)?;
@@ -254,6 +257,7 @@ fn request_tools(request: &ChatRequest) -> &[ChatTool] {
 pub(super) fn resolve_reasoning(
     request: &ChatRequest,
     defaults: &HashMap<String, Value>,
+    variant: KimiK3Variant,
 ) -> Result<ReasoningControl> {
     let reasoning = ReasoningControl::resolve(request, defaults)?
         .fallback(ReasoningControl::enabled(DEFAULT_THINKING_EFFORT));
@@ -263,9 +267,12 @@ pub(super) fn resolve_reasoning(
                 "Kimi K3 reasoning_effort must be a string, got {value}"
             ))
         })?;
-        if !VALID_THINKING_EFFORTS.contains(&effort) {
+        let efforts = variant.thinking_efforts();
+        if !efforts.contains(&effort) {
+            let (last, rest) = efforts.split_last().expect("every variant accepts some effort");
+            let supported: String = rest.iter().map(|effort| format!("`{effort}`, ")).collect();
             return Err(Error::InvalidReasoningEffort(format!(
-                "unsupported reasoning_effort={effort:?}; supported values are `low`, `high`, and `max`"
+                "unsupported reasoning_effort={effort:?}; supported values are {supported}and `{last}`"
             )));
         }
     }
@@ -280,7 +287,8 @@ fn content_is_empty(content: &ChatContent) -> bool {
             ChatContentPart::ImageUrl { .. }
             | ChatContentPart::VideoUrl { .. }
             | ChatContentPart::InputAudio { .. }
-            | ChatContentPart::AudioUrl { .. } => false,
+            | ChatContentPart::AudioUrl { .. }
+            | ChatContentPart::ToolReference { .. } => false,
         }),
     }
 }
@@ -485,6 +493,9 @@ fn write_content(
                     ChatContentPart::AudioUrl { .. } => {
                         return Err(Error::UnsupportedMultimodalContent("audio_url"));
                     }
+                    ChatContentPart::ToolReference { .. } => {
+                        return Err(Error::UnsupportedContentPart("tool_reference"));
+                    }
                 }
             }
             Ok(())
@@ -555,8 +566,8 @@ fn normalize_tool_arguments(arguments: &str) -> Result<(Map<String, Value>, Opti
     }
     match serde_json::from_str::<Value>(trimmed) {
         Ok(Value::Object(map)) => Ok((map, None)),
-        Ok(_) => Err(Error::ChatTemplate(
-            "Kimi K3 tool call arguments must be a JSON object".to_string(),
+        Ok(_) => Err(invalid_messages!(
+            "Kimi K3 tool call arguments must be a JSON object"
         )),
         Err(_) => Ok((Map::new(), Some(arguments.to_string()))),
     }

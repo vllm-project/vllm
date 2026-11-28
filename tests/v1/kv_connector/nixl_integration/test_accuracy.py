@@ -30,13 +30,12 @@ EXPECTED_VALUES = {
     "ibm-granite/granite-4.0-h-tiny": 0.77,
     "Qwen/Qwen3.5-0.8B": 0.33,
     "google/gemma-4-E2B-it": 0.485,
-    "ai21labs/AI21-Jamba2-3B": 0.74,
     "deepseek-ai/DeepSeek-V4-Flash": 0.95,
 }
 
 SIMPLE_PROMPT = (
     "The best part about working on vLLM is that I got to meet so many people across "
-    "various different organizations like UCB, Google, and Meta which means",
+    "various different organizations like UCB, Google, and Meta which means"
 )
 
 # Get model name from environment variable
@@ -86,8 +85,7 @@ def test_accuracy():
             f"model={MODEL_NAME},"
             f"base_url={BASE_URL}/chat/completions,"
             f"num_concurrent={NUM_CONCURRENT},"
-            "tokenizer_backend=huggingface,"
-            "trust_remote_code=True"
+            "tokenizer_backend=huggingface"
         )
         results = lm_eval.simple_evaluate(
             model="local-chat-completions",
@@ -100,8 +98,7 @@ def test_accuracy():
         model_args = (
             f"model={MODEL_NAME},"
             f"base_url={BASE_URL}/completions,"
-            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False,"
-            "trust_remote_code=True"
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
         )
         results = lm_eval.simple_evaluate(
             model="local-completions",

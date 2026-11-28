@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -113,8 +114,12 @@ def test_batch_padding_removed_from_image_items():
     items = result["mm_kwargs"]["image"]
     shapes = set()
     for item in items:
-        height, width = item["image_sizes"].data.flatten().tolist()
+        assert item is not None
+        image_sizes = item["image_sizes"].data
+        assert isinstance(image_sizes, torch.Tensor)
+        height, width = image_sizes.flatten().tolist()
         pixel_values = item["pixel_values"].data
+        assert isinstance(pixel_values, torch.Tensor)
         assert tuple(pixel_values.shape[-2:]) == (height, width)
         shapes.add(tuple(pixel_values.shape))
 
@@ -219,6 +224,7 @@ def test_repeated_image_hits_the_processor_cache():
     model_config = ModelConfig(
         model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf", model_impl="transformers"
     )
+    assert model_config.multimodal_config is not None
     model_config.multimodal_config.mm_processor_cache_gb = 4
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     cache = MultiModalProcessorOnlyCache(model_config)
@@ -245,16 +251,7 @@ def test_repeated_image_hits_the_processor_cache():
         ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", "<image>\nWhat is this?"),
         ("google/gemma-3-4b-it", "<start_of_image> What is this?"),
         ("HuggingFaceTB/SmolVLM-256M-Instruct", "<image>What is this?"),
-        pytest.param(
-            "BAAI/Emu3-Chat-hf",
-            "<image> and more text",
-            marks=pytest.mark.xfail(
-                reason="Emu3Processor prepends the BOS token itself because the "
-                "tokenizer doesn't, so the unexpanded prompt vLLM tokenizes "
-                "never gets one.",
-                strict=False,
-            ),
-        ),
+        ("BAAI/Emu3-Chat-hf", "<image> and more text"),
     ],
 )
 def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
@@ -267,14 +264,10 @@ def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
     info = mm_processor.info
     image = ImageAsset("cherry_blossom").pil_image
 
-    hf_processor = info.get_hf_processor()
-    prompt_ids = info.get_tokenizer().encode(
-        prompt, **info.default_tok_params.get_encode_kwargs()
-    )
     hf_ids = info.ctx.call_hf_processor(
-        hf_processor,
-        dict(text=hf_processor.decode(prompt_ids), images=[image]),
-        dict(truncation=False, add_special_tokens=False),
+        info.get_hf_processor(),
+        dict(text=prompt, images=[image]),
+        dict(truncation=False),
     )["input_ids"][0].tolist()
 
     result = mm_processor(
@@ -303,5 +296,9 @@ def test_nested_image_fields_split_per_image():
     items = result["mm_kwargs"]["image"]
     assert len(items) == 2
     for item in items:
+        assert item is not None
         pixel_values = item["pixel_values"].data
-        assert pixel_values.shape[1] == int(item["num_image_patches"].data)
+        num_image_patches = item["num_image_patches"].data
+        assert isinstance(pixel_values, torch.Tensor)
+        assert isinstance(num_image_patches, torch.Tensor)
+        assert pixel_values.shape[1] == int(num_image_patches)

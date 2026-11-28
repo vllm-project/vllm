@@ -9,14 +9,15 @@ from pydantic import ConfigDict, Field, model_validator
 
 from vllm import envs
 from vllm.config.kernel import MEGA_MOE_BACKENDS, KernelConfig
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.config.cache import CacheConfig
+    from vllm.sampling_params import SamplingParams
 else:
     ModelConfig = Any
     CacheConfig = Any
@@ -35,6 +36,15 @@ class LoRAConfig:
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
+    split_k_reduction: Literal["atomic", "kernel"] = "atomic"
+    """Triton LoRA linear shrink split-K reduction. `atomic` (default):
+    accumulate partial results using atomic adds in one kernel.
+    `kernel` sums FP32 partials in a separate fixed-order kernel.
+    Does not enable model-wide batch invariance or affect fused MoE LoRA.
+    A matching `VLLM_TUNED_CONFIG_FOLDER` shrink config takes precedence, followed
+    by `VLLM_BATCH_INVARIANT=1` (which selects `kernel`), then this option.
+    See https://github.com/vllm-project/vllm/issues/70061.
+    """
     fully_sharded_loras: bool = False
     """By default, only half of the LoRA computation is sharded with tensor
     parallelism. Enabling this will use the fully sharded layers. At high
@@ -47,8 +57,11 @@ class LoRAConfig:
     """Data type for LoRA. If auto, will default to base model dtype."""
     target_modules: list[str] | None = None
     """Restrict LoRA to specific module suffixes (e.g., ["o_proj", "qkv_proj"]).
-    If None, all supported LoRA modules are used. This allows deployment-time
-    control over which modules have LoRA applied, useful for performance tuning."""
+    An explicit list takes precedence over `enable_lora_embedding_modules`."""
+    enable_embedding_modules: bool = False
+    """Enable LoRA on input embeddings and `lm_head` alongside the default
+    LoRA modules. Both are skipped by default. Ignored when
+    `lora_target_modules` is specified."""
     default_mm_loras: dict[str, str] | None = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -88,10 +101,23 @@ class LoRAConfig:
     """Maximum output size for LoRA classification heads. Defaults to the
     base classification head size."""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def validate_prompt_logprobs(self, params: "SamplingParams") -> None:
+        if params.prompt_logprobs is None and params.prompt_logprob_token_ids is None:
+            return
+        lm_head_enabled = (
+            any("lm_head" in name for name in self.target_modules)
+            if self.target_modules is not None
+            else self.enable_embedding_modules
+        )
+        if lm_head_enabled:
+            raise VLLMValidationError(
+                "prompt_logprobs and prompt_logprob_token_ids are unsupported "
+                "when lm_head LoRA is enabled for the deployment."
+            )
+
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -99,22 +125,17 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.enable_tower_connector_lora)
-        factors.append(self.enable_mixed_moe_lora_format)
-        factors.append(self.enable_moe_shared_loras)
-        factors.append(self.max_lora_cls_labels)
-        # target_modules affects which modules get LoRA applied
-        factors.append(
-            tuple(sorted(self.target_modules)) if self.target_modules else None
-        )
-
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            # Runtime/placement only; does not affect compiled graph
+            "max_cpu_loras",
+            "default_mm_loras",
+            "specialize_active_lora",
+        }
+        factors = get_compile_factors(self, ignored_factors)
+        if self.target_modules is not None:
+            # Order is not semantic
+            factors["target_modules"] = sorted(self.target_modules)
+        return factors
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
@@ -160,7 +181,10 @@ class LoRAConfig:
             self.lora_dtype = getattr(torch, self.lora_dtype)
 
         architectures = getattr(model_config, "architectures", None) or []
-        is_inkling = any("Inkling" in arch for arch in architectures)
+        # Inkling2 has no Lamport fused-collective path.
+        is_inkling = any(
+            "Inkling" in arch and "Inkling2" not in arch for arch in architectures
+        )
         if is_inkling and os.environ.get("INKLING_MULTIMEM_AR", "1") != "0":
             raise ValueError(
                 "Inkling LoRA requires INKLING_MULTIMEM_AR=0: the Lamport "

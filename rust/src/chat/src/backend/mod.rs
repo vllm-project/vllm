@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::Value;
-use vllm_text::backend::hf::{HfOverrides, ModelSource};
+use serde_json::{Map, Value};
+use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
@@ -16,11 +16,10 @@ use crate::request::ChatRequest;
 use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection, ToolStrictLevel};
 
 pub mod hf;
+mod tokenizerless;
 
 /// Options for creating a new chat output processor.
-pub struct NewChatOutputProcessorOptions<'a> {
-    pub tool_call_parser: &'a ParserSelection,
-    pub reasoning_parser: &'a ParserSelection,
+pub struct NewChatOutputProcessorOptions {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     pub tool_strict_level: Option<ToolStrictLevel>,
@@ -42,8 +41,20 @@ pub trait ChatBackend: Send + Sync {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> Result<DynChatOutputProcessor>;
+
+    /// Effective tool-call parser name, if the output processors parse tool
+    /// calls with a selectable parser.
+    fn tool_call_parser_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Effective reasoning parser name, if the output processors parse
+    /// reasoning with a selectable parser.
+    fn reasoning_parser_name(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Shared trait-object form of [`ChatBackend`].
@@ -71,12 +82,24 @@ pub struct LoadModelBackendsOptions {
     pub tokenizer: Option<ModelSource>,
     /// Source of `config.json` and `generation_config.json`, or `None` for the model.
     pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only, rejecting chat requests and
+    /// text prompts (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
+    /// Token for Hub downloads (`--hf-token`), or `None` for `HF_TOKEN` and
+    /// the stored login token.
+    pub hf_token: Option<HfToken>,
     /// JSON Merge Patch applied to the model config before loading any backend.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
+    /// Keys applied over the generation-config sampling defaults.
+    pub override_generation_config: Map<String, Value>,
     /// Which chat renderer implementation to use.
     pub renderer: RendererSelection,
+    /// Tool-call parser selection, resolved for the model at load.
+    pub tool_call_parser: ParserSelection,
+    /// Reasoning parser selection, resolved for the model at load.
+    pub reasoning_parser: ParserSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
     /// language-only.
     pub language_model_only: bool,
@@ -91,8 +114,10 @@ pub struct LoadModelBackendsOptions {
     /// native renderers inherit supported reasoning controls below request controls.
     pub default_chat_template_kwargs: HashMap<String, Value>,
     /// Maximum number of input items allowed per prompt for each modality.
-    /// Unspecified modalities are unlimited.
+    /// Unspecified modalities default to the model's default, else 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
 }
 
 /// Shared backends loaded from a model id.

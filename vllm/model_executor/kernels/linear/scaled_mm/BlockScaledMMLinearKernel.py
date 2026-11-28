@@ -7,6 +7,10 @@ from typing import ClassVar, Self
 
 import torch
 
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
@@ -20,7 +24,7 @@ from ..base import (
 from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class FP8BlockParams(FP8Params):
     weight_scale_inv: torch.Tensor | None
     weight_scale: torch.Tensor | None
@@ -39,8 +43,8 @@ class FP8BlockParams(FP8Params):
 
     @property
     def block_scale_attr(self) -> str:
-        """Fp8LinearMethod registers the block scale as ``weight_scale_inv``,
-        compressed-tensors as ``weight_scale``."""
+        """Fp8LinearMethod registers the block scale as `weight_scale_inv`,
+        compressed-tensors as `weight_scale`."""
         return (
             self.WEIGHT_SCALE
             if self.weight_scale_inv is None
@@ -100,7 +104,7 @@ class Fp8BlockScaledMMLinearKernel(
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -111,6 +115,19 @@ class Fp8BlockScaledMMLinearKernel(
         input_scale = params.input_scale
         scale_up = params.input_scale_ub
 
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            # Quantized by the producer (see input_quant_key).
+            qa = qa.flatten()
+            output_shape = [*qa.orig_shape[:-1], weight.shape[0]]
+            output = self.apply_block_scaled_mm(
+                A=qa.data, B=weight, As=qa.scale, Bs=weight_scale
+            )
+            if bias is not None:
+                output = output + bias
+            return output.to(dtype=out_dtype).view(*output_shape)
+
+        assert isinstance(x, torch.Tensor)
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
         output_shape = [*x.shape[:-1], weight.shape[0]]
@@ -182,8 +199,10 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         if not is_base_supported and not is_fallback_supported:
             return (
                 False,
-                f"base is not supported due to {reason_1}; "
-                f"fallback is not supported due to {reason_2}",
+                (
+                    f"base is not supported due to {reason_1}; "
+                    f"fallback is not supported due to {reason_2}"
+                ),
             )
         if not is_base_supported:
             return False, f"base is not supported due to {reason_1}"
@@ -200,8 +219,10 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         if not can_implement_base and not can_implement_fallback:
             return (
                 False,
-                f"base cannot implement due to {reason_1}; "
-                f"fallback cannot implement due to {reason_2}",
+                (
+                    f"base cannot implement due to {reason_1}; "
+                    f"fallback cannot implement due to {reason_2}"
+                ),
             )
         if not can_implement_base:
             return False, f"base cannot implement due to {reason_1}"

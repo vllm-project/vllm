@@ -3,15 +3,17 @@
 """Tests for the engine-based Inkling parser.
 
 Inkling output is a sequence of typed content blocks delimited by dedicated
-special tokens; the tool-call payload is ``{"name":...,"args":{...}}``
-between ``<|content_invoke_tool_json|>`` and ``<|end_message|>``. The
+special tokens; the tool-call payload is `{"name":...,"args":{...}}`
+between `<|content_invoke_tool_json|>` and `<|end_message|>`. The
 cases mirror the Rust unified parser's tests
-(``rust/src/parser/src/unified/inkling.rs``) where applicable.
+(`rust/src/parser/src/unified/inkling.rs`) where applicable.
 """
 
+import dataclasses
 import json
 
 import pytest
+import xgrammar
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
@@ -20,6 +22,7 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
@@ -31,8 +34,15 @@ from vllm.parser.engine.registered_adapters import (
     InklingParserToolAdapter,
 )
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
-from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
+from vllm.parser.inkling import (
+    InklingParser,
+    _inkling_arg_converter,
+    _inkling_arg_value_extender,
+    inkling_config,
+)
 from vllm.parser.parser_manager import ParserManager
+from vllm.sampling_params import SamplingParams
+from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
 MSG_MODEL = "<|message_model|>"
 TEXT_START = "<|content_text|>"
@@ -43,8 +53,15 @@ TOOL_ERROR = "<|content_tool_error|>"
 END_MESSAGE = "<|end_message|>"
 END_SAMPLING = "<|content_model_end_sampling|>"
 
+MSG_USER = "<|message_user|>"
+MSG_SYSTEM = "<|message_system|>"
+MSG_TOOL = "<|message_tool|>"
+
 _TML_VOCAB = {
+    MSG_USER: 200000,
     MSG_MODEL: 200001,
+    MSG_SYSTEM: 200002,
+    MSG_TOOL: 200003,
     TEXT_START: 200004,
     END_SAMPLING: 200006,
     THINK_START: 200008,
@@ -75,7 +92,7 @@ _MARKERS = sorted(_TML_VOCAB, key=len, reverse=True)
 def _tokenize(text: str) -> list[tuple[int, str]]:
     """Tokenize like the real stream: markers are atomic special tokens,
     plain text becomes one token per character (matching the mock
-    tokenizer's ``chr``-based decode)."""
+    tokenizer's `chr`-based decode)."""
     tokens: list[tuple[int, str]] = []
     i = 0
     while i < len(text):
@@ -91,7 +108,7 @@ def _tokenize(text: str) -> list[tuple[int, str]]:
 
 
 def _stream(parser, request, text: str, chunk_size: int):
-    """Stream production-shaped deltas: ``chunk_size`` tokens per delta,
+    """Stream production-shaped deltas: `chunk_size` tokens per delta,
     with delta_token_ids covering every token (specials and text)."""
     tokens = _tokenize(text)
     results = []
@@ -178,9 +195,9 @@ class _TwoPassInklingParser(DelegatingParser):
 
 
 def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
-    """Stream ``text`` through ``DelegatingParser.parse_delta``, ``chunk_size``
-    tokens per delta; return ``(content, reasoning, ordered tool names,
-    ordered tool arguments)``. Arguments arrive in fragments, so they are
+    """Stream `text` through `DelegatingParser.parse_delta`, `chunk_size`
+    tokens per delta; return `(content, reasoning, ordered tool names,
+    ordered tool arguments)`. Arguments arrive in fragments, so they are
     concatenated per tool index."""
     tokens = _tokenize(text)
     content, reasoning = "", ""
@@ -248,6 +265,92 @@ class TestArgConverter:
     def test_non_object_args_rejected(self):
         with pytest.raises(ValueError, match="JSON object"):
             _inkling_arg_converter('{"name":"x","args":[1]}', False)
+
+
+# Escapes, braces, non-ASCII and marker-like text that must stay inside the value.
+LONG_ARG_LINE = 'if a < b: print("x\\y", {"k": [1, "}"]})  # <|end_message \u00e9\n'
+
+
+def _long_tool_block(lines: int) -> str:
+    args = json.dumps(
+        {"path": "/repo/app.py", "mode": 644, "content": LONG_ARG_LINE * lines}
+    )
+    return _tool_block("write_file", args)
+
+
+class TestArgValueExtender:
+    """The open `args` object streams without re-running the converter."""
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 64])
+    def test_long_call_streams_non_streaming_arguments(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        text = _long_tool_block(lines=200)
+
+        results = _stream(InklingParser(mock_tokenizer), mock_request, text, chunk_size)
+        result = InklingParser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert (
+            collect_tool_arguments(results) == result.tool_calls[0].function.arguments
+        )
+
+    def test_conversions_do_not_grow_with_argument_length(
+        self, mock_tokenizer, mock_request
+    ):
+        base = inkling_config()
+
+        def streaming_conversions(lines: int) -> int:
+            calls = 0
+
+            def counting_converter(raw_args: str, partial: bool) -> str:
+                nonlocal calls
+                calls += partial
+                return _inkling_arg_converter(raw_args, partial)
+
+            parser = InklingParser(
+                mock_tokenizer,
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            _stream(parser, mock_request, _long_tool_block(lines), 4)
+            return calls
+
+        assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
+
+    def test_string_extender_stops_at_closing_quote(self):
+        extend = _inkling_arg_value_extender('{"name":"f","args":{"a":"x')
+        assert extend is not None
+        assert [extend(d) for d in ["{y}", '\\"', "z\\\\", '"']] == [
+            "{y}",
+            '\\"',
+            "z\\\\",
+            None,
+        ]
+
+    def test_nested_extender_stops_when_value_closes(self):
+        extend = _inkling_arg_value_extender('{"name":"f","args":{"a":{"b":"}')
+        assert extend is not None
+        assert [extend(d) for d in ['"', ',"c":[1,', "2]", "}"]] == [
+            '"',
+            ',"c":[1,',
+            "2]",
+            None,
+        ]
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            '{"name":"f"',
+            '{"name":"f","args":{"a":"x"}',
+            '{"name":"f","args":{"a":"x","b',
+            '{"name":"f","args":{"a":',
+            '{"name":"f","args":{"a": ',
+        ],
+        ids=["args_not_started", "args_closed", "key", "value_not_started", "ws"],
+    )
+    def test_no_extender_unless_value_is_open(self, raw_args):
+        assert _inkling_arg_value_extender(raw_args) is None
 
 
 class TestNonStreaming:
@@ -615,16 +718,16 @@ class TestRegisteredAdapters:
 
 
 class TestDelegatingTwoPass:
-    """Served reasoning+tool ``DelegatingParser`` path (issue #51387).
+    """Served reasoning+tool `DelegatingParser` path (issue #51387).
 
-    Unlike ``TestStreaming`` above (single engine, ``skip_tool_parsing=False``),
+    Unlike `TestStreaming` above (single engine, `skip_tool_parsing=False`),
     these drive the real two-pass parser, where the reasoning pass runs with
-    ``skip_tool_parsing=True`` — the path where the trailing-marker leak lived.
+    `skip_tool_parsing=True` — the path where the trailing-marker leak lived.
 
     The bug is specific to the *tools-enabled* plain-text/reasoning path, so the
     content-only cases (which emit no tool call and would still pass in a
     no-tools mode) offer a real function tool on both the request and the
-    parser, keeping ``tool_choice="auto"``.
+    parser, keeping `tool_choice="auto"`.
     """
 
     GEN_PROMPT = [_TML_VOCAB[MSG_MODEL]]
@@ -812,7 +915,7 @@ class TestDelegatingTwoPass:
         emitted one, so the tool pass never ran: the entire tool block came
         back as assistant content and no tool call was parsed. Every opener
         that starts a visible block has to confirm the boundary, which is why
-        ``TOOL_TEXT`` and ``TOOL_ERROR`` are covered alongside ``TEXT_START``.
+        `TOOL_TEXT` and `TOOL_ERROR` are covered alongside `TEXT_START`.
         """
         tools = [_function_tool()]
         mock_request.tools = tools
@@ -836,7 +939,7 @@ class TestDelegatingTwoPass:
     ):
         """A tool call with no block of any kind ahead of it.
 
-        The generation prompt ends in ``<|message_model|>``, so this fires
+        The generation prompt ends in `<|message_model|>`, so this fires
         TOOL_START straight from MESSAGE_HEADER. A tool block is the one
         opener that confirms no reasoning is open without rendering visible
         content, so it is the case the visible-block openers cannot cover.
@@ -859,7 +962,7 @@ class TestDelegatingTwoPass:
     def test_function_name_header_before_tool_start_streaming(
         self, mock_tokenizer, mock_request
     ):
-        """The optional function name between ``<|message_model|>`` and the
+        """The optional function name between `<|message_model|>` and the
         content-kind marker is metadata: the buffered header must be
         discarded on the way out, not flushed into content."""
         tools = [_function_tool()]
@@ -877,7 +980,7 @@ class TestDelegatingTwoPass:
 
     def test_content_state_tool_start_streaming(self, mock_tokenizer, mock_request):
         """Same opener reached from CONTENT rather than MESSAGE_HEADER: a
-        text block closed with no ``<|message_model|>`` before the tool
+        text block closed with no `<|message_model|>` before the tool
         block. Preceding text must reach content exactly once, unmarked."""
         tools = [_function_tool()]
         mock_request.tools = tools
@@ -913,8 +1016,8 @@ def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
 
 
 def test_skip_reasoning_parsing_inert_for_shared_markers():
-    """``skip_reasoning_parsing`` may only bypass reasoning-exclusive
-    markers. Inkling has none — ``<|end_message|>`` is labelled THINK_END
+    """`skip_reasoning_parsing` may only bypass reasoning-exclusive
+    markers. Inkling has none — `<|end_message|>` is labelled THINK_END
     yet also closes text, header, and tool blocks — so the flag must be
     inert: a tool block still closes through its transition and following
     text returns to CONTENT instead of leaking into the argument stream."""
@@ -931,10 +1034,10 @@ def test_skip_reasoning_parsing_inert_for_shared_markers():
 
 
 class TestToolParserWithoutReasoningParser:
-    """Inkling served with only the tool parser, no ``--reasoning-parser``.
+    """Inkling served with only the tool parser, no `--reasoning-parser`.
 
-    That configuration turns on ``skip_reasoning_parsing``, and Inkling
-    labels ``<|end_message|>`` as THINK_END; a bypass keyed on the label
+    That configuration turns on `skip_reasoning_parsing`, and Inkling
+    labels `<|end_message|>` as THINK_END; a bypass keyed on the label
     would neutralize the closer of every block kind, leaking markers into
     content and leaving tool calls unterminated. Structure must keep
     parsing exactly as with the reasoning parser attached."""
@@ -1021,3 +1124,186 @@ class TestToolParserWithoutReasoningParser:
         )
         assert [c.name for c in calls] == ["get_weather"]
         assert not content
+
+
+_INKLING2_VOCAB = {**_TML_VOCAB, "<|content_xml|>": 200024}
+
+
+class _ToolOnlyInklingParser(DelegatingParser):
+    tool_parser_cls = InklingParserToolAdapter
+
+
+class TestInkling2:
+    """Inkling2 prompts render no generation prefix: they end between
+    messages and the model emits its own `<|message_model|>` headers."""
+
+    PROMPT = [
+        _TML_VOCAB[MSG_SYSTEM],
+        _TML_VOCAB[TEXT_START],
+        ord("e"),
+        _TML_VOCAB[END_MESSAGE],
+        _TML_VOCAB[MSG_USER],
+        _TML_VOCAB[TEXT_START],
+        ord("q"),
+        _TML_VOCAB[END_MESSAGE],
+    ]
+    OUTPUT = (
+        f"{MSG_MODEL}{THINK_START}plan{END_MESSAGE}"
+        f"{MSG_MODEL}{TEXT_START}Checking.{END_MESSAGE}"
+        + MSG_MODEL
+        + _tool_block("f", '{"a":1}')
+        + MSG_MODEL
+        + _tool_block("g", '{"b":[2]}')
+    )
+
+    @pytest.fixture
+    def mock_tokenizer(self):
+        return make_mock_tokenizer(_INKLING2_VOCAB)
+
+    def test_prompt_does_not_end_reasoning(self, parser):
+        assert not parser.is_reasoning_end(self.PROMPT)
+        assert not parser.is_reasoning_end(
+            self.PROMPT + [_TML_VOCAB[MSG_MODEL], _TML_VOCAB[THINK_START]]
+        )
+        assert parser.is_reasoning_end(
+            self.PROMPT + [_TML_VOCAB[MSG_MODEL], _TML_VOCAB[TEXT_START], ord("x")]
+        )
+
+    def test_non_streaming(self, mock_tokenizer, mock_request):
+        tools = [_function_tool("f"), _function_tool("g")]
+        mock_request.tools = tools
+        reasoning, content, calls = _delegating(mock_tokenizer, tools).parse(
+            self.OUTPUT, mock_request, enable_auto_tools=True
+        )
+        assert reasoning == "plan"
+        assert content == "Checking."
+        assert [(c.name, json.loads(c.arguments)) for c in calls] == [
+            ("f", {"a": 1}),
+            ("g", {"b": [2]}),
+        ]
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 64])
+    def test_streaming(self, mock_tokenizer, mock_request, chunk_size):
+        tools = [_function_tool("f"), _function_tool("g")]
+        mock_request.tools = tools
+        content, reasoning, names, args = _stream_delegating(
+            _delegating(mock_tokenizer, tools),
+            mock_request,
+            self.OUTPUT,
+            chunk_size,
+            self.PROMPT,
+        )
+        assert reasoning == "plan"
+        assert content == "Checking."
+        assert names == ["f", "g"]
+        assert [json.loads(a) for a in args] == [{"a": 1}, {"b": [2]}]
+
+    @pytest.mark.parametrize("chunk_size", [1, 64])
+    def test_streaming_text_only(self, mock_tokenizer, mock_request, chunk_size):
+        content, reasoning, names, _ = _stream_delegating(
+            _delegating(mock_tokenizer),
+            mock_request,
+            f"{MSG_MODEL}{THINK_START}hm{END_MESSAGE}"
+            f"{MSG_MODEL}{TEXT_START}4{END_SAMPLING}",
+            chunk_size,
+            self.PROMPT,
+        )
+        assert (reasoning, content, names) == ("hm", "4", [])
+
+    @staticmethod
+    def _json_request(tools=None, assistant: str | None = None):
+        messages = [{"role": "user", "content": "q"}]
+        if assistant is not None:
+            messages.append({"role": "assistant", "content": assistant})
+        return ChatCompletionRequest(
+            model="inkling2",
+            messages=messages,
+            tools=tools,
+            continue_final_message=assistant is not None,
+            add_generation_prompt=assistant is None,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "object", "properties": {"a": {}}},
+                },
+            },
+        )
+
+    @classmethod
+    def _json_grammar_matcher(cls, parser, **request_kwargs):
+        """Adjust a JSON-schema request and compile its grammar over a
+        one-token-per-character vocab that holds the Inkling markers."""
+        request = parser.adjust_request(cls._json_request(**request_kwargs))
+        assert request.response_format is None
+        assert request.resolve_reasoning_ended(None, cls.PROMPT) is True
+        validate_xgrammar_grammar(
+            SamplingParams(structured_outputs=request.structured_outputs)
+        )
+
+        vocab = [chr(i) if i < 128 else f"<unused_{i}>" for i in range(200058)]
+        for marker, token_id in _INKLING2_VOCAB.items():
+            vocab[token_id] = marker
+        end_sampling = _TML_VOCAB[END_SAMPLING]
+        compiler = xgrammar.GrammarCompiler(
+            xgrammar.TokenizerInfo(vocab, stop_token_ids=[end_sampling])
+        )
+        compiled = compiler.compile_structural_tag(
+            request.structured_outputs.structural_tag
+        )
+        return xgrammar.GrammarMatcher(compiled)
+
+    @staticmethod
+    def _accepts(matcher, output: str) -> bool:
+        token_ids = [tid for tid, _ in _tokenize(output + END_SAMPLING)]
+        return all(matcher.accept_token(tid) for tid in token_ids) and (
+            matcher.is_terminated()
+        )
+
+    def test_json_response_format_frames_final_text(self, parser):
+        matcher = self._json_grammar_matcher(parser)
+        assert self._accepts(
+            matcher,
+            f"{MSG_MODEL}{THINK_START}any {{text}}{END_MESSAGE}"
+            f'{MSG_MODEL}{TEXT_START}{{"a": 1}}{END_MESSAGE}',
+        )
+
+    def test_json_response_format_continues_empty_answer(self, parser):
+        matcher = self._json_grammar_matcher(parser, assistant="")
+        assert self._accepts(matcher, f"{{}}{END_MESSAGE}")
+
+    def test_json_response_format_rejects_nonempty_continuation(self, parser):
+        with pytest.raises(ValueError, match="nonempty assistant message"):
+            parser.adjust_request(self._json_request(assistant="{"))
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            # JSON outside a text block.
+            '{"a": 1}',
+            # A final text block that is not the schema.
+            f"{MSG_MODEL}{TEXT_START}plain{END_MESSAGE}",
+            # Framing inside reasoning.
+            f"{MSG_MODEL}{THINK_START}a{TOOL_JSON}{END_MESSAGE}",
+            # Tool calls in place of the JSON answer, even under auto.
+            f"{MSG_MODEL}{_tool_block('f', '{}')}",
+        ],
+    )
+    def test_json_response_format_rejects(self, parser, output):
+        matcher = self._json_grammar_matcher(parser, tools=[_function_tool("f")])
+        assert not self._accepts(matcher, output)
+
+    def test_json_response_format_with_tool_parser_only(self, mock_tokenizer):
+        """The tool parser alone frames the grammar; it never sees the prompt."""
+        matcher = self._json_grammar_matcher(
+            _ToolOnlyInklingParser(mock_tokenizer, [_function_tool("f")]),
+            tools=[_function_tool("f")],
+        )
+        assert self._accepts(matcher, f'{MSG_MODEL}{TEXT_START}{{"a":1}}{END_MESSAGE}')
+
+
+def test_inkling_json_response_format_is_unframed(parser):
+    """Inkling (v1) leaves a JSON response format to the default handling."""
+    request = TestInkling2._json_request()
+    response_format = request.response_format
+    assert parser.adjust_request(request).response_format == response_format

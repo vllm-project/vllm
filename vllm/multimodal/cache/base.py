@@ -35,12 +35,12 @@ class MultiModalCacheMissError(RuntimeError):
     are not cached.
 
     P0 (frontend) keeps a metadata-only shadow of P1 (engine) and sends
-    ``data=None`` on a shadow hit. The two caches are updated in different orders
+    `data=None` on a shadow hit. The two caches are updated in different orders
     across processes, so they can drift -- leaving P0 referencing items P1 has
     evicted. Raising (instead of asserting) lets the engine return a retryable
     response and have P0 drop the stale entries
-    (``BaseMultiModalProcessorCache.invalidate``) so the client resends the data.
-    Carries every drifted ``mm_hash`` in the request so P0 can drop them all in one
+    (`BaseMultiModalProcessorCache.invalidate`) so the client resends the data.
+    Carries every drifted `mm_hash` in the request so P0 can drop them all in one
     pass -- one retry then recovers the whole request, not one item per retry.
     """
 
@@ -151,22 +151,6 @@ class MultiModalCache:
             )
 
         return size
-
-    @classmethod
-    def get_item_complexity(cls, value: MultiModalCacheValue) -> int:
-        """Get the number of leaf elements in a multi-modal cache value.
-
-        This provides a measure of structural complexity that can be useful
-        for debugging cache performance and understanding data patterns.
-
-        Args:
-            value: The multi-modal cache value to analyze.
-
-        Returns:
-            The number of leaf elements in the nested structure.
-
-        """
-        return json_count_leaves(value)
 
     @classmethod
     def get_lru_cache(
@@ -345,8 +329,16 @@ class BaseMultiModalProcessorCache(
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
+    def get_cached_item(self, mm_hash: str) -> MultiModalProcessorCacheInItem:
+        """Return a locally stored payload without updating eviction order.
+
+        Metadata-only and shared-memory sender caches do not retain a local
+        payload, so they return `None`.
+        """
+        return None
+
     def invalidate(self, mm_hash: str) -> None:
-        """Drop ``mm_hash`` from this P0 shadow cache to recover from P0/P1 drift.
+        """Drop `mm_hash` from this P0 shadow cache to recover from P0/P1 drift.
 
         No-op by default; shadow caches that can drift from P1 override this.
         """
@@ -417,6 +409,12 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         return mm_hash in self._cache
 
     @override
+    def get_cached_item(self, mm_hash: str) -> MultiModalProcessorCacheInItem:
+        if (cached_item := self._cache.peek(mm_hash)) is not None:
+            return cached_item.item, cached_item.prompt_updates
+        return None
+
+    @override
     def get_and_update_item(
         self,
         mm_item: MultiModalProcessorCacheInItem,
@@ -460,11 +458,15 @@ class BaseMultiModalReceiverCache(
         identifier for backward compatibility).
         """
         for feature in mm_features:
+            if feature.skip_mm_cache:
+                continue
             cache_key = feature.mm_hash or feature.identifier
             self.touch_receiver_cache_item(cache_key, feature.data)
 
         missing_mm_hashes: list[str] = []
         for feature in mm_features:
+            if feature.skip_mm_cache:
+                continue
             cache_key = feature.mm_hash or feature.identifier
             try:
                 feature.data = self.get_and_update_item(feature.data, cache_key)
