@@ -867,3 +867,17 @@ def test_gemma4_without_fa4_backend(architecture, kv_cache_dtype, expected):
     ):
         Gemma4Config.verify_and_update_config(config)
     assert config.attention_config.backend == AttentionBackendEnum[expected]
+
+
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_flash_attn_head_size_above_256_needs_fa4(monkeypatch, batch_invariant):
+    """Head sizes above 256 need FA4, which batch invariance downgrades to FA2."""
+    from vllm.v1.attention.backends import flash_attn
+
+    monkeypatch.setattr(flash_attn, "is_fa_version_supported", lambda v: v == 4)
+    monkeypatch.setattr(flash_attn.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(flash_attn.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    assert flash_attn.FlashAttentionBackend.supports_head_size(256)
+    assert flash_attn.FlashAttentionBackend.supports_head_size(512) == (
+        not batch_invariant
+    )

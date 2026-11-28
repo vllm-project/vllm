@@ -523,7 +523,8 @@ class FlashAttentionBackend(AttentionBackend):
         if current_platform.is_xpu():
             # The XPU SYCL kernels support head sizes up to 512.
             return head_size <= 512
-        if is_fa_version_supported(4):
+        # Batch invariance downgrades FA4 to FA2, which stops at head size 256.
+        if is_fa_version_supported(4) and not envs.VLLM_BATCH_INVARIANT:
             return head_size <= 512
         return False
 
