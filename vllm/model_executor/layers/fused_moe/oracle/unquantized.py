@@ -198,21 +198,23 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
 
 
+_UNQUANTIZED_BACKEND_MAP: dict[str, UnquantizedMoeBackend] = {
+    "triton": UnquantizedMoeBackend.TRITON,
+    "batched_triton": UnquantizedMoeBackend.BATCHED_TRITON,
+    "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+    "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+    "flashinfer_cutedsl": UnquantizedMoeBackend.FLASHINFER_CUTEDSL,
+    "aiter": UnquantizedMoeBackend.AITER,
+}
+
+
 def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend:
     """Map user's MoEBackend to UnquantizedMoeBackend."""
-    mapping = {
-        "triton": UnquantizedMoeBackend.TRITON,
-        "batched_triton": UnquantizedMoeBackend.BATCHED_TRITON,
-        "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-        "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-        "flashinfer_cutedsl": UnquantizedMoeBackend.FLASHINFER_CUTEDSL,
-        "aiter": UnquantizedMoeBackend.AITER,
-    }
-    if backend := mapping.get(runner_backend):
+    if backend := _UNQUANTIZED_BACKEND_MAP.get(runner_backend):
         return backend
     raise ValueError(
         f"moe_backend='{runner_backend}' is not supported for unquantized MoE. "
-        f"Expected one of {list(mapping.keys())}."
+        f"Expected one of {list(_UNQUANTIZED_BACKEND_MAP.keys())}."
     )
 
 
@@ -317,11 +319,18 @@ def select_unquantized_moe_backend(
         return oracle.return_or_raise(UnquantizedMoeBackend.MOONEP, AVAILABLE_BACKENDS)
 
     runner_backend = moe_config.moe_backend
-    # 'humming', 'marlin' and the RDNA3 int4 backends are quantization-only; an
-    # unquantized layer (e.g. excluded via modules_to_not_convert, or an
-    # unquantized MTP draft of a quantized model) falls through to auto instead
-    # of erroring.
-    if runner_backend not in ["auto", "humming", "marlin", "rdna3", "rdna3_int4_int8"]:
+    # Quantization-only backends (e.g. flashinfer_b12x, marlin, humming, deep_gemm,
+    # rdna3) fall through to 'auto' for unquantized layers (e.g. MTP draft models,
+    # modules_to_not_convert) instead of raising ValueError.
+    if runner_backend != "auto" and runner_backend not in _UNQUANTIZED_BACKEND_MAP:
+        logger.info_once(
+            "moe_backend='%s' is quantization-only; using 'auto' for this "
+            "unquantized MoE layer.",
+            runner_backend,
+        )
+        runner_backend = "auto"
+
+    if runner_backend != "auto":
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             moe_config.activation_format.is_batched
