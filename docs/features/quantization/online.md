@@ -141,6 +141,24 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 
 Combine with `--moe-backend` to pin a specific kernel family.
 
+On gfx950, Quark MXFP4 SiTU experts support an explicit MXFP8 activation
+override through the AITER backend:
+
+```bash
+VLLM_ROCM_USE_AITER=1 vllm serve amd/Kimi-K3-Quark-MXFP4-AttnFP8 \
+  --moe-backend aiter --quantization-config.moe.activation mxfp8
+```
+
+This selects `AITER_MXFP4_MXFP8`, preserves the packed MXFP4 weights and
+E8M0 scales, and quantizes activations to MXFP8 inside AITER for every token
+count. It requires BF16 inputs, bias-free experts, and AITER support for SiTU,
+`gate_mode`, `quant_dtype_a`, and `quant_dtype_a2`.
+The activation format and gate/up layout do not depend on
+`VLLM_ROCM_USE_AITER_MOE_SITUV2` or `AITER_BF16_FP8_MOE_BOUND`. Without an
+activation override the checkpoint's activation scheme is retained. MoRI
+prequantized dispatch is not supported by this backend; unsupported explicit
+requests raise rather than silently selecting BF16 activations.
+
 For MXFP4 linear layers on RDNA3/RDNA3.5 (gfx11), `int8_per_group_32` selects
 the W4A8 int8-dot GEMV for decode (batches of up to 8 tokens); larger batches
 run weight-only. On W4A4 checkpoints this replaces the MXFP4 activation

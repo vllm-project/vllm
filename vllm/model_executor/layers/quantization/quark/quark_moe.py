@@ -10,6 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
+from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -48,6 +49,7 @@ from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    _backend_activation_key,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -1559,6 +1561,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     # implements the packed MXFP4 / MXFP6 elements.
     supported_activation_quant_keys = [
         kMxfp4Dynamic,
+        kMxfp8Dynamic,
         kMxfp6E3M2Dynamic,
         kMxfp6E2M3Dynamic,
         kFp8DynamicTensorSym,
@@ -1577,6 +1580,16 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         weight_quant_key: QuantKey,
         activation_quant_key: QuantKey | None,
     ):
+        activation_override, explicit_override = user_activation_override(
+            "moe", get_current_vllm_config()
+        )
+        if explicit_override and weight_quant_key == kMxfp4Static:
+            if (
+                activation_override == kFp8StaticTensorSym
+                and activation_quant_key != kFp8StaticTensorSym
+            ):
+                raise ValueError("An FP8 static override requires checkpoint scales")
+            activation_quant_key = activation_override
         super().__init__(moe, weight_quant_key, activation_quant_key)
         self.weight_dtype = next(
             dtype
@@ -1631,6 +1644,30 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe, activation_key=kMxfp4Dynamic
             )
+        elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp8":
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, activation_key=kMxfp8Dynamic
+            )
+
+        if (
+            explicit_override
+            and weight_quant_key == kMxfp4Static
+            and self.mxfp4_backend != Mxfp4MoeBackend.NONE
+        ):
+            backend_key = _backend_activation_key(self.mxfp4_backend)
+            if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+                if activation_quant_key == kMxfp8Dynamic:
+                    raise NotImplementedError(
+                        "Quark MXFP4 emulation does not support MXFP8 activations"
+                    )
+            elif (
+                self.mxfp4_backend != Mxfp4MoeBackend.HUMMING
+                and backend_key != activation_quant_key
+            ):
+                raise NotImplementedError(
+                    f"Quark MXFP4 backend {self.mxfp4_backend.value} cannot honour "
+                    f"activation={activation_quant_key}; it computes {backend_key}"
+                )
 
         # Validation for unsupported schemes
         if any(
@@ -1684,7 +1721,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
-                    self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+                    self.mxfp4_backend,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                    activation=self.moe.activation,
                 )
             )
         return hidden_size, intermediate_size_per_partition
@@ -1843,6 +1883,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 activation=self.moe.activation,
+                activation_key=self.activation_quant_key,
             )
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = converted_weights
 

@@ -175,6 +175,7 @@ class Mxfp4MoeBackend(Enum):
     # W4A16: aiter Triton moe_gemm_a16w4 kernel (gfx942/gfx950/gfx1250)
     AITER_TRITON_MXFP4_BF16 = "AITER_TRITON_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
+    AITER_MXFP4_MXFP8 = "AITER_MXFP4_MXFP8"
     AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel (gfx950)
     # W4A4: aiter Triton/Gluon moe_gemm_a4w4 kernel (gfx1250)
     AITER_TRITON_MXFP4_MXFP4 = "AITER_TRITON_MXFP4_MXFP4"
@@ -312,6 +313,13 @@ def backend_to_kernel_cls(
 
         return [BatchedMarlinExperts]
 
+    elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+            AiterMxfp4Mxfp8Experts,
+        )
+
+        return [AiterMxfp4Mxfp8Experts]
+
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterMxfp4Experts,
@@ -406,6 +414,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
             Mxfp4MoeBackend.AITER_MXFP4_FP8,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
             Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
             Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         ],
@@ -434,6 +443,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
@@ -473,6 +483,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     if current_platform.is_rocm():
         return [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
             Mxfp4MoeBackend.EMULATION,
         ]
     if current_platform.is_xpu():
@@ -501,6 +512,7 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     if backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
     ):
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
@@ -919,7 +931,10 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128
         # rather than the generic ROCm 256 round-up, which would inflate
         # weights and OOM.
-        aiter_uses_128 = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+        aiter_uses_128 = backend in (
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
+        )
 
         # matmul_ogs uses block_k=128 for MXFP4 on pre-CDNA4 GPUs.
         # CDNA4's F16xMXFP4 configuration uses block_k=256.
@@ -1817,7 +1832,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and not is_gfx1250:
+    elif (
+        mxfp4_backend
+        in (
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
+        )
+        and not is_gfx1250
+    ):
         # Initially introduced for DeepSeekV4
 
         if w13_bias is not None:
@@ -1832,7 +1854,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
             fp4_dtype = torch.float4_e2m1fn_x2
             e8m0_dtype = torch.float8_e8m0fnu
-            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            guinterleave = (
+                mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8
+                or rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            )
             w13 = rocm_aiter_ops.shuffle_weight_a16w4(
                 w13_weight.data.view(fp4_dtype), 16, guinterleave
             )
@@ -2138,7 +2163,10 @@ def make_mxfp4_moe_quant_config(
     if mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
         # The megakernel quantizes activations itself and owns its scales.
         return FusedMoEQuantConfig.make("nvfp4", weight_dtype="mxfp4")
-    if mxfp4_backend == Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
+    if mxfp4_backend in (
+        Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
+    ):
         return mxfp4_mxfp8_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,

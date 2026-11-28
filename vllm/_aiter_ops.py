@@ -351,6 +351,7 @@ def _rocm_aiter_fused_moe_impl(
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
     q_dtype_a: torch.dtype | None = None,
+    q_dtype_a2: torch.dtype | None = None,
 ) -> torch.Tensor:
     has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
         shared_w1,
@@ -390,6 +391,8 @@ def _rocm_aiter_fused_moe_impl(
         # is checked at config time, so this is only reached on an AITER
         # build new enough to accept it.
         extra_kwargs["quant_dtype_a"] = q_dtype_a
+    if q_dtype_a2 is not None:
+        extra_kwargs["quant_dtype_a2"] = q_dtype_a2
 
     return fused_moe(
         hidden_states,
@@ -448,6 +451,7 @@ def _rocm_aiter_fused_moe_fake(
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
     q_dtype_a: torch.dtype | None = None,
+    q_dtype_a2: torch.dtype | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -3232,6 +3236,18 @@ class rocm_aiter_ops:
 
         return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_quant_dtype_a2(cls) -> bool:
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        return {"quant_dtype_a", "quant_dtype_a2"}.issubset(
+            inspect.signature(fused_moe).parameters
+        )
+
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
@@ -3986,6 +4002,7 @@ class rocm_aiter_ops:
         shared_w2_scale: torch.Tensor | None = None,
         shared_expert_id: int = -1,
         q_dtype_a: torch.dtype | None = None,
+        q_dtype_a2: torch.dtype | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -4018,6 +4035,7 @@ class rocm_aiter_ops:
             shared_w2_scale,
             shared_expert_id,
             q_dtype_a,
+            q_dtype_a2,
         )
 
     @staticmethod

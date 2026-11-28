@@ -21,8 +21,9 @@ from packaging import version
 
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig, CacheDType
+from vllm.config.quantization import QuantSpec, layer_target_spec_scope
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
@@ -1420,7 +1421,7 @@ def test_quant_method_dispatch_unsupported(weight, input_tensors):
     [case for case in QTENSOR_CONFIGS if case.expected_error is None],
     ids=lambda case: case.name,
 )
-def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_config):
+def test_quant_method_dispatch_instantiation(case, monkeypatch, quark_mxfp4_config):
     config = _make_qtensor_config(case.weight, case.input_tensors)
     assert case.dispatch_cls is not None
     if issubclass(case.dispatch_cls, QuarkScheme):
@@ -1478,16 +1479,6 @@ def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_con
             lambda: True,
         )
 
-        # default_vllm_config carries no model, but the FP8 and OCP MX methods
-        # read the model type off the HF config.
-        monkeypatch.setattr(
-            "vllm.model_executor.layers.quantization.quark.quark_moe."
-            "get_current_vllm_config",
-            lambda: SimpleNamespace(
-                model_config=SimpleNamespace(hf_config=SimpleNamespace())
-            ),
-        )
-
         layer = TestRoutedExperts()
         method = config.get_quant_method(layer, "experts")
 
@@ -1495,6 +1486,59 @@ def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_con
 
 
 QUARK_MOE_MODULE = "vllm.model_executor.layers.quantization.quark.quark_moe"
+
+
+@pytest.fixture
+def quark_mxfp4_config(tmp_path):
+    from transformers import LlamaConfig
+
+    LlamaConfig(
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        vocab_size=32,
+        architectures=["LlamaForCausalLM"],
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(model=str(tmp_path), skip_tokenizer_init=True)
+    )
+    with set_current_vllm_config(config):
+        yield config
+
+
+def test_quark_mxfp4_respects_explicit_emulation(quark_mxfp4_config):
+    from dataclasses import replace
+
+    config = replace(_make_test_moe_config(), moe_backend="emulation")
+    method = QuarkOCP_MX_MoEMethod(config, kMxfp4Static, kMxfp4Dynamic)
+
+    assert method.mxfp4_backend == Mxfp4MoeBackend.EMULATION
+    assert method.activation_quant_key == kMxfp4Dynamic
+
+
+def test_quark_mxfp4_rejects_mxfp8_emulation(quark_mxfp4_config):
+    from dataclasses import replace
+
+    config = replace(_make_test_moe_config(), moe_backend="emulation")
+    spec = QuantSpec(activation="mxfp8")
+    with (
+        layer_target_spec_scope(spec),
+        pytest.raises(NotImplementedError, match="emulation.*MXFP8"),
+    ):
+        QuarkOCP_MX_MoEMethod(config, kMxfp4Static, kMxfp4Dynamic)
+
+
+def test_quark_mxfp4_rejects_static_override_without_scales(quark_mxfp4_config):
+    spec = QuantSpec(activation="fp8_per_tensor_static")
+    with (
+        layer_target_spec_scope(spec),
+        pytest.raises(ValueError, match="static override requires checkpoint scales"),
+    ):
+        QuarkOCP_MX_MoEMethod(_make_test_moe_config(), kMxfp4Static, kMxfp4Dynamic)
+
+
 # validate_fp8_block_shape_moe imports this from vllm.distributed when called,
 # so the patch has to target the source module rather than a local binding.
 TP_WORLD_SIZE = "vllm.distributed.get_tensor_model_parallel_world_size"
