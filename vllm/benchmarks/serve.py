@@ -49,6 +49,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
+    _get_headers,
     async_request_profile,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
@@ -102,6 +103,7 @@ async def _align_prompts_to_server_tokenizer(
     model_id: str,
     input_requests: list[SampleRequest],
     ssl_context: ssl.SSLContext | bool | None = None,
+    headers: dict | None = None,
 ) -> list[SampleRequest]:
     """Re-align prompts if local/server tokenizers disagree."""
     if not input_requests or not isinstance(input_requests[0].prompt, str):
@@ -111,7 +113,7 @@ async def _align_prompts_to_server_tokenizer(
     detok_url = f"{base_url}/detokenize"
     connector = aiohttp.TCPConnector(ssl=ssl_context)
 
-    async with aiohttp.ClientSession(connector=connector) as session:
+    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
         sem = asyncio.Semaphore(64)
 
         async def _tokenize(prompt: str) -> list[int]:
@@ -890,6 +892,7 @@ async def benchmark(
         )
         return aiohttp.ClientSession(
             connector=connector,
+            headers=extra_headers,
             trust_env=True,
             timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
         )
@@ -1746,7 +1749,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
         metavar="KEY=VALUE",
         nargs="*",
         help="Key-value pairs (e.g, --header x-additional-info=0.3.3) "
-        "for headers to be passed with each request. These headers override "
+        "for headers to be passed with inference, profiling, and metrics requests. "
+        "These headers override "
         "per backend constants and values set via environment variable, and "
         "will be overridden by other arguments (such as request ids).",
     )
@@ -2185,13 +2189,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         base_url = f"http://{host_port}"
 
     # Headers
-    headers = None
+    headers = (
+        _get_headers()
+        if args.backend in OPENAI_COMPATIBLE_BACKENDS
+        or args.backend in POOLING_BACKENDS
+        else {}
+    )
     if args.header:
-        headers = {}
         for item in args.header:
             if "=" in item:
                 kvstring = item.split("=", 1)
-                headers[kvstring[0].strip()] = kvstring[1].strip()
+                name = kvstring[0].strip()
+                if name.lower() == "authorization":
+                    name = "Authorization"
+                headers[name] = kvstring[1].strip()
             else:
                 raise ValueError("Invalid header format. Please use KEY=VALUE format.")
 
@@ -2295,7 +2306,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.dataset_name in ("random", "prefix_repetition"):
         input_requests = await _align_prompts_to_server_tokenizer(
-            base_url, model_id, input_requests, ssl_context
+            base_url, model_id, input_requests, ssl_context, headers
         )
 
     goodput_config_dict = check_goodput_args(args)
