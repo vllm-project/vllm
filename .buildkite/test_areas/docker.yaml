@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":computer: (CPU) Docker Build Metadata"
   key: docker-build-metadata
+  automatic_shard: true
   timeout_in_minutes: 20
   device: cpu-small
   source_file_dependencies:
@@ -12,6 +13,7 @@ steps:
     - .buildkite/scripts/rocm/build.sh
     - .buildkite/scripts/rocm/publish.sh
     - tools/vllm-rocm/therock_wheels.py
+    - tools/vllm-rocm/amdsmi/
     - docker/Dockerfile
     - docker/Dockerfile.cpu
     - docker/Dockerfile.rocm
@@ -32,6 +34,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Docker Build Metadata"
+      automatic_shard: true
       dind: false
       device: mi250_1
       no_gpu: true
@@ -46,6 +49,7 @@ steps:
       - .buildkite/scripts/rocm/build.sh
       - .buildkite/scripts/rocm/publish.sh
       - tools/vllm-rocm/therock_wheels.py
+      - tools/vllm-rocm/amdsmi/
       - tests/tools/test_docker_build_metadata_args.py
       - tests/tools/test_rocm_build.py
       - tests/tools/test_amd_ci_fast_exit.py

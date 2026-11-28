@@ -85,20 +85,28 @@ def test_hybrid_attention_replay_shares_normal_scheduler_and_preserves_state(
     config.cache_config.mamba_cache_mode = "align"
     config.cache_config.mamba_block_size = 16
     cache_config = make_kv_cache_config(
-        16, mamba_enabled=True, mamba_cache_mode="align", num_blocks=100
+        16, mamba_enabled=True, enable_prefix_caching=True, num_blocks=100
     )
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+    from dataclasses import replace
 
-    cache_config.kv_cache_groups[0].layer_names = [
-        "model.layers.0.attn",
-        "model.layers.2.attn",
-    ]
+    attention_group = cache_config.kv_cache_groups[0]
+    attention_group.kv_cache_specs = dict(
+        zip(
+            ["model.layers.0.attn", "model.layers.2.attn"],
+            attention_group.kv_cache_specs.values(),
+            strict=True,
+        )
+    )
     state_group = cache_config.kv_cache_groups[1]
     for index in range(1, recurrent_groups):
         cache_config.kv_cache_groups.append(
-            KVCacheGroupSpec(
-                layer_names=[f"extra_state_{index}"],
-                kv_cache_spec=state_group.kv_cache_spec,
+            replace(
+                state_group,
+                kv_cache_specs={
+                    f"extra_state_{index}": next(
+                        iter(state_group.kv_cache_specs.values())
+                    )
+                },
             )
         )
     scheduler = create_scheduler(config, kv_cache_config=cache_config)

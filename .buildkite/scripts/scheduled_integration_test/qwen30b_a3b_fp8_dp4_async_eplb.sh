@@ -43,7 +43,6 @@ vllm serve "$MODEL" \
 --enable-eplb \
 --all2all-backend "$BACK" \
 --eplb-config '{"window_size":20, "step_interval":100, "use_async":true}' \
---trust-remote-code \
 --max-model-len 2048 \
 --port "$PORT" &
 SERVER_PID=$!

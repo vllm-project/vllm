@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -12,6 +13,7 @@
 
 #include "../torch_utils.h"
 #include "core/cuda_compat.h"
+#include "fused_gdn_decode.h"
 
 namespace {
 
@@ -67,6 +69,14 @@ load_state4<__nv_bfloat16>(const __nv_bfloat16* state) {
                      __bfloat162float(hi.x), __bfloat162float(hi.y));
 }
 
+template <>
+__device__ __forceinline__ float4 load_state4<__half>(const __half* state) {
+  const __half2 lo = *reinterpret_cast<const __half2*>(state);
+  const __half2 hi = *reinterpret_cast<const __half2*>(state + 2);
+  return make_float4(__half2float(lo.x), __half2float(lo.y), __half2float(hi.x),
+                     __half2float(hi.y));
+}
+
 template <typename StateT>
 __device__ __forceinline__ void store_state4(StateT* state, float4 value);
 
@@ -85,6 +95,13 @@ __device__ __forceinline__ void store_state4<__nv_bfloat16>(
       __floats2bfloat162_rn(value.z, value.w);
 }
 
+template <>
+__device__ __forceinline__ void store_state4<__half>(__half* state,
+                                                     float4 value) {
+  *reinterpret_cast<__half2*>(state) = __floats2half2_rn(value.x, value.y);
+  *reinterpret_cast<__half2*>(state + 2) = __floats2half2_rn(value.z, value.w);
+}
+
 constexpr int kDimK = 128;
 constexpr int kDimV = 128;
 constexpr int kThreads = 256;
@@ -92,18 +109,17 @@ constexpr int kWarps = kThreads / 32;
 constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
-constexpr int kMaxMtpTokens = 9;
 constexpr int kTokenPasses = (kMaxMtpTokens + kWarps - 1) / kWarps;
-constexpr int kDtBiasFloat32 = 0;
-constexpr int kDtBiasBFloat16 = 1;
-constexpr int kDtBiasFloat16 = 2;
 
-struct GdnDecodeStrides {
-  int64_t mixed_row;
-  int64_t a_row;
-  int64_t b_row;
-  int64_t gate_row;
-  int64_t state_slot;
+// Dynamic shared memory holds one per token of the launch's window.
+struct alignas(16) TokenSmem {
+  float q[kDimK];
+  float k[kDimK];
+  __nv_bfloat16 v[kDimV];
+  __nv_bfloat16 out[kDimV];
+  float decay;
+  float beta;
+  float sum_square;
 };
 
 __device__ __forceinline__ float sigmoid_fast(float x) {
@@ -196,7 +212,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       accepted > 0 && accepted <= state_indices_width
           ? state_indices[request * state_indices_width + accepted - 1]
           : 0;
-  if (source_slot <= 0 || num_tokens > kMaxMtpTokens) {
+  if (source_slot <= 0 || num_tokens > state_indices_width) {
     for (int linear = tid; linear < num_tokens * kSliceV; linear += kThreads) {
       const int token = bos + linear / kSliceV;
       const int value = slice_begin + linear % kSliceV;
@@ -209,13 +225,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
 
   const int key_head = value_head / ValueHeadsPerKeyHead;
   __shared__ StateT shared_state[2][kChunkV][kDimK];
-  __shared__ float shared_q[kMaxMtpTokens][kDimK];
-  __shared__ float shared_k[kMaxMtpTokens][kDimK];
-  __shared__ __nv_bfloat16 shared_v[kMaxMtpTokens][kDimV];
-  __shared__ __nv_bfloat16 shared_out[kMaxMtpTokens][kDimV];
-  __shared__ float shared_decay[kMaxMtpTokens];
-  __shared__ float shared_beta[kMaxMtpTokens];
-  __shared__ float shared_sum_square[kMaxMtpTokens];
+  extern __shared__ TokenSmem tokens[];
 
   StateT* source_state =
       state + static_cast<int64_t>(source_slot) * strides.state_slot +
@@ -241,7 +251,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
           __bfloat162float(mixed_qkv[mixed_base + key_head * kDimK + dim]);
       k_values[i] = __bfloat162float(
           mixed_qkv[mixed_base + H * kDimK + key_head * kDimK + dim]);
-      shared_v[t][dim] =
+      tokens[t].v[dim] =
           mixed_qkv[mixed_base + 2 * H * kDimK + value_head * kDimV + dim];
       q_square += q_values[i] * q_values[i];
       k_square += k_values[i] * k_values[i];
@@ -254,8 +264,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int dim = lane + i * 32;
-      shared_q[t][dim] = q_values[i] * q_scale;
-      shared_k[t][dim] = k_values[i] * k_scale;
+      tokens[t].q[dim] = q_values[i] * q_scale;
+      tokens[t].k[dim] = k_values[i] * k_scale;
     }
     if (lane == 0) {
       const float a_value = __bfloat162float(
@@ -265,8 +275,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       const float g = -__expf(a_log[value_head]) *
                       softplus_fast(a_value + load_dt_bias(dt_bias, value_head,
                                                            dt_bias_type));
-      shared_decay[t] = __expf(g);
-      shared_beta[t] = sigmoid_fast(b_value);
+      tokens[t].decay = __expf(g);
+      tokens[t].beta = sigmoid_fast(b_value);
     }
   }
   __syncthreads();
@@ -300,8 +310,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     }
 
     for (int t = 0; t < num_tokens; ++t) {
-      const float4 q4 = *reinterpret_cast<const float4*>(&shared_q[t][k_base]);
-      const float4 k4 = *reinterpret_cast<const float4*>(&shared_k[t][k_base]);
+      const float4 q4 = *reinterpret_cast<const float4*>(&tokens[t].q[k_base]);
+      const float4 k4 = *reinterpret_cast<const float4*>(&tokens[t].k[k_base]);
       const float q_values[4] = {q4.x, q4.y, q4.z, q4.w};
       const float k_values[4] = {k4.x, k4.y, k4.z, k4.w};
 
@@ -310,7 +320,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       for (int row = 0; row < kRowsPerWarp; ++row) {
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
-          h[row][i] *= shared_decay[t];
+          h[row][i] *= tokens[t].decay;
           dot_hk[row] += h[row][i] * k_values[i];
         }
       }
@@ -324,8 +334,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       for (int row = 0; row < kRowsPerWarp; ++row) {
         const int value = chunk * kChunkV + rows[row];
         const float delta =
-            (__bfloat162float(shared_v[t][value]) - reduced_hk[row]) *
-            shared_beta[t];
+            (__bfloat162float(tokens[t].v[value]) - reduced_hk[row]) *
+            tokens[t].beta;
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
           h[row][i] += k_values[i] * delta;
@@ -335,13 +345,13 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       const Sum2 dot_hq_01 = warp_reduce_sum_pair(dot_hq[0], dot_hq[1]);
       const Sum2 dot_hq_23 = warp_reduce_sum_pair(dot_hq[2], dot_hq[3]);
       if (lane == 0) {
-        shared_out[t][chunk * kChunkV + rows[0]] =
+        tokens[t].out[chunk * kChunkV + rows[0]] =
             __float2bfloat16(dot_hq_01.x);
-        shared_out[t][chunk * kChunkV + rows[1]] =
+        tokens[t].out[chunk * kChunkV + rows[1]] =
             __float2bfloat16(dot_hq_01.y);
-        shared_out[t][chunk * kChunkV + rows[2]] =
+        tokens[t].out[chunk * kChunkV + rows[2]] =
             __float2bfloat16(dot_hq_23.x);
-        shared_out[t][chunk * kChunkV + rows[3]] =
+        tokens[t].out[chunk * kChunkV + rows[3]] =
             __float2bfloat16(dot_hq_23.y);
       }
 
@@ -371,7 +381,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
 #pragma unroll
     for (int i = 0; i < kValuesPerLane; ++i) {
       const int value = slice_begin + lane + i * 32;
-      const float output_value = __bfloat162float(shared_out[t][value]);
+      const float output_value = __bfloat162float(tokens[t].out[value]);
       const float gate_input = __bfloat162float(
           output_gate[static_cast<int64_t>(token) * strides.gate_row +
                       value_head * kDimV + value]);
@@ -395,14 +405,14 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
 #pragma unroll
     for (int i = 0; i < kValuesPerLane; ++i) {
       const float value =
-          __bfloat162float(shared_out[t][slice_begin + lane + i * 32]);
+          __bfloat162float(tokens[t].out[slice_begin + lane + i * 32]);
       sum_square += value * value;
     }
     sum_square = warp_reduce_sum(sum_square);
     if constexpr (SplitV == 1) {
       write_token(t, sum_square);
     } else if (lane == 0) {
-      shared_sum_square[t] = sum_square;
+      tokens[t].sum_square = sum_square;
     }
   }
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
@@ -414,27 +424,30 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       float sum_square = 0.0f;
   #pragma unroll
       for (int rank = 0; rank < SplitV; ++rank) {
-        sum_square += cluster.map_shared_rank(shared_sum_square, rank)[t];
+        sum_square += *cluster.map_shared_rank(&tokens[t].sum_square, rank);
       }
       write_token(t, sum_square);
     }
-    cluster.sync();  // keep shared_sum_square alive for remote readers
+    cluster.sync();  // keep sum_square alive for remote readers
   }
 #endif
 }
 
 // Split V over a cluster while the split grid still fits in one wave (2 CTAs
-// per SM). On B300 this picks 4 up to 2 requests and 2 at 4 requests (value
-// heads HV=32).
-int choose_split_v(int num_blocks, int device) {
-  int major = 0, num_sms = 0;
+// per SM, or 1 if two don't fit in its shared memory). On B300 this picks 4 up
+// to 2 requests and 2 at 4 requests (value heads HV=32).
+int choose_split_v(int num_blocks, int cta_smem_bytes, int device) {
+  int major = 0, num_sms = 0, sm_smem_bytes = 0;
   cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
   cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device);
+  cudaDeviceGetAttribute(&sm_smem_bytes,
+                         cudaDevAttrMaxSharedMemoryPerMultiprocessor, device);
   if (major < 9) {
     return 1;
   }
+  const int ctas_per_sm = 2 * cta_smem_bytes <= sm_smem_bytes ? 2 : 1;
   for (const int split : {4, 2}) {
-    if (num_blocks * split <= 2 * num_sms) {
+    if (num_blocks * split <= ctas_per_sm * num_sms) {
       return split;
     }
   }
@@ -443,16 +456,26 @@ int choose_split_v(int num_blocks, int device) {
 
 template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate,
           int SplitV, typename... Args>
-cudaError_t launch_split(dim3 grid, cudaStream_t stream, Args... args) {
+cudaError_t launch_split(dim3 grid, cudaStream_t stream, int token_smem_bytes,
+                         Args... args) {
   const auto kernel =
       gdn_decode_post_conv_mtp_kernel<StateT, ValueHeadsPerKeyHead, SigmoidGate,
                                       SplitV>;
+  // With the state chunks, a full window exceeds the default 48 KB per CTA.
+  const cudaError_t error =
+      cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel),
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           kMaxMtpTokens * sizeof(TokenSmem));
+  if (error != cudaSuccess) {
+    return error;
+  }
   cudaLaunchAttribute attribute{};
   attribute.id = cudaLaunchAttributeClusterDimension;
   attribute.val.clusterDim = {1, 1, SplitV};
   cudaLaunchConfig_t config{};
   config.gridDim = grid;
   config.blockDim = dim3(kThreads);
+  config.dynamicSmemBytes = token_smem_bytes;
   config.stream = stream;
   config.attrs = SplitV > 1 ? &attribute : nullptr;
   config.numAttrs = SplitV > 1 ? 1 : 0;
@@ -483,11 +506,39 @@ void launch_gdn_decode_post_conv_mtp(
   const cudaStream_t stream =
       get_current_cuda_stream(mixed_qkv.get_device_index());
   const int num_requests = static_cast<int>(state_indices.size(0));
+  const int token_smem_bytes =
+      static_cast<int>(state_indices.size(1) * sizeof(TokenSmem));
+  constexpr int kStateSmemBytes = 2 * kChunkV * kDimK * sizeof(StateT);
   const int split_v = choose_split_v(num_requests * num_value_heads,
+                                     kStateSmemBytes + token_smem_bytes,
                                      mixed_qkv.get_device_index());
+  // Without a V split, 16-bit state runs fused_gdn_decode_16bit_kernel.cu.
+  if constexpr (!std::is_same_v<StateT, float>) {
+    if (split_v == 1) {
+      const cudaError_t error =
+          launch_gdn_decode_post_conv_mtp_16bit<StateT, ValueHeadsPerKeyHead,
+                                                SigmoidGate>(
+              dim3(num_requests, num_value_heads), stream,
+              static_cast<const __nv_bfloat16*>(mixed_qkv.data_ptr()), a, b,
+              static_cast<const float*>(a_log.data_ptr()), dt_bias.data_ptr(),
+              static_cast<const int*>(state_indices.data_ptr()),
+              static_cast<const int*>(cu_seqlens.data_ptr()),
+              static_cast<const int*>(num_accepted_tokens.data_ptr()),
+              static_cast<StateT*>(state.data_ptr()), output_gate,
+              norm_weight.data_ptr(),
+              static_cast<__nv_bfloat16*>(out.data_ptr()), num_key_heads,
+              num_value_heads, static_cast<int>(state_indices.size(1)),
+              dt_bias_type, norm_weight.scalar_type() == ScalarType::BFloat16,
+              static_cast<float>(scale), static_cast<float>(norm_eps), strides);
+      STD_TORCH_CHECK(error == cudaSuccess,
+                      "GDN decode MTP post-conv kernel launch failed: ",
+                      cudaGetErrorString(error));
+      return;
+    }
+  }
   const auto launch = [&]<int SplitV>() {
     return launch_split<StateT, ValueHeadsPerKeyHead, SigmoidGate, SplitV>(
-        dim3(num_requests, num_value_heads, SplitV), stream,
+        dim3(num_requests, num_value_heads, SplitV), stream, token_smem_bytes,
         static_cast<const __nv_bfloat16*>(mixed_qkv.data_ptr()), a, b,
         static_cast<const float*>(a_log.data_ptr()), dt_bias.data_ptr(),
         static_cast<const int*>(state_indices.data_ptr()),
@@ -548,8 +599,9 @@ void fused_gdn_decode_post_conv_mtp(
   const auto state_scalar_type = state.scalar_type();
   STD_TORCH_CHECK(
       state.is_cuda() && (state_scalar_type == ScalarType::Float ||
-                          state_scalar_type == ScalarType::BFloat16),
-      "state must be a CUDA float32 or bfloat16 tensor");
+                          state_scalar_type == ScalarType::BFloat16 ||
+                          state_scalar_type == ScalarType::Half),
+      "state must be a CUDA float32, bfloat16, or float16 tensor");
   STD_TORCH_CHECK(output_gate.is_cuda() &&
                       output_gate.scalar_type() == ScalarType::BFloat16,
                   "output_gate must be a CUDA bfloat16 tensor");
@@ -584,10 +636,10 @@ void fused_gdn_decode_post_conv_mtp(
            value_heads_per_key_head == 8),
       "GDN decode MTP fusion requires HV/H in {1, 2, 3, 4, 8}");
 
-  STD_TORCH_CHECK(state_indices.dim() == 2 && state_indices.size(0) > 0 &&
-                      state_indices.size(1) > 0 &&
-                      state_indices.size(1) <= kMaxMtpTokens,
-                  "state_indices must have shape [N, S] with 1 <= S <= 9");
+  STD_TORCH_CHECK(
+      state_indices.dim() == 2 && state_indices.size(0) > 0 &&
+          state_indices.size(1) > 0 && state_indices.size(1) <= kMaxMtpTokens,
+      "state_indices must have shape [N, S] with 1 <= S <= ", kMaxMtpTokens);
   const int num_requests = static_cast<int>(state_indices.size(0));
   STD_TORCH_CHECK(
       cu_seqlens.dim() == 1 && cu_seqlens.numel() == num_requests + 1,
@@ -657,6 +709,12 @@ void fused_gdn_decode_post_conv_mtp(
         launch.template operator()<float, ValueHeadsPerKeyHead, true>();
       } else {
         launch.template operator()<float, ValueHeadsPerKeyHead, false>();
+      }
+    } else if (state_scalar_type == ScalarType::Half) {
+      if (output_gate_activation == "sigmoid") {
+        launch.template operator()<__half, ValueHeadsPerKeyHead, true>();
+      } else {
+        launch.template operator()<__half, ValueHeadsPerKeyHead, false>();
       }
     } else {
       if (output_gate_activation == "sigmoid") {

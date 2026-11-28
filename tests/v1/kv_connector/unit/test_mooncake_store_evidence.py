@@ -47,7 +47,7 @@ from tests.v1.core.test_scheduler_transfer_evidence import (
 from tests.v1.kv_connector.unit.test_mooncake_store_scheduler import (
     _make_bare_scheduler,
 )
-from tests.v1.kv_connector.unit.utils import create_request
+from tests.v1.kv_connector.unit.utils import create_request, make_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
@@ -72,7 +72,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -130,14 +130,14 @@ def make_thread(store, evidence_buffer=None, layers=LAYERS, tp_rank=0):
     )
     token_database.set_kv_caches_base_addr([0x1000])
     token_database.set_block_len([256])
-    spec = FullAttentionSpec(block_size=BLOCK, num_kv_heads=8, head_size=64, dtype=None)
+    spec = AttentionSpec(block_size=BLOCK, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["layer0"], spec)],
+        [make_kv_cache_group(["layer0"], spec)],
         scheduler_block_size=BLOCK,
         hash_block_size=BLOCK,
     )
     thread = mooncake_store_worker.KVCacheStoreRecvingThread(
-        store=store,
+        store_service=mooncake_store_worker.MooncakeStoreService(store),
         coord=coord,
         token_databases=[token_database],
         block_size=BLOCK,
@@ -574,14 +574,16 @@ def test_duplicate_failures_same_block_count_once():
 
     db, _ = _make_tp_shared_db()  # two shard-objects per block
     buf = EvidenceBuffer()
-    spec = FullAttentionSpec(block_size=BLOCK, num_kv_heads=8, head_size=64, dtype=None)
+    spec = AttentionSpec(block_size=BLOCK, num_kv_heads=8, head_size=64, dtype=None)
     coord = mooncake_store_worker.MooncakeStoreCoordinator(
-        [KVCacheGroupSpec(["layer0"], spec)],
+        [make_kv_cache_group(["layer0"], spec)],
         scheduler_block_size=BLOCK,
         hash_block_size=BLOCK,
     )
     thread = mooncake_store_worker.KVCacheStoreRecvingThread(
-        store=FakeStore([RC_OBJECT_NOT_FOUND, RC_TRANSFER_FAIL, 0, 0]),
+        store_service=mooncake_store_worker.MooncakeStoreService(
+            FakeStore([RC_OBJECT_NOT_FOUND, RC_TRANSFER_FAIL, 0, 0])
+        ),
         coord=coord,
         token_databases=[db],
         block_size=BLOCK,

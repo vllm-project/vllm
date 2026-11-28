@@ -242,7 +242,9 @@ def _forward(
 
 
 def _assert_backend_is_aiter(layer: RoutedExperts) -> None:
-    selected = layer.quant_method.unquantized_backend
+    method = layer.quant_method
+    assert isinstance(method, UnquantizedFusedMoEMethod)
+    selected = method.unquantized_backend
     assert selected is UnquantizedMoeBackend.AITER, (
         f"expected AiterExperts to be selected, got backend={selected!r}"
     )
@@ -581,7 +583,9 @@ def test_aiter_moe_padding_rl_reload_address_stable(
 
 
 def _assert_backend_is_triton(layer: RoutedExperts) -> None:
-    selected = layer.quant_method.unquantized_backend
+    method = layer.quant_method
+    assert isinstance(method, UnquantizedFusedMoEMethod)
+    selected = method.unquantized_backend
     assert selected is UnquantizedMoeBackend.TRITON, (
         f"expected TritonExperts to be selected, got backend={selected!r}"
     )

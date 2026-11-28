@@ -10,7 +10,9 @@ use crate::renderer::{ChatRenderer, DynChatRenderer, RenderedPrompt};
 use crate::request::ChatRequest;
 
 /// Chat backend under `--skip-tokenizer-init`: rendering and parsing a chat
-/// need the tokenizer, so every chat request is rejected, like Python.
+/// need the tokenizer, so every chat request is rejected, like Python. Parser
+/// selections are therefore not resolved, as Python skips their tokenizer
+/// check without a tokenizer.
 pub(super) struct TokenizerlessChatBackend;
 
 /// Error for every chat request without a tokenizer.
@@ -26,7 +28,7 @@ impl ChatBackend for TokenizerlessChatBackend {
     fn new_chat_output_processor(
         &self,
         _request: &mut ChatRequest,
-        _options: NewChatOutputProcessorOptions<'_>,
+        _options: NewChatOutputProcessorOptions,
     ) -> Result<DynChatOutputProcessor> {
         Err(tokenizer_unavailable())
     }

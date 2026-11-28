@@ -7,7 +7,6 @@ use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serde_with::DefaultOnNull;
-use validator::Validate;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::WeightVersionSpan;
@@ -17,17 +16,13 @@ use super::features::MultiModalFeatures;
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
-use crate::routes::openai::utils::types::{
-    ChatLogProbs, Normalizable, StreamOptions, StringOrArray, Usage,
-};
+use crate::routes::openai::utils::types::{ChatLogProbs, StreamOptions, StringOrArray, Usage};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
 /// Wraps [`SamplingParams`] to additionally capture `n`, which the shared
 /// northbound type intentionally omits (parallel sampling is handled by
-/// higher layers, and the Rust frontend does not implement it). Capturing it
-/// here lets validation reject `n > 1` explicitly instead of silently
-/// dropping the key and returning a single choice.
+/// higher layers).
 ///
 /// It also captures Python sampling fields that the route does not support
 /// yet, so validation can reject their non-default values instead of
@@ -35,7 +30,7 @@ use crate::routes::openai::utils::types::{
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateSamplingParams {
-    /// Number of output sequences to generate. Only `1` is supported.
+    /// Number of output sequences to generate.
     pub n: Option<u32>,
     /// Stop strings, matched against the decoded output text. The output's
     /// token IDs end with the token that completes the match.
@@ -61,7 +56,7 @@ pub struct GenerateSamplingParams {
 /// vLLM-compatible request type for the token-in/token-out generate API.
 #[serde_with::skip_serializing_none]
 #[serde_with::serde_as]
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateRequest {
     pub request_id: Option<String>,
     pub model: Option<String>,
@@ -76,7 +71,9 @@ pub struct GenerateRequest {
     pub priority: i32,
     pub kv_transfer_params: Option<HashMap<String, Value>>,
     pub ec_transfer_params: Option<HashMap<String, Value>>,
-    /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
+    /// Raw multimodal input; server resolves media and expands its
+    /// placeholders. With `features`, these placeholders must follow the last
+    /// `features` range, which is left as is.
     pub content_parts: Option<Vec<MediaContentPart>>,
     /// Multimodal items already preprocessed by render, aligned with the
     /// expanded placeholders in `token_ids`.
@@ -93,8 +90,6 @@ pub struct GenerateRequest {
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
-
-impl Normalizable for GenerateRequest {}
 
 /// Response level of the generate API, mirroring Python's `OutputMode`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -172,6 +167,7 @@ pub(super) struct GenerateStreamResponse {
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
+    pub mm_hashes: Option<MultiModalHashes>,
     pub metrics: Option<PerRequestMetrics<StreamingSpeculativeDecodingMetrics>>,
 }
 
@@ -191,6 +187,7 @@ pub(super) struct GenerateResponse {
     pub prompt_token_id_logprobs: Option<String>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
+    pub mm_hashes: Option<MultiModalHashes>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
     pub metrics: Option<PerRequestMetrics<SpeculativeDecodingMetrics>>,
@@ -202,6 +199,17 @@ pub(super) struct PerRequestMetrics<T> {
 }
 
 pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInfo>>;
+
+/// Per-modality processor cache keys, parallel to [`MultiModalPlaceholders`].
+pub(super) type MultiModalHashes = HashMap<String, Vec<String>>;
+
+/// The multimodal prompt layout a response echoes back, so a caller can send
+/// the items again as `features` without `kwargs_data`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct MmResponseInfo {
+    pub mm_placeholders: MultiModalPlaceholders,
+    pub mm_hashes: MultiModalHashes,
+}
 
 /// Mirrors the Python vLLM `PlaceholderRangeInfo` class.
 #[serde_with::skip_serializing_none]

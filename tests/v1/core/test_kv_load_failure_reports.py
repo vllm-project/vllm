@@ -267,9 +267,8 @@ def test_reports_on_multi_group_layouts_fail_closed_without_crash():
     import torch
 
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
     )
 
     vllm_config = create_vllm_config(
@@ -277,7 +276,9 @@ def test_reports_on_multi_group_layouts_fail_closed_without_crash():
         max_num_batched_tokens=4096,
     )
     vllm_config.scheduler_config.async_scheduling = False
-    spec = FullAttentionSpec(
+    from tests.v1.kv_connector.unit.utils import make_kv_cache_group
+
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
     scheduler = create_scheduler(
@@ -286,8 +287,8 @@ def test_reports_on_multi_group_layouts_fail_closed_without_crash():
             num_blocks=10000,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(["layer_a"], spec),
-                KVCacheGroupSpec(["layer_b"], spec),
+                make_kv_cache_group(["layer_a"], spec),
+                make_kv_cache_group(["layer_b"], spec),
             ],
         ),
     )

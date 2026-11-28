@@ -138,7 +138,7 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
 
 ### Hybrid attention and recurrent state
 
-WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark. Use matching cache layouts on both instances, `--mamba-cache-mode align`, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Sliding-window WRITE and hybrid speculative methods other than DSpark remain unsupported.
+WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark. Use matching cache layouts on both instances, keep prefix caching enabled, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Sliding-window WRITE and hybrid speculative methods other than DSpark remain unsupported.
 
 For DSpark, configure the same draft model on both instances through `--speculative-config`. Target and draft attention groups retain their own block IDs and token spans; only the running recurrent state is transferred, not speculative scratch slots. The producer transfers the state after the first N-1 prompt tokens, and the consumer recomputes the last prompt token. Convolution and SSM transfers must both finish before the layer is complete.
 
@@ -149,6 +149,25 @@ Hybrid READ transfers every attention group, so drafters that share the target's
 Kimi-K3 on MI355X supports specialized decode on built-in MoRIIO READ and WRITE consumers. Set `--additional-config '{"decode_backend":"latency_specialized"}'` on the consumer and keep the producer on the default `decode_backend=auto`.
 
 Use matching transfer modes and cache layouts. See [supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/kimi_k3/amd/specialized_decode/README.md#supported-deployments) for the hardware, state dtype, and execution requirements.
+
+### Attention cache layouts
+
+MoRIIO supports standardized 4D attention caches whose scheduler blocks are
+split into smaller kernel blocks. For example, AITER FA can use 32-token kernel
+blocks with `--block-size 64` and `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=0` on both
+servers. The connector transfers each
+complete scheduler block, including all of its kernel blocks. Both peers must
+use matching kernel-block layouts. Split blocks must form non-overlapping,
+contiguous scheduler pages; incomplete groups are
+rejected. This grouping supports equal-TP transfers; split layouts that cannot
+be sliced by head remain unsupported between different TP sizes.
+
+For AITER FA with `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1`, MoRIIO transfers the
+separate dense K/V planes in READ and WRITE mode. Use the same backend, KV dtype,
+shuffle setting, block size, and TP size on both servers. Blocks must not be split
+into smaller kernel blocks; the tested Qwen3 BF16 configuration uses
+`--block-size 16`.
+These packed planes do not support transfers between different TP sizes.
 
 ### Different prefill and decode TP sizes
 

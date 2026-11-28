@@ -2062,9 +2062,8 @@ def test_single_kv_group_guard_refuses_multi_group_at_init():
         create_vllm_config,
     )
     from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
     )
 
     vllm_config = create_vllm_config(
@@ -2074,15 +2073,17 @@ def test_single_kv_group_guard_refuses_multi_group_at_init():
     )
     vllm_config.scheduler_config.async_scheduling = False
     block_size = vllm_config.cache_config.block_size
-    spec = FullAttentionSpec(
+    from tests.v1.kv_connector.unit.utils import make_kv_cache_group
+
+    spec = AttentionSpec(
         block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
     two_groups = KVCacheConfig(
         num_blocks=10000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["layers.0-7"], spec),
-            KVCacheGroupSpec(["layers.8-15"], spec),
+            make_kv_cache_group(["layers.0-7"], spec),
+            make_kv_cache_group(["layers.8-15"], spec),
         ],
     )
     with pytest.raises(RuntimeError, match="single KV cache group"):

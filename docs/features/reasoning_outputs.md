@@ -250,7 +250,7 @@ vllm serve <model> \
     --reasoning-effort-map '{"minimal": "low", "medium": "low", "xhigh": "max"}'
 ```
 
-The map applies to the effort set through the Chat Completions (`reasoning_effort`), Responses (`reasoning.effort`) and Anthropic Messages (`output_config.effort`) APIs. Efforts that are not listed pass through unchanged, and a `reasoning_effort` set directly in `chat_template_kwargs` is not rewritten. Keys must be one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; values are passed to the chat template as-is. Mapping an effort to `none` disables thinking for templates that honor `enable_thinking`.
+The map applies to the effort set through the Chat Completions (`reasoning_effort`), Responses (`reasoning.effort`), Anthropic Messages (`output_config.effort`) and `/tokenize` (`reasoning_effort`) APIs. Efforts that are not listed pass through unchanged, and a `reasoning_effort` set directly in `chat_template_kwargs` is not rewritten. Keys must be one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; values are passed to the chat template as-is. Mapping an effort to `none` disables thinking for templates that honor `enable_thinking`.
 
 ### Request-Level Override
 

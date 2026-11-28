@@ -17,6 +17,7 @@ import einops
 import torch
 import torch.nn.functional as F
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -44,6 +45,8 @@ def flash_attn_maxseqlen_wrapper(
 
         if not current_platform.is_rocm() and fa_version is not None:
             kwargs["fa_version"] = fa_version
+        if fa_version == 3 and envs.VLLM_BATCH_INVARIANT:
+            kwargs["num_splits"] = 1
 
     q_len = q.size(1)
     if cu_seqlens is None:
@@ -167,6 +170,7 @@ def triton_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 
@@ -184,13 +188,15 @@ def triton_attn_wrapper(
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = torch.empty_like(q, memory_format=torch.contiguous_format)
+    if sequence_lengths is None:
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     context_attention_fwd(
         q,
         k,
         v,
         output,
         b_start_loc=cu_seqlens[:-1],
-        b_seq_len=cu_seqlens[1:] - cu_seqlens[:-1],
+        b_seq_len=sequence_lengths,
         max_input_len=max_seqlen,
         is_causal=False,
         sliding_window_q=None,
@@ -210,6 +216,7 @@ def triton_attn_wrapper_fake(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q, memory_format=torch.contiguous_format)
 
@@ -229,6 +236,7 @@ def vit_triton_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.triton_attn_wrapper(
         q,
@@ -238,6 +246,7 @@ def vit_triton_attn_wrapper(
         scale,
         cu_seqlens,
         max_seqlen,
+        sequence_lengths,
     )
 
 
