@@ -65,6 +65,10 @@ def register_api_routers(
 
         elastic_ep_attach_router(app)
 
+        from vllm.entrypoints.serve.pd_role.api_router import router as pd_role_router
+
+        app.include_router(pd_role_router)
+
         if model_config is not None and model_config.enable_sleep_mode:
             from vllm.entrypoints.serve.checkpoint.api_router import (
                 attach_router as checkpoint_attach_router,
