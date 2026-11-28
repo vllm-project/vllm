@@ -66,6 +66,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    OFI_UNAVAILABLE_MSG,
     MoRIIOWrapper,
     MoRIIOWriter,
 )
@@ -2160,11 +2161,14 @@ class MoRIIOConnectorWorker:
             transfer_timeout=self.moriio_config.transfer_timeout,
         )
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
-        backend = (
-            BackendType.XGMI
-            if self.moriio_config.backend == "xgmi"
-            else BackendType.RDMA
-        )
+        if self.moriio_config.backend == "xgmi":
+            backend = BackendType.XGMI
+        elif self.moriio_config.backend == "ofi":
+            backend = getattr(BackendType, "OFI", None)
+            if backend is None:
+                raise RuntimeError(OFI_UNAVAILABLE_MSG)
+        else:
+            backend = BackendType.RDMA
         self.moriio_wrapper.set_backend_type(
             backend,
             qp_per_transfer=self.moriio_config.qp_per_transfer,
