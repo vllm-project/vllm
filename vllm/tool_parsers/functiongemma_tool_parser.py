@@ -141,9 +141,12 @@ class FunctionGemmaToolParser(ToolParser):
     tool_call_end_token: str = "<end_function_call>"
 
     # Regex patterns
+    # Name class includes hyphens to match streaming (func_part.split("{")[0])
+    # and OpenAI-legal tool names like get-weather. Argument keys already
+    # accept hyphens via the scanner in _parse_arguments.
     tool_call_regex: re.Pattern = re.compile(
-        r"<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>"
-        r"|<start_function_call>call:(\w+)\{(.*)",
+        r"<start_function_call>call:([\w-]+)\{(.*?)\}<end_function_call>"
+        r"|<start_function_call>call:([\w-]+)\{(.*)",
         re.DOTALL,
     )
 
