@@ -675,6 +675,27 @@ def test_aiter_moe_pads(
     )
 
 
+@pytest.mark.parametrize(
+    ("tp_size", "expected"),
+    [
+        # Qwen3.8-Flash-Next TP4: 160 intermediate columns stored as 192.
+        (4, (0, 32)),
+        # At TP1 the pad stays doubled and 64-wide.
+        (1, (0, 0)),
+    ],
+)
+def test_aiter_moe_pads_skip_bf16_tail(tp_size, expected):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        aiter_moe_pads,
+    )
+
+    pads = aiter_moe_pads(
+        0, 32, MoEActivation.SILU, False, False, tp_size, skip_bf16_tail=True
+    )
+    assert pads == expected
+
+
 # a4w4 (FP4 activation) opt-in gating test ---------------------------------
 
 
