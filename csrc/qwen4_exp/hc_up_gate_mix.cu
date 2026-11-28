@@ -154,7 +154,8 @@ __device__ __forceinline__ void st_shared_v4(uint32_t addr, uint4 v) {
 // through a PTX predicate: no divergent loop, so loop state stays uniform.
 __device__ __forceinline__ uint32_t elect_lane() {
   uint32_t pred;
-  asm("{\n"
+  asm volatile(
+      "{\n"
       ".reg .pred p;\n"
       "elect.sync _|p, 0xffffffff;\n"
       "selp.u32 %0, 1, 0, p;\n"
@@ -351,8 +352,9 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
       for (uint32_t kb = 0; kb < NUM_K_BLOCKS; ++kb) {
         sm.full[stage].wait(phase);
         tcgen05_after_thread_sync();
-        // fma and umma_arrive are called by the whole warp and both elect
-        // lane 0, so each commit tracks the MMAs issued before it.
+        // fma and umma_arrive are called by the whole warp and both elect the
+        // same lane (deterministic for a fixed membermask), so each commit
+        // tracks the MMAs issued before it.
   #pragma unroll
         for (uint32_t k = 0; k < BLOCK_K / UMMA_K; ++k) {
           Mma::fma(make_sw128_desc(sm.a[stage], k * UMMA_K),
