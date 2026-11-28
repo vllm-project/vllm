@@ -118,6 +118,7 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
                                       const torch::Tensor block_table,
                                       torch::Tensor slot_mapping,
                                       const int64_t block_size) {
+  TORCH_CHECK(block_size > 0, "block_size must be > 0, got ", block_size);
   const int32_t req_num = query_start_loc.size(0) - 1;
   const int64_t block_table_stride = block_table.stride(0);
 
