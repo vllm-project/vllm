@@ -92,7 +92,7 @@ _encode_delta_text = json.JSONEncoder(ensure_ascii=False).encode
 
 
 def _delta_frame_template(
-    request_id: str, created_time: int, model_name: str
+    request_id: str, created_time: int, model_name: str, include_usage: bool
 ) -> tuple[str, str, str] | None:
     """Split a probe chunk into the parts of a plain-delta SSE frame that are
     constant for a stream, so only index and text are rendered per chunk.
@@ -123,6 +123,8 @@ def _delta_frame_template(
         ],
         kv_transfer_params=None,
     )
+    if include_usage:
+        probe.usage = None
     frame = f"data: {probe.model_dump_json(exclude_unset=True)}\n\n"
     index, text = str(_PROBE_INDEX), json.dumps(_PROBE_TEXT)
     if frame.count(index) != 1 or frame.count(text) != 1:
@@ -422,7 +424,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 and not include_continuous_usage
             ):
                 delta_template = _delta_frame_template(
-                    request_id, created_time, model_name
+                    request_id, created_time, model_name, include_usage
                 )
 
             async for prompt_idx, res in result_generator:
@@ -619,6 +621,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             completion_tokens=completion_tokens,
                             total_tokens=prompt_tokens + completion_tokens,
                         )
+                    elif include_usage:
+                        # OpenAI sends `"usage": null` on every chunk before
+                        # the final usage chunk when usage is requested.
+                        chunk.usage = None
 
                     response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"

@@ -60,7 +60,7 @@ def model_frame(request_id: str, model_name: str, index: int, text: str) -> str:
 def test_template_frame_matches_model_frame(
     request_id: str, model_name: str, index: int, text: str
 ):
-    template = _delta_frame_template(request_id, CREATED, model_name)
+    template = _delta_frame_template(request_id, CREATED, model_name, False)
     assert template is not None
     prefix, infix, suffix = template
     frame = f"{prefix}{index}{infix}{json.dumps(text, ensure_ascii=False)}{suffix}"
@@ -68,4 +68,4 @@ def test_template_frame_matches_model_frame(
 
 
 def test_template_is_none_when_sentinels_are_ambiguous():
-    assert _delta_frame_template("cmpl-987654321", CREATED, "m") is None
+    assert _delta_frame_template("cmpl-987654321", CREATED, "m", False) is None
