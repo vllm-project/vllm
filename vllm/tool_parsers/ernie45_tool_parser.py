@@ -99,6 +99,11 @@ class Ernie45ToolParser(ToolParser):
                         )
                     )
 
+                if not tool_calls:
+                    return ExtractedToolCallInformation(
+                        tools_called=False, tool_calls=[], content=model_output
+                    )
+
                 content = model_output[
                     : model_output.find(self.tool_calls_start_token)
                 ].rstrip("\n")
