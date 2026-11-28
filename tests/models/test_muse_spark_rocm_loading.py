@@ -264,6 +264,7 @@ def test_aiter_kv_workspace_only_for_cache_readers(
     layer.impl.num_heads = 1
     layer.impl.num_kv_heads = 1
     layer.impl.head_size = 64
+    layer.impl.use_fp8_extend_query = False
     layer.impl.alibi_slopes = None
     layer.impl.sinks = None
     layer.impl._fast_verify = False

@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
     VllmConfig,
@@ -19,6 +20,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.platforms.rocm import get_cdna_version
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
@@ -381,7 +383,7 @@ class AiterChunkSlidingWindowMetadata:
 
 @dataclass(slots=True)
 class AiterChunkContextMetadata:
-    workspace: torch.Tensor
+    workspace: torch.Tensor | None
     cu_seq_lens_chunk: torch.Tensor
     chunk_starts: torch.Tensor
     token_to_batch: torch.Tensor
@@ -630,6 +632,7 @@ class AiterFlashAttentionMetadataBuilder(
         kv_sharing_shape = None
         self._verify_kv_heads: int | None = None
         swa_tables_needed = False
+        fp8_query: list[bool] = []
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
@@ -653,6 +656,15 @@ class AiterFlashAttentionMetadataBuilder(
                 self._verify_kv_heads = layer.impl.num_kv_heads
             if layer.impl.sliding_window[0] != -1 and not layer.impl._fast_verify:
                 swa_tables_needed = True
+            # Per-head q scales are only known once the weights are loaded.
+            fp8_layer = layer.impl.use_fp8_extend_query
+            if fp8_layer and layer._q_scale.numel() != 1:
+                logger.info_once(
+                    "AITER FA: per-head q scales keep a BF16 query for prefill "
+                    "attention (attention_config.use_prefill_query_quantization)."
+                )
+                fp8_layer = False
+            fp8_query.append(fp8_layer)
             if (
                 layer.kv_sharing_target_layer_name is not None
                 or layer.kv_cache_update_bypass
@@ -694,10 +706,22 @@ class AiterFlashAttentionMetadataBuilder(
             )
         )
 
-        self.extend_workspace = torch.empty(
-            [2, _CP_TOKENS_PER_ITER_ROCM, self.num_heads_kv, self.headdim],
-            dtype=self.model_config.dtype,
-            device=device,
+        # When every layer of this KV-cache group prefills with an FP8 query
+        # over the paged cache, the chunked-context metadata and workspace of
+        # the BF16 path are unused. This is a conservative default: if the group
+        # also holds layers that keep the BF16 path (e.g. sliding-window layers
+        # sharing the group), the whole group keeps the BF16 prefill metadata
+        # and workspace, while its eligible layers' extends still take the FP8
+        # call.
+        self.fp8_extend_query = bool(fp8_query) and all(fp8_query)
+        self.extend_workspace = (
+            None
+            if self.fp8_extend_query
+            else torch.empty(
+                [2, _CP_TOKENS_PER_ITER_ROCM, self.num_heads_kv, self.headdim],
+                dtype=self.model_config.dtype,
+                device=device,
+            )
         )
         self.k_scale: dict[str, torch.Tensor] | None = None
         self.v_scale: dict[str, torch.Tensor] | None = None
@@ -805,8 +829,14 @@ class AiterFlashAttentionMetadataBuilder(
             num_prefills,
             num_decode_tokens,
             num_extend_tokens,
-            _,
+            num_prefill_tokens,
         ) = split_ret
+        if self.fp8_extend_query and num_prefills > 0:
+            # The FP8 call reads the new tokens from the paged cache, so it
+            # covers pure prefills too.
+            num_extends += num_prefills
+            num_extend_tokens += num_prefill_tokens
+            num_prefills = 0
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -943,7 +973,11 @@ class AiterFlashAttentionMetadataBuilder(
             # Split the workspace only among extends that have context to read.
             num_extends_with_context = max(int((computed_kv_lens > 0).sum()), 1)
             max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends_with_context
-            num_chunks = cdiv(computed_kv_lens.max().item(), max_context_chunk)
+            num_chunks = (
+                0
+                if self.fp8_extend_query
+                else cdiv(computed_kv_lens.max().item(), max_context_chunk)
+            )
 
             chunk_starts = (
                 torch.arange(num_chunks, dtype=torch.int32)
@@ -1197,6 +1231,36 @@ class AiterFlashAttentionImpl(AttentionImpl):
             sinks,
             self.logits_soft_cap,
         )
+        # Prefill over the paged FP8 cache as one FP8 x FP8 unified_attention
+        # call instead of CK on the new tokens plus, for extends, the per-chunk
+        # gather/dequantize -> CK -> merge loop. Sliding-window layers keep the
+        # BF16 path: the window bounds their KV read.
+        vllm_config = get_current_vllm_config_or_none()
+        use_prefill_query_quantization = (
+            vllm_config is not None
+            and vllm_config.attention_config.use_prefill_query_quantization
+        )
+        self.use_fp8_extend_query = (
+            use_prefill_query_quantization
+            and kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and self.sliding_window[0] == -1
+            and alibi_slopes is None
+            and sinks is None
+            and not logits_soft_cap
+            and get_cdna_version() in (3, 4)
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
+        if self.use_fp8_extend_query:
+            logger.info_once(
+                "AITER FA: FP8 query for prefill attention on full-attention "
+                "layers (attention_config.use_prefill_query_quantization)."
+            )
+        elif use_prefill_query_quantization:
+            logger.info_once(
+                "AITER FA: use_prefill_query_quantization is not used for "
+                "layers with a sliding window, ALiBi, sinks or soft cap; it "
+                "needs gfx942 or gfx950 and an FP8 KV cache in the default layout."
+            )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -1295,10 +1359,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
         cu_seqlens_q: torch.Tensor,
         max_seqlen_q: int,
         max_seqlen_k: int,
+        seq_lens: torch.Tensor,
         block_table: torch.Tensor,
         slot_mapping: torch.Tensor,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
+        q_scale: torch.Tensor,
     ):
         if self.sliding_window[0] != -1:
             self.extend_for_sliding_window(
@@ -1312,6 +1378,37 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 block_table,
                 k_scale,
                 v_scale,
+            )
+            return
+        if self.use_fp8_extend_query and q_scale.numel() == 1:
+            # The new tokens' K/V are already in the cache, so one causal call
+            # covers the cached prefix and the new tokens.
+            from aiter.ops.triton.unified_attention import unified_attention
+
+            num_tokens = query.shape[0]
+            query_fp8, _ = ops.scaled_fp8_quant(
+                query.reshape(num_tokens, -1), scale=q_scale
+            )
+            descale_shape = (seq_lens.shape[0], self.num_kv_heads)
+            unified_attention(
+                q=query_fp8.view(num_tokens, self.num_heads, self.head_size),
+                k=key_cache,
+                v=value_cache,
+                out=output,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seq_lens,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=None,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=0.0,
+                q_descale=q_scale.view(1),
+                k_descale=k_scale.expand(descale_shape),
+                v_descale=v_scale.expand(descale_shape),
+                sinks=None,
             )
             return
         out, lse = rocm_aiter_ops.flash_attn_varlen_func(
@@ -1340,6 +1437,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         chunk_starts = chunk_context_metadata.chunk_starts
         token_to_batch = chunk_context_metadata.token_to_batch
         total_token_per_batch = chunk_context_metadata.total_token_per_batch
+        assert workspace is not None
         key_fetched, value_fetched = workspace[0], workspace[1]
         chunked_output = None
         chunked_lse = None
@@ -1544,6 +1642,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             extend_outputs = output[extend_tokens_slice]
             k_scale = layer._k_scale
             v_scale = layer._v_scale
+            q_scale = layer._q_scale
             self.extend_forward(
                 attn_metadata=attn_metadata,
                 query=extend_queries,
@@ -1555,6 +1654,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
                 max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
+                seq_lens=attn_metadata.seq_lens[
+                    num_decodes : num_decodes + num_extends
+                ],
                 block_table=attn_metadata.block_table[
                     num_decodes : num_decodes + num_extends
                 ],
@@ -1563,6 +1665,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 ],
                 k_scale=k_scale,
                 v_scale=v_scale,
+                q_scale=q_scale,
             )
 
         # calculate for decodes

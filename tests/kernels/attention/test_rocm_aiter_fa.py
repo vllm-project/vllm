@@ -11,12 +11,13 @@ wired through `vllm.v1.attention.backends.rocm_aiter_fa`:
 """
 
 import importlib
+from unittest.mock import patch
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_mi3xx
+from vllm.platforms.rocm import get_cdna_version, on_mi3xx
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -1036,6 +1037,208 @@ def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_s
         sinks=sinks,
     )
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
+# Layers the flag must leave correct: every head shape for full attention, one
+# shape for each layer kind or cache that has its own prefill path. The latter
+# use the test model's own head shape (Qwen3-0.6B), which the metadata builder
+# sizes its BF16 prefill workspace from.
+_PREFILL_QUERY_QUANT_CASES = [
+    pytest.param(head_size, num_heads, "full_attention", id=f"full-{head_size}-{nh}")
+    for head_size in HEAD_SIZES
+    for nh, num_heads in enumerate(NUM_HEADS_PAIRS)
+] + [
+    pytest.param(128, (16, 8), case, id=case)
+    for case in ("sliding_window", "sinks", "bf16_kv_cache", "shuffled_kv_layout")
+]
+
+
+@pytest.mark.skipif(get_cdna_version() not in (3, 4), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize("head_size, num_heads, layer_kind", _PREFILL_QUERY_QUANT_CASES)
+@pytest.mark.parametrize("q_scale", [1.0, 4.0])
+@pytest.mark.parametrize("batch", ["prefill_last", "prefill_first", "extends_only"])
+def test_aiter_fa_fp8_query_extend_matches_reference(
+    monkeypatch, head_size, num_heads, layer_kind, q_scale, batch
+):
+    """With `use_prefill_query_quantization` on, a batch with a decode, extends
+    and a pure prefill, or without the prefill, matches the reference attention
+    of the layer: full
+    attention, sliding window, sinks, a BF16 KV cache or the shuffled KV
+    layout. Each extend and prefill matches, by relative L2, a float32
+    reference computed from the BF16 query or from the query quantized to FP8
+    with the layer's static q scale (an FP8 query also rounds the probabilities
+    to FP8, so single elements of rows that attend over a few keys differ by
+    more than an elementwise tolerance would allow)."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionImpl,
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    _assert_aiter_supported()
+    shuffle = layer_kind == "shuffled_kv_layout"
+    monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", shuffle)
+    kv_cache_dtype = "auto" if layer_kind == "bf16_kv_cache" else "fp8"
+    sliding_window = 32 if layer_kind == "sliding_window" else None
+    set_random_seed(0)
+    # A decode, the extends and a pure prefill, which may precede the extends.
+    if batch == "prefill_first":
+        batch_spec = BatchSpec(
+            seq_lens=[500, 64, 700, 333, 90], query_lens=[1, 64, 96, 40, 24]
+        )
+    elif batch == "prefill_last":
+        batch_spec = BatchSpec(
+            seq_lens=[500, 700, 333, 90, 64], query_lens=[1, 96, 40, 24, 64]
+        )
+    else:
+        batch_spec = BatchSpec(seq_lens=[500, 700, 333, 90], query_lens=[1, 96, 40, 24])
+    num_blocks = 256
+    num_q_heads, num_kv_heads = num_heads
+    # Sinks comparable to the softmax mass of the real keys.
+    sinks = (
+        torch.randn(num_q_heads, dtype=torch.float32) + 4.0
+        if layer_kind == "sinks"
+        else None
+    )
+    config = create_vllm_config(
+        dtype="bfloat16",
+        max_num_batched_tokens=1024,
+        hf_config_override={
+            "num_attention_heads": num_q_heads,
+            "num_key_value_heads": num_kv_heads,
+            "head_dim": head_size,
+        },
+    )
+    config.cache_config.cache_dtype = kv_cache_dtype
+    config.attention_config.use_prefill_query_quantization = True
+    scale = head_size**-0.5
+
+    with set_current_vllm_config(config):
+        layer = Attention(
+            num_q_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=sliding_window,
+            prefix="layer",
+            attn_backend=AiterFlashAttentionBackend,
+            sinks=sinks,
+        )
+        builder = AiterFlashAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config),
+            ["layer"],
+            config,
+            torch.device("cuda"),
+        )
+        common = create_common_attn_metadata(
+            batch_spec, BLOCK_SIZE, torch.device("cuda"), arange_block_indices=True
+        )
+        with torch.device("cpu"):
+            metadata = builder.build(0, common)
+    impl = layer.impl
+    assert isinstance(impl, AiterFlashAttentionImpl)
+    layer._q_scale.fill_(q_scale)
+
+    cache_dtype = (
+        current_platform.fp8_dtype() if kv_cache_dtype == "fp8" else torch.bfloat16
+    )
+    kv_cache = (
+        torch.empty(
+            2, num_blocks, BLOCK_SIZE, num_kv_heads * head_size, dtype=cache_dtype
+        ).transpose(0, 1)
+        if shuffle
+        else torch.empty(
+            num_blocks, num_kv_heads, BLOCK_SIZE, 2 * head_size, dtype=cache_dtype
+        )
+    )
+    shape = (num_blocks, BLOCK_SIZE, num_kv_heads, head_size)
+    key = torch.randn(shape).to(cache_dtype).to(torch.bfloat16)
+    value = torch.randn(shape).to(cache_dtype).to(torch.bfloat16)
+    # Keys past each request's last token must be masked out of the scores.
+    for i, seq_len in enumerate(batch_spec.seq_lens):
+        last = common.block_table_tensor[i, (seq_len - 1) // BLOCK_SIZE]
+        key[last, (seq_len - 1) % BLOCK_SIZE + 1 :] = 200.0
+    impl.do_kv_cache_update(
+        layer,
+        key.view(-1, num_kv_heads, head_size),
+        value.view(-1, num_kv_heads, head_size),
+        kv_cache,
+        torch.arange(num_blocks * BLOCK_SIZE, dtype=torch.int64),
+    )
+    key_ref, value_ref = key.float(), value.float()
+    # The new tokens' K/V as the forward receives them: what the cache holds.
+    keys, values = [], []
+    for i, (seq_len, query_len) in enumerate(
+        zip(batch_spec.seq_lens, batch_spec.query_lens)
+    ):
+        pos = torch.arange(seq_len - query_len, seq_len)
+        blocks = common.block_table_tensor[i, pos // BLOCK_SIZE]
+        keys.append(key[blocks, pos % BLOCK_SIZE])
+        values.append(value[blocks, pos % BLOCK_SIZE])
+    query = torch.randn(
+        batch_spec.compute_num_tokens(), num_q_heads, head_size, dtype=torch.bfloat16
+    )
+    fp8_dtype = current_platform.fp8_dtype()
+    references = [
+        ref_paged_attn(
+            q,
+            key_ref,
+            value_ref,
+            batch_spec.query_lens,
+            batch_spec.seq_lens,
+            common.block_table_tensor,
+            scale,
+            sliding_window,
+            sinks,
+        )
+        for q in (
+            query.float(),
+            (query.float() / q_scale).to(fp8_dtype).float() * q_scale,
+        )
+    ]
+
+    from aiter.ops.triton.unified_attention import unified_attention
+
+    output = torch.empty_like(query)
+    with patch(
+        "aiter.ops.triton.unified_attention.unified_attention", wraps=unified_attention
+    ) as spy:
+        impl.forward(
+            layer, query, torch.cat(keys), torch.cat(values), kv_cache, metadata, output
+        )
+    if layer_kind == "full_attention":
+        # The FP8-query output is within the bound of the BF16-query reference
+        # too, so check that the extends and the prefill took an FP8 query.
+        fp8_rows = sum(
+            call.kwargs["q"].shape[0]
+            for call in spy.call_args_list
+            if call.kwargs["q"].dtype == fp8_dtype
+        )
+        assert fp8_rows == sum(batch_spec.query_lens[1:])
+    # The decode does not take the flag; it keeps the established FP8-cache
+    # decode tolerance (the shuffled layout's decode kernel needs it).
+    torch.testing.assert_close(
+        output[:1].float(), references[0][:1], atol=6e-2, rtol=1e-1
+    )
+    start = 1
+    for i, query_len in enumerate(batch_spec.query_lens[1:], start=1):
+        rows = slice(start, start + query_len)
+        errors = [
+            ((output[rows].float() - ref[rows]).norm() / ref[rows].norm()).item()
+            for ref in references
+        ]
+        assert min(errors) < 3e-2, f"request {i}: relative L2 {errors}"
+        start += query_len
 
 
 # Decode path test --------------------------------------------------------
