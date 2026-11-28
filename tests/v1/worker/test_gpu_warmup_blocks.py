@@ -336,6 +336,26 @@ def test_context_prefill_warmup_stays_within_the_context_and_vocabulary():
     assert max(request.prompt_token_ids) < vocab_size < len(request.prompt_token_ids)
 
 
+def test_context_prefill_warmup_schedules_the_requested_query_len():
+    """A prefix hit's short suffix: one request prefills `query_len` tokens."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.extensible_kv_cache = _StubExtensibleCache(1024)
+    outputs: list[SchedulerOutput] = []
+
+    assert run_context_prefill_warmup(
+        runner,
+        outputs.append,
+        lambda grammar_output: None,
+        num_context_tokens=100,
+        query_len=3,
+    )
+
+    (request,) = outputs[0].scheduled_new_reqs
+    assert request.num_computed_tokens == 100
+    assert outputs[0].num_scheduled_tokens == {request.req_id: 3}
+    assert outputs[0].total_num_scheduled_tokens == 3
+
+
 def test_context_prefill_warmup_reserves_drafting_slots():
     runner = _make_runner([_attention_group()], NUM_SPEC_STEPS)
     runner.speculative_config.max_num_new_slots_for_drafting = 1

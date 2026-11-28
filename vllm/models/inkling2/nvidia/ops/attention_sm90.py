@@ -56,7 +56,14 @@ def _load_fp8_kv(ptr, offsets, mask, dtype: tl.constexpr, D: tl.constexpr):
     return tl.interleave(lo, hi).to(dtype)
 
 
-@triton.jit
+# A prefill launch after decoding requests passes views past them, whose
+# pointers are not 16-byte aligned, and its token count (the `lse` head
+# stride) need not be a multiple of 16: specializing on either compiles a
+# second variant of this kernel during the first request of the other kind.
+@triton.jit(
+    do_not_specialize=["num_tokens", "stride_lse_h"],
+    do_not_specialize_on_alignment=["BlockTable", "SeqLens", "CuSeqlensQ"],
+)
 def _rel_attention_kernel(
     Q,
     K,

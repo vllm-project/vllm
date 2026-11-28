@@ -380,14 +380,17 @@ def run_context_prefill_warmup(
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
     num_context_tokens: int,
+    query_len: int | None = None,
 ) -> bool:
     """Run a prefill step over about `num_context_tokens` of cached context.
 
     MLA up-projects a prefix cache hit's context chunk by chunk, a transient
     that no step starting from an empty prefix reaches. The queries are kept
-    short: the full-budget step already measured theirs.
+    short (`query_len` tokens, by default one more than a decode step's): the
+    full-budget step already measured theirs.
     """
-    query_len = model_runner.decode_query_len + 1
+    if query_len is None:
+        query_len = model_runner.decode_query_len + 1
     # Leave room for a sampled token after the prompt; and no request needs
     # more context than the step does.
     context_len = min(model_runner.max_model_len - query_len - 1, num_context_tokens)
@@ -551,10 +554,20 @@ _MIXED_DECODE_COUNT_MAX = 16
 # both odd (not a multiple of 16), the first below the 64-token range in which
 # FA4 takes its small-launch split path, the second above it.
 _MIXED_PREFILL_LENS = (37, 141)
+# A prefix cache hit leaves a suffix shorter than a KV block to prefill, and
+# attention kernels pick variants by that query length. Lengths of the
+# prefill steps run over a cached context: one in each range between a decode
+# step's query and the lengths `_MIXED_PREFILL_LENS` covers.
+_CACHED_SUFFIX_LENS = (3, 11, 21)
+_CACHED_SUFFIX_CONTEXT_TOKENS = 256
 # Spacing of the eager prefill steps above the captured sizes: one odd count
 # and one multiple of 16 at the bottom, the middle and (this far below the
 # token budget, leaving the drafting slots) the top of the eager range.
 _EAGER_TOP_MARGIN = 64
+# Eager prefill steps also run every `_EAGER_GRID_STEP` tokens above the
+# captured sizes, up to `_EAGER_GRID_MAX_TOKENS`.
+_EAGER_GRID_STEP = 256
+_EAGER_GRID_MAX_TOKENS = 4096
 
 
 def _eager_prefill_warmup_token_counts(model_runner: GPUModelRunner) -> list[int]:
@@ -587,6 +600,12 @@ def _eager_prefill_warmup_token_counts(model_runner: GPUModelRunner) -> list[int
         (capture_max + budget) // 2 // 16 * 16,
         (budget - _EAGER_TOP_MARGIN) // 16 * 16,
     }
+    # A token-count-derived constexpr is typically rounded to a granule (a
+    # tile count, say), so it changes every few hundred tokens while the
+    # tiles are small: a grid covers that range.
+    anchors.update(
+        range(capture_max, min(budget, _EAGER_GRID_MAX_TOKENS), _EAGER_GRID_STEP)
+    )
     counts = {
         count
         for anchor in anchors
@@ -794,7 +813,8 @@ def run_serving_shape_warmup(
     do not compile during inference: mixed prefill+decode steps at every
     decode request count up to `_MIXED_DECODE_COUNT_MAX`, and eager prefill
     steps above the largest captured prefill size, at token counts that are
-    and are not multiples of 16 (`_eager_prefill_warmup_token_counts`).
+    and are not multiples of 16 (`_eager_prefill_warmup_token_counts`), and
+    the short prefills that follow a prefix cache hit (`_CACHED_SUFFIX_LENS`).
 
     Only the compiled kernels outlive these steps. A failure is logged and
     serving goes on; the kernels then compile on first use, as before.
@@ -847,6 +867,15 @@ def run_serving_shape_warmup(
                     prefill_only_fallback=True,
                 ):
                     ran.append(f"eager{count}")
+            for suffix_len in _CACHED_SUFFIX_LENS:
+                if run_context_prefill_warmup(
+                    model_runner,
+                    worker_execute_model,
+                    worker_sample_tokens,
+                    _CACHED_SUFFIX_CONTEXT_TOKENS,
+                    query_len=suffix_len,
+                ):
+                    ran.append(f"cached+{suffix_len}p")
     except Exception:
         logger.exception(
             "Serving-shape warmup failed after %d steps (%s); serving goes on "

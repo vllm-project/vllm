@@ -680,16 +680,14 @@ def test_token_tiles_match(dist_init, monkeypatch, fmt: str, tokens: int):
 
 
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
-def test_largest_tile_rounds_launched_tiles(dist_init, fmt: str):
-    """`max_ctas` is a constexpr of the routing kernel. At the largest tile,
-    which batches above the captured prefill sizes reach at their exact token
-    count, it is rounded up to a granule, so those batches share a few kernel
-    variants and never launch fewer tiles than they need. Smaller tiles keep
-    the exact count."""
+def test_eager_tiles_round_launched_tiles(dist_init, fmt: str):
+    """`max_ctas` is a constexpr of the routing kernel. At the tiles batches
+    above the captured prefill sizes reach at their exact token count, it is
+    rounded up to a granule, so those batches share a few kernel variants and
+    never launch fewer tiles than they need. Smaller tiles keep the exact
+    count."""
     experts = _build_moe(fmt, _random_moe_weights(fmt)).experts
     trtllm_bmm.expert_plan.cache_clear()
-    granule = trtllm_bmm._LARGE_TILE_CTAS_GRANULE
-    (below, small), (_, large) = trtllm_bmm._TILES[-2:]
 
     def exact(tokens: int, tile: int) -> int:
         rows = tokens * experts.topk
@@ -697,17 +695,22 @@ def test_largest_tile_rounds_launched_tiles(dist_init, fmt: str):
         return full + (rows - full) // tile
 
     span = 4096
-    seen = set()
-    for tokens in range(below + 1, below + 1 + span, 32):
-        plan = experts.plan(tokens)
-        assert plan.tile == large
-        assert plan.max_ctas % granule == 0
-        assert exact(tokens, large) <= plan.max_ctas < exact(tokens, large) + granule
-        seen.add(plan.max_ctas)
-    assert len(seen) <= span * experts.topk // large // granule + 2
-
-    plan = experts.plan(below)
-    assert (plan.tile, plan.max_ctas) == (small, exact(below, small))
+    below = 0
+    for limit, tile in trtllm_bmm._TILES:
+        granule = trtllm_bmm._CTAS_GRANULES.get(tile, 1)
+        top = min(limit, below + span)
+        seen = set()
+        for tokens in range(below + 1, top + 1, 8):
+            plan = experts.plan(tokens)
+            wanted = exact(tokens, tile)
+            assert plan.tile == tile
+            assert plan.max_ctas % granule == 0
+            assert wanted <= plan.max_ctas < wanted + granule
+            seen.add(plan.max_ctas)
+        if granule > 1:
+            assert len(seen) <= (top - below) * experts.topk // tile // granule + 2
+        below = limit
+    assert trtllm_bmm._CTAS_GRANULES.keys() <= {tile for _, tile in trtllm_bmm._TILES}
 
 
 def _nan_filled(empty):
