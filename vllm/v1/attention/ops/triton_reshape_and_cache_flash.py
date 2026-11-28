@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.fp8 import to_fp8
 from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
@@ -121,8 +122,6 @@ def reshape_and_cache_kernel_flash(
         key_ptr + src_key_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
     if FP8_KV_CACHE:
-        # tl.store will do the correct implicit cast to fp8,
-        # based on the key_cache_ptr.dtype.element_ty
         key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
     else:
         key_tile = key_load
@@ -135,20 +134,22 @@ def reshape_and_cache_kernel_flash(
         if value_load.dtype.is_fp8():
             value_tile = value_load
         else:
-            # tl.store will do the correct implicit cast to fp8,
-            #  based on the value_cache_ptr.dtype.element_ty
             value_tile = value_load / tl.load(v_scale)
     else:
         value_tile = value_load
 
+    # The cast to the cache's fp8 type is explicit: the implicit one in
+    # tl.store rounds fp32 twice on SM89.
     tl.store(
         key_cache_ptr + tgt_idx_k,
-        key_tile,
+        to_fp8(key_tile, key_cache_ptr.dtype.element_ty) if FP8_KV_CACHE else key_tile,
         mask=tile_pos < (num_heads * head_size),
     )
     tl.store(
         value_cache_ptr + tgt_idx_v,
-        value_tile,
+        to_fp8(value_tile, value_cache_ptr.dtype.element_ty)
+        if FP8_KV_CACHE
+        else value_tile,
         mask=tile_pos < (num_heads * head_size),
     )
     return
@@ -238,7 +239,7 @@ def _reshape_cache_per_token_head(
         + slot_in_blk * stride_kc_slot
         + head * stride_kc_head
         + dim_offs,
-        k_q,
+        k_q if IS_INT_QUANT else to_fp8(k_q, key_cache_ptr.dtype.element_ty),
         mask=k_mask,
     )
 
@@ -270,7 +271,7 @@ def _reshape_cache_per_token_head(
         + slot_in_blk * stride_vc_slot
         + head * stride_vc_head
         + dim_offs,
-        v_q,
+        v_q if IS_INT_QUANT else to_fp8(v_q, value_cache_ptr.dtype.element_ty),
         mask=v_mask,
     )
 

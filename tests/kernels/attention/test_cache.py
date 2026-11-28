@@ -494,6 +494,62 @@ def test_reshape_and_cache_flash(
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="Triton stores e4m3 natively on CUDA from SM89",
+)
+@pytest.mark.parametrize("per_token_head", [False, True])
+@torch.inference_mode()
+def test_triton_reshape_and_cache_flash_fp8_rounds_to_nearest_even(
+    per_token_head: bool,
+) -> None:
+    """fp32 entries just past an e4m3 tie are stored as torch rounds them.
+
+    SM89 has no direct fp32 -> e4m3 conversion, and rounding through a
+    truncated fp16 sends these to the wrong neighbour.
+    """
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash,
+        triton_reshape_and_cache_flash_per_token_head_quant,
+    )
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    device = CUDA_DEVICES[0]
+    fp8 = torch.float8_e4m3fn
+    codes = torch.arange(256, dtype=torch.uint8, device=device).view(fp8).float()
+    finite = codes[codes.isfinite()].unique()
+    ties = (finite[1:] + finite[:-1]) / 2
+    past_ties = torch.nextafter(ties, ties.sign() * torch.inf)
+    # One full-scale entry per head keeps the per-token-head scale at 1.
+    full_scale = torch.full((4, 1), 448.0, device=device)
+    key = torch.cat((past_ties.view(4, 63), full_scale), dim=1).view(4, 1, 64)
+    value = -key
+
+    key_cache = torch.zeros(1, 4, 1, 64, dtype=fp8, device=device)
+    value_cache = torch.zeros_like(key_cache)
+    slot_mapping = torch.arange(4, device=device)
+    if per_token_head:
+        triton_reshape_and_cache_flash_per_token_head_quant(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            torch.zeros(1, 4, 1, device=device),
+            torch.zeros(1, 4, 1, device=device),
+            slot_mapping,
+            KVQuantMode.FP8_PER_TOKEN_HEAD,
+        )
+    else:
+        one = torch.ones((), device=device)
+        triton_reshape_and_cache_flash(
+            key, value, key_cache, value_cache, slot_mapping, "fp8", one, one
+        )
+
+    for cache, source in ((key_cache, key), (value_cache, value)):
+        stored = cache.view(torch.uint8).view(4, 1, 64)
+        assert torch.equal(stored, source.to(fp8).view(torch.uint8))
+
+
 @torch.inference_mode()
 def test_nvfp4_4over6_selects_lower_error_scale(
     kv_cache_factory_flashinfer,
