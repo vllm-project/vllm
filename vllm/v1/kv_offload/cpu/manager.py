@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+import time
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -29,9 +30,20 @@ from vllm.v1.kv_offload.cpu.common import (
     CPUOffloadingInfo,
     CPUOffloadingMetrics,
 )
+from vllm.v1.kv_offload.cpu.pin import (
+    PIN_ACTION_TYPE,
+    PinRequest,
+    parse_pin_hints,
+)
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+
+
+def _prefix_sort_key(key: OffloadKey, req_context: ReqContext) -> tuple[bool, int]:
+    """Order keys by their token position, unknown positions last."""
+    position = req_context.get_offload_key_position(key)
+    return (position is None, position if position is not None else 0)
 
 
 @dataclass(slots=True)
@@ -50,6 +62,15 @@ class _RequestCacheAccess:
     # is not another use of the content.
     counted_keys: set[OffloadKey] = field(default_factory=set)
     finished: bool = False
+
+
+@dataclass(slots=True)
+class _PinState:
+    """The pin requests of one request, parsed once per cache generation."""
+
+    owner: object
+    cache_generation: int
+    requests: tuple[PinRequest, ...]
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -71,8 +92,11 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        pin_capacity_ratio: float = 0.5,
         info: CPUOffloadingInfo | None = None,
     ):
+        if not 0 < pin_capacity_ratio <= 1:
+            raise ValueError("pin_capacity_ratio must be in (0, 1]")
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
         self._config_info: ConfigInfoMapping = (
@@ -100,6 +124,15 @@ class CPUOffloadingManager(OffloadingManager):
         self.counts: OrderedDict[OffloadKey, int] | None = (
             OrderedDict() if store_threshold >= 2 else None
         )
+
+        # OffloadKey -> time.monotonic() deadline. Pinned chunks are excluded
+        # from eviction until their deadline lapses.
+        self._pins: dict[OffloadKey, float] = {}
+        # At most this many chunks may be pinned at once. The rest of the tier
+        # stays evictable, so an accurate pin cannot starve normal traffic.
+        self._max_pinned_chunks: int = max(1, int(num_chunks * pin_capacity_ratio))
+        # (action_type, outcome) -> count, drained by get_stats().
+        self._hint_outcome_counts: dict[tuple[str, str], int] = {}
 
     # --- chunk pool ---
 
@@ -160,6 +193,62 @@ class CPUOffloadingManager(OffloadingManager):
                 num_unprotected -= 1
             self.counts[key] = 1
 
+    def _count_hint_outcome(self, count: int, outcome: str) -> None:
+        key = (PIN_ACTION_TYPE, outcome)
+        self._hint_outcome_counts[key] = self._hint_outcome_counts.get(key, 0) + count
+
+    def _get_pin_state(self, req_context: ReqContext) -> _PinState:
+        state = req_context.get_state(_PinState)
+        if (
+            state is None
+            or state.owner is not self
+            or state.cache_generation != self._cache_generation
+        ):
+            hints = parse_pin_hints(req_context.kv_hints)
+            if hints.pins:
+                self._count_hint_outcome(len(hints.pins), "applied")
+            if hints.unsupported:
+                self._count_hint_outcome(hints.unsupported, "unsupported")
+            if hints.rejected:
+                self._count_hint_outcome(hints.rejected, "rejected")
+            state = _PinState(
+                owner=self,
+                cache_generation=self._cache_generation,
+                requests=hints.pins,
+            )
+            req_context.set_state(state)
+        return state
+
+    def _pin_keys(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext, now: float
+    ) -> None:
+        """Pin a request's chunks, prefix-first, within the tier's pin cap."""
+        state = self._get_pin_state(req_context)
+        if not state.requests:
+            return
+        deadline = now + max(request.ttl_seconds for request in state.requests)
+        # Lapsed pins must not hold cap space for new pins.
+        self._unexpired_pins(now)
+        ordered = sorted(keys, key=lambda key: _prefix_sort_key(key, req_context))
+        for key in ordered:
+            pinned_until = self._pins.get(key)
+            if pinned_until is not None:
+                # Escalating an existing pin is always allowed.
+                self._pins[key] = max(pinned_until, deadline)
+            elif len(self._pins) >= self._max_pinned_chunks:
+                self._count_hint_outcome(1, "clipped")
+            else:
+                self._pins[key] = deadline
+
+    def _unexpired_pins(self, now: float) -> set[OffloadKey]:
+        """Return the live pins, dropping the ones whose TTL has lapsed."""
+        if not self._pins:
+            return set()
+        expired = [key for key, deadline in self._pins.items() if deadline <= now]
+        for key in expired:
+            del self._pins[key]
+        return set(self._pins)
+
     def _get_request_cache_access(self, req_context: ReqContext) -> _RequestCacheAccess:
         state = req_context.get_state(_RequestCacheAccess)
         if (
@@ -206,6 +295,7 @@ class CPUOffloadingManager(OffloadingManager):
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         self._get_request_cache_access(req_context)
+        self._get_pin_state(req_context)
         return RequestOffloadingContext()
 
     @override
@@ -333,6 +423,7 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
         if not keys_to_store:
+            self._pin_keys(ready_existing_keys, req_context, time.monotonic())
             return PrepareStoreOutput(
                 keys_to_store=[],
                 store_spec=self._get_load_store_spec([], []),
@@ -374,6 +465,7 @@ class CPUOffloadingManager(OffloadingManager):
                 retried_keys = set(keys_to_retry)
                 keys_to_store = [k for k in keys_to_store if k not in retried_keys]
                 if not keys_to_store:
+                    self._pin_keys(ready_existing_keys, req_context, time.monotonic())
                     return PrepareStoreOutput(
                         keys_to_store=[],
                         store_spec=self._get_load_store_spec([], []),
@@ -394,7 +486,10 @@ class CPUOffloadingManager(OffloadingManager):
 
             # Chunks from the original input are excluded from eviction candidates:
             # a chunk that was already stored must remain in the cache after this call.
-            protected = set(keys)
+            # Live pins are excluded as well; a pin the tier accepted is honored
+            # rather than silently broken, so the store fails instead.
+            now = time.monotonic()
+            protected = set(keys) | self._unexpired_pins(now)
             evicted = self._policy.evict(num_chunks_to_evict, protected)
             if evicted is None:
                 return None
@@ -404,6 +499,7 @@ class CPUOffloadingManager(OffloadingManager):
             assert self._num_evictable_cache_chunks >= 0
 
             for key, chunk in evicted:
+                self._pins.pop(key, None)
                 self._free_chunk(chunk)
                 to_evict.append(key)
 
@@ -425,6 +521,9 @@ class CPUOffloadingManager(OffloadingManager):
             self._policy.insert(key, chunk, req_context)
         self._num_write_pending_chunks += len(keys_to_store)
         state.inserted_keys.update(keys_to_store)
+        self._pin_keys(
+            (*keys_to_store, *ready_existing_keys), req_context, time.monotonic()
+        )
 
         # build store specs for allocated chunks
         store_spec = self._get_load_store_spec(keys_to_store, chunks)
@@ -471,6 +570,7 @@ class CPUOffloadingManager(OffloadingManager):
                 if chunk is not None and not chunk.is_ready:
                     self._num_write_pending_chunks -= 1
                     self._policy.remove(key)
+                    self._pins.pop(key, None)
                     self._free_chunk(chunk)
                     removed_keys.append(key)
 
@@ -535,6 +635,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._cache_generation += 1
         self._num_evictable_cache_chunks = 0
         self._num_write_pending_chunks = 0
+        self._pins.clear()
 
         self._free_list.clear()
         self._num_allocated_chunks = 0
@@ -593,5 +694,13 @@ class CPUOffloadingManager(OffloadingManager):
                 self.stores_skipped_in_current_batch,
             )
             self.stores_skipped_in_current_batch = 0
+
+        for (action_type, outcome), count in self._hint_outcome_counts.items():
+            stats.increase_counter(
+                CPUOffloadingMetrics.HINT_ACTIONS,
+                count,
+                labelvalues=(action_type, outcome),
+            )
+        self._hint_outcome_counts.clear()
 
         return stats

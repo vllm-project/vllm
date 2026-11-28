@@ -56,6 +56,13 @@ class CPUOffloadingSpec(OffloadingSpec):
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         definitions: dict[str, OffloadingMetricMetadata] = {
+            CPUOffloadingMetrics.HINT_ACTIONS: OffloadingCounterMetadata(
+                documentation=(
+                    "Number of KV hint actions handled by the CPU offloading "
+                    "tier, labeled by action type and outcome."
+                ),
+                labelnames=("action_type", "outcome"),
+            ),
             CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
                 documentation=(
                     "Fraction of CPU KV-cache space currently pinned by active "
@@ -184,6 +191,12 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.cache_policy_module_path: str | None = self.extra_config.get(
             "cache_policy_module_path"
         )
+        # Fraction of the tier that kv.pin hints may protect at once.
+        self.pin_capacity_ratio: float = float(
+            self.extra_config.get("pin_capacity_ratio", 0.5)
+        )
+        if not 0 < self.pin_capacity_ratio <= 1:
+            raise ValueError("pin_capacity_ratio must be in (0, 1]")
 
     @classmethod
     @override
@@ -210,6 +223,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
+                pin_capacity_ratio=self.pin_capacity_ratio,
                 info=self.cpu_info,
             )
         return self._manager

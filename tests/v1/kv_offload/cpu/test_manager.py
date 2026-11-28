@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from functools import partial
 import numpy as np
 import pytest
 
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -21,6 +23,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.pin import PIN_ACTION_TYPE, PIN_ACTION_VERSION
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
@@ -28,10 +31,14 @@ from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
 
 def make_req_context(
-    req_id: str = "", kv_transfer_params: dict | None = None
+    req_id: str = "",
+    kv_transfer_params: dict | None = None,
+    kv_hints: KvHintsEnvelope | None = None,
 ) -> ReqContext:
     """Create a ReqContext as production code would, from a request's params."""
-    return ReqContext(req_id=req_id, kv_transfer_params=kv_transfer_params)
+    return ReqContext(
+        req_id=req_id, kv_transfer_params=kv_transfer_params, kv_hints=kv_hints
+    )
 
 
 _EMPTY_REQ_CTX = make_req_context()
@@ -44,6 +51,7 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
+    pin_capacity_ratio: float = 0.5,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_chunks=num_chunks,
@@ -52,6 +60,7 @@ def make_cpu_manager(
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
+        pin_capacity_ratio=pin_capacity_ratio,
     )
 
 
@@ -2567,3 +2576,208 @@ def test_store_trigger_and_success_are_keyword_only():
             keys, _EMPTY_REQ_CTX, StoreTrigger.ON_COMPUTE
         )
     manager.complete_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+
+
+def make_pin_envelope(ttl_seconds: float = 60.0) -> KvHintsEnvelope:
+    return KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="pin-test",
+        actions=[
+            KvHintAction(
+                action_id="pin",
+                action_type=PIN_ACTION_TYPE,
+                action_version=PIN_ACTION_VERSION,
+                payload={"ttl_seconds": ttl_seconds},
+            )
+        ],
+    )
+
+
+def store_and_finish(
+    manager: CPUOffloadingManager,
+    req_context: ReqContext,
+    int_hashes: list[int],
+    *,
+    success: bool = True,
+) -> PrepareStoreOutput:
+    keys = to_keys(int_hashes)
+    output = manager.prepare_store(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)
+    assert output is not None
+    manager.complete_store(
+        keys, req_context, trigger=StoreTrigger.ON_COMPUTE, success=success
+    )
+    manager.on_request_finished(req_context)
+    return output
+
+
+def hint_counter_key(outcome: str) -> str:
+    return f"{CPUOffloadingMetrics.HINT_ACTIONS}:{('kv.pin', outcome)}"
+
+
+def test_pin_protects_chunks_from_lru_eviction():
+    manager = make_cpu_manager(num_chunks=4)
+    pinned = make_req_context("pinned", kv_hints=make_pin_envelope())
+    store_and_finish(manager, pinned, [1, 2])
+    store_and_finish(manager, make_req_context("other"), [3, 4])
+
+    # [1, 2] are pinned, so an unpinned chunk goes instead.
+    output = manager.prepare_store(
+        to_keys([5]), make_req_context("third"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert set(output.evicted_keys) <= set(to_keys([3, 4]))
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
+
+
+def test_pin_expires_after_its_ttl():
+    manager = make_cpu_manager(num_chunks=4)
+    pinned = make_req_context("pinned", kv_hints=make_pin_envelope(0.05))
+    store_and_finish(manager, pinned, [1, 2])
+    store_and_finish(manager, make_req_context("other"), [3, 4])
+
+    # A live pin is honored: a store that would need its room fails.
+    assert (
+        manager.prepare_store(
+            to_keys([5, 6, 7]),
+            make_req_context("third"),
+            trigger=StoreTrigger.ON_COMPUTE,
+        )
+        is None
+    )
+
+    time.sleep(0.1)
+    output = manager.prepare_store(
+        to_keys([5, 6, 7]), make_req_context("third"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert len(output.evicted_keys) == 3
+
+
+def test_pin_cap_clips_overflowing_pins():
+    manager = make_cpu_manager(num_chunks=4)  # At most two chunks may be pinned.
+    pinned = make_req_context("pinned", kv_hints=make_pin_envelope())
+    keys = to_keys([1, 2, 3, 4])
+    for position, key in enumerate(keys, 1):
+        pinned.set_offload_key_position(key, position * 16)
+    store_and_finish(manager, pinned, [1, 2, 3, 4])
+
+    # The prefix wins the cap; the tail is clipped, not rejected.
+    assert set(manager._pins) == set(to_keys([1, 2]))
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[hint_counter_key("clipped")] == 2
+    assert reduced[hint_counter_key("applied")] == 1
+
+
+def test_store_fails_rather_than_breaking_a_live_pin():
+    manager = make_cpu_manager(num_chunks=1)
+    pinned = make_req_context("pinned", kv_hints=make_pin_envelope())
+    store_and_finish(manager, pinned, [1])
+
+    assert (
+        manager.prepare_store(
+            to_keys([2]), make_req_context("third"), trigger=StoreTrigger.ON_COMPUTE
+        )
+        is None
+    )
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+
+
+def test_pin_applies_to_chunks_the_request_reuses():
+    manager = make_cpu_manager(num_chunks=4)
+    store_and_finish(manager, make_req_context("first"), [1, 2])
+
+    # The request's chunks are already resident, so this is a pure reuse.
+    pinned = make_req_context("pinned", kv_hints=make_pin_envelope())
+    output = manager.prepare_store(
+        to_keys([1, 2]), pinned, trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.keys_to_store == []
+    assert set(manager._pins) == set(to_keys([1, 2]))
+
+    store_and_finish(manager, make_req_context("other"), [3, 4])
+    output = manager.prepare_store(
+        to_keys([5]), make_req_context("third"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert set(output.evicted_keys) <= set(to_keys([3, 4]))
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
+
+
+def test_invalid_pin_actions_are_skipped_without_failing_siblings():
+    manager = make_cpu_manager(num_chunks=4)
+    envelope = KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="mixed",
+        actions=[
+            KvHintAction("bad-ttl", PIN_ACTION_TYPE, "1.0", {"ttl_seconds": -1}),
+            KvHintAction("bad-version", PIN_ACTION_TYPE, "2.0", {"ttl_seconds": 60}),
+            KvHintAction("other", "kv.other", "1.0", {}),
+            KvHintAction("good", PIN_ACTION_TYPE, "1.0", {"ttl_seconds": 60}),
+        ],
+    )
+    store_and_finish(manager, make_req_context("pinned", kv_hints=envelope), [1, 2])
+
+    assert set(manager._pins) == set(to_keys([1, 2]))
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[hint_counter_key("applied")] == 1
+    assert reduced[hint_counter_key("unsupported")] == 1
+    assert reduced[hint_counter_key("rejected")] == 1
+
+
+def test_reset_cache_clears_pins():
+    manager = make_cpu_manager(num_chunks=2)
+    pinned = make_req_context("pinned", kv_hints=make_pin_envelope())
+    store_and_finish(manager, pinned, [1, 2])
+    assert manager._pins
+
+    manager.reset_cache()
+    assert not manager._pins
+    output = manager.prepare_store(
+        to_keys([1, 2]), make_req_context("new"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+
+
+def test_expired_pins_release_their_cap_space():
+    manager = make_cpu_manager(num_chunks=4)  # At most two chunks may be pinned.
+    first = make_req_context("first", kv_hints=make_pin_envelope(0.05))
+    store_and_finish(manager, first, [1, 2])
+    assert set(manager._pins) == set(to_keys([1, 2]))
+
+    time.sleep(0.1)
+    second = make_req_context("second", kv_hints=make_pin_envelope())
+    store_and_finish(manager, second, [3, 4])
+
+    # The lapsed pins no longer hold cap space, so the new request fits.
+    assert set(manager._pins) == set(to_keys([3, 4]))
+
+
+@pytest.mark.parametrize(
+    ("ratio", "expected_pinned"),
+    [(1.0, 4), (0.5, 2), (0.25, 1)],
+)
+def test_pin_capacity_ratio_sets_the_pin_cap(ratio: float, expected_pinned: int):
+    manager = make_cpu_manager(num_chunks=4, pin_capacity_ratio=ratio)
+    pinned = make_req_context("pinned", kv_hints=make_pin_envelope())
+    keys = to_keys([1, 2, 3, 4])
+    for position, key in enumerate(keys, 1):
+        pinned.set_offload_key_position(key, position * 16)
+    store_and_finish(manager, pinned, [1, 2, 3, 4])
+
+    assert len(manager._pins) == expected_pinned
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce().get(hint_counter_key("clipped"), 0) == 4 - expected_pinned
+
+
+@pytest.mark.parametrize("ratio", [0, -0.1, 1.1, float("nan")])
+def test_pin_capacity_ratio_is_validated(ratio: float):
+    with pytest.raises(ValueError, match="pin_capacity_ratio"):
+        make_cpu_manager(num_chunks=4, pin_capacity_ratio=ratio)

@@ -135,6 +135,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
+        pin_capacity_ratio: float = 0.5,
         info: CPUOffloadingInfo | None = None,
     ):
         super().__init__(
@@ -142,6 +143,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             cache_policy=cache_policy,
             cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
+            pin_capacity_ratio=pin_capacity_ratio,
             info=info,
         )
         self._mmap_region = mmap_region

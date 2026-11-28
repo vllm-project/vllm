@@ -23,10 +23,14 @@ from vllm.v1.kv_offload.config import (
     OffloadingGroupConfig,
 )
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
+from vllm.v1.kv_offload.tiering.manager import (
+    CPUPrimaryTierOffloadingManager,
+    TieringOffloadingManager,
+)
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 
@@ -336,6 +340,26 @@ def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
             # 32 tokens for each chunk, over a request of 32 chunks.
             "cpu_kv_cache_size_tokens": spec.num_chunks * 32,
         }
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+def test_tiering_spec_passes_pin_capacity_ratio_to_the_primary_tier():
+    """A non-default ratio must reach the tiered primary, not only the single tier."""
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        engine_id=f"test-tiering-{uuid.uuid4().hex}",
+        extra_config={"pin_capacity_ratio": 0.25},
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+    manager = spec.get_manager()
+    try:
+        assert isinstance(manager, TieringOffloadingManager)
+        primary = manager.primary_tier
+        assert isinstance(primary, CPUPrimaryTierOffloadingManager)
+        assert primary._max_pinned_chunks == max(1, int(spec.num_chunks * 0.25))
     finally:
         manager.shutdown()
 
@@ -947,3 +971,17 @@ def test_tiering_spec_rejects_secondary_tiers_across_nodes(
     # them every group is queried, even after one spans nodes, since each
     # query is a collective that the group's other ranks also join.
     assert sorted(queried) == (["pcp", "pp", "tp"] if secondary_tiers else [])
+
+
+def test_cpu_spec_pin_capacity_ratio_reaches_the_manager():
+    spec = _create_spec(extra_config={"pin_capacity_ratio": 1.0})
+    assert isinstance(spec, CPUOffloadingSpec)
+    manager = spec.get_manager()
+    assert isinstance(manager, CPUOffloadingManager)
+    assert manager._max_pinned_chunks == spec.num_chunks
+
+
+@pytest.mark.parametrize("ratio", [0.0, -0.1, 1.1])
+def test_cpu_spec_rejects_invalid_pin_capacity_ratio(ratio: float):
+    with pytest.raises(ValueError, match="pin_capacity_ratio"):
+        _create_spec(extra_config={"pin_capacity_ratio": ratio})

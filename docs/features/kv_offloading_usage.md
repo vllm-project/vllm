@@ -52,6 +52,63 @@ it can satisfy a resident hit directly and is the required staging tier for
 secondary-to-GPU loads. Consequently, an empty tier list allows CPU hits but
 does not query any secondary tier.
 
+## KV hint actions: pin
+
+A request can ask the CPU tier to keep the chunks it offloads by attaching a
+`kv.pin` action to its KV hints envelope. The action is a bounded-TTL soft
+protection: it only reorders eviction while it is alive, and the tier never
+lets pins take over the whole cache.
+
+```json
+{
+  "model": "<model>",
+  "prompt": "...",
+  "kv_hints": {
+    "protocol_version": "0.1",
+    "message_id": "msg-1",
+    "actions": [
+      {
+        "action_id": "pin-session-7",
+        "action_type": "kv.pin",
+        "action_version": "1.0",
+        "payload": {"ttl_seconds": 300}
+      }
+    ]
+  }
+}
+```
+
+Semantics:
+
+- `ttl_seconds` is required and must be in `(0, 3600]`. A pin is applied when
+  the request's chunks are stored into the CPU tier, and it can be refreshed by
+  re-sending the action on a later request that reuses the same chunks.
+- Pinned chunks are skipped by ordinary eviction until their deadline lapses.
+  After that they fall back to the tier's normal policy; expiry never deletes a
+  chunk by itself.
+- At most `pin_capacity_ratio` of the tier's chunks may be pinned at once (half
+  by default). A request that pins more has the overflow clipped, and the
+  prefix (lowest token positions) is pinned first.
+- A store that could only be satisfied by evicting a live pin fails instead;
+  the affected request falls back to recomputation. The tier prefers refusing
+  new offloads over silently breaking a pin it accepted.
+- Pins survive the request lifecycle: a finished request's offloaded context
+  stays protected for the rest of its TTL. `POST /reset_prefix_cache` only
+  resets the GPU cache; use `?reset_external=true` to also drop the CPU tier's
+  chunks and pins.
+- Actions with an unsupported `action_version` or an invalid payload are
+  skipped without affecting the other actions of the same envelope. The action
+  has no effect when no CPU offloading connector is configured.
+- The action is handled by the CPU primary tier. Secondary tiers keep their own
+  retention policies.
+
+Each handled action is counted by `vllm:kv_hint_actions_total`, labeled by
+`action_type` and `outcome` (`applied`, `clipped`, `rejected`, `unsupported`).
+
+!!! note
+    KV hints arrive through the request's `kv_hints` field, available through
+    `AsyncLLM.generate(kv_hints=...)` and the OpenAI entrypoints that accept it.
+
 ## Terminology: Chunks
 
 The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
@@ -146,6 +203,7 @@ Files are named by block content hash, so blocks written by an earlier run or by
 | `eviction_policy` | no | `lru` | both | Primary tier policy: built-in `lru`/`arc`, or a custom `CachePolicy` name (see [Custom Eviction Policies](#custom-eviction-policies)). |
 | `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
+| `pin_capacity_ratio` | no | `0.5` | both | Fraction of the tier, in `(0, 1]`, that live `kv.pin` hints may protect at once. Pins beyond it are clipped. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `async_init` | no | `false` | single-tier | Pre-fault and pin the CPU buffer in the background; the engine serves without offloading until every worker is ready. CUDA only. |
 | `async_init_pin_pace` | no | `2.0` | single-tier | Pause after each background pin call, as a multiple of its duration. |
