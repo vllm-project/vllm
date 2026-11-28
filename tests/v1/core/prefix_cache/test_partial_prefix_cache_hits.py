@@ -864,6 +864,62 @@ def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
     assert num_computed == checkpoint_position
 
 
+def _make_coarse_mamba_manager():
+    """Hits align to the attention block (64), coarser than the Mamba block."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=16,
+        full_block_size=64,
+        mamba_block_size=16,
+        num_prefill_checkpoint_blocks=1,
+    )
+    assert not manager.coordinator.enable_partial_hash_hits
+    return manager
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0])
+def test_coarse_prompt_end_checkpoint_is_offered_to_connector(retention_interval):
+    """`cache_blocks` gets a token count that stops at the last hit-aligned
+    boundary, below the checkpoint column. The prompt-end checkpoint keyed
+    there must still be offered to a KV connector, also when no chunk ends on
+    it.
+    """
+    manager = _make_coarse_mamba_manager()
+    manager.coordinator.retention_interval = retention_interval
+
+    request = make_request("producer", list(range(150)), 16, sha256)
+    assert manager.allocate_slots(request, request.num_tokens) is not None
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    # State@128 is exported into the column at index 8, not into block 7.
+    assert mamba_blocks[7].is_null
+    hit = manager.block_pool.get_cached_block(request.block_hashes[128 // 16 - 1], [1])
+    assert hit is not None
+    assert hit[0] is mamba_blocks[8]
+    assert drain_boundary_state_offloads(manager) == {
+        request.request_id: [(1, mamba_blocks[8].block_id, 128)]
+    }
+
+    # Offered once: the first decode step re-keys nothing.
+    request.num_computed_tokens = 150
+    request.append_output_token_ids(7)
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, 1) is not None
+    assert drain_boundary_state_offloads(manager) == {}
+
+
+def test_coarse_transient_checkpoint_is_not_offered_to_connector():
+    """A mid-prompt checkpoint that sparse retention drops is evicted as
+    transient and must not reach a connector."""
+    manager = _make_coarse_mamba_manager()
+    manager.coordinator.retention_interval = 256
+
+    request = make_request("producer", list(range(400)), 16, sha256)
+    # The chunk ends mid-prompt; its checkpoint (128) is not retained.
+    assert manager.allocate_slots(request, 150) is not None
+    assert manager.block_pool.get_cached_block(request.block_hashes[7], [1]) is None
+    assert drain_boundary_state_offloads(manager) == {}
+
+
 @pytest.mark.parametrize("retention_interval,reserved", [(None, True), (0, False)])
 def test_intermediate_chunk_checkpoint_reserved_only_under_dense_retention(
     retention_interval, reserved

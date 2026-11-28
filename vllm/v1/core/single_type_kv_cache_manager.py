@@ -2523,6 +2523,7 @@ class MambaManager(SingleTypeKVCacheManager):
             replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
+        partial_hash = None
         if self.prefix_caching:
             partial_hash = self._cache_partial_tail_block(
                 request, num_tokens, retention_interval=retention_interval
@@ -2554,6 +2555,23 @@ class MambaManager(SingleTypeKVCacheManager):
                             block.block_hash_num_tokens,
                         )
                     )
+        if partial_hash is not None:
+            checkpoint = self._checkpoints.get(request.request_id)
+            if checkpoint is not None and not (
+                num_cached_blocks_before <= checkpoint[1] < num_cached_blocks_after
+            ):
+                # The checkpoint column can lie past the full blocks offered
+                # above: `num_tokens` stops at the last hit-aligned boundary,
+                # which is below it when hits align coarser than this group's
+                # block.
+                self._pending_boundary_state_offloads.append(
+                    (
+                        request.request_id,
+                        self.kv_cache_group_id,
+                        self.req_to_blocks[request.request_id][checkpoint[1]],
+                        checkpoint[0],
+                    )
+                )
 
     def _decode_resume_block_idx(
         self, request_id: str, processed_tokens: int, num_prompt_tokens: int

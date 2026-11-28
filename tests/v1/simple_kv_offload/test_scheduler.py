@@ -3516,6 +3516,25 @@ def test_gpu_prefix_hit_refreshes_cpu_mamba_boundary() -> None:
     assert lru_order.index(mamba[0]) < lru_order.index(newer[0])
 
 
+@pytest.mark.parametrize("max_num_batched_tokens", [80, 256])
+def test_dcp_hybrid_coarse_prompt_checkpoint_reaches_cpu(
+    max_num_batched_tokens: int,
+) -> None:
+    """The sliding-window draft group keeps hits on the scheduler block, so
+    the Mamba prompt checkpoint is the last scheduler-block boundary. No chunk
+    ends on it here; the CPU tier still needs that state for a hit."""
+    engine = _make_dcp_hybrid_engine(
+        draft_sliding_window=True, max_num_batched_tokens=max_num_batched_tokens
+    )
+    prompt = list(range(150))
+    boundary = 128
+    assert max_num_batched_tokens // BLOCK_SIZE * BLOCK_SIZE != boundary
+
+    assert _run_engine_request(engine, prompt) == 0
+    assert engine.reset_prefix_cache(reset_connector=False)
+    assert _run_engine_request(engine, prompt + list(range(1000, 1024))) == boundary
+
+
 def test_external_lookup_rejects_misaligned_local_prefix(caplog_vllm) -> None:
     scheduler_block_size = 4 * BLOCK_SIZE
     fix = _make_hybrid_attention_mamba_scheduler(block_size=scheduler_block_size)
