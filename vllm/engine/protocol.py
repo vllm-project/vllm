@@ -237,6 +237,15 @@ class EngineClient(ABC):
         """Return the checkpoint lifecycle state and the error that failed it."""
         ...
 
+    async def prepare_snapshot_resources(self) -> None:
+        """Prepare and synchronize engine resources for a snapshot.
+        The caller must have paused generation and must own admission."""
+        raise NotImplementedError
+
+    async def restore_snapshot_resources(self) -> None:
+        """Restore the resources released by `prepare_snapshot_resources`."""
+        raise NotImplementedError
+
     @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
