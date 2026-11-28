@@ -874,6 +874,26 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     assert not any(os.path.exists(path) for path, _, _ in segments)
 
 
+def test_shared_offload_region_without_os_memfd_create(iid, monkeypatch):
+    """Multi-segment reservation works when os.memfd_create is absent."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    if hasattr(os, "memfd_create"):
+        monkeypatch.delattr(os, "memfd_create")
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=2 * PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=2,
+    )
+    try:
+        assert len(region._segments) == 2
+        assert region.mmap_obj is not None
+    finally:
+        region.cleanup()
+
+
 @pytest.mark.parametrize("num_segments", [1, 3])
 def test_region_is_left_out_of_core_dumps(iid, monkeypatch, num_segments):
     """Every mapping of the region, segment files included, is skipped by

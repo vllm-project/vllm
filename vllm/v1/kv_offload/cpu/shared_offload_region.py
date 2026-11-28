@@ -21,6 +21,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.logger import init_logger
 from vllm.utils.host_memory import exclude_from_core_dump
 from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.system_utils import memfd_create
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
 
 logger = init_logger(__name__)
@@ -251,17 +252,29 @@ class SharedOffloadRegion:
                     prot=mmap.PROT_READ | mmap.PROT_WRITE,
                 )
             else:
-                reservation = os.memfd_create("vllm_offload_reservation")
                 try:
-                    os.ftruncate(reservation, self.total_size_bytes)
+                    reservation = memfd_create("vllm_offload_reservation")
+                except OSError:
+                    reservation = None
+
+                if reservation is not None:
+                    try:
+                        os.ftruncate(reservation, self.total_size_bytes)
+                        self.mmap_obj = mmap.mmap(
+                            reservation,
+                            self.total_size_bytes,
+                            flags=mmap.MAP_SHARED,
+                            prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                        )
+                    finally:
+                        os.close(reservation)
+                else:
                     self.mmap_obj = mmap.mmap(
-                        reservation,
+                        -1,
                         self.total_size_bytes,
                         flags=mmap.MAP_SHARED,
                         prot=mmap.PROT_READ | mmap.PROT_WRITE,
                     )
-                finally:
-                    os.close(reservation)
                 self._map_segments()
             exclude_from_core_dump(self.mmap_obj)
             if private and self._creator:
