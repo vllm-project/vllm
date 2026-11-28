@@ -869,6 +869,126 @@ def test_scheduler_emits_async_load_without_scheduled_model_tokens():
     assert scheduler._pending_loads == {}
 
 
+class _LeasingHandle(_SchedulerHandle):
+    def __init__(self, hits, lost=(), fail=False):
+        super().__init__(hits)
+        self.lost = set(lost)
+        self.fail = fail
+        self.leases = []
+
+    def lease(self, keys, ttl_ms):
+        self.leases.append((list(keys), ttl_ms))
+        if self.fail:
+            raise RuntimeError("lease RPC failed")
+        return [self.hits.get(key, False) and key not in self.lost for key in keys]
+
+
+def _leasing_scheduler(extra, handle, codec, topology):
+    return UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {"mode": "embedded", "load_async": False, **extra},
+            tensor_parallel_size=2,
+            world_size=2,
+        ),
+        _kv_cache_config(),
+        handle,
+        codec,
+        topology,
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "ttl_ms"),
+    [({}, 30000), ({"timeout_ms": 5000}, 5000), ({"load_lease_ms": 1200}, 1200)],
+)
+def test_a_hit_leases_every_rank_of_exactly_the_objects_it_loads(extra, ttl_ms):
+    codec = BlockIdentityCodec(UMBPNamespace("lease"))
+    topology = RankTopology(tp_size=2)
+    block_hashes = [bytes([index]) for index in range(8)]
+    stored = [
+        key
+        for block_hash in block_hashes[:5]
+        for key in codec.keys_for_topology(block_hash, topology, (0,))
+    ]
+    handle = _LeasingHandle(dict.fromkeys(stored, True))
+    scheduler = _leasing_scheduler(extra, handle, codec, topology)
+    request = make_request("req", num_tokens=97, block_hashes=block_hashes)
+    try:
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (80, False)
+    finally:
+        scheduler.close()
+    # The lookup asked about all eight blocks; the lease names the five loaded.
+    assert handle.leases == [(stored, ttl_ms)]
+
+
+def test_an_object_lost_before_its_lease_ends_the_hit_before_it():
+    codec = BlockIdentityCodec(UMBPNamespace("lease-lost"))
+    topology = RankTopology(tp_size=2)
+    block_hashes = [bytes([index]) for index in range(8)]
+    stored = [
+        key
+        for block_hash in block_hashes[:5]
+        for key in codec.keys_for_topology(block_hash, topology, (0,))
+    ]
+    # The fourth block's second rank went after the lookup.
+    handle = _LeasingHandle(dict.fromkeys(stored, True), lost=[stored[7]])
+    scheduler = _leasing_scheduler({}, handle, codec, topology)
+    request = make_request("req", num_tokens=97, block_hashes=block_hashes)
+    try:
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (48, False)
+        scheduler.update_state_after_alloc(
+            request,
+            SimpleNamespace(get_block_ids=lambda group_ids: (list(range(10, 17)),)),
+            48,
+        )
+        plans = scheduler._pending_loads["req"]
+        assert list(plans.keys) == [
+            codec.key(block_hash, group_id=0) for block_hash in block_hashes[:3]
+        ]
+    finally:
+        scheduler.close()
+    assert [keys for keys, _ in handle.leases] == [stored, stored[:6]]
+
+
+@pytest.mark.parametrize(
+    ("extra", "fail", "expected", "leases"),
+    [
+        ({"load_lease_ms": 0}, False, (80, False), 0),
+        ({}, True, (0, False), 1),
+    ],
+)
+def test_without_a_lease_the_hit_is_the_lookups_or_nothing(
+    extra, fail, expected, leases
+):
+    """load_lease_ms=0 trusts the lookup; a lease that fails loads nothing."""
+    codec = BlockIdentityCodec(UMBPNamespace("lease-off"))
+    topology = RankTopology(tp_size=2)
+    block_hashes = [bytes([index]) for index in range(8)]
+    stored = [
+        key
+        for block_hash in block_hashes[:5]
+        for key in codec.keys_for_topology(block_hash, topology, (0,))
+    ]
+    handle = _LeasingHandle(dict.fromkeys(stored, True), fail=fail)
+    scheduler = _leasing_scheduler(extra, handle, codec, topology)
+    request = make_request("req", num_tokens=97, block_hashes=block_hashes)
+    try:
+        assert scheduler.get_num_new_matched_tokens(request, 0) == expected
+    finally:
+        scheduler.close()
+    assert len(handle.leases) == leases
+
+
+def test_load_lease_ms_must_be_a_non_negative_integer():
+    with pytest.raises(ValueError, match="load_lease_ms"):
+        _leasing_scheduler(
+            {"load_lease_ms": -1},
+            _LeasingHandle({}),
+            BlockIdentityCodec(UMBPNamespace("lease-bad")),
+            RankTopology(tp_size=2),
+        )
+
+
 def test_load_batch_metadata_roundtrip_preserves_destinations_and_identity():
     batch = BlockLoadBatch(["g1", "g0"], [7, 3], [1, 0], "r")
     meta = UMBPConnectorMetadata(load_requests={"r": batch})

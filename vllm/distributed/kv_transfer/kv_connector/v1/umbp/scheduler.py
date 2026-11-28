@@ -216,6 +216,10 @@ class UMBPStoreConnectorScheduler:
     until `bind_namespace` supplies them.
     """
 
+    # Matches of a hit whose objects keep being lost before the lease, after
+    # which it loads nothing.
+    _LEASE_ATTEMPTS = 3
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -277,6 +281,13 @@ class UMBPStoreConnectorScheduler:
             self.load_async = True
         self.enable_lookup = bool(extra.get("enable_lookup", True))
         self.lookup_async = bool(extra.get("lookup_async", False))
+        # How long the objects a hit loads are kept from eviction. A load not
+        # done within the transfer timeout fails anyway, so by default the
+        # lease covers exactly the time a load may take to start and finish.
+        # 0 takes no lease and loads what the lookup found.
+        self.load_lease_ms = extra.get("load_lease_ms", extra.get("timeout_ms", 30000))
+        if type(self.load_lease_ms) is not int or self.load_lease_ms < 0:
+            raise ValueError("load_lease_ms must be a non-negative integer")
         self.save_decode_cache = bool(extra.get("save_decode_cache", False))
         # A kv_consumer only restores from the pool, as with other store
         # connectors; it never offloads its own KV.
@@ -541,36 +552,9 @@ class UMBPStoreConnectorScheduler:
                     for index in range(0, len(group_hits), per_rank)
                 ]
             )
-        if self._lookup_coordinator is None:
-            group_id = group_ids[0]
-            group_hits = logical_hits_by_group[group_id]
-            units_per_block = (
-                self.group_block_sizes[group_id] // self._lookup_units[group_id]
-            )
-            matched_units = 0
-            for index in range(units_per_block - 1, len(group_hits), units_per_block):
-                if not group_hits[index]:
-                    break
-                matched_units = index + 1
-            # Interior hashes are sparse: only the saved tail needs to exist.
-            for index in range(
-                min(matched_units + units_per_block - 1, len(group_hits)) - 1,
-                matched_units - 1,
-                -1,
-            ):
-                if group_hits[index]:
-                    matched_units = index + 1
-                    break
-            need_to_load = matched_units * self._lookup_units[group_id]
-            block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
-        else:
-            need_to_load, block_hashes_by_group = self._coordinate_external_hits(
-                list(context.hashes),
-                num_computed_tokens,
-                max_external_token - num_computed_tokens,
-                logical_objects_by_group,
-                logical_hits_by_group,
-            )
+        need_to_load, block_hashes_by_group = self._match_external_hits(
+            context, max_external_token, logical_hits_by_group
+        )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "UMBP lookup result request=%s keys=%s group_hits=%s load_tokens=%d",
@@ -578,6 +562,14 @@ class UMBPStoreConnectorScheduler:
                 keys,
                 logical_hits_by_group,
                 need_to_load,
+            )
+        if need_to_load > 0 and self.load_lease_ms:
+            need_to_load, block_hashes_by_group = self._lease_external_hits(
+                context,
+                max_external_token,
+                logical_hits_by_group,
+                need_to_load,
+                block_hashes_by_group,
             )
         matched_tokens = num_computed_tokens + need_to_load
         if need_to_load <= 0:
@@ -617,6 +609,158 @@ class UMBPStoreConnectorScheduler:
         return _LookupContext(
             request, local_tokens, request.num_tokens, hashes, objects, keys
         )
+
+    def _match_external_hits(
+        self,
+        context: _LookupContext,
+        max_external_token: int,
+        logical_hits_by_group: dict[int, list[bool]],
+    ) -> tuple[int, tuple[tuple[bytes | None, ...], ...]]:
+        """Tokens to load past the local prefix, and the objects of each group."""
+        group_ids = self.kv_cache_config.prefix_cacheable_group_ids
+        if self._lookup_coordinator is not None:
+            return self._coordinate_external_hits(
+                list(context.hashes),
+                context.local_tokens,
+                max_external_token - context.local_tokens,
+                context.objects,
+                logical_hits_by_group,
+            )
+        group_id = group_ids[0]
+        group_hits = logical_hits_by_group[group_id]
+        units_per_block = (
+            self.group_block_sizes[group_id] // self._lookup_units[group_id]
+        )
+        matched_units = 0
+        for index in range(units_per_block - 1, len(group_hits), units_per_block):
+            if not group_hits[index]:
+                break
+            matched_units = index + 1
+        # Interior hashes are sparse: only the saved tail needs to exist.
+        for index in range(
+            min(matched_units + units_per_block - 1, len(group_hits)) - 1,
+            matched_units - 1,
+            -1,
+        ):
+            if group_hits[index]:
+                matched_units = index + 1
+                break
+        return matched_units * self._lookup_units[group_id], ()
+
+    def _lease_external_hits(
+        self,
+        context: _LookupContext,
+        max_external_token: int,
+        logical_hits_by_group: dict[int, list[bool]],
+        need_to_load: int,
+        block_hashes_by_group: tuple[tuple[bytes | None, ...], ...],
+    ) -> tuple[int, tuple[tuple[bytes | None, ...], ...]]:
+        """Lease exactly what the hit loads, shrinking it past lost objects.
+
+        Lookups ask about far more than a load reads (every boundary of every
+        group, older turns' states included) and take nothing, so this is
+        where the objects to read are protected from eviction until the load.
+        An object lost since the lookup counts as a miss and the hit is matched
+        again; a hit that cannot be confirmed loads nothing.
+        """
+        assert self.codec is not None
+        lease = getattr(self.runtime, "lease", None)
+        if lease is None:
+            # A handle that predates leases: load what the lookup found.
+            return need_to_load, block_hashes_by_group
+        for _ in range(self._LEASE_ATTEMPTS):
+            objects = self._load_objects(
+                context.hashes,
+                context.local_tokens,
+                context.local_tokens + need_to_load,
+                block_hashes_by_group,
+            )
+            if not objects:
+                return need_to_load, block_hashes_by_group
+            rank_keys = [
+                _rank_keys(self.codec, self.topology, block_hash, group_id)
+                for _, group_id, _, block_hash in objects
+            ]
+            try:
+                held = list(
+                    lease(
+                        [key for keys in rank_keys for key in keys], self.load_lease_ms
+                    )
+                )
+            except Exception as exc:
+                logger.debug(
+                    "UMBP lease failed request=%s: %s", context.request.request_id, exc
+                )
+                return 0, ()
+            if len(held) != sum(len(keys) for keys in rank_keys):
+                return 0, ()
+            lost: set[tuple[int, bytes]] = set()
+            offset = 0
+            for (_, group_id, _, block_hash), keys in zip(
+                objects, rank_keys, strict=True
+            ):
+                # An unavailable rank cannot serve the load either.
+                if not all(held[offset : offset + len(keys)]):
+                    lost.add((group_id, block_hash))
+                offset += len(keys)
+            if not lost:
+                return need_to_load, block_hashes_by_group
+            logger.debug(
+                "UMBP lease found %d of %d objects lost since the lookup request=%s",
+                len(lost),
+                len(objects),
+                context.request.request_id,
+            )
+            for group_id, group_hits in logical_hits_by_group.items():
+                for index, (block_hash, _) in enumerate(context.objects[group_id]):
+                    if (group_id, block_hash) in lost:
+                        group_hits[index] = False
+            need_to_load, block_hashes_by_group = self._match_external_hits(
+                context, max_external_token, logical_hits_by_group
+            )
+            if need_to_load <= 0:
+                return 0, ()
+        return 0, ()
+
+    def _load_objects(
+        self,
+        block_hashes: Sequence[bytes],
+        local_tokens: int,
+        end_tokens: int,
+        block_hashes_by_group: tuple[tuple[bytes | None, ...], ...],
+    ) -> list[tuple[int, int, int, bytes]]:
+        """(group index, group id, block index, hash) of every object a load reads."""
+        group_ids = self.kv_cache_config.prefix_cacheable_group_ids
+        objects: list[tuple[int, int, int, bytes]] = []
+        if block_hashes_by_group:
+            for group_index, group_id in enumerate(group_ids):
+                start_block = local_tokens // self.group_block_sizes[group_id]
+                for block_index, block_hash in enumerate(
+                    block_hashes_by_group[group_index]
+                ):
+                    if block_index >= start_block and block_hash is not None:
+                        objects.append((group_index, group_id, block_index, block_hash))
+            return objects
+        for group_index, group_id in enumerate(group_ids):
+            group_block_size = self.group_block_sizes[group_id]
+            for block_index in range(
+                local_tokens // group_block_size, end_tokens // group_block_size
+            ):
+                token_end = (block_index + 1) * group_block_size
+                objects.append(
+                    (
+                        group_index,
+                        group_id,
+                        block_index,
+                        self._object_hash_at_token_end(block_hashes, token_end),
+                    )
+                )
+        if end_tokens % self.block_size and self.enable_partial_hash_hits:
+            block_hash = block_hashes[end_tokens // self.hash_block_size - 1]
+            for group_index, group_id in enumerate(group_ids):
+                block_index = end_tokens // self.group_block_sizes[group_id]
+                objects.append((group_index, group_id, block_index, block_hash))
+        return objects
 
     def _coordinate_external_hits(
         self,
@@ -1328,60 +1472,29 @@ class UMBPStoreConnectorScheduler:
     ) -> BlockLoadBatch:
         """Batch the logical objects selected by the external hit window."""
         assert self.codec is not None
-        group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         spec = tracker.load_spec
         local_tokens = spec.local_tokens if spec is not None else 0
-        end_tokens = local_tokens + num_external_tokens
         keys: list[str] = []
         destinations: list[int] = []
         groups: list[int] = []
-        if spec is not None and spec.block_hashes_by_group:
-            for group_index, group_id in enumerate(group_ids):
-                group_block_size = self.group_block_sizes[group_id]
-                start_block = local_tokens // group_block_size
-                for block_index, block_hash in enumerate(
-                    spec.block_hashes_by_group[group_index]
-                ):
-                    if block_index < start_block or block_hash is None:
-                        continue
-                    block_id = block_groups[group_index][block_index]
-                    if block_id == NULL_BLOCK_ID:
-                        raise RuntimeError(
-                            "UMBP external hit mapped a runtime object to a null "
-                            f"destination block for group {group_id}"
-                        )
-                    keys.append(self.codec.key(block_hash, group_id=group_id))
-                    destinations.append(block_id)
-                    groups.append(group_id)
-            return BlockLoadBatch(keys, destinations, groups, request.request_id)
-        for group_index, group_id in enumerate(group_ids):
-            group_block_size = self.group_block_sizes[group_id]
-            start_block = local_tokens // group_block_size
-            num_full_blocks = end_tokens // group_block_size
-            for block_index in range(start_block, num_full_blocks):
-                token_end = (block_index + 1) * group_block_size
-                keys.append(
-                    self.codec.key(
-                        self._object_hash_at_token_end(request.block_hashes, token_end),
-                        group_id=group_id,
-                    )
+        for group_index, group_id, block_index, block_hash in self._load_objects(
+            request.block_hashes,
+            local_tokens,
+            local_tokens + num_external_tokens,
+            spec.block_hashes_by_group if spec is not None else (),
+        ):
+            group_block_ids = block_groups[group_index]
+            if (
+                block_index >= len(group_block_ids)
+                or group_block_ids[block_index] == NULL_BLOCK_ID
+            ):
+                raise RuntimeError(
+                    "UMBP external hit mapped a runtime object to no destination "
+                    f"block for group {group_id}"
                 )
-                destinations.append(block_groups[group_index][block_index])
-                groups.append(group_id)
-        partial_tokens = end_tokens % self.block_size
-        if partial_tokens and self.enable_partial_hash_hits:
-            hash_index = end_tokens // self.hash_block_size - 1
-            for group_index, group_id in enumerate(group_ids):
-                block_index = end_tokens // self.group_block_sizes[group_id]
-                group_block_ids = block_groups[group_index]
-                if (
-                    block_index >= len(group_block_ids)
-                    or group_block_ids[block_index] == NULL_BLOCK_ID
-                ):
-                    raise RuntimeError("UMBP partial hit has no destination block")
-                keys.append(self.codec.key(request.block_hashes[hash_index], group_id))
-                destinations.append(group_block_ids[block_index])
-                groups.append(group_id)
+            keys.append(self.codec.key(block_hash, group_id=group_id))
+            destinations.append(group_block_ids[block_index])
+            groups.append(group_id)
         return BlockLoadBatch(keys, destinations, groups, request.request_id)
 
     def _object_hash_at_token_end(

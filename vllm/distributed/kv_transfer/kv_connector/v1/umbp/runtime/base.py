@@ -22,7 +22,16 @@ class UMBPSchedulerHandle(Protocol):
         """Return one answer per key.
 
         True is present and False is absent. None means the owning rank
-        could not be asked. None is not a miss.
+        could not be asked. None is not a miss. A lookup changes nothing in
+        the pool: the scheduler asks about far more than it loads.
+        """
+
+    def lease(self, keys: Sequence[str], ttl_ms: int) -> Sequence[bool | None]:
+        """Keep the keys a load is about to read from eviction for `ttl_ms`.
+
+        Answers as `lookup` does, at the time of the lease: True is held and
+        cannot be evicted before the lease ends, False was lost since the
+        lookup, and None means the owning rank could not be asked.
         """
 
     def clear(self) -> bool:

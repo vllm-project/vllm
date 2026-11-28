@@ -85,6 +85,9 @@ class _MemorySchedulerHandle(UMBPSchedulerHandle):
     def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
         return [self._store.contains(key) for key in keys]
 
+    def lease(self, keys: Sequence[str], ttl_ms: int) -> Sequence[bool]:
+        return self.lookup(keys)
+
     def clear(self) -> bool:
         self._store.clear()
         return True

@@ -89,6 +89,9 @@ class _Server:
         self.raises = False
         self.accept_puts = True
         self.clients: list[_Client] = []
+        self.leases: list[tuple[list[str], int]] = []
+        # Evicted between a lookup and the lease that follows it.
+        self.lost_before_lease: set[str] = set()
 
     def lose(self, failure: str) -> None:
         if failure == "server-down":
@@ -141,6 +144,14 @@ class _Client:
 
     def batch_exists(self, keys):
         self._rpc()
+        return [self.server.up and key in self.server.objects for key in keys]
+
+    def batch_lease(self, keys, ttl_ms):
+        self._rpc()
+        self.server.leases.append((list(keys), ttl_ms))
+        for key in self.server.lost_before_lease:
+            self.server.objects.pop(key, None)
+        self.server.lost_before_lease.clear()
         return [self.server.up and key in self.server.objects for key in keys]
 
     def batch_put_ranges_from_ptr(self, keys, object_sizes, pointers, sizes, offsets):
@@ -1102,6 +1113,70 @@ def test_lost_objects_after_a_hit_mark_blocks_for_recompute(
             time.sleep(0.01)
 
     assert consumer_worker.get_block_ids_with_load_errors() == {5, 6}
+
+
+@pytest.mark.parametrize("load_async", [False, True])
+def test_a_hit_leases_what_it_loads_and_drops_what_was_lost_since_the_lookup(
+    server, make_engine, load_async
+):
+    """An object evicted between the lookup and the lease shortens the hit
+    instead of failing the load: the load reads only what the lease holds."""
+    producer_scheduler, producer_worker = make_engine()
+    consumer_scheduler, consumer_worker = make_engine(load_async=load_async)
+    producer_worker.register_kv_caches(make_kv_caches(fill=True))
+    consumer_worker.register_kv_caches(make_kv_caches())
+    hashes = [b"lease-a", b"lease-b"]
+    _store(
+        producer_scheduler,
+        producer_worker,
+        make_request("producer", num_tokens=33, block_hashes=hashes),
+    )
+    first, second = server.objects
+    server.lost_before_lease.add(second)
+    consumer = make_request("consumer", num_tokens=33, block_hashes=hashes)
+
+    assert consumer_scheduler.get_num_new_matched_tokens(consumer, 0) == (
+        16,
+        load_async,
+    )
+    # The whole hit, then what is left of it once the second block was found lost.
+    assert server.leases == [([first, second], 30000), ([first], 30000)]
+
+    consumer_scheduler.update_state_after_alloc(
+        consumer, SimpleNamespace(get_block_ids=lambda group_ids: ([5, 6],)), 16
+    )
+    metadata = consumer_scheduler.build_connector_meta(
+        make_scheduler_output(
+            new_reqs=[consumer], scheduled_tokens={consumer.req_id: 17}
+        )
+    )
+    assert [plan.key for plan in metadata.load_requests["consumer"]] == [first]
+    consumer_worker.bind_connector_metadata(metadata)
+    consumer_worker.start_load_kv(None)
+    consumer_worker.wait_for_layer_load("layer0")
+    if load_async:
+        deadline = time.monotonic() + 5
+        while consumer_worker.get_finished(set()) != (None, {"consumer"}):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+    assert consumer_worker.get_block_ids_with_load_errors() == set()
+
+
+def test_lease_reads_as_unavailable_when_the_rpc_fails(server):
+    handle = _runtime().create_scheduler_handle("ns", RankTopology(), None)
+    server.objects["k"] = b"x"
+    assert handle.lease(["k", "j"], 100) == [True, False]
+    server.lose("client-raises")
+    assert handle.lease(["k"], 100) == [None]
+    handle.close()
+
+
+def test_mori_without_leases_loads_what_the_lookup_found(server, monkeypatch):
+    monkeypatch.delattr(_Client, "batch_lease")
+    handle = _runtime().create_scheduler_handle("ns", RankTopology(), None)
+    assert handle.lease(["k", "j"], 100) == [True, True]
+    assert handle.lease([], 100) == []
+    handle.close()
 
 
 @pytest.mark.parametrize("failure", ["server-down", "client-raises", "puts-rejected"])
