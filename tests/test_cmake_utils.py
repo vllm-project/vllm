@@ -105,6 +105,53 @@ endif()
     subprocess.run([_get_cmake_bin(), "-P", script], check=True)
 
 
+def test_inkling2_kernels_include_hopper(tmp_path: Path):
+    """Regression test for https://github.com/vllm-project/vllm/issues/69046.
+
+    The vllm-openai:inkling-2-mini image shipped the Inkling2 kernels
+    (csrc/inkling2/conv_mix.cu, allreduce_conv_mix.cu, seq_parallel.cu) only
+    for sm_100: the CMakeLists.txt arch list had no 9.0a entry, so on H100
+    (sm_90) launches failed with "no kernel image is available for execution
+    on the device". Hopper support was added in #67880; pin the arch lists in
+    CMakeLists.txt so that every standard Docker/release build (whose
+    TORCH_CUDA_ARCH_LIST includes 9.0) still yields a 9.0a cubin.
+    """
+    repo_root = Path(__file__).parents[1]
+    cmake_lists = (repo_root / "CMakeLists.txt").read_text()
+    marker = "cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS"
+    src_lists = []
+    start = 0
+    while True:
+        i = cmake_lists.find(marker, start)
+        if i < 0:
+            break
+        q1 = cmake_lists.index('"', i)
+        q2 = cmake_lists.index('"', q1 + 1)
+        src_lists.append(cmake_lists[q1 + 1 : q2])
+        start = q2 + 1
+    assert src_lists, "INKLING2_KERNEL_ARCHS block not found in CMakeLists.txt"
+    # Standard build arch lists (docker/Dockerfile, docker/versions.json,
+    # .buildkite/release-pipeline.yaml) all include 9.0.
+    tgt_lists = (
+        "7.5;8.0;8.6;8.9;9.0;10.0;11.0;12.0",  # Dockerfile default
+        "7.5;8.0;8.6;8.9;9.0;10.0;12.0",  # release pipeline x86_64
+        "8.0;8.7;8.9;9.0;10.0;11.0;12.0",  # release pipeline aarch64
+    )
+    for src_archs in src_lists:
+        for tgt_archs in tgt_lists:
+            script = tmp_path / "test_inkling2_archs.cmake"
+            script.write_text(
+                f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+cuda_archs_loose_intersection(actual "{src_archs}" "{tgt_archs}")
+if(NOT "9.0a" IN_LIST actual)
+  message(FATAL_ERROR "Inkling2 kernels miss Hopper (9.0a) for target list '{tgt_archs}': got '${{actual}}'")
+endif()
+"""
+            )
+            subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
 def test_clear_cuda_gencode_flags(tmp_path: Path):
     repo_root = Path(__file__).parents[1]
     script = tmp_path / "test_clear_flags.cmake"
