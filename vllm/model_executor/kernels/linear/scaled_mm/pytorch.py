@@ -70,6 +70,14 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return False, "requires a platform with torch FP8 scaled-MM support."
 
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        # torch._scaled_mm on CUDA rejects K or N not divisible by 16.
+        n, k = c.weight_shape
+        if current_platform.is_cuda() and (n % 16 or k % 16):
+            return False, f"requires N and K divisible by 16, got N={n} and K={k}."
+        return True, None
+
     def get_output_padding(self) -> int | None:
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
@@ -95,7 +103,7 @@ class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 
         if not (per_tensor_activation_scales and per_tensor_weight_scales):
             return False, "requires per tensor activation and weight scales."
-        return True, None
+        return super().can_implement(c)
 
     def input_quant_key(self) -> QuantKey | None:
         if self.config.activation_quant_key == kFp8StaticTensorSym:
@@ -213,7 +221,7 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if per_tensor_activation_scales and per_tensor_weight_scales:
             return False, "cannot be used with per tensor activation and weight scales."
 
-        return True, None
+        return super().can_implement(c)
 
     def apply_scaled_mm(
         self,

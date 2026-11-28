@@ -17,12 +17,15 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
     AiterInt8ScaledMMLinearKernel,
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     HummingFP8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
+    MarlinFP8ScaledMMLinearKernel,
+    PerTensorTorchFP8ScaledMMLinearKernel,
     ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
@@ -34,7 +37,9 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
@@ -112,6 +117,72 @@ def test_fp8_linear_backend_override(platform_mock, _, monkeypatch, strict):
                 init_kernel()
         else:
             assert type(init_kernel()) is HummingFP8ScaledMMLinearKernel
+
+
+_KERNELS_BEFORE_TORCH_FP8 = (
+    "FlashInferFP8ScaledMMLinearKernel,CutlassFP8ScaledMMLinearKernel,"
+    "B12xTensorFP8ScaledMMLinearKernel"
+)
+
+
+@pytest.mark.parametrize(
+    ("weight_quant_key", "activation_quant_key", "torch_kernel"),
+    [
+        (
+            kFp8StaticTensorSym,
+            kFp8StaticTensorSym,
+            PerTensorTorchFP8ScaledMMLinearKernel,
+        ),
+        (
+            kFp8StaticChannelSym,
+            kFp8DynamicTokenSym,
+            ChannelWiseTorchFP8ScaledMMLinearKernel,
+        ),
+    ],
+    ids=["per_tensor", "channel_wise"],
+)
+@pytest.mark.parametrize(
+    ("weight_shape", "torch_fits"),
+    [((32, 5120), True), ((24, 5120), False), ((32, 24), False)],
+    ids=str,
+)
+@patch.object(MarlinFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
+@patch("vllm.model_executor.kernels.linear.scaled_mm.pytorch.current_platform")
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_cuda_torch_fp8_kernels_need_dims_divisible_by_16(
+    platform_mock,
+    torch_platform_mock,
+    _,
+    default_vllm_config,
+    monkeypatch,
+    weight_shape,
+    torch_fits,
+    weight_quant_key,
+    activation_quant_key,
+    torch_kernel,
+):
+    """torch._scaled_mm on CUDA rejects N or K not divisible by 16, so such
+    layers (Qwen3.5 GDN in_proj_ba at TP4 has N=24) must fall through to
+    Marlin instead of failing at the first forward."""
+    monkeypatch.setenv("VLLM_DISABLED_KERNELS", _KERNELS_BEFORE_TORCH_FP8)
+    platform_mock._enum = PlatformEnum.CUDA
+    torch_platform_mock.is_cpu.return_value = False
+    torch_platform_mock.is_xpu.return_value = False
+    torch_platform_mock.is_rocm.return_value = False
+    torch_platform_mock.is_cuda.return_value = True
+    torch_platform_mock.is_cuda_alike.return_value = True
+    torch_platform_mock.supports_fp8.return_value = True
+
+    kernel = init_fp8_linear_kernel(
+        activation_quant_key=activation_quant_key,
+        weight_quant_key=weight_quant_key,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=weight_shape,
+    )
+
+    expected = torch_kernel if torch_fits else MarlinFP8ScaledMMLinearKernel
+    assert type(kernel) is expected
 
 
 def test_is_supported_is_abstract():
