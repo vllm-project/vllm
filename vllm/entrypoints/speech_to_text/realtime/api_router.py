@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, WebSocket
+from fastapi import APIRouter, WebSocket, status
 
 from vllm.logger import init_logger
 
@@ -33,6 +33,14 @@ async def realtime_endpoint(websocket: WebSocket):
     Audio format: PCM16, 16kHz, mono, base64-encoded
     """
     app = websocket.app
+    if getattr(app.state, "shutting_down", False):
+        # Accept first so the client gets a close code rather than an HTTP 403.
+        await websocket.accept()
+        await websocket.close(
+            code=status.WS_1001_GOING_AWAY, reason="Server shutting down"
+        )
+        return
+
     serving = app.state.openai_serving_realtime
 
     connection = RealtimeConnection(websocket, serving)
