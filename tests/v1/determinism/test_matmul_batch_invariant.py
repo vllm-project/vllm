@@ -18,7 +18,7 @@ from vllm.model_executor.determinism.batch_invariant import (
 )
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
-    _get_tuned_matmul_arch_family,
+    _get_current_tuned_matmul_arch_family,
 )
 from vllm.platforms import current_platform
 
@@ -114,10 +114,7 @@ def test_matmul_batch_invariance(dtype):
 @pytest.mark.parametrize("transpose_b", [False, True], ids=["contiguous", "transposed"])
 def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     # Tuned M buckets must preserve each row's K-reduction order.
-    capability = (
-        current_platform.get_device_capability() if current_platform.is_cuda() else None
-    )
-    arch_family = _get_tuned_matmul_arch_family(capability)
+    arch_family = _get_current_tuned_matmul_arch_family()
     if arch_family not in _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
         pytest.skip("No tuned persistent matmul config for this architecture")
 
@@ -134,6 +131,39 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     batch_output = matmul_batch_invariant(a, b)
 
     assert torch.equal(single_output[0], batch_output[0])
+
+
+_GFX950_TUNED_SHAPES = sorted(_BATCH_INVARIANT_MATMUL_TUNED_CONFIGS.get("gfx950", {}))
+
+
+@skip_unsupported
+@pytest.mark.skipif(
+    not (
+        current_platform.is_rocm()
+        and _get_current_tuned_matmul_arch_family() == "gfx950"
+    ),
+    reason="gfx950 tuned persistent matmul configs only",
+)
+@pytest.mark.parametrize("n,k", _GFX950_TUNED_SHAPES)
+@pytest.mark.parametrize("transpose_b", [False, True], ids=["contiguous", "transposed"])
+def test_gfx950_tuned_configs_bitwise_equal_default(n, k, transpose_b, monkeypatch):
+    # Every gfx950 entry keeps BLOCK_K=64, so it must reproduce the default
+    # 128x128x64 config bit for bit at every M, not only be batch invariant.
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(0)
+    a = torch.randn((512, k), dtype=torch.bfloat16, device=device)
+    if transpose_b:
+        b = torch.randn((n, k), dtype=torch.bfloat16, device=device).t()
+    else:
+        b = torch.randn((k, n), dtype=torch.bfloat16, device=device)
+    ms = list(range(1, 257)) + [384, 512]
+
+    tuned = [matmul_persistent(a[:m], b) for m in ms]
+    monkeypatch.setattr(
+        bi, "_get_matmul_config", lambda M, N, K, dtype, default: default
+    )
+    for m, out in zip(ms, tuned):
+        assert torch.equal(out, matmul_persistent(a[:m], b)), (n, k, m)
 
 
 @pytest.fixture
