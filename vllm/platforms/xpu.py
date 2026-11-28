@@ -397,11 +397,24 @@ class XPUPlatform(Platform):
                 model_config.quantization is not None
                 or vllm_config.quant_config is not None
             ):
-                raise ValueError(
-                    "XPU batch invariance currently supports only unquantized "
-                    f"models; got quantization={model_config.quantization!r}. "
-                    "Use an unquantized model or disable VLLM_BATCH_INVARIANT."
+                from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+                quant_config = vllm_config.quant_config
+                # Without online overrides, block FP8 uses the W8A8 BI path.
+                # Overrides can change the activation scheme or execution kernel.
+                supported_fp8 = (
+                    isinstance(quant_config, Fp8Config)
+                    and quant_config.weight_block_size is not None
+                    and quant_config.online_quantization_config is None
                 )
+                if not supported_fp8:
+                    raise ValueError(
+                        "XPU batch invariance currently supports only unquantized "
+                        "models or block-wise FP8 models without online overrides; "
+                        f"got quantization={model_config.quantization!r}. "
+                        "Use a supported configuration or disable "
+                        "VLLM_BATCH_INVARIANT."
+                    )
 
             cache_dtype = vllm_config.cache_config.cache_dtype
             if cache_dtype not in ("auto", "float16", "bfloat16"):

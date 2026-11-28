@@ -10,7 +10,7 @@ steps:
   agent_tags:
     label: production
     gpu: 2+
-    mem: 16+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -31,6 +31,9 @@ steps:
       pytest -v -s v1/determinism/test_batch_invariance.py &&
       VLLM_TEST_TP_SIZE=2 pytest -v -s v1/determinism/test_batch_invariance.py
       -k "bs1_vs_bsN or without_batch_invariance_should_fail" &&
+      VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-FP8
+      VLLM_TEST_TP_SIZE=2 pytest -v -s v1/determinism/test_batch_invariance.py
+      -k "test_logprobs_bitwise_batch_invariance_bs1_vs_bsN" &&
       bash ../.buildkite/scripts/hardware_ci/run-xpu-batch-invariance.sh'
 
 - label: ":intel: (BMG) V1 Core"
