@@ -3032,9 +3032,10 @@ class VllmConfig:
         from vllm.model_executor.models.config import (
             MODELS_CONFIG_MAP,
             HybridAttentionMambaModelConfig,
+            get_model_config_cls,
         )
 
-        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        cls = get_model_config_cls(self.model_config)
         if cls is None:
             # `architecture` may be an HF base-model name (e.g. "Mamba2Model"
             # when `architectures` is omitted); normalize to the resolved arch

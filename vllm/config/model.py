@@ -1206,6 +1206,13 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
+        if self.architectures and (
+            backend_cls := self.registry.get_registered_transformers_backend_cls(
+                self.architectures[0]
+            )
+        ):
+            return backend_cls
+
         cls = "Transformers"
         # If 'hf_config is not hf_text_config' it's a nested config, i.e. multimodal
         cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
@@ -1662,11 +1669,9 @@ class ModelConfig:
         if architecture is None:
             return
 
-        from vllm.model_executor.models.config import (
-            MODELS_CONFIG_MAP,
-        )
+        from vllm.model_executor.models.config import get_model_config_cls
 
-        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        cls = get_model_config_cls(self)
         if cls is not None:
             cls.verify_and_update_model_config(self)
 

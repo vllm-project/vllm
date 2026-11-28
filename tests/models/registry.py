@@ -475,7 +475,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "NemotronLabsDiffusionForCausalLM": _HfExamplesInfo(
         "nvidia/Nemotron-Labs-Diffusion-3B",
-        trust_remote_code=True,
         hf_overrides={"architectures": ["NemotronLabsDiffusionForCausalLM"]},
     ),
     "NemotronLabsDiffusionModel": _HfExamplesInfo(

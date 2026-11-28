@@ -516,7 +516,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
 !!! note
-    Nemotron Labs Diffusion runs masked block diffusion by default. `--diffusion-config` sets `canvas_length` (default: the checkpoint's `block_size`) and `model_options` such as `selection_policy` and `confidence_threshold`; request temperatures are applied as usual. Pass `--hf-overrides '{"ar_mode": true}'` (or select `NemotronLabsDiffusionForCausalLM`) for ordinary autoregressive generation with the same checkpoint.
+    Nemotron Labs Diffusion uses the Transformers backend and runs masked block diffusion by default. Use `--diffusion-config` to set `canvas_length` and `model_options` such as `selection_policy` and `confidence_threshold`. The canvas width defaults to the checkpoint's `block_size`. Request temperatures apply as usual. Pass `--hf-overrides '{"ar_mode": true}'` or select `NemotronLabsDiffusionForCausalLM` for ordinary autoregressive generation with the same checkpoint.
 
 ## List of Multimodal Language Models
 

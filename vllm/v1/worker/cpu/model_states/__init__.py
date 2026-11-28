@@ -24,7 +24,13 @@ def resolve_model_state_cls(
     vllm_config: VllmConfig, model: nn.Module
 ) -> type[ModelState]:
     # Custom model states are GPU-owned until a CPU implementation is provided.
-    if hasattr(model, "get_model_state_cls"):
+    from vllm.model_executor.models.config import get_model_config_cls
+
+    config_cls = get_model_config_cls(vllm_config.model_config)
+    if hasattr(model, "get_model_state_cls") or (
+        config_cls is not None
+        and config_cls.get_model_state_cls(vllm_config) is not None
+    ):
         raise ValueError(
             f"Custom model state from {type(model).__name__} is not supported "
             "by CPU Model Runner V2 without Triton."

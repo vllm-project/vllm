@@ -497,8 +497,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logger.info("Batch-sharded sampling enabled.")
             else:
                 logger.warning_once(
-                    "Disabling batch-sharded sampling: %s does not implement "
-                    "compute_logits_local",
+                    "Disabling batch-sharded sampling: unsupported by %s "
+                    "in this configuration",
                     type(self.model).__name__,
                 )
 
