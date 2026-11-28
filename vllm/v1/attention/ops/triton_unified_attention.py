@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -37,14 +38,15 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 # Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
 MAX_3D_QUERY_LEN = 8
 
-# RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
-# (RDNA3).
-is_gfx1201 = is_gfx1100 = False
+# Launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4), gfx1100 (RDNA3)
+# and gfx950 (CDNA4).
+is_gfx1201 = is_gfx1100 = is_gfx950 = False
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx1100, on_gfx1201
+    from vllm.platforms.rocm import on_gfx950, on_gfx1100, on_gfx1201
 
     is_gfx1201 = on_gfx1201()
     is_gfx1100 = on_gfx1100()
+    is_gfx950 = on_gfx950()
 
 # The tables are keyed by the padded head size (next power of 2), which the kernel's
 # tiles use: head_size 96 runs as 128, 192 as 256.
@@ -63,6 +65,9 @@ _GFX1100_2D_CONFIGS = {
     128: (None, (64, 32, 4, 1), (128, 32, 8, 1)),
     256: ((32, 32, 8, 1), (64, 32, 8, 1), (128, 64, 8, 1)),
     512: ((64, 32, 8, 1), (64, 32, 8, 1), (64, 32, 8, 1)),
+}
+_GFX950_2D_CONFIGS = {
+    256: (None, (128, 64, 4, 2), (128, 64, 4, 2)),
 }
 # 2D decode (decode batches above the split-KV threshold): padded head size ->
 # (TILE_SIZE, num_warps, num_stages); BLOCK_M keeps its default.
@@ -1301,6 +1306,29 @@ def unified_attention(
     if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
         logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
         use_3d = False
+
+    # gfx950 2D launch. A 128-row program is slower per KV token than a 16-row
+    # one, so it pays only when the default grid fills the GPU and the queries
+    # other than the longest fill a block on average.
+    if (
+        is_gfx950
+        and not use_3d
+        and not is_batch_invariant
+        and not use_td
+        and num_queries_per_kv <= 16
+        and q.element_size() == 2
+        and k.element_size() == 2
+        and total_num_q_blocks * num_kv_heads >= 4 * num_compute_units()
+    ):
+        config = _prefill_band_config(
+            _GFX950_2D_CONFIGS, head_size_padded, max_seqlen_q
+        )
+        if config is not None and config[0] % num_queries_per_kv == 0:
+            block_q = config[0] // num_queries_per_kv
+            if q.shape[0] - max_seqlen_q >= block_q * (num_seqs - 1):
+                BLOCK_M, TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = config
+                BLOCK_Q = block_q
+                total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
     # RDNA launch tuning, after vLLM's 2D/3D choice (it keeps vLLM's split-KV
     # threshold). Only launch parameters change; sliding window, sinks, softcap and
