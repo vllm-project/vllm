@@ -75,6 +75,13 @@ from vllm import LLM
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
 ```
 
+On models with Mamba state, full-decode CUDA graphs need enough Mamba cache
+blocks for `max_num_seqs`. If that check fails, lower `max_num_seqs`. If you set
+`--num-gpu-blocks-override`, increase or remove it; otherwise you can free more
+memory for the KV cache. The check does not apply to eager execution or to
+`PIECEWISE`-only graphs, but available cache blocks can still limit how many
+requests run at once.
+
 ## Sparse indexer decode logits
 
 On SM100, the sparse indexer computes decode logits in chunks of query rows whose
