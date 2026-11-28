@@ -102,3 +102,27 @@ WEIGHT_SHAPES = {
         ([36864, 12288], 0),
     ],
 }
+
+# Explicit ([K, N]) workloads for fused projections whose TP shapes cannot be
+# represented by dividing a single dimension. Keep these separate so existing
+# consumers of WEIGHT_SHAPES retain their axis-based partitioning contract.
+TP_WEIGHT_SHAPES = {
+    "RedHatAI/gemma-4-12B-it-FP8-Dynamic": {
+        1: [
+            (4096, 3840),
+            (8192, 3840),
+            (15360, 3840),
+            (3840, 8192),
+            (3840, 9216),
+            (3840, 30720),
+        ],
+        2: [
+            (2048, 3840),
+            (4096, 3840),
+            (7680, 3840),
+            (3840, 4096),
+            (3840, 5120),
+            (3840, 15360),
+        ],
+    },
+}
