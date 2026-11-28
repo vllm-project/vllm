@@ -20,7 +20,6 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::future;
-use thiserror_ext::AsReport as _;
 use tracing_futures::Instrument as _;
 use vllm_text::{
     CollectedTextOutput, FinishReason, Prompt, PromptTruncation, PromptTruncationLimit,
@@ -30,7 +29,9 @@ use vllm_text::{
 use self::types::{
     GenerativeScoringItemResult, GenerativeScoringRequest, GenerativeScoringResponse,
 };
-use crate::error::{ApiError, bail_invalid_request, engine_error, server_error, text_submit_error};
+use crate::error::{
+    ApiError, bail_invalid_request, engine_error, server_error, text_request_error,
+};
 use crate::routes::openai::utils::types::Usage;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
@@ -42,7 +43,11 @@ pub async fn generative_scoring(
     request: Result<Json<GenerativeScoringRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = request?;
-    let ctx = resolve_request_context(&headers, request.request_id.as_deref())?;
+    let ctx = resolve_request_context(
+        &headers,
+        "generative-scoring-",
+        request.request_id.as_deref(),
+    )?;
     let lora_resolution = state.resolve_model_with_loras(request.model.as_deref()).await;
     lora_resolution.model_names.check(request.model.as_deref())?;
 
@@ -56,7 +61,7 @@ pub async fn generative_scoring(
         bail_invalid_request!(param = "items", "items must contain at least one item.");
     }
 
-    let request_id = format!("generative-scoring-{}", ctx.request_id);
+    let request_id = ctx.request_id.clone();
     let request_span = tracing::info_span!("generative_scoring", request_id = %request_id);
     let text = state.chat.text();
     let GenerativeScoringRequest {
@@ -76,7 +81,7 @@ pub async fn generative_scoring(
     let tokenize = |prompt: Prompt, add_special_tokens: bool| match prompt {
         Prompt::Text(prompt) => tokenizer
             .encode(&prompt, add_special_tokens)
-            .map_err(|error| text_submit_error("failed to tokenize input", error.into())),
+            .map_err(|error| text_request_error("failed to tokenize input", error.into())),
         Prompt::TokenIds(token_ids) => Ok(token_ids),
     };
     let query_token_ids = tokenize(query, add_special_tokens)?;
@@ -125,7 +130,7 @@ pub async fn generative_scoring(
                 arrival_time: None,
             };
             text.request_processor().prepare(text_request).map_err(|error| {
-                text_submit_error("failed to prepare generative scoring request", error)
+                text_request_error("failed to prepare generative scoring request", error)
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -134,14 +139,11 @@ pub async fn generative_scoring(
     let outputs = future::try_join_all(prepared.into_iter().map(|prepared| async {
         let mut streams =
             text.generate_prepared_n(prepared, NonZeroU32::MIN).await.map_err(|error| {
-                text_submit_error("failed to submit generative scoring request", error)
+                text_request_error("failed to submit generative scoring request", error)
             })?;
         let stream = streams.pop().expect("one output stream per sample");
         stream.collect_output().await.map_err(|error| {
-            server_error!(
-                "failed to collect generative scoring response: {}",
-                error.to_report_string()
-            )
+            text_request_error("failed to collect generative scoring response", error)
         })
     }))
     .instrument(request_span)
@@ -202,7 +204,7 @@ fn label_read_sampling_params(label_token_ids: &[u32]) -> SamplingParams {
 
 /// Read the logprob of each label token, in `label_token_ids` order, from the
 /// item's single output position.
-fn label_logprobs(
+pub(super) fn label_logprobs(
     output: &CollectedTextOutput,
     label_token_ids: &[u32],
     index: usize,

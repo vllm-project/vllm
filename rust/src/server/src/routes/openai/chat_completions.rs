@@ -25,11 +25,12 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
+use vllm_text::DecodedLogprobs;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::{ApiServerOptions, OutputLogConfig};
-use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
+use crate::error::{ApiError, bail_server_error, chat_request_error, engine_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
@@ -74,7 +75,8 @@ pub async fn chat_completions(
 ) -> Result<Response, ApiError> {
     let Json(body) = body?;
     let stream = body.stream;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let request_context =
+        resolve_request_context(&headers, "chatcmpl-", body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state
         .resolve_model_with_default_mm_loras(requested_model, body.media_modalities())
@@ -105,7 +107,7 @@ pub async fn chat_completions(
         .chat_n(prepared.chat_request, n)
         .instrument(request_span.clone())
         .await
-        .map_err(|error| chat_submit_error("failed to submit chat request", error))?;
+        .map_err(|error| chat_request_error("failed to submit chat request", error))?;
 
     if stream {
         let chunk_streams = chat_streams
@@ -221,12 +223,10 @@ async fn collect_chat_completion(
 ) -> Result<ChatCompletionResponse, ApiError> {
     let return_tokens_as_token_ids =
         return_tokens_as_token_ids.unwrap_or(default_return_tokens_as_token_ids);
-    let collected = stream.collect_message().await.map_err(|error| {
-        server_error!(
-            "failed to collect chat completion response: {}",
-            error.to_report_string()
-        )
-    })?;
+    let collected = stream
+        .collect_message()
+        .await
+        .map_err(|error| chat_request_error("failed to collect chat completion response", error))?;
     let CollectedAssistantMessage {
         message,
         prompt_token_ids,
@@ -266,10 +266,19 @@ async fn collect_chat_completion(
         })
         .collect::<Vec<_>>();
     let logprobs = if requested_logprobs && include_output_metadata {
+        let logprobs = match logprobs {
+            Some(logprobs) => logprobs,
+            // A request that generated nothing, such as one aborted during
+            // prefill, has no positions to report.
+            None if token_ids.is_empty() => DecodedLogprobs {
+                positions: Vec::new(),
+            },
+            None => {
+                bail_server_error!("chat response requested logprobs but generation returned none")
+            }
+        };
         Some(decoded_logprobs_to_openai_chat(
-            logprobs.as_ref().ok_or_else(|| {
-                server_error!("chat response requested logprobs but generation returned none")
-            })?,
+            &logprobs,
             output_top_logprobs,
             return_tokens_as_token_ids,
         )?)
@@ -674,7 +683,7 @@ async fn chat_completion_chunk_stream(
                     error = %error.as_report(),
                     "chat stream failed"
                 );
-                bail_server_error!("{}", error.to_report_string());
+                return Err(chat_request_error("chat stream failed", error));
             }
         }
     }

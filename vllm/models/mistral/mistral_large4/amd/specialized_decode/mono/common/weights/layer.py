@@ -85,57 +85,6 @@ def _unshuffle_linear_scale(
     )
 
 
-def linear_ptpc_fp8(
-    linear,
-    *,
-    name: str,
-    logical_rows: int,
-    logical_cols: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return a preshuffled PTPC FP8 weight and its per-output-channel scales."""
-    weight = linear.weight
-    scale = getattr(linear, "weight_scale", None)
-    fp8_dtypes = tuple(
-        dtype
-        for dtype in (
-            getattr(torch, "float8_e4m3fn", None),
-            getattr(torch, "float8_e4m3fnuz", None),
-        )
-        if dtype is not None
-    )
-    _need(
-        getattr(getattr(linear, "quant_type", None), "name", None) == "per_Token",
-        f"{name} must use per-token FP8",
-    )
-    _need(
-        getattr(linear, "params_dtype", None) in fp8_dtypes
-        and weight.dtype == getattr(linear, "params_dtype", None),
-        f"{name} must use E4M3 FP8 weights",
-    )
-    _need(
-        bool(getattr(weight, "is_shuffled", False)),
-        f"{name} FP8 weight must use the AITER preshuffle",
-    )
-    _need(
-        weight.ndim == 2
-        and weight.shape[0] >= logical_rows
-        and weight.shape[1] == logical_cols,
-        f"{name} weight shape {tuple(weight.shape)}",
-    )
-    _need(
-        not getattr(linear, "is_output_padded", False)
-        or getattr(linear, "_output_size_before_padding", None) == logical_rows,
-        f"{name} output padding does not preserve {logical_rows} logical rows",
-    )
-    _need(
-        scale is not None
-        and scale.dtype == torch.float32
-        and scale.numel() == weight.shape[0],
-        f"{name} per-output-channel scale",
-    )
-    return weight.data, scale.data.view(-1)  # type: ignore[union-attr]
-
-
 def linear_bf16(
     linear,
     *,

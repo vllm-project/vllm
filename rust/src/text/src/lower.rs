@@ -1461,10 +1461,12 @@ mod tests {
     }
 
     #[test]
-    fn lower_sampling_params_rejects_out_of_vocab_allowed_token_ids() {
+    fn lower_sampling_params_bounds_allowed_token_ids_by_model_vocab() {
+        // Tokenizer larger than the model (input-only placeholder tokens): IDs
+        // past the model vocabulary are rejected.
         let error = lower_sampling_params_with_limits(
             SamplingParams {
-                allowed_token_ids: Some(vec![1999, 2000]),
+                allowed_token_ids: Some(vec![999, 1000, 1999]),
                 ..Default::default()
             },
             sample_sampling_limits(),
@@ -1476,9 +1478,25 @@ mod tests {
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "allowed_token_ids",
                 token_ids,
-                vocab_size: 2000,
-            }) if token_ids == vec![2000]
+                vocab_size: 1000,
+            }) if token_ids == vec![1000, 1999]
         ));
+
+        // Model larger than the tokenizer (padded embedding rows, e.g. Qwen3):
+        // IDs within the model vocabulary are accepted.
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                allowed_token_ids: Some(vec![1500, 1999]),
+                ..Default::default()
+            },
+            SamplingLimits {
+                model_vocab_size: 2000,
+                tokenizer_vocab_size: 1000,
+                ..sample_sampling_limits()
+            },
+        )
+        .unwrap();
+        assert_eq!(params.allowed_token_ids, Some(vec![1500, 1999]));
     }
 
     #[test]

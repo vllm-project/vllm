@@ -862,12 +862,7 @@ def get_model_params(config):
     architectures = getattr(config, "architectures", None) or [type(config).__name__]
     architecture = architectures[0]
 
-    if architecture == "DbrxForCausalLM":
-        E = config.ffn_config.moe_num_experts
-        topk = config.ffn_config.moe_top_k
-        intermediate_size = config.ffn_config.ffn_hidden_size
-        hidden_size = config.hidden_size
-    elif architecture in (
+    if architecture in (
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",

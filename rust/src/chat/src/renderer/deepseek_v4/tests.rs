@@ -10,6 +10,7 @@ use thiserror_ext::AsReport as _;
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
 use crate::EffortValue;
+use crate::error::ErrorKind;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{
@@ -143,6 +144,35 @@ fn drop_thinking_keeps_last_developer() {
         "<｜begin▁of▁sentence｜><｜User｜>old question<｜Assistant｜></think>old answer<｜end▁of▁sentence｜><｜User｜>latest instruction<｜Assistant｜><think>"
     ]
     .assert_eq(&rendered);
+}
+
+/// An empty developer message and a non-boolean `drop_thinking` are the
+/// request's errors, as Python's encoder rejects the former with `ValueError`.
+#[test]
+fn request_refusals_name_their_parameter() {
+    let error = DeepSeekV4ChatRenderer::default()
+        .render(&thinking_request(vec![
+            ChatMessage::user("hi"),
+            ChatMessage::developer("", None),
+        ]))
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::invalid_param("messages"),
+        "{error:?}"
+    );
+
+    let mut request = thinking_request(vec![ChatMessage::user("hi")]);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("drop_thinking".to_string(), Value::from("no"));
+    let error = DeepSeekV4ChatRenderer::default().render(&request).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::invalid_param("chat_template_kwargs"),
+        "{error:?}"
+    );
 }
 
 #[test]

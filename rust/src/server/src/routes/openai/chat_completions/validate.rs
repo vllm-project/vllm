@@ -157,7 +157,7 @@ mod tests {
                 function: Function {
                     name: "tool".to_string(),
                     description: None,
-                    parameters: json!({}),
+                    parameters: Some(serde_json::Map::new()),
                     strict: None,
                     defer_loading: None,
                 },
@@ -175,7 +175,7 @@ mod tests {
                     function: Function {
                         name: "tool".to_string(),
                         description: None,
-                        parameters: json!({}),
+                        parameters: Some(serde_json::Map::new()),
                         strict: None,
                         defer_loading: None,
                     },

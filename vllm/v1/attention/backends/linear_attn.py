@@ -6,7 +6,12 @@ import torch
 
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.model_executor.layers.mamba.abstract import (
+    get_kv_cache_checkpoint_alignment,
     get_mamba_num_speculative_blocks,
+)
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -115,6 +120,7 @@ class BailingLinearAttentionMetadata(LinearAttentionMetadata):
     state_indices_tensor_p: torch.Tensor | None = None
     num_accepted_tokens: torch.Tensor | None = None
     query_start_loc_d: torch.Tensor | None = None
+    checkpoint: MambaPrefillCheckpointMetadata | None = None
 
 
 class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
@@ -167,6 +173,11 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
             device=device,
         )
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config,
+            kv_cache_spec,
+            get_kv_cache_checkpoint_alignment(vllm_config),
+        )
 
     def build_for_cudagraph_capture(
         self,
@@ -222,6 +233,11 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
             dim=0,
         )
         state_indices_tensor_p = state_indices_tensor_p[:, 0]
+        checkpoint = None
+        if num_prefills > 0:
+            checkpoint = self.checkpoint_builder.build(
+                common_attn_metadata, list(range(num_decodes, num_reqs))
+            )
 
         query_start_loc_d = None
         if use_spec_decode:
@@ -307,4 +323,5 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
             state_indices_tensor_p=state_indices_tensor_p,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
+            checkpoint=checkpoint,
         )

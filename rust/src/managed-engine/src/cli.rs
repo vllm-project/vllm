@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 
+use clap::builder::ValueParser;
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory};
 use serde_json::{Map, Value};
@@ -247,7 +248,7 @@ fn repartition_real_managed_engine_args(
     let (long_flags, short_flags) = collect_option_names(command);
     let (front_args, explicit_passthrough, had_separator) = split_managed_engine_args(&args[1..]);
     let normalized_front_args = merge_dotted_frontend_args(
-        normalize_python_arg_aliases(front_args),
+        normalize_python_bool_flags(normalize_python_arg_aliases(front_args), command),
         &long_flags,
         command,
     )?;
@@ -336,6 +337,51 @@ fn find_python_multi_char_alias(arg: &str) -> Option<&'static str> {
     PYTHON_MULTI_CHAR_ALIASES.iter().find_map(|&(alias, canonical)| {
         (arg == alias || arg.starts_with(&format!("{alias}="))).then_some(canonical)
     })
+}
+
+/// Python gives every `BooleanOptionalAction` flag a `--no-<flag>` spelling
+/// and pairs `--enable-<x>` with `--disable-<x>` (`EnableDisableAction`).
+/// Rewrite these spellings of the boolean flags `vllm-rs serve` declares into
+/// the declared flag set to `false`, so clap parses them instead of forwarding
+/// them to Python, where the frontend would never see them. A contradictory
+/// pair such as `--enable-x --disable-x` then fails as a repeated flag.
+fn normalize_python_bool_flags(args: Vec<OsString>, command: &clap::Command) -> Vec<OsString> {
+    let declared: HashSet<&str> = (command.get_arguments())
+        .flat_map(|arg| arg.get_long_and_visible_aliases().unwrap_or_default())
+        .collect();
+    let bool_flags: HashSet<&str> = (command.get_arguments())
+        .filter(|arg| is_bool_flag(arg))
+        .flat_map(|arg| arg.get_long_and_visible_aliases().unwrap_or_default())
+        .collect();
+    let rewrite = |arg: OsString| {
+        let Some(name) = arg.to_str().and_then(|arg| arg.strip_prefix("--")) else {
+            return arg;
+        };
+        if declared.contains(name) {
+            return arg;
+        }
+        let negated = name.strip_prefix("no-").map(str::to_owned);
+        let inverse = (name.strip_prefix("disable-").map(|rest| format!("enable-{rest}")))
+            .or_else(|| name.strip_prefix("enable-").map(|rest| format!("disable-{rest}")));
+        negated
+            .into_iter()
+            .chain(inverse)
+            .find(|flag| bool_flags.contains(flag.as_str()))
+            .map_or(arg, |flag| format!("--{flag}=false").into())
+    };
+
+    args.into_iter().map(rewrite).collect()
+}
+
+/// Whether `arg` is a boolean flag the frontend reads: a `bool` taking an
+/// optional value, so `--<flag>=false` sets it off. The markers of flags the
+/// frontend does not implement are left out, so their inverse spellings go to
+/// Python like any undeclared flag: they select Python's default for an
+/// unimplemented flag, and reach engine-side readers such as the pooling scorer
+/// behind the no-op `--enable-flash-late-interaction`.
+fn is_bool_flag(arg: &clap::Arg) -> bool {
+    arg.get_num_args() == Some((0..=1).into())
+        && arg.get_value_parser().type_id() == ValueParser::bool().type_id()
 }
 
 /// Python's `FlexibleArgumentParser` turns `--<flag>.<key>[.<key>...] <value>`

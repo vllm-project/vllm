@@ -12,7 +12,7 @@ use vllm_chat::{
 
 use super::types::ChatCompletionRequest;
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request, chat_submit_error, text_submit_error};
+use crate::error::{ApiError, bail_invalid_request, chat_request_error, text_request_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
@@ -85,9 +85,9 @@ pub(super) fn prepare_chat_request(
         request.truncate_prompt_tokens,
         request.truncation_side,
     )
-    .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
+    .map_err(|error| text_request_error("invalid prompt truncation", error))?;
 
-    let request_id = format!("chatcmpl-{}", ctx.request_id);
+    let request_id = ctx.request_id.clone();
     let response_model = lora_resolution.response_model();
     let include_reasoning = request.include_reasoning;
     let echo = request
@@ -158,7 +158,7 @@ pub(super) fn prepare_chat_request(
         request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
-    .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
+    .map_err(|error| chat_request_error("failed to resolve request tools", error))?;
 
     #[expect(deprecated)]
     let max_tokens = request.max_completion_tokens.or(request.max_tokens);
@@ -360,7 +360,7 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                 ),
                 ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
                     image_url: image_url.url,
-                    detail: image_url.detail,
+                    detail: image_url.detail.map(Into::into),
                     uuid,
                 }),
                 ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
@@ -373,7 +373,7 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                 }),
                 ContentPart::InputAudio { input_audio, uuid } => Ok(ChatContentPart::InputAudio {
                     data: input_audio.data,
-                    format: input_audio.format,
+                    format: Some(input_audio.format),
                     uuid,
                 }),
                 ContentPart::ToolReference { name } => Ok(ChatContentPart::ToolReference { name }),
@@ -497,13 +497,12 @@ mod tests {
 
     use axum::http::{HeaderMap, StatusCode};
     use expect_test::expect;
-    use llm_multimodal::ImageDetail;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use thiserror_ext::AsReport as _;
     use vllm_chat::{
         AllowedToolsMode, AssistantContentBlock, AssistantToolCall, ChatContentPart,
         ChatMessage as VllmChatMessage, ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice,
-        GenerationPromptMode, KimiK3ChatRenderer, KimiK3Variant,
+        GenerationPromptMode, InputAudioFormat, KimiK3ChatRenderer, KimiK3Variant,
         SamplingParams as VllmSamplingParams,
     };
     use vllm_text::{
@@ -519,14 +518,14 @@ mod tests {
     };
     use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
-        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
-        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceObject,
+        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageDetail, ImageUrl,
+        InputAudio, MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceObject,
         ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id).expect("valid headers")
+        resolve_request_context(headers, "chatcmpl-", request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {
@@ -599,6 +598,38 @@ mod tests {
             "stream_interval": 0,
         });
         assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
+    }
+
+    #[test]
+    fn chat_http_input_audio_format_accepts_only_openai_names() {
+        let request = |format: Option<Value>| {
+            let mut input_audio = json!({"data": "dGVzdA=="});
+            if let Some(format) = format {
+                input_audio["format"] = format;
+            }
+            json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "input_audio", "input_audio": input_audio}],
+                }],
+            })
+        };
+        for format in ["wav", "mp3"] {
+            serde_json::from_value::<ChatCompletionRequest>(request(Some(json!(format))))
+                .expect("OpenAI format names are accepted");
+        }
+        for (format, expected) in [
+            (None, "missing field `format`"),
+            (Some(Value::Null), "invalid type: null"),
+            (Some(json!("WAV")), "expected `wav` or `mp3`"),
+            (Some(json!("MP3")), "expected `wav` or `mp3`"),
+            (Some(json!("flac")), "expected `wav` or `mp3`"),
+        ] {
+            let error = serde_json::from_value::<ChatCompletionRequest>(request(format.clone()))
+                .expect_err("format must be rejected")
+                .to_string();
+            assert!(error.contains(expected), "format {format:?}: {error}");
+        }
     }
 
     #[test]
@@ -894,7 +925,7 @@ mod tests {
                     function: Function {
                         name: "tool".to_string(),
                         description: None,
-                        parameters: json!({}),
+                        parameters: Some(serde_json::Map::new()),
                         strict: None,
                         defer_loading: None,
                     },
@@ -1018,7 +1049,7 @@ mod tests {
         let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
+            request_context(&HeaderMap::new(), None),
         )
         .expect("request is valid");
 
@@ -1098,7 +1129,7 @@ mod tests {
         let prepared = prepare_chat_request(
             base_request(),
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
+            request_context(&HeaderMap::new(), None),
         )
         .expect("request is valid");
 
@@ -1214,7 +1245,9 @@ mod tests {
                         parameters: json!({
                             "type": "object",
                             "properties": {"city": {"type": "string"}},
-                        }),
+                        })
+                        .as_object()
+                        .cloned(),
                         strict: Some(true),
                         defer_loading: None,
                     },
@@ -1298,7 +1331,7 @@ mod tests {
                     ContentPart::ImageUrl {
                         image_url: ImageUrl {
                             url: "https://example.com/image.png".to_string(),
-                            detail: Some(ImageDetail::Low),
+                            detail: Some(ImageDetail::Original),
                         },
                         uuid: Some("image-1".to_string()),
                     },
@@ -1324,7 +1357,7 @@ mod tests {
                 ChatContentPart::text("describe "),
                 ChatContentPart::ImageUrl {
                     image_url: "https://example.com/image.png".to_string(),
-                    detail: Some(ImageDetail::Low),
+                    detail: Some(llm_multimodal::ImageDetail::High),
                     uuid: Some("image-1".to_string()),
                 },
                 ChatContentPart::text(" briefly"),
@@ -1405,7 +1438,7 @@ mod tests {
                     ContentPart::InputAudio {
                         input_audio: InputAudio {
                             data: "dGVzdA==".to_string(),
-                            format: Some("wav".to_string()),
+                            format: InputAudioFormat::Wav,
                         },
                         uuid: Some("audio-1".to_string()),
                     },
@@ -1433,7 +1466,7 @@ mod tests {
             vec![VllmChatMessage::user(vec![
                 ChatContentPart::InputAudio {
                     data: "dGVzdA==".to_string(),
-                    format: Some("wav".to_string()),
+                    format: Some(InputAudioFormat::Wav),
                     uuid: Some("audio-1".to_string()),
                 },
                 ChatContentPart::audio_url("https://example.com/audio.mp3"),
@@ -1679,7 +1712,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -1775,7 +1810,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },
@@ -1813,7 +1850,7 @@ mod tests {
                             function: Function {
                                 name: "lookup".to_string(),
                                 description: None,
-                                parameters: json!({"type": "object"}),
+                                parameters: json!({"type": "object"}).as_object().cloned(),
                                 strict: None,
                                 defer_loading: None,
                             },
@@ -1888,7 +1925,9 @@ mod tests {
                     parameters: json!({
                         "type": "object",
                         "properties": {"city": {"type": "string"}},
-                    }),
+                    })
+                    .as_object()
+                    .cloned(),
                     strict: None,
                     defer_loading: None,
                 },

@@ -585,6 +585,82 @@ def test_rust_frontend_uses_pulled_object_storage_model(
     assert args_json["served_model_name"] == expected_served_model_name
 
 
+@pytest.mark.parametrize(
+    ("runner_type", "architecture", "logprobs_mode", "expected"),
+    [
+        ("generate", "Qwen3ForCausalLM", "raw_logprobs", "NextTokenStrategy"),
+        # Forwarded even though the Rust frontend refuses it at startup.
+        ("generate", "Qwen3_5ForSlotDecision", "raw_logprobs", "SlotLMStrategy"),
+        ("pooling", "D3ForSequenceClassification", "raw_logits", "D3Strategy"),
+        # Where Python answers 501, nothing is forwarded: architectures
+        # without a read strategy, and the cases select_read_strategy refuses.
+        ("generate", "LlamaForCausalLM", "raw_logprobs", None),
+        ("generate", "Qwen3ForCausalLM", "raw_logits", None),
+        ("pooling", "Qwen3ForCausalLM", "raw_logprobs", None),
+        ("generate", "D3ForSequenceClassification", "raw_logprobs", None),
+    ],
+)
+def test_rust_frontend_receives_decisions_read_strategy(
+    monkeypatch, runner_type, architecture, logprobs_mode, expected
+):
+    """The launcher forwards the read strategy Python's table picks, so the
+    Rust frontend keeps no copy of the table."""
+    import json
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(["--model", "m"])
+    model_config = SimpleNamespace(
+        model="m",
+        model_weights=None,
+        runner_type=runner_type,
+        architecture=architecture,
+        logprobs_mode=logprobs_mode,
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+            model_config=model_config,
+        )
+    finally:
+        sock.close()
+
+    [cmd] = popen_calls
+    args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    assert args_json.get("decisions_read_strategy") == expected
+
+
 def test_rust_frontend_inherits_grpc_listener(monkeypatch):
     """The Python-bound gRPC socket is passed to Rust like the HTTP one."""
     import subprocess as subprocess_mod

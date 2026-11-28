@@ -178,6 +178,7 @@ impl EngineCoreLlm {
                 client.data_parallel_size(),
             ),
         };
+        let admission = Admission::new(client.model_name(), AdmissionLimits::default());
         Self {
             client,
             info,
@@ -185,7 +186,7 @@ impl EngineCoreLlm {
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
-            admission: Admission::default(),
+            admission,
             request_metric_handles,
         }
     }
@@ -220,7 +221,7 @@ impl EngineCoreLlm {
 
     /// Set the queue limits that reject new requests with a retryable error.
     pub fn with_admission_limits(mut self, limits: AdmissionLimits) -> Self {
-        self.admission = Admission::new(limits);
+        self.admission = Admission::new(self.client.model_name(), limits);
         self
     }
 

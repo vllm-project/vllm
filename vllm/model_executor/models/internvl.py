@@ -618,7 +618,6 @@ class InternVLChatModel(
             )
 
         self.img_context_token_id: int | None = None
-        self.video_context_token_id: int | None = None
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -758,7 +757,6 @@ class InternVLChatModel(
             video_token_id = video_token_id.flatten().unique().item()
 
         assert isinstance(video_token_id, int)
-        self.video_context_token_id = video_token_id
 
         if pixel_values_flat_video is not None:
             expected_h = expected_w = self.config.vision_config.image_size

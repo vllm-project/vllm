@@ -106,6 +106,7 @@ def test_forward_mqa_prepares_triton_sparse_mla_inputs(
     metadata = SimpleNamespace(
         num_actual_tokens=num_tokens,
         topk_tokens=topk,
+        topk_start=0,
         req_id_per_token=torch.tensor(req_id_per_token, dtype=torch.int32).to(device),
         block_table=block_table,
         block_size=block_size,

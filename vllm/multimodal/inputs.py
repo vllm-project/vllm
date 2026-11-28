@@ -372,6 +372,13 @@ class MultiModalFeatureSpec:
     mm_hash: str | None = None
     """The hash for caching processor outputs (without LoRA prefix)."""
 
+    skip_mm_cache: bool = False
+    """
+    If true, skip the multimodal processor cache for this item/feature so
+    pre-rendered or unrecorded features do not insert into or evict entries
+    from the receiver cache.
+    """
+
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
         kwargs = defaultdict[str, list[NestedTensors]](list)
@@ -406,6 +413,23 @@ class MultiModalFieldElem:
     """
     Defines how to combine the tensor data of this field with others
     in order to batch multi-modal items together for model inference.
+    """
+
+    skip_mm_cache: bool = False
+    """If True, this field carries its full tensor data for inference but must
+    not be inserted into, or update, the receiver-side multimodal LRU cache.
+
+    The combination of `data` and this flag encodes three states:
+
+    * `data` is a full tensor, `skip_mm_cache=False`: a normal item that
+      participates in both the sender and receiver LRU (insertion and update).
+    * `data=None`, `skip_mm_cache=False`: the sender has already cached
+      this item; the receiver resolves the data by hash from its cache.
+    * `data` is a full tensor, `skip_mm_cache=True`: an item rebuilt from
+      the render endpoint's `features`. It bypassed the sender cache, so it
+      must bypass the receiver cache as well; inserting it would evict P1
+      entries that the sender still believes are cached, causing a later
+      `MultiModalCacheMissError`.
     """
 
     def __eq__(self, other: object) -> bool:

@@ -539,8 +539,6 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.max_decode_cudagraph_capture_requests]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
-        - [`cudagraph_copy_inputs`]
-        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
     - Inductor compilation:
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
         - [`compile_ranges_endpoints`]
@@ -858,13 +856,8 @@ class CompilationConfig:
     token-keyed graphs. None (default): 8192 on SM100 GPUs, otherwise no budget.
     Wider decode graphs take memory from the KV cache."""
     cudagraph_copy_inputs: bool = False
-    """Whether to copy input tensors for
-    cudagraph. If the caller can guarantee that the same input buffers
-    are always used, it can set this to False. Otherwise, it should
-    set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False.
-    Note that this flag is only effective when cudagraph_mode is PIECEWISE.
-    """
+    """Deprecated: has no effect and will be removed in v0.37.0. The model runner
+    already passes persistent input buffers to CUDA graphs."""
     cudagraph_specialize_lora: bool = True
     """Whether to create separate cuda graphs for cases with and without active
     LoRA adapters. When set to False, the LoRA-enabled cuda graph will be used
@@ -1022,6 +1015,7 @@ class CompilationConfig:
             "enabled_custom_ops",
             "disabled_custom_ops",
             "static_forward_context",
+            "cudagraph_copy_inputs",
         }
 
         return get_compile_factors(self, ignored_factors)
@@ -1102,7 +1096,6 @@ class CompilationConfig:
         return value
 
     @field_validator(
-        "level",
         "mode",
         "cudagraph_mode",
         "max_cudagraph_capture_size",
@@ -1118,6 +1111,12 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
+        if self.cudagraph_copy_inputs:
+            logger.warning_once(
+                "`cudagraph_copy_inputs` is deprecated, has no effect and will be "
+                "removed in v0.37.0."
+            )
+
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924
@@ -1278,8 +1277,7 @@ class CompilationConfig:
         if self.mode is None:
             raise ValueError(
                 "No compilation mode is set. This method should only be "
-                "called via vllm config where the level is set if none is "
-                "provided."
+                "called via vllm config where the mode is set if none is provided."
             )
         if self.mode == CompilationMode.NONE:
             raise ValueError("No compilation mode is set.")

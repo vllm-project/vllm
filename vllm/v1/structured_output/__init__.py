@@ -304,37 +304,26 @@ class StructuredOutputManager:
         if num_spec_tokens <= 0:
             return _NO_SPEC_TOKENS
 
-        # Parsers that know their end tokens also report whether one is content.
-        if reasoner.reasoning_end_token_ids:
-            end = reasoner.find_reasoning_end(spec_tokens)
-            if end is not None:
-                constraint_start = end.offset + 1
-                if end.implicit:
-                    return ConstraintBounds(end.offset, constraint_start)
-                return ConstraintBounds(constraint_start, constraint_start)
+        # Parsers may locate multi-token ends too. None requires the
+        # context-aware fallback (e.g. a marker split across decode steps).
+        end = reasoner.find_reasoning_end(spec_tokens)
+        if end is not None:
+            constraint_start = end.offset + 1
+            if end.implicit:
+                return ConstraintBounds(end.offset, constraint_start)
+            return ConstraintBounds(constraint_start, constraint_start)
 
-        # Fallback: the grammar starts after the end token. A view, not a copy,
-        # of all_token_ids: most parsers don't read it every step.
-        if spec_tokens_committed:
-            if not spec_tokens or not reasoner.is_reasoning_end_streaming(
-                request.all_token_ids, spec_tokens
-            ):
-                return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
-
-            input_ids = TokenIdsView(request._all_token_ids)
-            delta_ids = list(spec_tokens)
-        else:
-            input_ids = TokenIdsView(request._all_token_ids, spec_tokens)
-            if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
-                return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
-            delta_ids = list(spec_tokens)
-
-        for i in range(num_spec_tokens - 1, 0, -1):
+        # Keep the earliest ended prefix even if a later draft reopens reasoning.
+        # Check each token with its preceding context, without copying prefixes.
+        input_ids = TokenIdsView(
+            request._all_token_ids, () if spec_tokens_committed else spec_tokens
+        )
+        constraint_start = num_spec_tokens + 1
+        for i in range(num_spec_tokens, 0, -1):
+            if reasoner.is_reasoning_end_streaming(input_ids, (spec_tokens[i - 1],)):
+                constraint_start = i
             input_ids.pop()
-            delta_ids.pop()
-            if not reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
-                return ConstraintBounds(i + 1, i + 1)
-        return ConstraintBounds(1, 1)
+        return ConstraintBounds(constraint_start, constraint_start)
 
     def trim_spec_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
         """Trim structured-output padding and grammar-invalid suffixes."""

@@ -271,7 +271,7 @@ message ChatMediaUrl {
 message ChatInputAudio {
   // Base64-encoded audio bytes.
   string data = 1;
-  // Audio format, such as "wav" or "mp3".
+  // Audio format, "wav" or "mp3"; when absent, detected from the bytes.
   optional string format = 2;
   // Caller-assigned item ID, used in place of the content hash for caching.
   optional string uuid = 3;

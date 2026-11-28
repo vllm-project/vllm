@@ -205,7 +205,6 @@ class Llama4Attention(nn.Module):
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
         self.max_position_embeddings = max_position_embeddings
-        self.n_rep = self.num_heads // self.num_kv_heads
         self.qk_norm = (
             RMSNorm(
                 hidden_size=self.head_dim,
@@ -319,7 +318,6 @@ class Llama4DecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.layer_idx = extract_layer_index(prefix)
-        self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
         max_position_embeddings = config.max_position_embeddings
 

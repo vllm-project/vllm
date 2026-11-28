@@ -122,7 +122,7 @@ CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "num_experts": (
         "num_experts",  # Qwen3-MoE
-        "moe_num_experts",  # Dbrx
+        "moe_num_experts",  # ERNIE-4.5
         "n_routed_experts",  # DeepSeek
         "num_local_experts",  # Mixtral
     ),

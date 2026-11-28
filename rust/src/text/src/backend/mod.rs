@@ -95,7 +95,7 @@ pub struct SamplingLimits {
     /// Model vocabulary size from the model config, used to bound generated
     /// token IDs and logits-domain sampling controls.
     pub model_vocab_size: usize,
-    /// Tokenizer vocabulary size, used to bound `allowed_token_ids` and
+    /// Tokenizer vocabulary size, used to bound `bad_words` token IDs and
     /// token-ID prompts that carry multimodal inputs.
     pub tokenizer_vocab_size: usize,
 }
@@ -149,7 +149,7 @@ pub trait TextBackend: Send + Sync {
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).
-    /// Used to range-check `allowed_token_ids` and token-id prompts.
+    /// Used to range-check `bad_words` token IDs and token-id prompts.
     fn tokenizer_vocab_size(&self) -> usize {
         self.tokenizer().vocab_size()
     }

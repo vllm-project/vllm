@@ -204,11 +204,13 @@ It can be ensured that the resulting cache hit of sliding window attention layer
 
 The algorithm applies to models with exactly two attention types full attention + X, where X can be an arbitrary efficient attention algorithm like sliding window, llama 4 local attention, and mamba. It doesn't support models without full attention layers, and models with more than 2 types of attention. This is enough for most hybrid models at the moment of writing this doc.
 
-The second question is the cache eviction policy. For now, we use one LRU queue for all kv cache groups. The blocks are added to the LRU queue when freed, either because the request is finished or the block is out of the sliding window.
+The second question is the cache eviction policy. All KV cache groups share a single `FreeKVCacheBlockQueue` organized into three eviction tiers: uncached blocks at the front, a middle deprioritized tier (FIFO, inserted before `_cached_head`), and normal LRU-cached blocks at the tail. Blocks normally enter the LRU tail when freed, either because the request is finished or the block is out of the sliding window.
 
 ### Case 3: mamba models
 
-Models with mamba layers + full attention layers support prefix caching via the full attention + X algorithm in case 2, with the Mamba state cached at block boundaries. See [Automatic Prefix Caching](../features/automatic_prefix_caching.md).
+Models with mamba layers + full attention layers support prefix caching via the full attention + X algorithm in case 2, with the Mamba state cached at block boundaries.
+
+Because recurrent checkpoints from older turns accumulate across every Mamba KV cache group, vLLM enables superseded-state deprioritization by default whenever prefix caching is active for Mamba groups. When a finished request caches a deeper Mamba tip past an earlier tip, the immediate predecessor (`t-1`) remains in normal LRU as a one-turn rollback fallback (and shared-prefix junctions or multi-branch fork points stay in normal LRU), while states two or more turns behind (`t-2` and older) are moved to the middle deprioritized tier. Deprioritized blocks keep their hashes until reused, so they are evicted after uncached blocks and before normal LRU-cached blocks (such as active full-attention KV blocks). See [Automatic Prefix Caching](../features/automatic_prefix_caching.md).
 
 ## Implementation
 

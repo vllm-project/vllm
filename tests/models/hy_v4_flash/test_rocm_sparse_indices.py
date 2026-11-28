@@ -5,8 +5,6 @@
 counts must equal the indexers' live entries and rows must be front-packed.
 """
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -20,6 +18,9 @@ if not current_platform.is_rocm():
 
 from vllm.models.hy_v4_flash.amd import swa
 from vllm.models.hy_v4_flash.amd.indexpool_ops import expand_groups, select_groups
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseMetadata,
+)
 
 DEVICE = "cuda"
 # (seq_len, query_len) per request: decode, short and long extend, an empty
@@ -141,10 +142,17 @@ def _window_metadata(seq_lens, query_lens, num_actual):
     starts = [0]
     for query_len in query_lens:
         starts.append(starts[-1] + query_len)
-    return SimpleNamespace(
-        seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE),
-        query_start_loc=torch.tensor(starts, dtype=torch.int32, device=DEVICE),
+    zeros = torch.zeros(starts[-1], dtype=torch.int32, device=DEVICE)
+    return ROCMAiterMLASparseMetadata(
+        num_reqs=len(seq_lens),
+        max_query_len=max(query_lens),
+        max_seq_len=max(seq_lens),
         num_actual_tokens=num_actual,
+        query_start_loc=torch.tensor(starts, dtype=torch.int32, device=DEVICE),
+        slot_mapping=zeros.long(),
+        block_table=torch.zeros(len(seq_lens), 1, dtype=torch.int32, device=DEVICE),
+        req_id_per_token=zeros,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE),
     ), starts
 
 

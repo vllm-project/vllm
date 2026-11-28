@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HYV4 Flash backbone using the public HYV4 checkpoint contract."""
 
+from itertools import islice
+
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.interfaces import SupportsMRoPE
+from vllm.model_executor.models.utils import WeightsMapper, copy_pp_buffers
 from vllm.models.hy_v4.common.mrope import set_token_rope
 from vllm.models.hy_v4.nvidia.hc import HYV4HCLayer
 from vllm.models.hy_v4.nvidia.model import (
@@ -22,6 +26,7 @@ from vllm.models.hy_v4_flash.common.model import (
     HYV4FlashModelMixin,
 )
 from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -81,13 +86,24 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.init_engram(vllm_config, prefix)
+        local_layers = list(islice(self.layers, self.start_layer, self.end_layer))
         # SWA and sparse layers rotate with different thetas, and each rotary
         # module holds its own per-forward rows for the fused RoPE kernels.
         self.rotary_embs = list(
             {
                 id(layer.self_attn.rotary_emb): layer.self_attn.rotary_emb
-                for layer in self.layers
+                for layer in local_layers
             }.values()
+        )
+        # Engram hashing reads the batch layout from this stage's first sparse
+        # layer.
+        sparse = [
+            layer for layer in local_layers if not layer.self_attn.is_window_layer
+        ]
+        self.engram_metadata_layer = (
+            (sparse or local_layers)[0].self_attn.mla_attn.layer_name
+            if local_layers
+            else None
         )
 
     def forward(
@@ -97,19 +113,27 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        hidden = (
-            inputs_embeds
-            if inputs_embeds is not None
-            else self.embed_input_ids(input_ids)
-        )
-        for rotary_emb in self.rotary_embs[1:]:
-            set_token_rope(rotary_emb, positions, hidden)
+    ) -> torch.Tensor | IntermediateTensors:
+        if get_pp_group().is_first_rank:
+            hidden = (
+                inputs_embeds
+                if inputs_embeds is not None
+                else self.embed_input_ids(input_ids)
+            )
+        else:
+            assert intermediate_tensors is not None
+            hidden = intermediate_tensors["hidden_states"]
         if self.engram_hash is None:
+            for rotary_emb in self.rotary_embs[1:]:
+                set_token_rope(rotary_emb, positions, hidden)
             return super().forward(input_ids, positions, intermediate_tensors, hidden)
         if input_ids is None:
             raise ValueError("Flash Engram requires original input token IDs")
-        set_token_rope(self.rotary_embs[0], positions, hidden)
+        if not get_pp_group().is_first_rank:
+            assert intermediate_tensors is not None
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
+        for rotary_emb in self.rotary_embs:
+            set_token_rope(rotary_emb, positions, hidden)
         hashes = input_ids.new_empty(
             (
                 len(self.config.engram_layer_ids),
@@ -121,16 +145,17 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
         self.engram_hash.prepare_hashes_with_output(
             input_ids,
             lookback_token_ids,
-            self.layers[0].self_attn.mla_attn.layer_name,
+            self.engram_metadata_layer,
             hashes,
         )
         hash_indices = {
             layer_id - 1: index
             for index, layer_id in enumerate(self.config.engram_layer_ids)
         }
-        fused = self.uses_fused_ihc(use_ihc_sequence_parallel=False)
+        fused = self.uses_fused_ihc()
         carry: IHCCarry | None = None
-        for index, layer in enumerate(self.layers):
+        for index in range(self.start_layer, self.end_layer):
+            layer = self.layers[index]
             if index in hash_indices:
                 if carry is not None:
                     hidden = self.layers[index - 1].hc_mlp_layer.post(*carry)
@@ -141,24 +166,45 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
                 carry = layer.forward_ihc_fused(positions, hidden, carry)
             else:
                 hidden, _ = layer(positions, hidden, None)
+        is_last_rank = get_pp_group().is_last_rank
         if carry is not None:
+            output = (
+                self.hc_head.fused_post(*carry, self.norm) if is_last_rank else None
+            )
+            if output is not None:
+                return output
             hidden = layer.hc_mlp_layer.post(*carry)
+        if not is_last_rank:
+            buffers = {k: v[: positions.shape[-1]] for k, v in self.pp_buffers.items()}
+            return IntermediateTensors({"hidden_states": hidden.flatten(1), **buffers})
         return self.norm(self.hc_head(hidden))
 
 
-class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM):
+class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM, SupportsMRoPE):
     model_cls = HYV4FlashModel
     supports_lora = False  # type: ignore[assignment]
-    supports_pp = False  # type: ignore[assignment]
     requires_raw_input_tokens = True
-    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+    }
     hf_to_vllm_mapper = HYV4_MLP_MAPPER | WeightsMapper(
         orig_to_new_substr={".compressed_indexer.": ".indexer."},
         orig_to_new_stacked={
+            ".self_attn.q_a_proj.": (".self_attn.fused_qkv_a_proj.", 0),
+            ".self_attn.kv_a_proj_with_mqa.": (".self_attn.fused_qkv_a_proj.", 1),
             ".indexer.key_value_projection.": (".indexer.key_projection.", 0),
             ".indexer.key_gate_projection.": (".indexer.key_projection.", 1),
         },
     )
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> tuple[torch.Tensor, int]:
+        # Published configs use M-RoPE; text tokens share one position per row.
+        return torch.arange(len(input_tokens)).repeat(3, 1), 0
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         validate_platform()

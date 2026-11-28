@@ -32,7 +32,7 @@ from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
-MODEL_NAME = "vllm-project/multilingual-e5-small"
+MODEL_NAME = "vllm/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
 input_text = "The best thing about vLLM is that it supports many different models"
@@ -114,6 +114,20 @@ def test_pooling_rejects_media_before_fetching_on_text_model(
         media_server.server_close()
 
 
+def test_pooling_rejects_request_tokenizer_options(server: RemoteOpenAIServer):
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"padding": False},
+        },
+        timeout=10,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "chat_template_kwargs"
+
+
 @pytest.fixture(scope="module")
 def server():
     args = [
@@ -127,6 +141,26 @@ def server():
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
         *ROCM_DETERMINISM_ARGS,
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def server_with_default_chat_template_kwargs():
+    args = [
+        "--runner",
+        "pooling",
+        "--dtype",
+        DTYPE,
+        "--enforce-eager",
+        "--max-model-len",
+        "512",
+        "--chat-template",
+        "{% if prefix %}{{ prefix }} {% endif %}" + DUMMY_CHAT_TEMPLATE,
+        "--default-chat-template-kwargs",
+        json.dumps({"prefix": "Represent this conversation for retrieval:"}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -378,6 +412,32 @@ async def test_padding(client: openai.AsyncOpenAI, model_name: str):
             input=input_texts,
             extra_body={"padding": "longest"},
         )
+
+
+def test_chat_request_uses_default_chat_template_kwargs(
+    server_with_default_chat_template_kwargs: RemoteOpenAIServer,
+):
+    """`--default-chat-template-kwargs` applies to chat embedding requests,
+    and request-level `chat_template_kwargs` still take precedence."""
+    server = server_with_default_chat_template_kwargs
+    messages = [{"role": "user", "content": "The cat sat on the mat."}]
+
+    def prompt_tokens(**extra) -> int:
+        response = requests.post(
+            server.url_for("v1/embeddings"),
+            json={"model": MODEL_NAME, "messages": messages, **extra},
+        )
+        response.raise_for_status()
+        return response.json()["usage"]["prompt_tokens"]
+
+    server_default = prompt_tokens()
+    explicit = prompt_tokens(
+        chat_template_kwargs={"prefix": "Represent this conversation for retrieval:"}
+    )
+    overridden = prompt_tokens(chat_template_kwargs={"prefix": ""})
+
+    assert server_default == explicit == 18
+    assert overridden == 9
 
 
 @pytest.mark.asyncio

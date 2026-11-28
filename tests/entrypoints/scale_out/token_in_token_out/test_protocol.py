@@ -177,6 +177,63 @@ def test_multimodal_features_reject_overlapping_placeholders(placeholders):
         _features(placeholders)
 
 
+def _s3_ref(**overrides) -> dict:
+    return {
+        "uri": "s3://tensor-bucket/tenant/request/image-0",
+        "format": "safetensors-v1",
+        "nbytes": 1024,
+        "digest": "a" * 64,
+        **overrides,
+    }
+
+
+def test_tensor_reference_with_metadata_does_not_require_ec():
+    request = GenerateRequest.model_validate(
+        {
+            **_base_payload(),
+            "features": {
+                "mm_hashes": {"image": ["a"]},
+                "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                "kwargs_refs": {"image": [_s3_ref()]},
+                "mm_metadata": {"image": ["encoded-metadata"]},
+            },
+        }
+    )
+
+    assert request.features is not None
+    assert request.features.kwargs_refs is not None
+    (reference,) = request.features.kwargs_refs["image"]
+    assert reference is not None
+    assert reference.uri == "s3://tensor-bucket/tenant/request/image-0"
+
+
+@pytest.mark.parametrize(
+    ("features", "match"),
+    [
+        ({"kwargs_refs": {"video": [_s3_ref()]}}, "same modalities"),
+        ({"kwargs_refs": {"image": [_s3_ref(), None]}}, "same length"),
+        (
+            {"kwargs_refs": {"image": [_s3_ref()]}, "kwargs_data": {"image": ["x"]}},
+            "both kwargs_data and kwargs_refs",
+        ),
+        ({"kwargs_refs": {"image": [_s3_ref(backend="s3")]}}, "backend"),
+        ({"kwargs_refs": {"image": [_s3_ref(format="pickle")]}}, "format"),
+        ({"kwargs_refs": {"image": [_s3_ref(nbytes=0)]}}, "nbytes"),
+        ({"kwargs_refs": {"image": [_s3_ref(digest="abc")]}}, "digest"),
+        ({"kwargs_refs": {"image": [_s3_ref(endpoint="http://x")]}}, "endpoint"),
+    ],
+)
+def test_multimodal_features_reject_invalid_tensor_references(features, match):
+    with pytest.raises(ValidationError, match=match):
+        MultiModalFeatures.model_validate(
+            {
+                "mm_hashes": {"image": ["a"]},
+                "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                **features,
+            }
+        )
+
+
 def test_generate_request_rejects_placeholder_outside_prompt():
     with pytest.raises(ValueError, match="within the token_ids sequence"):
         GenerateRequest(
@@ -314,7 +371,7 @@ def test_tokens_mode_allows_detokenize_false():
 
 def test_response_without_output_mode_parses_as_tokens():
     """Existing clients and older servers never send output_mode."""
-    parsed = TypeAdapter(GenerateResponse).validate_python(
+    parsed = TypeAdapter[GenerateResponse](GenerateResponse).validate_python(
         {"choices": [{"index": 0, "token_ids": [1]}]}
     )
     assert isinstance(parsed, GenerateTokensResponse)
@@ -322,17 +379,17 @@ def test_response_without_output_mode_parses_as_tokens():
 
 
 def test_stream_chunk_without_output_mode_parses_as_tokens():
-    parsed = TypeAdapter(GenerateStreamResponse).validate_python(
-        {"choices": [{"index": 0, "token_ids": [1]}]}
-    )
+    parsed = TypeAdapter[GenerateStreamResponse](
+        GenerateStreamResponse
+    ).validate_python({"choices": [{"index": 0, "token_ids": [1]}]})
     assert isinstance(parsed, GenerateTokensStreamResponse)
 
 
 def test_text_response_and_chunk_dispatch_on_output_mode():
-    response = TypeAdapter(GenerateResponse).validate_python(
+    response = TypeAdapter[GenerateResponse](GenerateResponse).validate_python(
         {"output_mode": "text", "choices": [{"index": 0, "text": "hi"}]}
     )
-    chunk = TypeAdapter(GenerateStreamResponse).validate_python(
+    chunk = TypeAdapter[GenerateStreamResponse](GenerateStreamResponse).validate_python(
         {"output_mode": "text", "choices": [{"index": 0, "text": "hi"}]}
     )
     assert isinstance(response, GenerateTextResponse)
@@ -344,7 +401,9 @@ def test_derender_chunk_dispatches_and_derender_stream_request_rejects_it():
         "output_mode": "derender",
         "choices": [{"index": 0, "delta": {"content": "hi"}}],
     }
-    parsed = TypeAdapter(GenerateStreamResponse).validate_python(chunk)
+    parsed = TypeAdapter[GenerateStreamResponse](
+        GenerateStreamResponse
+    ).validate_python(chunk)
     assert isinstance(parsed, GenerateDerenderStreamResponse)
     with pytest.raises(ValidationError, match="output_mode"):
         DerenderChatStreamRequest.model_validate(
@@ -360,7 +419,7 @@ def test_text_response_requires_text_on_every_choice():
 
 
 def test_derender_response_dispatches_on_output_mode():
-    parsed = TypeAdapter(GenerateResponse).validate_python(
+    parsed = TypeAdapter[GenerateResponse](GenerateResponse).validate_python(
         {
             "output_mode": "derender",
             "choices": [

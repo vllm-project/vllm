@@ -31,6 +31,14 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, matches the block size of any group that requires block-aligned lookups (such as sliding-window attention), and is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates these at startup and fails if an explicit value would disable partial cache hits. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+### Superseded Mamba state eviction
+
+With prefix caching enabled, vLLM automatically deprioritizes superseded Mamba checkpoints in multi-turn workloads with no extra configuration:
+
+- **Eviction order**: `uncached -> deprioritized (FIFO) -> normal LRU cached`. Deprioritized blocks keep their prefix hashes while free blocks remain and are only evicted ahead of normal LRU-cached blocks under memory pressure.
+- **One-turn fallback protection**: when a finished request advances a conversation's cached Mamba tip, the immediate predecessor (`t-1`) stays in normal LRU to shield against small tail rollbacks (such as tool retries), while states two or more turns behind (`t-2` and older) are deprioritized.
+- **Shared-prefix protection**: shared-prefix junctions and multi-branch fork points keep normal LRU priority.
+
 ### FlashInfer ReplaySSM
 
 FlashInfer ReplaySSM caches recent inputs to reduce full-state writes during Mamba2 decoding. It is disabled by default. Both Model Runners V1 and V2 support prefix caching with ReplaySSM, including MTP speculative decoding.

@@ -924,10 +924,13 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        # Routing is done by CPURouter before apply(), so the scoring doesn't
+        # matter here.
         return routing_method in [
             RoutingMethodType.Default,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.DeepSeekV3,
         ]
 
     @staticmethod
@@ -1111,10 +1114,13 @@ class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        # Routing is done by CPURouter before apply(), so the scoring doesn't
+        # matter here.
         return routing_method in [
             RoutingMethodType.Default,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.DeepSeekV3,
         ]
 
     @staticmethod
@@ -1596,10 +1602,13 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        # Routing is done by CPURouter before apply(), so the scoring doesn't
+        # matter here.
         return routing_method in [
             RoutingMethodType.Default,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.DeepSeekV3,
         ]
 
     @staticmethod

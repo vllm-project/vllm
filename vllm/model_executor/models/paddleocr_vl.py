@@ -410,7 +410,6 @@ class SiglipVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
-        self.cache_position_embedding: dict[tuple[int, int], torch.Tensor] = {}
         self.cache_position_count: dict[tuple[int, int], int] = {}
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 

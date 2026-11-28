@@ -292,25 +292,38 @@ HYBRID_REVISION = "3b17b717b8f2f5d305b0a92c1491e239aeda19c8"
 
 
 @pytest.fixture
-def umbp_hybrid_llm(vllm_runner, socket_dir):
-    with vllm_runner(
-        HYBRID_MODEL,
-        revision=HYBRID_REVISION,
-        enforce_eager=True,
-        max_model_len=2048,
-        enable_chunked_prefill=True,
-        enable_prefix_caching=True,
-        disable_log_stats=False,
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="UMBPStoreConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "mode": "embedded",
-                "capacity_bytes": 1 << 30,
-                "lookup_dir": socket_dir,
-            },
-        ),
-    ) as runner:
+def umbp_hybrid_llm(vllm_runner, socket_dir, tmp_path, request):
+    options = {"capacity_bytes": 1 << 30, **getattr(request, "param", {})}
+    prefix_match_unit = options.pop("prefix_match_unit", None)
+    with contextlib.ExitStack() as stack:
+        if options.pop("standalone", False):
+            server = stack.enter_context(
+                standalone_server(tmp_path, socket_dir, options.pop("capacity_bytes"))
+            )
+            pool_config = {
+                "mode": "standalone",
+                "endpoint": server.address,
+                "startup_timeout_ms": 60000,
+            }
+        else:
+            pool_config = {"mode": "embedded", "lookup_dir": socket_dir}
+        runner = stack.enter_context(
+            vllm_runner(
+                HYBRID_MODEL,
+                revision=HYBRID_REVISION,
+                enforce_eager=True,
+                max_model_len=2048,
+                enable_chunked_prefill=True,
+                enable_prefix_caching=True,
+                prefix_match_unit=prefix_match_unit,
+                disable_log_stats=False,
+                kv_transfer_config=KVTransferConfig(
+                    kv_connector="UMBPStoreConnector",
+                    kv_role="kv_both",
+                    kv_connector_extra_config={**pool_config, **options},
+                ),
+            )
+        )
         yield runner.llm
 
 
@@ -366,3 +379,35 @@ def test_lazy_offload_restores_reused_blocks(umbp_llm):
 
     assert _external_tokens(umbp_llm) - before == 3 * 4 * BLOCK_SIZE
     _assert_same_outputs(computed, restored)
+
+
+_UNIT16 = {"prefix_match_unit": 16, "enable_partial_hash_hits": True}
+
+
+@pytest.mark.parametrize(
+    "umbp_hybrid_llm",
+    [
+        pytest.param(_UNIT16, id="embedded"),
+        pytest.param({**_UNIT16, "standalone": True}, id="standalone"),
+    ],
+    indirect=True,
+)
+def test_hybrid_restores_a_boundary_inside_an_attention_block(umbp_hybrid_llm):
+    """A Mamba checkpoint inside an attention block restores like a GPU hit.
+
+    Mamba hybrids have no batch-invariant kernels, so the reference is a local
+    prefix hit rather than a cold run.
+    """
+    llm = umbp_hybrid_llm
+    block_size = llm.llm_engine.vllm_config.cache_config.block_size
+    prompt = _prompt(0, 2 * block_size + 40)
+    llm.generate(prompt, PARAMS, use_tqdm=False)
+    local_hit = llm.generate(prompt, PARAMS, use_tqdm=False)
+    assert local_hit[0].num_cached_tokens == 2 * block_size + 32
+    _reset_gpu_prefix_cache(llm)
+
+    before = _external_tokens(llm)
+    restored = llm.generate(prompt, PARAMS, use_tqdm=False)
+
+    assert _external_tokens(llm) - before == 2 * block_size + 32
+    _assert_same_outputs(local_hit, restored)

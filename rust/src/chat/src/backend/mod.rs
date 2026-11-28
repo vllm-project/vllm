@@ -19,9 +19,7 @@ pub mod hf;
 mod tokenizerless;
 
 /// Options for creating a new chat output processor.
-pub struct NewChatOutputProcessorOptions<'a> {
-    pub tool_call_parser: &'a ParserSelection,
-    pub reasoning_parser: &'a ParserSelection,
+pub struct NewChatOutputProcessorOptions {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     pub tool_strict_level: Option<ToolStrictLevel>,
@@ -43,8 +41,20 @@ pub trait ChatBackend: Send + Sync {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> Result<DynChatOutputProcessor>;
+
+    /// Effective tool-call parser name, if the output processors parse tool
+    /// calls with a selectable parser.
+    fn tool_call_parser_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Effective reasoning parser name, if the output processors parse
+    /// reasoning with a selectable parser.
+    fn reasoning_parser_name(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Shared trait-object form of [`ChatBackend`].
@@ -86,6 +96,10 @@ pub struct LoadModelBackendsOptions {
     pub override_generation_config: Map<String, Value>,
     /// Which chat renderer implementation to use.
     pub renderer: RendererSelection,
+    /// Tool-call parser selection, resolved for the model at load.
+    pub tool_call_parser: ParserSelection,
+    /// Reasoning parser selection, resolved for the model at load.
+    pub reasoning_parser: ParserSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
     /// language-only.
     pub language_model_only: bool,

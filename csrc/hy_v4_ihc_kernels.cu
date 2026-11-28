@@ -67,6 +67,22 @@
 
 namespace vllm::hy_v4_ihc {
 
+// Dynamic PDL inputs must neither use non-coherent read-only loads nor move
+// above griddepcontrol.wait. Explicit volatile loads preserve that ordering.
+__device__ __forceinline__ uint4 load_dynamic128(void const* ptr) {
+  uint4 value;
+  asm volatile("ld.global.v4.u32 {%0, %1, %2, %3}, [%4];"
+               : "=r"(value.x), "=r"(value.y), "=r"(value.z), "=r"(value.w)
+               : "l"(ptr)
+               : "memory");
+  return value;
+}
+__device__ __forceinline__ float load_dynamic32(float const* ptr) {
+  float value;
+  asm volatile("ld.global.f32 %0, [%1];" : "=f"(value) : "l"(ptr) : "memory");
+  return value;
+}
+
 constexpr int kHc = 4;
 constexpr int kNumMixes = 2 * kHc;        // MMA N
 constexpr int kNumStats = kNumMixes + 1;  // mixes + sum of squares
@@ -1053,13 +1069,11 @@ __launch_bounds__(kSmallBlock, 1) __global__ void ihc_small_kernel(
   for (int t = 0; t < kTokens; t++) {
     int64_t const tok = tok_base + t;
     bool const ok = act1 && tok < num_tokens;
-    raw[t] = ok ? *reinterpret_cast<uint4 const*>(residual_in +
-                                                  (tok * kHc + c) * hidden + h1)
+    raw[t] = ok ? load_dynamic128(residual_in + (tok * kHc + c) * hidden + h1)
                 : zero;
     if constexpr (kHasPost) {
-      x_raw[t] =
-          ok ? *reinterpret_cast<uint4 const*>(x + tok * hidden + h1) : zero;
-      gate[t] = ok ? post[tok * kHc + c] : 0.f;
+      x_raw[t] = ok ? load_dynamic128(x + tok * hidden + h1) : zero;
+      gate[t] = ok ? load_dynamic32(post + tok * kHc + c) : 0.f;
     }
   }
 

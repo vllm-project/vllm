@@ -34,6 +34,7 @@ from transformers import PreTrainedConfig
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
@@ -58,6 +59,12 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     pp_topk_buffers,
 )
+from vllm.models.common.ops.sequence_parallel import (
+    is_sequence_parallel_active,
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm.models.hy_v4.weight_utils import (
     HYV4_MLP_MAPPER,
     HYV4_PACKED_MODULES_MAPPING,
@@ -68,6 +75,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from ..common.mrope import set_token_rope
+from ..common.sequence_parallel import IHC_SP_MIN_TOKENS, ihc_sequence_parallel_enabled
 from ..nvidia.moe import HYV4FeedForward, HYV4MoEFused
 from .aiter_mla_sparse import warn_if_aiter_triton_sparse_mla_disabled
 from .attention import (
@@ -110,11 +118,13 @@ class HYV4DecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        ihc_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.config = config
         self.enable_ihc = getattr(config, "enable_ihc", False)
+        self.defer_reduction = ihc_sequence_parallel and self.enable_ihc
         layer_idx = int(prefix.split(".")[-1])
         self.layer_idx = layer_idx
 
@@ -135,6 +145,7 @@ class HYV4DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             layer_idx=layer_idx,
             topk_indices_buffer=topk_indices_buffer,
+            reduce_results=not self.defer_reduction,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         if config.mlp_layer_types[layer_idx] == "dense":
@@ -144,11 +155,15 @@ class HYV4DecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                reduce_results=not self.defer_reduction,
             )
             self.block_type = "feedforward"
         else:
             self.mlp = HYV4MoEFused(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.defer_reduction,
             )
             self.block_type = "moe"
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -200,13 +215,23 @@ class HYV4DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
         """IHC forward: each sub-block reduces and re-scatters the channels."""
+        full_num_tokens = positions.shape[-1]
+        use_ihc_sequence_parallel = hidden_states.shape[0] < full_num_tokens
         hidden_states = self.hc_attn_layer.prepare_input(hidden_states)
         hidden_states, post_gates, residual = self.hc_attn_layer.pre(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
+        if use_ihc_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         attention_output = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+        if self.defer_reduction:
+            attention_output = (
+                sp_reduce_scatter(attention_output)
+                if use_ihc_sequence_parallel
+                else tensor_model_parallel_all_reduce(attention_output)
+            )
         can_fuse_ihc_post_pre_rms_norm = (
             triton_ihc_supported(attention_output)
             and self.hc_attn_layer.hc_post.hpc_op is None
@@ -232,7 +257,15 @@ class HYV4DecoderLayer(nn.Module):
             hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
             hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
             hidden_states = self.post_attention_layernorm(hidden_states)
+        if use_ihc_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.mlp(hidden_states)
+        if self.defer_reduction:
+            hidden_states = (
+                sp_reduce_scatter(hidden_states)
+                if use_ihc_sequence_parallel
+                else tensor_model_parallel_all_reduce(hidden_states)
+            )
         hidden_states = self.hc_mlp_layer.post(hidden_states, residual, post_gates)
 
         # Under iHC the residual is carried inside hidden_states.
@@ -243,6 +276,7 @@ class HYV4Model(nn.Module):
     """HY V4 backbone."""
 
     decoder_layer_cls: type[HYV4DecoderLayer] = HYV4DecoderLayer
+    supports_ihc_sequence_parallel = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -272,6 +306,9 @@ class HYV4Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.enable_ihc = getattr(config, "enable_ihc", False)
+        self.ihc_sequence_parallel = ihc_sequence_parallel_enabled(
+            vllm_config, self.supports_ihc_sequence_parallel
+        )
 
         if get_pp_group().is_first_rank or (
             self.config.tie_word_embeddings and get_pp_group().is_last_rank
@@ -291,6 +328,7 @@ class HYV4Model(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
+                ihc_sequence_parallel=self.ihc_sequence_parallel,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -404,6 +442,10 @@ class HYV4Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        full_num_tokens = positions.shape[-1]
+        use_ihc_sequence_parallel = is_sequence_parallel_active(
+            self.ihc_sequence_parallel, full_num_tokens, IHC_SP_MIN_TOKENS
+        )
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -426,6 +468,8 @@ class HYV4Model(nn.Module):
                 hidden_states,
             )
 
+        if use_ihc_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
@@ -445,7 +489,10 @@ class HYV4Model(nn.Module):
         else:
             hidden_states = hidden_states + residual
 
-        return self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        if use_ihc_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+        return hidden_states
 
     def load_fused_expert_weights(
         self,

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use itertools::Itertools as _;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 use serde_with::DefaultOnNull;
 use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
@@ -16,15 +16,29 @@ use crate::routes::openai::chat_completions::convert::{
     convert_message, convert_tools, normalize_generation_prompt_mode,
 };
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
-use crate::routes::openai::utils::types::{ChatMessage, Tool, default_true};
+use crate::routes::openai::utils::types::{ChatMessage, ReasoningEffort, Tool, default_true};
 
-/// `POST /tokenize` body. Untagged: a JSON object with `messages` parses as the
-/// chat variant; one with `prompt` parses as the completion variant.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+/// `POST /tokenize` body: a JSON object whose `messages` is a list parses as the
+/// chat variant; any other as the completion variant.
+#[derive(Debug, Clone)]
 pub enum TokenizeRequest {
     Chat(TokenizeChatRequest),
     Completion(TokenizeCompletionRequest),
+}
+
+impl<'de> Deserialize<'de> for TokenizeRequest {
+    /// Select the variant by `messages` rather than `#[serde(untagged)]`, which
+    /// would tokenize `prompt` instead when a body carrying both has a malformed
+    /// chat part, and would replace the chat error with a generic one.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let request = if value.get("messages").is_some_and(Value::is_array) {
+            TokenizeChatRequest::deserialize(value).map(Self::Chat)
+        } else {
+            TokenizeCompletionRequest::deserialize(value).map(Self::Completion)
+        };
+        request.map_err(de::Error::custom)
+    }
 }
 
 #[serde_with::serde_as]
@@ -82,6 +96,13 @@ pub struct TokenizeChatRequest {
     pub chat_template: Option<String>,
     #[serde(default)]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Effort level for reasoning models, with the same meaning as in chat
+    /// completions.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Documents for RAG (retrieval-augmented generation).
+    #[serde(default)]
+    pub documents: Option<Vec<Value>>,
     /// Output format to include in model-specific chat rendering.
     pub response_format: Option<Box<ResponseFormat>>,
     #[serde(default)]
@@ -113,7 +134,7 @@ impl TokenizeChatRequest {
 
         let tool_context =
             ResolvedToolContext::new(&messages, convert_tools(self.tools)?, None, true).map_err(
-                |error| crate::error::chat_submit_error("failed to resolve request tools", error),
+                |error| crate::error::chat_request_error("failed to resolve request tools", error),
             )?;
 
         Ok(ChatRequest {
@@ -123,7 +144,7 @@ impl TokenizeChatRequest {
             chat_options: ChatOptions {
                 generation_prompt_mode,
                 chat_template: self.chat_template,
-                reasoning_effort: None,
+                reasoning_effort: self.reasoning_effort.map(|effort| effort.as_str().into()),
                 response_format,
                 template_kwargs: self.chat_template_kwargs.unwrap_or_default(),
             },
@@ -132,7 +153,7 @@ impl TokenizeChatRequest {
             intermediate: false,
             prompt_truncation: None,
             priority: 0,
-            documents: None,
+            documents: self.documents,
             cache_salt: None,
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
@@ -170,7 +191,7 @@ mod tests {
 
     use expect_test::expect;
     use serde_json::json;
-    use vllm_chat::{ChatRenderer, ChatTool, KimiK3ChatRenderer, KimiK3Variant};
+    use vllm_chat::{ChatRenderer, ChatTool, EffortValue, KimiK3ChatRenderer, KimiK3Variant};
     use vllm_tokenizer::{Tokenizer as _, test_utils::TestTokenizer};
 
     use super::*;
@@ -295,6 +316,8 @@ mod tests {
             return_token_strs: false,
             chat_template: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
+            documents: None,
             response_format: None,
             tools: None,
         };
@@ -306,5 +329,45 @@ mod tests {
             error.to_error_response().error.message,
             "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
         );
+    }
+
+    /// Chat completions pass `reasoning_effort` and `documents` to the chat
+    /// template, so `/tokenize` must too or it renders a different prompt.
+    #[test]
+    fn tokenize_request_forwards_reasoning_effort_and_documents() {
+        let documents = json!([{"title": "Math", "text": "2+2 equals 4."}]);
+        let request: TokenizeRequest = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "none",
+            "documents": documents,
+        }))
+        .expect("body with reasoning_effort and documents is the chat variant");
+        let TokenizeRequest::Chat(req) = request else {
+            panic!("messages body should parse as the chat variant");
+        };
+        let chat_request =
+            req.into_chat_request("tokenize-test".to_string()).expect("request is valid");
+
+        assert_eq!(
+            chat_request.chat_options.reasoning_effort,
+            Some(EffortValue::from("none"))
+        );
+        assert_eq!(chat_request.documents, documents.as_array().cloned());
+    }
+
+    #[test]
+    fn tokenize_request_without_reasoning_effort_and_documents_leaves_them_unset() {
+        let request: TokenizeRequest = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .expect("plain chat body");
+        let TokenizeRequest::Chat(req) = request else {
+            panic!("messages body should parse as the chat variant");
+        };
+        let chat_request =
+            req.into_chat_request("tokenize-test".to_string()).expect("request is valid");
+
+        assert_eq!(chat_request.chat_options.reasoning_effort, None);
+        assert_eq!(chat_request.documents, None);
     }
 }

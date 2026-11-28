@@ -537,14 +537,16 @@ async fn responses_per_request_metrics_follow_server_option() {
                 .into()
             },
             |_| {},
-            Arc::new(FakeChatBackend::new()),
+            Arc::new(FakeChatBackend::new().with_parser_selections(
+                if empty_with_tool_parser {
+                    ParserSelection::Explicit("hermes".to_string())
+                } else {
+                    ParserSelection::None
+                },
+                ParserSelection::Auto,
+            )),
         )
         .await;
-        let chat = chat.with_tool_call_parser(if empty_with_tool_parser {
-            ParserSelection::Explicit("hermes".to_string())
-        } else {
-            ParserSelection::None
-        });
         let app = build_router(Arc::new(
             AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
                 .with_api_server_options(ApiServerOptions {
