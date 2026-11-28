@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -523,6 +524,42 @@ def test_copy_weight_prefault_maps_the_mmap_view(
         assert mapped_bytes() < src.nbytes
         copy_weight_(torch.empty_like(src, device="meta"), src)
         assert mapped_bytes() >= src.nbytes
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize(
+    "make_src,dst_dtype,staged",
+    [
+        (lambda: torch.frombuffer(bytearray(4096), dtype=torch.float32), None, False),
+        (lambda: torch.randn(64, 1024).pin_memory(), None, False),
+        (lambda: torch.randn(64, 1024), None, True),
+        (lambda: torch.randn(64, 1024).narrow(1, 512, 512), None, True),
+        (lambda: torch.randn(1024, 64).t(), None, True),
+        (lambda: torch.randn(64, 1024), torch.bfloat16, True),
+    ],
+    ids=["mmap_like", "pinned", "computed", "dim1_narrow", "transposed", "bf16"],
+)
+def test_copy_weight_stages_through_pinned_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    make_src: Callable[[], torch.Tensor],
+    dst_dtype: torch.dtype | None,
+    staged: bool,
+) -> None:
+    src = make_src()
+    dst_dtype = dst_dtype or src.dtype
+    empty, pinned = torch.empty, []
+
+    def recording_empty(*args, **kwargs) -> torch.Tensor:
+        tensor = empty(*args, **kwargs)
+        if kwargs.get("pin_memory"):
+            pinned.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(torch, "empty", recording_empty)
+    dst = empty(src.shape, dtype=dst_dtype, device="cuda")
+    copy_weight_(dst, src)
+    assert torch.equal(dst.cpu(), src.to(dst_dtype))
+    assert [t.is_pinned() for t in pinned] == ([True] if staged else [])
 
 
 @pytest.mark.parametrize(
