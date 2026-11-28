@@ -946,6 +946,25 @@ def test_fp8_e4m3_conversion(
     torch.testing.assert_close(cache, converted_cache, atol=0.001, rtol=0.1)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_convert_fp8_respects_strided_output(dtype: torch.dtype, device: str) -> None:
+    in_base = torch.zeros((4, 96), dtype=dtype, device=device)
+    out_base = torch.full((4, 96), 77, dtype=torch.uint8, device=device)
+    src = in_base[:, :64]
+    dst = out_base[:, :64]
+    src.copy_(torch.randn(src.shape, dtype=dtype, device=device))
+
+    expected = torch.empty_like(src, dtype=torch.uint8)
+    ops.convert_fp8(expected, src.contiguous())
+
+    ops.convert_fp8(dst, src)
+
+    assert torch.all(in_base[:, 64:] == 0)
+    assert torch.all(out_base[:, 64:] == 77)
+    assert torch.equal(dst, expected)
+
+
 def _create_mla_cache(
     num_blocks: int,
     block_size: int,

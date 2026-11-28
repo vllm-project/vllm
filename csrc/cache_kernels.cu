@@ -1262,13 +1262,26 @@ namespace vllm {
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
                                    Tout* __restrict__ dst_cache,
-                                   const float scale,
-                                   const int64_t block_stride) {
+                                   const float scale, const int64_t num_cols,
+                                   const int64_t src_row_stride,
+                                   const int64_t dst_row_stride) {
   const int64_t block_idx = blockIdx.x;
-  for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
-    int64_t idx = block_idx * block_stride + i;
-    dst_cache[idx] =
-        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], scale);
+  for (int64_t i = threadIdx.x; i < num_cols; i += blockDim.x) {
+    const int64_t src_idx = block_idx * src_row_stride + i;
+    const int64_t dst_idx = block_idx * dst_row_stride + i;
+    dst_cache[dst_idx] =
+        fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[src_idx], scale);
+  }
+}
+
+template <typename Tensor>
+void check_convert_fp8_inner_contiguous(const Tensor& tensor,
+                                        const char* name) {
+  int64_t stride = 1;
+  for (int64_t dim = tensor.dim() - 1; dim > 0; --dim) {
+    STD_TORCH_CHECK(tensor.stride(dim) == stride, name,
+                    " must have contiguous inner dimensions");
+    stride *= tensor.size(dim);
   }
 }
 
@@ -1277,7 +1290,8 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
 #define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)                                \
   vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE><<<grid, block, 0, stream>>>( \
       reinterpret_cast<Tin*>(src_cache.data_ptr()),                          \
-      reinterpret_cast<Tout*>(dst_cache.data_ptr()), scale, block_stride);
+      reinterpret_cast<Tout*>(dst_cache.data_ptr()), scale, num_cols,        \
+      src_row_stride, dst_row_stride);
 
 // Only for testing.
 void convert_fp8(torch::stable::Tensor& dst_cache,
@@ -1291,11 +1305,26 @@ void convert_fp8(torch::stable::Tensor& dst_cache,
                   "src and dst must be on the same GPU");
   torch::stable::accelerator::DeviceGuard device_guard(src_device.index());
 
-  int64_t num_blocks = src_cache.size(0);
-  int64_t block_stride = src_cache.stride(0);
+  STD_TORCH_CHECK(src_cache.dim() > 0 && dst_cache.dim() > 0,
+                  "src and dst must have at least one dimension");
+  STD_TORCH_CHECK(src_cache.sizes().equals(dst_cache.sizes()),
+                  "src and dst must have the same shape");
+  vllm::check_convert_fp8_inner_contiguous(src_cache, "src_cache");
+  vllm::check_convert_fp8_inner_contiguous(dst_cache, "dst_cache");
+
+  const int64_t num_blocks = src_cache.size(0);
+  if (num_blocks == 0) {
+    return;
+  }
+  const int64_t num_cols = src_cache.numel() / num_blocks;
+  if (num_cols == 0) {
+    return;
+  }
+  const int64_t src_row_stride = src_cache.stride(0);
+  const int64_t dst_row_stride = dst_cache.stride(0);
 
   dim3 grid(num_blocks);
-  dim3 block(std::min(block_stride, int64_t(512)));
+  dim3 block(std::min(num_cols, int64_t(512)));
   const cudaStream_t stream = get_current_cuda_stream();
 
   if (kv_cache_dtype == "auto") {
