@@ -403,3 +403,84 @@ def test_prefill_workspace_covers_staged_keys(world, interleave):
         gathered = world * local if world > 1 else 0
         staged = (total + 63) // 64 * 64
         assert 1024**3 + 68 * (local + gathered + staged) <= bound
+
+
+@pytest.mark.parametrize("heads", [16, 32, 64])
+@pytest.mark.parametrize("rows", [0, 3, 257])
+@pytest.mark.parametrize("strided", [False, True])
+def test_query_quantization_scale_layout_and_ties(heads, rows, strided):
+    """Packing preserves tie-to-even codes and writes every padded scale slot."""
+    from vllm.models.kimi_k3.amd.ops.fp4_indexer import quantize_queries
+
+    levels = torch.tensor(
+        [
+            -6,
+            -5,
+            -3.5,
+            -2.5,
+            -1.75,
+            -1.25,
+            -0.75,
+            -0.25,
+            0.25,
+            0.75,
+            1.25,
+            1.75,
+            2.5,
+            3.5,
+            5,
+            6,
+        ],
+        device="cuda",
+        dtype=torch.bfloat16,
+    ).repeat(2)
+    codes = torch.tensor(
+        [15, 14, 14, 12, 12, 10, 10, 0, 0, 2, 2, 4, 4, 6, 6, 7],
+        device="cuda",
+        dtype=torch.uint8,
+    ).repeat(8)
+    exponents = (
+        torch.arange(rows * heads * 4, device="cuda").view(rows, heads, 4) % 13 - 6
+    )
+    values = (
+        (levels * torch.exp2(exponents.float())[..., None])
+        .reshape(rows, heads, 128)
+        .to(torch.bfloat16)
+    )
+    if strided:
+        storage = torch.full(
+            (rows + 1, heads * 2, 129), 19, device="cuda", dtype=values.dtype
+        )
+        q = storage[1:, ::2, 1:]
+        q.copy_(values)
+    else:
+        q = values
+    payload, scales = quantize_queries(q)
+    expected_payload = (codes[::2] | (codes[1::2] << 4)).expand(rows, heads, 64)
+    expected_scales = torch.zeros((rows, 4, 64), device="cuda", dtype=torch.uint8)
+    head = torch.arange(heads, device="cuda")
+    expected_scales[:, :, head % 16 * 4 + head // 16] = (
+        (exponents + 127).transpose(1, 2).to(torch.uint8)
+    )
+    torch.testing.assert_close(payload, expected_payload, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scales.view(rows, 4, 64), expected_scales, rtol=0, atol=0
+    )
+    torch.testing.assert_close(q, values, rtol=0, atol=0)
+
+
+def test_query_quantization_graph_replay_updates_payload_and_scales():
+    from vllm.models.kimi_k3.amd.ops.fp4_indexer import quantize_queries
+
+    q = torch.full((3, 32, 128), 6.0, dtype=torch.bfloat16, device="cuda")
+    quantize_queries(q)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        payload, scales = quantize_queries(q)
+    q.fill_(-12.0)
+    graph.replay()
+    expected_payload, expected_scales = quantize_queries(q)
+    torch.testing.assert_close(payload, expected_payload, rtol=0, atol=0)
+    torch.testing.assert_close(scales, expected_scales, rtol=0, atol=0)
+    assert torch.all(payload == 0xFF)

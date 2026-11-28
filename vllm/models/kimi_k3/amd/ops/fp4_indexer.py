@@ -58,8 +58,8 @@ def decode_layout(
 
 
 @triton.jit
-def _quantize(values):
-    values = tl.reshape(values, (4, 32))
+def _quantize(values, GROUPS: tl.constexpr = 4):
+    values = tl.reshape(values, (GROUPS, 32))
     scale = tl.maximum(tl.max(tl.abs(values), 1) / 6.0, 1.0e-4)
     bits = scale.to(tl.int32, bitcast=True)
     exponent = tl.minimum(((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0), 254)
@@ -75,24 +75,43 @@ def _quantize(values):
     code += (a >= 3.5).to(tl.uint8)
     code += (a > 5.0).to(tl.uint8)
     code |= ((x < 0) & (code != 0)).to(tl.uint8) << 3
-    low, high = tl.split(tl.reshape(code, (64, 2)))
+    low, high = tl.split(tl.reshape(code, (GROUPS * 16, 2)))
     return low | (high << 4), exponent.to(tl.uint8)
 
 
 @triton.jit
 def _quantize_query(
-    Q, Payload, Scales, QS: tl.constexpr, QH: tl.constexpr, H: tl.constexpr
+    Q,
+    Payload,
+    Scales,
+    QS: tl.constexpr,
+    QH: tl.constexpr,
+    H: tl.constexpr,
+    BLOCK_HEADS: tl.constexpr,
 ):
-    row, head = tl.program_id(0), tl.program_id(1)
-    group = tl.arange(0, 4)
-    scale_offsets = row * 256 + group * 64 + (head % 16) * 4 + head // 16
-    if head < H:
-        values = tl.load(Q + row * QS + head * QH + tl.arange(0, 128)).to(tl.float32)
-        packed, scales = _quantize(values)
-        tl.store(Payload + (row * H + head) * 64 + tl.arange(0, 64), packed)
-        tl.store(Scales + scale_offsets, scales)
-    else:
-        tl.store(Scales + scale_offsets, tl.full((4,), 0, tl.uint8))
+    # All 64 scale slots must be written, including zeroes for padded heads.
+    row, block = tl.program_id(0), tl.program_id(1)
+    head = block * BLOCK_HEADS + tl.arange(0, BLOCK_HEADS)
+    valid = head < H
+    values = tl.load(
+        Q + row * QS + head[:, None] * QH + tl.arange(0, 128)[None, :],
+        valid[:, None],
+        0.0,
+    ).to(tl.float32)
+    packed, scales = _quantize(
+        tl.reshape(values, (BLOCK_HEADS * 128,)), BLOCK_HEADS * 4
+    )
+    byte = (row * H + block * BLOCK_HEADS) * 64 + tl.arange(0, BLOCK_HEADS * 64)
+    tl.store(
+        Payload + byte,
+        packed,
+        tl.arange(0, BLOCK_HEADS * 64) < (H - block * BLOCK_HEADS) * 64,
+    )
+    group = tl.arange(0, 4)[None, :]
+    scale_offsets = row * 256 + group * 64 + (head[:, None] % 16) * 4
+    scale_offsets += head[:, None] // 16
+    scales = tl.where(valid[:, None], tl.reshape(scales, (BLOCK_HEADS, 4)), 0)
+    tl.store(Scales + scale_offsets, scales.to(tl.uint8))
 
 
 @triton.jit
@@ -121,8 +140,12 @@ def quantize_queries(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         raise ValueError("FP4 row-group queries support 16, 32 or 64 heads")
     payload = torch.empty((rows, heads, 64), device=q.device, dtype=torch.uint8)
     scales = torch.empty((rows, 1, 4, 16, 4), device=q.device, dtype=torch.uint8)
+    # Match the 16-head tile in the row-group scale layout.
+    heads_per_program = 16
     if rows:
-        _quantize_query[(rows, 64)](q, payload, scales, q.stride(0), q.stride(1), heads)
+        _quantize_query[(rows, 64 // heads_per_program)](
+            q, payload, scales, q.stride(0), q.stride(1), heads, heads_per_program
+        )
     return payload, scales
 
 
