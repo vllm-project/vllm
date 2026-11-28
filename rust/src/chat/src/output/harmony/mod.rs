@@ -11,6 +11,8 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use futures::StreamExt as _;
 use openai_harmony::chat::{Content as HarmonyContent, Message as HarmonyMessage, Role};
 use openai_harmony::{HarmonyEncoding, StreamableParser};
+use thiserror_ext::AsReport as _;
+use tracing::warn;
 use vllm_text::output::{DecodedTextEvent, SampledDelta};
 
 use crate::Result as ChatResult;
@@ -78,6 +80,9 @@ struct HarmonyState {
     /// emitted reasoning delta, such as a token whose content delta is still
     /// empty.
     unattributed_reasoning_tokens: usize,
+    /// Index into the parser's tokens where the current, unfinished message
+    /// starts.
+    current_message_start: usize,
 }
 
 impl HarmonyChatOutputProcessor {
@@ -144,6 +149,7 @@ impl HarmonyState {
             open_tool_call: None,
             reasoning_tokens: 0,
             unattributed_reasoning_tokens: 0,
+            current_message_start: 0,
         })
     }
 
@@ -216,6 +222,7 @@ impl HarmonyState {
             }
 
             if completed_after > completed_before {
+                self.current_message_start = self.parser.tokens().len();
                 if let Some(group) = pending_group.take() {
                     self.emit_group(group, &mut events);
                 }
@@ -253,7 +260,9 @@ impl HarmonyState {
         let pending_content =
             self.parser.current_content().map_err(harmony_output_parsing_error)?;
 
-        self.parser.process_eos().map_err(harmony_output_parsing_error)?;
+        if let Err(error) = self.parser.process_eos() {
+            return self.recover_unfinished_message(completed_before, error);
+        }
 
         let completed_after = self.parser.messages().len();
         let mut events = Vec::new();
@@ -289,6 +298,45 @@ impl HarmonyState {
             self.handle_completed_message(key);
         }
 
+        Ok(events)
+    }
+
+    /// Return the raw text of a message the parser can't finish at EOS, which
+    /// happens when generation stops inside its header, e.g. at `max_tokens`.
+    /// Like Python's `HarmonyParser.flush`, the text is returned on the `final`
+    /// channel and the request finishes normally.
+    fn recover_unfinished_message(
+        &mut self,
+        serial: usize,
+        error: anyhow::Error,
+    ) -> Result<Vec<AssistantEvent>> {
+        warn!(
+            error = %harmony_output_parsing_error(error).as_report(),
+            "Harmony parser ended in a non-terminal state; returning the recovered raw output"
+        );
+
+        let raw_tokens = &self.parser.tokens()[self.current_message_start..];
+        let raw_bytes = self
+            .encoding
+            .tokenizer()
+            .decode_bytes(raw_tokens)
+            .map_err(harmony_output_parsing_error)?;
+
+        let mut events = Vec::new();
+        if !raw_bytes.is_empty() {
+            self.emit_group(
+                HarmonyGroup {
+                    key: HarmonyGroupKey {
+                        serial,
+                        channel: Some("final".to_string()),
+                        recipient: None,
+                    },
+                    text: String::from_utf8_lossy(&raw_bytes).into_owned(),
+                    reasoning_tokens: 0,
+                },
+                &mut events,
+            );
+        }
         Ok(events)
     }
 
