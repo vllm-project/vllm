@@ -45,6 +45,16 @@ def _call(city: str) -> str:
     return f"\n<tool_call>\n{json.dumps(body)}\n</tool_call>"
 
 
+def _fenced_call_example(city: str) -> str:
+    return (
+        "Example format:\n```\n"
+        f"<tool_call>\n"
+        f"{json.dumps({'name': 'get_weather', 'arguments': {'city': city}})}\n"
+        f"</tool_call>\n"
+        "```\nDone."
+    )
+
+
 # (model output, reasoning, content, tool-call cities)
 CASES = {
     "direct_answer": ("17*23 = 391.", "", "17*23 = 391.", []),
@@ -73,6 +83,13 @@ CASES = {
         "Need the tool.",
         "\nChecking now.",
         ["Paris"],
+    ),
+    # A quoted example of the call format must not run as a real call.
+    "fenced_tool_call_example": (
+        _fenced_call_example("Paris"),
+        "",
+        _fenced_call_example("Paris"),
+        [],
     ),
 }
 

@@ -28,6 +28,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.utils import extract_json_member_object
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ THINK_START = "<think>"
 THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
+_MARKDOWN_FENCE = "```"
 
 
 def _framed(marker: str, before: bool = True, after: bool = True) -> tuple[str, ...]:
@@ -48,9 +50,40 @@ def _framed(marker: str, before: bool = True, after: bool = True) -> tuple[str, 
     return tuple(sorted(spellings, key=len, reverse=True))
 
 
+def _in_unclosed_markdown_fence(text: str) -> bool:
+    return text.count(_MARKDOWN_FENCE) % 2 == 1
+
+
 def _ripple_arg_converter(raw_args: str, partial: bool) -> str:
     args = extract_json_member_object(raw_args, "arguments")
     return args if args is not None else ("" if partial else "{}")
+
+
+class RippleStreamingParserEngine(StreamingParserEngine):
+    """Keeps `<tool_call>` inside a markdown code fence as literal content.
+
+    Models quote the call format in fenced examples, which are otherwise
+    byte-identical to a real call.
+    """
+
+    def reset(self, initial_state: ParserState | None = None) -> None:
+        super().reset(initial_state=initial_state)
+        self._content_for_fence = ""
+
+    def _emit_for_state(self, text: str, token_count: int = 0):
+        # The streaming fast path bypasses `_on_content`.
+        if self.state == ParserState.CONTENT and text:
+            self._content_for_fence += text
+        return super()._emit_for_state(text, token_count)
+
+    def _on_terminal(self, terminal: str, value: str, token_count: int = 0):
+        if (
+            terminal == "TOOL_START"
+            and self.state == ParserState.CONTENT
+            and _in_unclosed_markdown_fence(self._content_for_fence)
+        ):
+            return self._emit_for_state(value, token_count)
+        return super()._on_terminal(terminal, value, token_count)
 
 
 @functools.cache
@@ -103,6 +136,7 @@ def ripple_config() -> ParserEngineConfig:
 
 class RippleParser(ParserEngine):
     CONFIG_NAME = "ripple"
+    _streaming_engine_cls = RippleStreamingParserEngine
 
     def __init__(
         self,
