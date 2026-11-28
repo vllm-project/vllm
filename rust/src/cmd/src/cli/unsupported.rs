@@ -467,4 +467,11 @@ pub struct ServerUnsupportedArgs {
     /// `VLLM_ENABLE_RESPONSES_API_STORE`.
     #[arg(long, hide = true, env = "VLLM_ENABLE_RESPONSES_API_STORE")]
     pub enable_responses_api_store: Option<Unsupported>,
+
+    /// Total seconds the API server waits for all endpoint plugin `stop` hooks
+    /// during shutdown.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not load endpoint plugins.
+    #[arg(long)]
+    pub endpoint_plugin_stop_timeout: Option<Noop>,
 }

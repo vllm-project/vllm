@@ -19,6 +19,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
 )
 from vllm.entrypoints.launchers.utils.constants import (
+    ENDPOINT_PLUGIN_STOP_TIMEOUT_DEFAULT,
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
@@ -400,6 +401,9 @@ class FrontendArgs(BaseFrontendArgs):
     When disabled, the setting is also propagated to the engine's
     `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
     path instead of the fused Triton kernel."""
+    endpoint_plugin_stop_timeout: int = ENDPOINT_PLUGIN_STOP_TIMEOUT_DEFAULT
+    """Total seconds the API server waits for all endpoint plugin `stop` hooks
+    during shutdown. Must be positive."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -596,6 +600,9 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "Error: --sse-keep-alive-interval must be a non-negative integer "
             "(0 disables keep-alive comments)."
         )
+
+    if getattr(args, "endpoint_plugin_stop_timeout", 1) <= 0:
+        raise ValueError("Error: --endpoint-plugin-stop-timeout must be positive.")
 
     if getattr(args, "enable_per_request_metrics", False) and getattr(
         args, "disable_log_stats", False

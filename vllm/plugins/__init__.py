@@ -119,6 +119,8 @@ def load_endpoint_plugins(
     """
     from importlib.metadata import entry_points
 
+    from vllm.plugins.endpoint_plugins.interface import validate_endpoint_plugin_hooks
+
     if envs.VLLM_PLUGINS is None:
         discovered = entry_points(group=ENDPOINT_PLUGINS_GROUP)
         if discovered:
@@ -153,6 +155,7 @@ def load_endpoint_plugins(
             )
             continue
 
+        validate_endpoint_plugin_hooks(plugin)
         logger.info("Loaded endpoint plugin %s", name)
         endpoint_plugins.append(plugin)
 
