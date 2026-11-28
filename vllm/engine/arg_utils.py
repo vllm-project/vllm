@@ -113,6 +113,7 @@ from vllm.config.parallel import (
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
+    MoEDPMode,
 )
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field, replace
@@ -550,6 +551,7 @@ class EngineArgs:
         KernelConfig.sparse_indexer_topk_backend
     )
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
+    moe_dp_mode: MoEDPMode = ParallelConfig.moe_dp_mode
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     enable_dbo: bool = ParallelConfig.enable_dbo
@@ -1309,6 +1311,10 @@ class EngineArgs:
             "--enable-expert-parallel",
             "-ep",
             **parallel_kwargs["enable_expert_parallel"],
+        )
+        parallel_group.add_argument(
+            "--moe-dp-mode",
+            **parallel_kwargs["moe_dp_mode"],
         )
         parallel_group.add_argument(
             "--enable-batch-sharded-sampling",
@@ -2482,12 +2488,14 @@ class EngineArgs:
         if (
             self.data_parallel_size > 1
             and data_parallel_external_lb
-            and not model_config.is_moe
+            and (not model_config.is_moe or self.moe_dp_mode == "independent")
         ):
             raise ValueError(
-                "Non-MoE models do not support external data parallel mode. "
-                "For external load balancing, launch independent vLLM "
-                "instances without --data-parallel-* arguments."
+                "External data parallel mode is not supported for non-MoE "
+                "models or with --moe-dp-mode independent. For external load "
+                "balancing, launch independent vLLM instances without "
+                "--data-parallel-* arguments, or route with the "
+                "X-data-parallel-rank header."
             )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
@@ -2613,6 +2621,7 @@ class EngineArgs:
             is_moe_model=model_config.is_moe,
             enable_hc_sp=self.enable_hc_sp,
             enable_expert_parallel=self.enable_expert_parallel,
+            moe_dp_mode=self.moe_dp_mode,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
