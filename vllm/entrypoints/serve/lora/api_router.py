@@ -11,7 +11,9 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
+    PinLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
+    UnpinLoRAAdapterRequest,
 )
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
@@ -88,6 +90,36 @@ def _attach_router(app: FastAPI):
         the serving engine."""
         handler: OpenAIServingModels = models(raw_request)
         response = await handler.unload_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(
+                content=response.model_dump(), status_code=response.error.code
+            )
+
+        return Response(status_code=200, content=response)
+
+    @router.post("/v1/pin_lora_adapter", dependencies=[Depends(validate_json_request)])
+    async def pin_lora_adapter(request: PinLoRAAdapterRequest, raw_request: Request):
+        """Handle POST /v1/pin_lora_adapter: pin a loaded LoRA adapter in
+        cache to prevent LRU eviction."""
+        handler: OpenAIServingModels = models(raw_request)
+        response = await handler.pin_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(
+                content=response.model_dump(), status_code=response.error.code
+            )
+
+        return Response(status_code=200, content=response)
+
+    @router.post(
+        "/v1/unpin_lora_adapter", dependencies=[Depends(validate_json_request)]
+    )
+    async def unpin_lora_adapter(
+        request: UnpinLoRAAdapterRequest, raw_request: Request
+    ):
+        """Handle POST /v1/unpin_lora_adapter: unpin a pinned LoRA adapter
+        so it can be evicted in LRU order."""
+        handler: OpenAIServingModels = models(raw_request)
+        response = await handler.unpin_lora_adapter(request)
         if isinstance(response, ErrorResponse):
             return JSONResponse(
                 content=response.model_dump(), status_code=response.error.code

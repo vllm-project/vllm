@@ -129,7 +129,7 @@ Every plugin has three parts:
     - If the plugin wants to support sleep mode feature, please implement the `sleep` and `wakeup` functions.
     - If the plugin wants to support graph mode feature, please implement the `compile_or_warm_up_model` function.
     - If the plugin wants to support speculative decoding feature, please implement the `take_draft_token_ids` function.
-    - If the plugin wants to support lora feature, please implement the `add_lora`,`remove_lora`,`list_loras` and `pin_lora` functions.
+    - If the plugin wants to support lora feature, please implement the `add_lora`, `remove_lora`, `list_loras`, `pin_lora`, and `unpin_lora` functions.
     - If the plugin wants to support data parallelism feature, please implement the `execute_dummy_batch` functions.
     - If the plugin implements a custom `shutdown` path with EPLB enabled, call `EplbState.stop_async_loop()` before releasing model and communication resources.
 

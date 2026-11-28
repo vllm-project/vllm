@@ -1371,6 +1371,10 @@ class AsyncLLM(EngineClient):
         """Prevent an adapter from being evicted."""
         return await self.engine_core.pin_lora_async(lora_id)
 
+    async def unpin_lora(self, lora_id: int) -> bool:
+        """Allow a pinned adapter to be evicted again."""
+        return await self.engine_core.unpin_lora_async(lora_id)
+
     async def collective_rpc(
         self,
         method: str,

@@ -530,6 +530,10 @@ class LLMEngine:
         """Prevent an adapter from being evicted."""
         return self.engine_core.pin_lora(lora_id)
 
+    def unpin_lora(self, lora_id: int) -> bool:
+        """Allow a pinned adapter to be evicted again."""
+        return self.engine_core.unpin_lora(lora_id)
+
     def collective_rpc(
         self,
         method: str | Callable[[WorkerBase], _R],

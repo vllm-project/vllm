@@ -243,6 +243,21 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter from the engine."""
+        ...
+
+    @abstractmethod
+    async def pin_lora(self, lora_id: int) -> bool:
+        """Prevent a loaded LoRA adapter from being evicted."""
+        ...
+
+    @abstractmethod
+    async def unpin_lora(self, lora_id: int) -> bool:
+        """Allow a pinned LoRA adapter to be evicted again."""
+        ...
+
+    @abstractmethod
     async def pause_generation(
         self,
         *,

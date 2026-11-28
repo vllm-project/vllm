@@ -192,6 +192,14 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
             raise ValueError(f"Cannot pin key: {key} not in cache.")
         self.pinned_items.add(key)
 
+    def unpin(self, key: _K) -> None:
+        """Unpins a key in the cache allowing it to be
+        evicted in the LRU order.
+        """
+        if key not in self:
+            raise ValueError(f"Cannot unpin key: {key} not in cache.")
+        self.pinned_items.discard(key)
+
     def _unpin(self, key: _K) -> None:
         """Unpins a key in the cache allowing it to be
         evicted in the LRU order.

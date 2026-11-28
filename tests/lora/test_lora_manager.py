@@ -716,6 +716,7 @@ def test_lora_lru_cache_model_manager(
     assert manager.pin_adapter(1)
     with pytest.raises(RuntimeError):
         assert manager.pin_adapter(2)
+    assert 2 not in manager._registered_adapters.pinned_items
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 1
     with pytest.raises(RuntimeError):
@@ -725,9 +726,12 @@ def test_lora_lru_cache_model_manager(
     assert manager.pin_adapter(2)
     assert manager.lora_index_to_id[0] == 2
     assert manager.lora_index_to_id[1] == 1
+    assert manager.unpin_adapter(2)
     assert manager.remove_adapter(3)
     with pytest.raises(ValueError):
         assert manager.pin_adapter(3)
+    with pytest.raises(ValueError):
+        assert manager.unpin_adapter(3)
     assert (
         manager.punica_wrapper_mapping.get(DEFAULT_LANGUAGE_WRAPPER_KEY).device
         == device
@@ -1348,3 +1352,54 @@ def test_target_modules_match_packed_runtime_modules(
         ],
         vllm_config=default_vllm_config,
     )
+
+
+def test_base_lora_model_manager_unpin_not_implemented():
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    with pytest.raises(NotImplementedError):
+        manager.unpin_adapter(1)
+
+
+def test_lru_lora_model_manager_unpin_and_pin_rollback():
+    manager = LRUCacheLoRAModelManager.__new__(LRUCacheLoRAModelManager)
+    manager.lora_config = LoRAConfig(max_loras=2, max_lora_rank=8, max_cpu_loras=3)
+    manager._registered_adapters = AdapterLRUCache(3, deactivate_fn=lambda _: None)
+    manager._active_adapters = AdapterLRUCache(2, deactivate_fn=lambda _: None)
+
+    for lora_id in (1, 2, 3):
+        manager._registered_adapters.put(lora_id, LoRAModel(lora_id, 8, {}))
+
+    def fake_activate(lora_id: int) -> bool:
+        if (
+            lora_id not in manager._active_adapters
+            and len(manager._active_adapters) >= manager.lora_slots
+        ):
+            manager._active_adapters.remove_oldest()
+        manager._active_adapters.put(lora_id, manager._registered_adapters[lora_id])
+        return True
+
+    manager.activate_adapter = fake_activate  # type: ignore[method-assign]
+
+    assert manager.pin_adapter(1)
+    assert manager.pin_adapter(2)
+    assert manager._registered_adapters.pinned_items == {1, 2}
+    assert manager._active_adapters.pinned_items == {1, 2}
+
+    # All GPU slots are pinned: pinning adapter 3 must fail and roll back its CPU pin.
+    with pytest.raises(RuntimeError, match="All items are pinned"):
+        manager.pin_adapter(3)
+    assert 3 not in manager._registered_adapters.pinned_items
+    assert 3 not in manager._active_adapters
+
+    # Unpinning adapter 1 frees it for eviction from both CPU and GPU caches.
+    assert manager.unpin_adapter(1)
+    assert 1 not in manager._registered_adapters.pinned_items
+    assert 1 not in manager._active_adapters.pinned_items
+
+    # Now adapter 3 can be pinned, evicting adapter 1 from the GPU cache.
+    assert manager.pin_adapter(3)
+    assert manager._active_adapters.pinned_items == {2, 3}
+    assert 1 not in manager._active_adapters
+
+    with pytest.raises(ValueError, match="Unpinning failed"):
+        manager.unpin_adapter(999)

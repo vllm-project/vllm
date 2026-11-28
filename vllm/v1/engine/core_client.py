@@ -272,6 +272,9 @@ class EngineCoreClient(ABC):
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
+    def unpin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
     def save_sharded_state(
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
@@ -371,6 +374,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def pin_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def unpin_lora_async(self, lora_id: int) -> bool:
         raise NotImplementedError
 
     async def save_sharded_state_async(
@@ -516,6 +522,9 @@ class InprocClient(EngineCoreClient):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.engine_core.pin_lora(lora_id)
+
+    def unpin_lora(self, lora_id: int) -> bool:
+        return self.engine_core.unpin_lora(lora_id)
 
     def save_sharded_state(
         self, path: str, pattern: str | None = None, max_size: int | None = None
@@ -1150,6 +1159,9 @@ class SyncMPClient(MPClient):
     def pin_lora(self, lora_id: int) -> bool:
         return self.call_utility("pin_lora", lora_id)
 
+    def unpin_lora(self, lora_id: int) -> bool:
+        return self.call_utility("unpin_lora", lora_id)
+
     def sleep(
         self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
     ) -> None:
@@ -1488,6 +1500,9 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
+
+    async def unpin_lora_async(self, lora_id: int) -> bool:
+        return await self.call_utility_async("unpin_lora", lora_id)
 
     async def save_sharded_state_async(
         self, path: str, pattern: str | None = None, max_size: int | None = None
