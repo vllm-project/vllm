@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_activation_quant,
+    gather_rows,
 )
 from vllm.model_executor.utils import replace_parameter
 
@@ -389,49 +390,24 @@ def prepare_static_weights_for_trtllm_fp4_moe(
         num_elts_per_sf=16,
     )
 
-    gemm1_weights_fp4_shuffled = torch.empty_like(gemm1_weights_fp4, dtype=torch.uint8)
-    gemm1_scales_fp4_shuffled = torch.empty_like(gemm1_scales_linear_fp4)
-    gemm2_weights_fp4_shuffled = torch.empty_like(gemm2_weights_fp4, dtype=torch.uint8)
-    gemm2_scales_fp4_shuffled = torch.empty_like(gemm2_scales_linear_fp4)
-    gemm1_scale_scratch = torch.empty_like(
-        gemm1_scales_linear_fp4[0], dtype=torch.uint8
+    # One gather and one interleave over every expert: the interleave takes
+    # [E, N, K] and lays experts out one after another.
+    gemm1_weights_fp4_shuffled = gather_rows(gemm1_weights_fp4, gemm1_weight_indices)
+    gemm2_weights_fp4_shuffled = gather_rows(gemm2_weights_fp4, gemm2_weight_indices)
+    gemm1_scales_fp4_shuffled = (
+        nvfp4_block_scale_interleave(
+            gather_rows(gemm1_scales_linear_fp4, gemm1_scale_indices)
+        )
+        .reshape(gemm1_scales_linear_fp4.shape)
+        .view(torch.float8_e4m3fn)
     )
-    gemm2_scale_scratch = torch.empty_like(
-        gemm2_scales_linear_fp4[0], dtype=torch.uint8
+    gemm2_scales_fp4_shuffled = (
+        nvfp4_block_scale_interleave(
+            gather_rows(gemm2_scales_linear_fp4, gemm2_scale_indices)
+        )
+        .reshape(gemm2_scales_linear_fp4.shape)
+        .view(torch.float8_e4m3fn)
     )
-
-    for expert_id in range(num_experts):
-        torch.index_select(
-            gemm1_weights_fp4[expert_id].view(torch.uint8),
-            0,
-            gemm1_weight_indices,
-            out=gemm1_weights_fp4_shuffled[expert_id],
-        )
-        torch.index_select(
-            gemm1_scales_linear_fp4[expert_id].view(torch.uint8),
-            0,
-            gemm1_scale_indices,
-            out=gemm1_scale_scratch,
-        )
-        gemm1_scales_fp4_shuffled[expert_id].view(torch.uint8).reshape(-1).copy_(
-            nvfp4_block_scale_interleave(gemm1_scale_scratch)
-        )
-
-        torch.index_select(
-            gemm2_weights_fp4[expert_id].view(torch.uint8),
-            0,
-            gemm2_weight_indices,
-            out=gemm2_weights_fp4_shuffled[expert_id],
-        )
-        torch.index_select(
-            gemm2_scales_linear_fp4[expert_id].view(torch.uint8),
-            0,
-            gemm2_scale_indices,
-            out=gemm2_scale_scratch,
-        )
-        gemm2_scales_fp4_shuffled[expert_id].view(torch.uint8).reshape(-1).copy_(
-            nvfp4_block_scale_interleave(gemm2_scale_scratch)
-        )
 
     return (
         gemm1_weights_fp4_shuffled,

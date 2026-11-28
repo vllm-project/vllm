@@ -6,6 +6,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.quantization.utils.quant_utils import gather_rows
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -112,48 +113,35 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor, is_gated_activation: bool
 ):
     """Shuffle weights for FI TRT-LLM Format."""
-    from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
+    from flashinfer.fused_moe.core import (
+        get_reorder_rows_for_gated_act_gemm_row_indices,
+    )
+    from flashinfer.utils import get_shuffle_matrix_a_row_indices
 
     epilogue_tile_m = 128
-    num_experts = gemm1_weights.shape[0]
-    hidden_size = gemm1_weights.shape[-1]
-    intermediate_size = gemm1_weights.shape[1] // 2
 
-    # Reorder rows of W1 for fused gated activation
-    gemm1_weights_fp8_interleaved = []
-    for i in range(num_experts):
-        gemm1_weights_fp8_interleaved.append(
-            reorder_rows_for_gated_act_gemm(gemm1_weights[i])
-            if is_gated_activation
-            else gemm1_weights[i]
-        )
-
-    # Stack weights and scales for all experts
-    gemm1_weights_fp8_interleaved = torch.stack(gemm1_weights_fp8_interleaved).reshape(
-        num_experts, 2 * intermediate_size, hidden_size
+    # The gated-activation row reorder and the transposed-mma shuffle are row
+    # permutations of the per-expert shape: compose them once and gather every
+    # expert at once.
+    w1 = gemm1_weights[0].view(torch.uint8)
+    perm1 = get_shuffle_matrix_a_row_indices(w1, epilogue_tile_m)
+    if is_gated_activation:
+        perm1 = get_reorder_rows_for_gated_act_gemm_row_indices(w1)[perm1]
+    perm2 = get_shuffle_matrix_a_row_indices(
+        gemm2_weights[0].view(torch.uint8), epilogue_tile_m
     )
 
-    # Shuffle weights and scaling factors for transposed mma output
-    gemm1_weights_fp8_shuffled = []
-    gemm2_weights_fp8_shuffled = []
-    for i in range(num_experts):
-        gemm1_weights_fp8_shuffled.append(
-            shuffle_matrix_a(
-                gemm1_weights_fp8_interleaved[i].view(torch.uint8), epilogue_tile_m
-            )
-        )
-
-        gemm2_weights_fp8_shuffled.append(
-            shuffle_matrix_a(gemm2_weights[i].view(torch.uint8), epilogue_tile_m)
-        )
-
-    # Stack weights for all experts, in place: they may be the layer's
-    # parameters, whose addresses captured CUDA graphs keep across reloads
+    # In place: they may be the layer's parameters, whose addresses captured
+    # CUDA graphs keep across reloads
     gemm1_weights.copy_(
-        torch.stack(gemm1_weights_fp8_shuffled).view(torch.float8_e4m3fn)
+        gather_rows(gemm1_weights, perm1.to(gemm1_weights.device)).view(
+            torch.float8_e4m3fn
+        )
     )
     gemm2_weights.copy_(
-        torch.stack(gemm2_weights_fp8_shuffled).view(torch.float8_e4m3fn)
+        gather_rows(gemm2_weights, perm2.to(gemm2_weights.device)).view(
+            torch.float8_e4m3fn
+        )
     )
 
 
@@ -166,8 +154,8 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     """Convert expert weights to FlashInfer's block layout.
 
     This reorders W13 and W2 in place into the expected epilogue-tiled block
-    layout and returns views of the shuffled weight tensors. Using one expert
-    as scratch space avoids allocating another full copy of both weights.
+    layout and returns views of the shuffled weight tensors. Gathering a chunk
+    of experts at a time avoids allocating another full copy of both weights.
     """
     if w13_weight.dtype != torch.bfloat16 or w2_weight.dtype != torch.bfloat16:
         raise ValueError(
@@ -183,63 +171,41 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     block_k = 128
 
     # Reorder rows of W13 and W2 for fused gated activation and convert to the
-    # block layout expected by the FlashInfer kernel.
+    # block layout expected by the FlashInfer kernel. The permutation depends
+    # only on the per-expert shape; experts are gathered in chunks of ~1 GiB.
     num_experts = w13_weight.shape[0]
-
-    def _copy_permuted_expert_to_block_layout(
-        out: torch.Tensor,
-        expert_uint8: torch.Tensor,
-        source_indices: torch.Tensor,
-    ) -> None:
-        expert_blocks = expert_uint8.view(
-            expert_uint8.shape[0], out.shape[0], block_k
-        ).permute(1, 0, 2)
-        torch.index_select(
-            expert_blocks,
-            1,
-            source_indices.to(expert_uint8.device),
-            out=out,
-        )
 
     def _convert_weight_in_place(
         weight: torch.Tensor,
         is_w13: bool,
     ) -> torch.Tensor:
-        rows, cols = weight[0].view(torch.uint8).shape
-        block_layout_shape = (num_experts, cols // block_k, rows, block_k)
-        expert_scratch = torch.empty(
-            block_layout_shape[1:],
-            dtype=torch.uint8,
-            device=weight.device,
-        )
-
-        for i in range(num_experts):
-            expert_uint8 = weight[i].view(torch.uint8)
-            if is_w13:
-                permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-                    cache_permute_indices,
-                    expert_uint8,
-                    epilogue_tile_m,
-                    is_gated_act_gemm=is_gated_act_gemm,
-                )
-                if is_gated_act_gemm:
-                    permute_indices = (
-                        permute_indices + expert_uint8.shape[0] // 2
-                    ) % expert_uint8.shape[0]
-            else:
-                permute_indices = get_w2_permute_indices_with_cache(
-                    cache_permute_indices,
-                    expert_uint8,
-                    epilogue_tile_m,
-                )
-
-            _copy_permuted_expert_to_block_layout(
-                expert_scratch,
+        expert_uint8 = weight[0].view(torch.uint8)
+        rows, cols = expert_uint8.shape
+        if is_w13:
+            permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+                cache_permute_indices,
                 expert_uint8,
-                permute_indices,
+                epilogue_tile_m,
+                is_gated_act_gemm=is_gated_act_gemm,
             )
-            expert_uint8.view(-1).copy_(expert_scratch.view(-1))
+            if is_gated_act_gemm:
+                permute_indices = (permute_indices + rows // 2) % rows
+        else:
+            permute_indices = get_w2_permute_indices_with_cache(
+                cache_permute_indices,
+                expert_uint8,
+                epilogue_tile_m,
+            )
+        permute_indices = permute_indices.to(weight.device)
 
+        chunk = max(1, (1 << 30) // (rows * cols))
+        for start in range(0, num_experts, chunk):
+            part = weight[start : start + chunk]
+            part.view(torch.uint8).view(-1).copy_(
+                gather_rows(part, permute_indices, block_k).view(-1)
+            )
+
+        block_layout_shape = (num_experts, cols // block_k, rows, block_k)
         return weight.view(torch.uint8).view(block_layout_shape).view(torch.bfloat16)
 
     return (

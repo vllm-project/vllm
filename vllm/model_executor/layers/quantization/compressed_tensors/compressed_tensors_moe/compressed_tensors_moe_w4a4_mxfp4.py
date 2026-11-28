@@ -195,17 +195,15 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             w2_scale_N = layer.w2_weight_scale.shape[2]
             w2_N = w2_scale_N * 32
 
-            swizzled_w13 = []
-            swizzled_w2 = []
-            for e_idx in range(E):
-                s13 = layer.w13_weight_scale[e_idx]
-                sw13 = swizzle_mxfp4_scales(s13, w13_N, w13_K)
-                swizzled_w13.append(sw13.reshape(w13_N, w13_scale_K))
-                s2 = layer.w2_weight_scale[e_idx]
-                sw2 = swizzle_mxfp4_scales(s2, w2_M, w2_N)
-                swizzled_w2.append(sw2.reshape(w2_M, w2_scale_N))
-            replace_parameter(layer, "w13_weight_scale", torch.stack(swizzled_w13))
-            replace_parameter(layer, "w2_weight_scale", torch.stack(swizzled_w2))
+            # One swizzle over every expert ([E, N, K//32] in, [E, flat] out).
+            sw13 = swizzle_mxfp4_scales(layer.w13_weight_scale, w13_N, w13_K)
+            sw2 = swizzle_mxfp4_scales(layer.w2_weight_scale, w2_M, w2_N)
+            replace_parameter(
+                layer, "w13_weight_scale", sw13.reshape(E, w13_N, w13_scale_K)
+            )
+            replace_parameter(
+                layer, "w2_weight_scale", sw2.reshape(E, w2_M, w2_scale_N)
+            )
         elif (
             self.mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4
             or self.mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS
