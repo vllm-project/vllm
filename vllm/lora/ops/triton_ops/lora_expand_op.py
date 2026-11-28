@@ -179,7 +179,9 @@ def _lora_expand(
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     for weight in lora_b_weights:
-        assert weight.dtype in [torch.float16, torch.bfloat16]
+        assert weight.dtype in [torch.float16, torch.bfloat16], (
+            f"LoRA expand requires float16 or bfloat16 weights, got {weight.dtype}"
+        )
 
     assert inputs.size(0) == len(lora_b_weights)
     assert output_tensor.is_contiguous()
