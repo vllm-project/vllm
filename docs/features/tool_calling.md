@@ -126,6 +126,14 @@ When a structural tag applies, each tool's declared parameter schema is enforced
 
 For parsers using schema-derived JSON constraints, required and named calls continue to enforce the declared parameter schemas.
 
+With `--tool-call-parser gemma4`, the required-tool branch starts directly with
+Gemma's native tool-call token. When `tool_choice="auto"` combines an active
+structural tag with a JSON-schema response format, the model can produce either
+a native tool call or a schema-valid reply, without an unconstrained text prefix.
+This applies to both Chat Completions and Responses. As with other structural-tag
+parsers, use a strict tool or an appropriate `--tool-strict-level` to activate the
+combined constraint.
+
 ### Strict Mode
 
 Structural-tag constraints have two layers. The tool-call *envelope* (markup and function name) is constrained whenever a structural tag applies: always for `tool_choice="required"` and named function calling, and for `tool_choice="auto"` once at least one tool sets `strict: true` or the server raises the floor. The *argument schema* of an individual tool is pinned only when that tool sets `strict: true` (or under `--tool-strict-level parameter`); a tool that omits `strict` keeps its arguments unconstrained, even when another tool in the same request is strict. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.

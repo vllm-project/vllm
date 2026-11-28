@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from openai.types.responses.tool_param import FunctionToolParam
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -41,6 +42,112 @@ from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.gemma4_engine_tool_parser import (
     Gemma4EngineToolParser as Gemma4ToolParser,
 )
+
+
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("with_answer", [False, True])
+@pytest.mark.parametrize("parallel", [False, True])
+def test_gemma4_constrained_calls_require_native_tokens(
+    monkeypatch, api, with_answer, parallel
+):
+    """A tool-or-JSON grammar must not admit free text or textual tool markers."""
+    import json
+
+    import xgrammar as xgr
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import TokenizersBackend
+
+    from vllm.parser.parser_manager import ParserManager
+
+    monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "1")
+    special = [
+        "<unk>",
+        "<|tool_call>",
+        "<tool_call|>",
+        "<|channel>",
+        "<channel|>",
+        '<|"|>',
+        "<turn|>",
+    ]
+    tokens = [chr(i) for i in range(128)] + special
+    vocab = {token: i for i, token in enumerate(tokens)}
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel(vocab, unk_token="<unk>")),
+        unk_token="<unk>",
+        additional_special_tokens=special[1:],
+    )
+    function = dict(_get_weather_tool())
+    function.pop("type")
+    answer = {
+        "type": "json_schema",
+        "name": "answer",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"response": {"type": "string"}},
+            "required": ["response"],
+            "additionalProperties": False,
+        },
+    }
+    common = {
+        "tool_choice": "auto" if with_answer else "required",
+        "parallel_tool_calls": parallel,
+    }
+    if api == "chat":
+        request = ChatCompletionRequest(
+            messages=[],
+            tools=[{"type": "function", "function": function}],
+            response_format={"type": "json_schema", "json_schema": answer}
+            if with_answer
+            else None,
+            **common,
+        )
+    else:
+        request = ResponsesRequest(
+            input="What is the weather in Hanoi?",
+            tools=[{"type": "function", **function}],
+            text={"format": answer} if with_answer else None,
+            **common,
+        )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="gemma4",
+        reasoning_parser_name="gemma4",
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(tokenizer, tools=request.tools)
+    adjusted = parser.adjust_request(request)
+    params = adjusted.extract_structured_outputs()
+    assert params is not None and params.structural_tag is not None
+    assert adjusted.skip_special_tokens is False
+
+    # The API preflight has no tokenizer: named TokenFormat nodes cannot pass it.
+    xgr.Grammar.from_structural_tag(params.structural_tag)
+    compiler = xgr.GrammarCompiler(
+        xgr.TokenizerInfo(tokens, stop_token_ids=[vocab["<turn|>"]])
+    )
+    compiled = compiler.compile_structural_tag(params.structural_tag)
+    body = 'call:get_weather{city:<|"|>Hanoi<|"|>}'
+    matcher = xgr.GrammarMatcher(compiled)
+    assert matcher.accept_token(vocab["<|tool_call>"])
+    assert matcher.accept_string(body)
+    assert matcher.accept_token(vocab["<tool_call|>"])
+    assert matcher.is_completed()
+    assert matcher.accept_token(vocab["<|tool_call>"]) is parallel
+
+    for text in (
+        "Let me check.",
+        "<|tool_call>" + body + "<tool_call|>",
+        "Let me check. <|tool_call>" + body + "<tool_call|>",
+    ):
+        assert not xgr.GrammarMatcher(compiled).accept_string(text)
+    reply = xgr.GrammarMatcher(compiled)
+    assert (
+        reply.accept_string(json.dumps({"response": "Hello:     world"})) is with_answer
+    )
+    if with_answer:
+        assert reply.is_completed()
 
 
 def _get_weather_tool() -> FunctionToolParam:
