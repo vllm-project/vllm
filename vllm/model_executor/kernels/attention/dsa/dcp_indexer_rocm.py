@@ -4,13 +4,10 @@
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     dcp_local_to_global_index,
 )
-
-FP8_DTYPE = current_platform.fp8_dtype()
 
 
 @triton.jit

@@ -83,9 +83,30 @@ def rescue_slots(topk: int, local_topk: int) -> int:
 # (topk, local_topk) -> rows of the rescue workspace built by
 # init_dcp_topk_merge; a decode step with more rows takes the generic merge.
 _MERGE_MAX_ROWS: dict[tuple[int, int], int] = {}
-# topk -> init_dcp_topk_merge's result: the layers of a model share one
-# workspace, and the collectives run once (in the same order on every rank).
-_MERGE_INIT: dict[int, int] = {}
+# Cache init_dcp_topk_merge per engine geometry + DCP group so layers of one
+# model share one workspace and run collectives once, while a new engine or
+# distributed group in the same process does not inherit stale state.
+_MERGE_INIT: dict[tuple[Any, ...], int] = {}
+
+
+def _merge_init_key(vllm_config: Any, topk: int) -> tuple[Any, ...]:
+    parallel_config = vllm_config.parallel_config
+    dcp_size = parallel_config.decode_context_parallel_size
+    group_name = None
+    if dcp_size > 1:
+        from vllm.distributed import get_dcp_group
+
+        group = get_dcp_group()
+        group_name = getattr(group, "unique_name", None)
+    return (
+        topk,
+        group_name,
+        dcp_size,
+        parallel_config.prefill_context_parallel_size,
+        getattr(parallel_config, "use_ubatching", False),
+        vllm_config.kernel_config.sparse_indexer_topk_backend,
+        vllm_config.model_config.max_model_len,
+    )
 
 
 def dcp_topk_merge_max_rows(topk: int, local_topk: int) -> int:
@@ -112,12 +133,14 @@ def init_dcp_topk_merge(vllm_config: Any, topk: int) -> int:
     that before allocating; a failure of the (collective) allocation itself
     is fatal. Also registers the merge kernels for JIT warmup.
     """
-    if topk in _MERGE_INIT:
-        return _MERGE_INIT[topk]
     local_topk = dcp_topk_merge_local_topk(vllm_config, topk)
-    if local_topk:
-        local_topk = _init_rescue(vllm_config, topk, local_topk)
-    _MERGE_INIT[topk] = local_topk
+    if not local_topk:
+        return 0
+    key = _merge_init_key(vllm_config, topk)
+    if key in _MERGE_INIT:
+        return _MERGE_INIT[key]
+    local_topk = _init_rescue(vllm_config, topk, local_topk)
+    _MERGE_INIT[key] = local_topk
     return local_topk
 
 

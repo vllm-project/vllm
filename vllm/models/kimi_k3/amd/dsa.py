@@ -9,7 +9,6 @@ cache. The DeepGEMM-only 32/64 index-head zero padding is dropped: the ROCm
 indexer kernels take the native head count.
 """
 
-import math
 from typing import cast
 
 import torch
@@ -37,11 +36,17 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.model_executor.layers.rotary_embedding.common import yarn_get_mscale
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
     _merge_dcp_topk_global,
 )
-from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerCache
+from vllm.model_executor.utils import refill_derived
+from vllm.models.kimi_k3.common.dsa_cache import (
+    KimiK3IndexerCache,
+    indexer_cache_entry_bytes,
+    kimi_k3_indexer_uses_fp4,
+)
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -80,12 +85,6 @@ def _index_weights_kernel(
     tl.store(output + row * NUM_HEADS + head, weight, head < NUM_HEADS)
 
 
-def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
-    if scale <= 1:
-        return 1.0
-    return 0.1 * mscale * math.log(scale) + 1.0
-
-
 class KimiK3DSAIndexerKNorm(nn.Module):
     """Bias-full fp32 LayerNorm for the DSA indexer shared key.
 
@@ -109,6 +108,12 @@ class KimiK3DSAIndexerKNorm(nn.Module):
         self.register_buffer("weight_bf16", None, persistent=False)
         self.register_buffer("bias_bf16", None, persistent=False)
 
+    def process_weights_after_loading(self) -> None:
+        if self.weight_bf16 is not None:
+            dtype = self.weight_bf16.dtype
+            refill_derived(self, "weight_bf16", self.weight.detach().to(dtype))
+            refill_derived(self, "bias_bf16", self.bias.detach().to(dtype))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         weight, bias = self.weight_bf16, self.bias_bf16
         if weight is None or weight.dtype != x.dtype:
@@ -131,6 +136,7 @@ def _indexer(
     out: torch.Tensor,
     scores: torch.Tensor,
     prefix: str,
+    head_dim: int,
     max_model_len: int,
     max_keys: int,
     rank: int,
@@ -151,10 +157,10 @@ def _indexer(
             q,
             k,
             weights,
-            128,
+            head_dim,
             "ue8m0",
             out.shape[1],
-            128,
+            head_dim,
             max_model_len,
             max_keys,
             out,
@@ -171,7 +177,7 @@ def _indexer(
         k[: m.slot_mapping.numel()],
         cache,
         m.slot_mapping,
-        128,
+        head_dim,
         "ue8m0",
         cache_layout="NORMAL",
     )
@@ -215,6 +221,7 @@ def _fake(
     out: torch.Tensor,
     scores: torch.Tensor,
     prefix: str,
+    head_dim: int,
     max_model_len: int,
     max_keys: int,
     rank: int,
@@ -409,7 +416,7 @@ class KimiK3DSAIndexer(nn.Module):
         self.index_head_dim = index_head_dim
         self.index_num_heads = index_num_heads
         self.indexer_weight_scale = self.index_num_heads**-0.5
-        self.use_fp4 = v32_indexer.dsa_indexer_uses_fp4(vllm_config)
+        self.use_fp4 = kimi_k3_indexer_uses_fp4(vllm_config)
         if self.use_fp4 and (
             index_head_dim != 128 or index_num_heads not in (16, 32, 64)
         ):
@@ -461,11 +468,8 @@ class KimiK3DSAIndexer(nn.Module):
         self.scale_fmt = "ue8m0"
         self.quant_block_size = self.index_head_dim
         self.index_softmax_scale = self.index_head_dim**-0.5
-        # FP8: 128 values + one FP32 scale. MXFP4: 64 packed value bytes
-        # + four UE8M0 group scales. Both formats add four scale bytes.
         self.k_cache = KimiK3IndexerCache(
-            head_dim=(self.index_head_dim // 2 if self.use_fp4 else self.index_head_dim)
-            + 4,
+            head_dim=indexer_cache_entry_bytes(self.index_head_dim, self.use_fp4),
             dtype=torch.uint8,
             prefix=f"{prefix}.k_cache",
             cache_config=cast(CacheConfig, cache_config),
@@ -587,6 +591,7 @@ class KimiK3DSAIndexer(nn.Module):
                 self.topk_indices_buffer,
                 self.dcp_scores,
                 self.k_cache.prefix,
+                self.index_head_dim,
                 self.max_model_len,
                 self.max_total_seq_len,
                 indexer_op.dcp_rank,

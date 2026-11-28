@@ -289,7 +289,6 @@ def test_merge_requires_rescue_workspace(monkeypatch):
     import vllm.distributed as distributed
     from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import kernels
     from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
-        dcp_topk_merge,
         dcp_topk_merge_rows,
         dcp_topk_pack,
     )
@@ -299,9 +298,6 @@ def test_merge_requires_rescue_workspace(monkeypatch):
     sent = dcp_topk_pack(logits, ends, n)
     monkeypatch.setattr(distributed, "get_dcp_group", lambda: _FakeDCPGroup(8))
     monkeypatch.setattr(kernels, "_RESCUE_WORKSPACES", {})
-    out = torch.empty((2, TOPK), dtype=torch.int32, device="cuda")
-    with pytest.raises(RuntimeError, match="rescue workspace"):
-        dcp_topk_merge(logits, ends, out, n)
     rows = dict(
         local_topk=n,
         topk=TOPK,
@@ -403,26 +399,69 @@ def test_exact_call_checks(monkeypatch):
         dcp_topk_merge_rows(**{**rows, "packed": g4[0, :, :n]})
 
 
+def _assert_packed_merge_contract(
+    packed: torch.Tensor,
+    logits: torch.Tensor,
+    row_ends: torch.Tensor,
+    local_topk: int,
+) -> None:
+    """Check a packed-mode producer against the contract of
+    `dcp_topk_merge_rows`."""
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge import packed_row_words
+
+    num_rows = packed.shape[0]
+    assert packed.dtype == torch.int32
+    assert packed.shape[1] == packed_row_words(local_topk), packed.shape
+    words = packed[:, :local_topk].long() & 0xFFFFFFFF
+    plane = packed[:, local_topk:].long() & 0xFFFFFFFF
+    j = torch.arange(local_topk, device=packed.device)
+    local = (0xFFFF - (words & 0xFFFF)) | (((plane[:, j // 32] >> (j % 32)) & 1) << 16)
+    bits = logits[:num_rows].contiguous().view(torch.int16).long() & 0xFFFF
+    ordered = torch.where(bits >= 0x8000, ~bits & 0xFFFF, bits | 0x8000)
+    is_nan = (bits & 0x7FFF) > 0x7F80
+    for row in range(num_rows):
+        end = min(int(row_ends[row]), logits.shape[1])
+        sent = words[row] != 0
+        ids = local[row][sent]
+        valid = ~is_nan[row, :end]
+        num_valid = int(valid.sum())
+        assert ids.numel() == min(local_topk, num_valid), (
+            f"row {row}: {ids.numel()} words, expected {min(local_topk, num_valid)}"
+        )
+        if ids.numel() == 0:
+            continue
+        assert int(ids.max()) < end, f"row {row}: local id past row_end {end}"
+        assert ids.unique().numel() == ids.numel(), f"row {row}: repeated ids"
+        assert not bool(is_nan[row, ids].any()), f"row {row}: NaN score sent"
+        sent_ord = words[row][sent] >> 16
+        assert torch.equal(sent_ord, ordered[row, ids]), (
+            f"row {row}: a word's score is not its logit"
+        )
+        unsent = valid.clone()
+        unsent[ids] = False
+        if bool(unsent.any()):
+            assert int(ordered[row, :end][unsent].max()) <= int(sent_ord.min()), (
+                f"row {row}: not a top-{local_topk} by score"
+            )
+
+
 def test_packed_contract_validator():
-    """`assert_packed_merge_contract` accepts the stock producer (DeepSelect
+    """`_assert_packed_merge_contract` accepts the stock producer (DeepSelect
     + pack, including short and empty rows) and catches a dropped word, a
     non-top word and a word whose score is not its logit."""
-    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import (
-        assert_packed_merge_contract,
-        dcp_topk_pack,
-    )
+    from vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge.kernels import dcp_topk_pack
 
     n = 384
     lg, e = _local_case([12_500, 3_750, 250, 0], seed=6)
     packed = dcp_topk_pack(lg, e, n)
-    assert_packed_merge_contract(packed, lg, e, n)
+    _assert_packed_merge_contract(packed, lg, e, n)
 
     words = packed[0, :n]
     j = int(torch.nonzero(words).flatten()[0])
     dropped = packed.clone()
     dropped[0, j] = 0
     with pytest.raises(AssertionError, match="words"):
-        assert_packed_merge_contract(dropped, lg, e, n)
+        _assert_packed_merge_contract(dropped, lg, e, n)
 
     # Replace a sent word by the row's lowest-scoring token.
     low = int(lg[0, : int(e[0])].float().argmin())
@@ -432,9 +471,9 @@ def test_packed_contract_validator():
     word = (ordered << 16) | (0xFFFF - low)
     non_top[0, j] = word - (1 << 32) if word >= 1 << 31 else word
     with pytest.raises(AssertionError, match="top-"):
-        assert_packed_merge_contract(non_top, lg, e, n)
+        _assert_packed_merge_contract(non_top, lg, e, n)
 
     wrong_score = packed.clone()
     wrong_score[0, j] ^= 1 << 16
     with pytest.raises(AssertionError, match="logit"):
-        assert_packed_merge_contract(wrong_score, lg, e, n)
+        _assert_packed_merge_contract(wrong_score, lg, e, n)

@@ -1381,7 +1381,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             # long prefill steps run in chunks. Tokens attend independently
             # (sparse indices), so chunking does not change the result.
             out = q.new_empty((num_tokens, q.shape[1], 512))
-            _lse = q.new_empty((q.shape[1], num_tokens), dtype=torch.float32)
+            _lse = (
+                q.new_empty((q.shape[1], num_tokens), dtype=torch.float32)
+                if self.need_to_return_lse_for_decode
+                else None
+            )
             chunk_metas = fp8_metadata.chunk_scheduler_metadata
             for start in range(0, num_tokens, chunk_tokens):
                 end = min(num_tokens, start + chunk_tokens)
@@ -1396,13 +1400,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     topk_length=topk_length,
                 )
                 out[start:end] = chunk_out[0]
-                _lse[:, start:end] = chunk_lse[0]
+                if _lse is not None:
+                    assert chunk_lse is not None
+                    _lse[:, start:end] = chunk_lse[0]
                 del chunk_out, chunk_lse
 
         if not self.need_to_return_lse_for_decode:
             return out, None
 
         # Kernel LSE is (H, T); the DCP merge consumes (T, H).
+        assert _lse is not None
         lse = _lse.transpose(0, 1)
         # Rows where this rank owns none of the selected tokens have undefined
         # out/lse; (0, -inf) drops this rank from their cross-rank LSE merge.

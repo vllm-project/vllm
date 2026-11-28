@@ -159,7 +159,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
                 return (
                     f"{cls.get_name()} reads nvfp4_ds_mla with FlashInfer's "
                     "prims_ts sparse MLA decode, which the installed FlashInfer "
-                    "lacks (needs a build with flashinfer-ai/flashinfer#7410)"
+                    "lacks (needs flashinfer-python>=0.7.4)"
                 )
 
         # FlashInfer MLA sparse SM10 kernel requires qk_nope_head_dim in [128, 192].
@@ -586,7 +586,7 @@ class _PrimsTSPlans:
 
     def __init__(self) -> None:
         self._plans: dict[tuple, dict[int, tuple[object, torch.Tensor]]] = {}
-        self._workspace: torch.Tensor | None = None
+        self._workspaces: dict[torch.device, torch.Tensor] = {}
 
     def get(
         self,
@@ -624,11 +624,13 @@ class _PrimsTSPlans:
             get_prims_ts_sparse_mla_decode_workspace_size(device, rows, heads, **kwargs)
             for rows in buckets
         )
-        if self._workspace is None or self._workspace.numel() < size:
-            self._workspace = torch.empty(size, dtype=torch.uint8, device=device)
+        workspace = self._workspaces.get(device)
+        if workspace is None or workspace.numel() < size:
+            workspace = torch.empty(size, dtype=torch.uint8, device=device)
+            self._workspaces[device] = workspace
         plans = {}
         for rows in buckets:
-            plan = BatchSparseMLADecodePagedTSWrapper(self._workspace)
+            plan = BatchSparseMLADecodePagedTSWrapper(workspace)
             plan.plan(device, rows, heads, **kwargs)
             qo_indptr = torch.arange(rows + 1, dtype=torch.int32, device=device)
             plans[rows] = (plan, qo_indptr)

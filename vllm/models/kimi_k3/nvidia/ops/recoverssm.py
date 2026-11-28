@@ -60,6 +60,9 @@ def _kda_recurrent_step(
     return state + correction[:, None] * normalized_k[None, :], correction
 
 
+@triton.heuristics(
+    {"HAS_RECORD_INDICES": lambda args: args["record_indices_ptr"] is not None}
+)
 @triton.jit
 def _kda_recoverssm_verify_kernel(
     q_ptr,
@@ -75,6 +78,7 @@ def _kda_recoverssm_verify_kernel(
     out_ptr,
     query_start_loc_ptr,
     state_indices_ptr,
+    record_indices_ptr,
     lower_bound,
     null_block_id,
     stride_q_token,
@@ -103,10 +107,14 @@ def _kda_recoverssm_verify_kernel(
     BV: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    HAS_RECORD_INDICES: tl.constexpr,
 ):
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_h = tl.program_id(2)
+    record_row = pid_b.to(tl.int64)
+    if HAS_RECORD_INDICES:
+        record_row = tl.load(record_indices_ptr + pid_b).to(tl.int64)
 
     bos = tl.load(query_start_loc_ptr + pid_b * stride_query_start_loc).to(tl.int64)
     eos = tl.load(query_start_loc_ptr + (pid_b + 1) * stride_query_start_loc).to(
@@ -196,7 +204,7 @@ def _kda_recoverssm_verify_kernel(
 
         correction_ptr = (
             correction_cache_ptr
-            + pid_b * stride_correction_row
+            + record_row * stride_correction_row
             + pid_h * stride_correction_head
             + token_offset * stride_correction_pos
         )
@@ -208,7 +216,7 @@ def _kda_recoverssm_verify_kernel(
         if pid_v == 0:
             kg_ptr = (
                 kg_cache_ptr
-                + pid_b * stride_kg_row
+                + record_row * stride_kg_row
                 + pid_h * stride_kg_head
                 + token_offset * stride_kg_pos
             )
@@ -627,9 +635,11 @@ def kda_recoverssm_verify(
     state_indices: torch.Tensor,
     spec_query_len: int,
     out: torch.Tensor | None = None,
+    record_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Verify a KDA speculative window without modifying its checkpoint. Request
-    `b` writes its verify records to row `b` of `records`."""
+    `b` writes its verify records to row `b` of `records`, or to row
+    `record_indices[b]` when `record_indices` is supplied."""
     if q.ndim != 4 or q.shape[0] != 1:
         raise ValueError("KDA RecoverSSM q must have shape [1, tokens, heads, dim]")
     _, total_tokens, num_heads, key_dim = q.shape
@@ -705,6 +715,7 @@ def kda_recoverssm_verify(
         out,
         query_start_loc,
         state_indices,
+        record_indices,
         lower_bound or 0.0,
         NULL_BLOCK_ID,
         q.stride(1),

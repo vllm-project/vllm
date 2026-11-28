@@ -508,9 +508,8 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 @functools.cache
 def has_flashinfer_prims_ts_sparse_mla() -> bool:
     """Return `True` if FlashInfer ships the task-scheduled (prims_ts) sparse
-    MLA decode wrapper with the plan API vLLM calls. Its quantized formats are
-    probed separately by `prims_ts_sparse_mla_format_error` once a device is
-    available."""
+    MLA decode wrapper. Its quantized formats are probed separately by
+    `prims_ts_sparse_mla_format_error` once a device is available."""
     if not has_flashinfer():
         return False
     try:
@@ -520,12 +519,9 @@ def has_flashinfer_prims_ts_sparse_mla() -> bool:
         )
     except ImportError:
         return False
-    if not callable(get_prims_ts_sparse_mla_decode_workspace_size):
-        return False
-    # vLLM passes the plan arguments of FlashInfer after 0.7.3 (max_q_len,
-    # q_dtype); 0.7.3's prims_ts still names them max_seq_len_q, q_data_type.
-    plan_args = inspect.signature(BatchSparseMLADecodePagedTSWrapper.plan).parameters
-    return "max_q_len" in plan_args
+    return callable(BatchSparseMLADecodePagedTSWrapper) and callable(
+        get_prims_ts_sparse_mla_decode_workspace_size
+    )
 
 
 @functools.cache
@@ -534,8 +530,7 @@ def prims_ts_sparse_mla_format_error(kv_cache_format: str) -> str | None:
     E4M3 query heads, LSE) over `kv_cache_format` on this GPU, else None.
 
     Asks the public workspace-size query, which resolves the plan without
-    allocating or compiling (FlashInfer >= the nightly with PR 7410 for
-    "nvfp4.fp8rope")."""
+    allocating or compiling."""
     if not has_flashinfer_prims_ts_sparse_mla():
         return "FlashInfer has no prims_ts sparse MLA decode"
     from flashinfer.attention.prims_ts import (
@@ -577,29 +572,17 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 @functools.cache
 def has_flashinfer_topk_varlen_gvr2() -> bool:
     """Return `True` if FlashInfer ships the `gvr_2` varlen top-k backend
-    (self-sampling GVR V2, `flashinfer.top_k_varlen(backend="gvr_2")`).
-
-    Feature-detected on the production entry `run_varlen` (FlashInfer >=
-    0.7.2: per-row `kv_lens`, a capture-stable `max_seq_len` and the
-    hint-free `top_k`) and the band-aware `warmup_varlen` (`row_stride`)
-    that the dispatcher calls.
-    """
-    if not has_flashinfer():
+    (self-sampling GVR V2, `flashinfer.top_k_varlen(backend="gvr_2")`)."""
+    if not has_flashinfer_cutedsl():
         return False
     try:
-        import inspect
-
         from flashinfer.topk_varlen.kernels import gvr2_topk_host
-
-        run_params = inspect.signature(gvr2_topk_host.run_varlen).parameters
-        warmup_params = inspect.signature(gvr2_topk_host.warmup_varlen).parameters
     except Exception:
         # The module imports the CuTe DSL; anything it raises means unusable.
         return False
-    return {"kv_lens", "max_seq_len", "top_k"} <= set(run_params) and {
-        "num_rows_list",
-        "row_stride",
-    } <= set(warmup_params)
+    return callable(getattr(gvr2_topk_host, "run_varlen", None)) and callable(
+        getattr(gvr2_topk_host, "warmup_varlen", None)
+    )
 
 
 @functools.cache

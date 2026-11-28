@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dense MLA draft support for Kimi K3.1 (DSA target).
+"""Draft model attention defaults for Kimi K3.1 (DSA target).
 
-Dense EAGLE3 and DSpark drafts keep their own fp8 MLA cache and decode with
-FLASHINFER_MLA, or ROCM_AITER_MLA on ROCm (`configure_dense_draft`).
+Dense MLA EAGLE3/DSpark drafts keep their own fp8 MLA cache and decode with
+FLASHINFER_MLA (or ROCM_AITER_MLA on ROCm); GQA drafts keep their own cache
+with FLASH_ATTN (or TRITON_ATTN on ROCm).
 """
 
 from typing import Any
@@ -15,8 +16,8 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 def configure_dense_draft(spec_config: SpeculativeConfig, text_config: Any) -> None:
     """Default an EAGLE3/DSpark draft's attention backend and KV dtype on a
-    KDA-hybrid DSA target: dense MLA + fp8 for MLA drafts, FLASH_ATTN +
-    model dtype for GQA drafts. MTP is unchanged."""
+    KDA-hybrid DSA target: dense MLA + fp8 for MLA drafts, FLASH_ATTN
+    (TRITON_ATTN on ROCm) + model dtype for GQA drafts. MTP is unchanged."""
     if (
         spec_config.method not in ("eagle3", "dspark")
         or getattr(text_config, "linear_attn_config", None) is None
@@ -35,6 +36,11 @@ def configure_dense_draft(spec_config: SpeculativeConfig, text_config: Any) -> N
         kv_cache_dtype = "fp8"
     else:
         # GQA draft: its own cache, not the target's sparse backend or fp8_ds_mla.
-        backend, kv_cache_dtype = AttentionBackendEnum.FLASH_ATTN, "auto"
+        backend = (
+            AttentionBackendEnum.TRITON_ATTN
+            if current_platform.is_rocm()
+            else AttentionBackendEnum.FLASH_ATTN
+        )
+        kv_cache_dtype = "auto"
     spec_config.attention_backend = spec_config.attention_backend or backend
     spec_config.kv_cache_dtype = spec_config.kv_cache_dtype or kv_cache_dtype

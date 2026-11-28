@@ -7,7 +7,7 @@ buffer. Under DCP the
 op merges the ranks' local top-k into global token ids.
 
 Under DCP on the FlashInfer core, when the layer's indexer has the one-round DCP
-top-k merge (`dcp_local_topk`, Inferact/mum#63), `merge_rows` replaces the op
+top-k merge (`dcp_local_topk`), `merge_rows` replaces the op
 and the local-slot filter: it scores the rows (DeepGEMM paged MQA logits, bf16)
 and merges them straight into this rank's compacted physical KV rows and counts.
 With the fused DCP indexer (`fused`, indexer.py) the scoring is its scorer (the
@@ -35,7 +35,7 @@ class IndexerStage:
         self.topk = indexer.topk_tokens
         # --- DCP top-k merge (#63): its caller-owned outputs -------------------
         # N, this rank's candidate count; 0 runs the op and the local-slot filter.
-        self.local_topk = indexer.dcp_local_topk if rows else 0
+        self.local_topk = indexer.init_dcp_topk_merge() if rows else 0
         if self.local_topk:
             device = indexer.topk_indices_buffer.device
             # K wide: the exact merge gives a rank up to K of a row's keys (a

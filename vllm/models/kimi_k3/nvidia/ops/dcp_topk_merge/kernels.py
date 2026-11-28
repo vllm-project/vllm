@@ -1654,56 +1654,6 @@ def dcp_topk_pack(
     return dcp_topk_pack_indices(logits, local_idx, out, row_ends)
 
 
-def assert_packed_merge_contract(
-    packed: torch.Tensor,
-    logits: torch.Tensor,
-    row_ends: torch.Tensor,
-    local_topk: int,
-) -> None:
-    """Check a packed-mode producer against the contract of
-    `dcp_topk_merge_rows` (raises `AssertionError`; syncs, for tests and
-    debugging): per row, exactly `min(N, v)` words (`v` the non-NaN
-    tokens below `row_ends`) of distinct local ids below `row_ends`, each
-    word's score the logit's bf16 bits, and no unsent non-NaN token scoring
-    above the lowest sent one."""
-    num_rows = packed.shape[0]
-    assert packed.dtype == torch.int32
-    assert packed.shape[1] == packed_row_words(local_topk), packed.shape
-    words = packed[:, :local_topk].long() & 0xFFFFFFFF
-    plane = packed[:, local_topk:].long() & 0xFFFFFFFF
-    j = torch.arange(local_topk, device=packed.device)
-    local = (0xFFFF - (words & 0xFFFF)) | (
-        ((plane[:, j // _WARP] >> (j % _WARP)) & 1) << 16
-    )
-    bits = logits[:num_rows].contiguous().view(torch.int16).long() & 0xFFFF
-    ordered = torch.where(bits >= 0x8000, ~bits & 0xFFFF, bits | 0x8000)
-    is_nan = (bits & 0x7FFF) > 0x7F80
-    for row in range(num_rows):
-        end = min(int(row_ends[row]), logits.shape[1])
-        sent = words[row] != 0
-        ids = local[row][sent]
-        valid = ~is_nan[row, :end]
-        num_valid = int(valid.sum())
-        assert ids.numel() == min(local_topk, num_valid), (
-            f"row {row}: {ids.numel()} words, expected {min(local_topk, num_valid)}"
-        )
-        if ids.numel() == 0:
-            continue
-        assert int(ids.max()) < end, f"row {row}: local id past row_end {end}"
-        assert ids.unique().numel() == ids.numel(), f"row {row}: repeated ids"
-        assert not bool(is_nan[row, ids].any()), f"row {row}: NaN score sent"
-        sent_ord = words[row][sent] >> 16
-        assert torch.equal(sent_ord, ordered[row, ids]), (
-            f"row {row}: a word's score is not its logit"
-        )
-        unsent = valid.clone()
-        unsent[ids] = False
-        if bool(unsent.any()):
-            assert int(ordered[row, :end][unsent].max()) <= int(sent_ord.min()), (
-                f"row {row}: not a top-{local_topk} by score"
-            )
-
-
 def dcp_topk_select(
     gathered: torch.Tensor,
     local_topk: int,
@@ -1843,32 +1793,6 @@ def _exact_args_for(
                 "workspace was built on"
             )
     return ws.args(logits, row_ends)
-
-
-def dcp_topk_merge(
-    logits: torch.Tensor,
-    row_ends: torch.Tensor,
-    topk_indices: torch.Tensor,
-    local_topk: int,
-    max_local_len: int | None = None,
-) -> None:
-    """Exact global top-K ids over the DCP group from this rank's bf16
-    `logits` (the stock indexer hook). Collective over the DCP group.
-
-    `logits` is `[T, S]` bf16 (row stride 1024-byte aligned for
-    DeepSelect), `row_ends` the per-row local lengths (at most
-    `max_local_len`, see `dcp_topk_pack`), `topk_indices` the
-    `[T, K]` int32 output (global token ids, -1 padded).
-    """
-    logits = _bound_logits(logits, max_local_len)
-    packed = dcp_topk_pack(logits, row_ends, local_topk)
-    topk = topk_indices.shape[1]
-    dcp_topk_select(
-        _all_gather_packed(packed, None),
-        local_topk,
-        topk_indices,
-        exact=_exact_args_for(topk, local_topk, logits, row_ends),
-    )
 
 
 def dcp_topk_merge_rows(

@@ -991,14 +991,13 @@ def _sharded(spec, model, w2, device):
     vocab = w2.shape[0]
     lp, head = model.logits_processor, model.lm_head
     checks = (
-        ("no drafter mailboxes", comm is None),
-        ("no logits mailbox", comm is not None and comm.logits is None),
-        ("TP 1", comm is not None and comm.tp <= 1),
+        ("no logits mailbox", comm.logits is None),
+        ("TP 1", comm.tp <= 1),
         ("FP64 Gumbel keys", bool(spec.use_fp64_gumbel)),
-        ("uneven vocabulary", comm is not None and vocab % comm.tp != 0),
-        ("vocab shard", comm is not None and vocab // comm.tp != comm.vocab_shard),
+        ("uneven vocabulary", vocab % comm.tp != 0),
+        ("vocab shard", vocab // comm.tp != comm.vocab_shard),
         ("padded vocabulary", lp.org_vocab_size != vocab),
-        ("lm_head TP", comm is not None and getattr(head, "tp_size", 1) != comm.tp),
+        ("lm_head TP", getattr(head, "tp_size", 1) != comm.tp),
         ("logits as input", bool(lp.logits_as_input)),
         ("head dtype", getattr(lp, "head_dtype", None) not in (None, torch.bfloat16)),
         ("head weight dtype", head.weight.dtype != torch.bfloat16),

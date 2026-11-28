@@ -25,7 +25,7 @@ def flydsl_ops(monkeypatch):
 
     if not on_gfx950():
         pytest.skip("FlyDSL sparse MLA is gfx950-only")
-    flydsl = pytest.importorskip("vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla")
+    flydsl = pytest.importorskip("vllm.v1.attention.ops.flydsl_sparse_mla")
     pytest.importorskip("aiter.ops.triton.attention.sparse_mla")
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -282,7 +282,7 @@ def test_flydsl_rejects_unsupported_calls(flydsl_ops) -> None:
     assert torch.equal(out, ref)
 
 
-IN_TREE_MODULE = "vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla"
+IN_TREE_MODULE = "vllm.v1.attention.ops.flydsl_sparse_mla"
 AITER_MODULE = "aiter.ops.flydsl.sparse_mla"
 
 

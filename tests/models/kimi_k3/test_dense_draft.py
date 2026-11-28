@@ -14,7 +14,7 @@ from tests.v1.core.utils import full_layer, mamba_layer, sliding_window_layer
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.models.config import KimiK3ForConditionalGenerationConfig
 from vllm.models.kimi_k3.common import dsa_cache
-from vllm.models.kimi_k3.nvidia.gqa_draft import GQADraftKVCacheGrouping
+from vllm.models.kimi_k3.common.gqa_draft import GQADraftKVCacheGrouping
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_planning import (
@@ -39,21 +39,39 @@ MLA_DRAFT = SimpleNamespace(kv_lora_rank=512)
 GQA_DRAFT = SimpleNamespace(num_key_value_heads=16)
 
 
+@pytest.mark.parametrize("is_rocm", [False, True])
 @pytest.mark.parametrize(
-    ("method", "draft_text_config", "expected"),
+    ("method", "draft_text_config", "expected_cuda", "expected_rocm"),
     [
         # A dense Kimi-K3 draft reads its own fp8 MLA cache.
-        ("eagle3", MLA_DRAFT, (AttentionBackendEnum.FLASHINFER_MLA, "fp8")),
-        ("dspark", MLA_DRAFT, (AttentionBackendEnum.FLASHINFER_MLA, "fp8")),
+        (
+            "eagle3",
+            MLA_DRAFT,
+            (AttentionBackendEnum.FLASHINFER_MLA, "fp8"),
+            (AttentionBackendEnum.ROCM_AITER_MLA, "fp8"),
+        ),
+        (
+            "dspark",
+            MLA_DRAFT,
+            (AttentionBackendEnum.FLASHINFER_MLA, "fp8"),
+            (AttentionBackendEnum.ROCM_AITER_MLA, "fp8"),
+        ),
         # A GQA draft (Qwen3 DSpark) keeps its own cache, off the sparse MLA path.
-        ("dspark", GQA_DRAFT, (AttentionBackendEnum.FLASH_ATTN, "auto")),
+        (
+            "dspark",
+            GQA_DRAFT,
+            (AttentionBackendEnum.FLASH_ATTN, "auto"),
+            (AttentionBackendEnum.TRITON_ATTN, "auto"),
+        ),
         # Other methods are left alone: n-gram has no draft layers.
-        ("ngram", None, (None, None)),
+        ("ngram", None, (None, None), (None, None)),
     ],
 )
-def test_kimi_k31_defaults_draft_attention(method, draft_text_config, expected):
-    if current_platform.is_rocm() and draft_text_config is MLA_DRAFT:
-        expected = (AttentionBackendEnum.ROCM_AITER_MLA, "fp8")
+def test_kimi_k31_defaults_draft_attention(
+    monkeypatch, is_rocm, method, draft_text_config, expected_cuda, expected_rocm
+):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    expected = expected_rocm if is_rocm else expected_cuda
     spec_config = SimpleNamespace(
         method=method,
         attention_backend=None,

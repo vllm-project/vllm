@@ -22,53 +22,13 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
+from vllm.cute_utils.ptx_mem import ld_global_v4, st_global_v4
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
 )
 from vllm.v1.attention.ops.dcp_shardq import PAGE_TOKENS
-
-
-@dsl_user_op
-def _ld_v4(address: Int64, *, loc=None, ip=None) -> tuple[Int32, ...]:
-    out = llvm.inline_asm(
-        llvm.StructType.get_literal([T.i32()] * 4),
-        [address.ir_value(loc=loc, ip=ip)],
-        "ld.global.nc.L1::no_allocate.v4.u32 {$0, $1, $2, $3}, [$4];",
-        "=r,=r,=r,=r,l",
-        has_side_effects=False,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
-    return tuple(
-        Int32(llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip)) for i in range(4)
-    )
-
-
-@dsl_user_op
-def _st_v4(
-    address: Int64, a: Int32, b: Int32, c: Int32, d: Int32, *, loc=None, ip=None
-) -> None:
-    llvm.inline_asm(
-        None,
-        [
-            address.ir_value(loc=loc, ip=ip),
-            a.ir_value(loc=loc, ip=ip),
-            b.ir_value(loc=loc, ip=ip),
-            c.ir_value(loc=loc, ip=ip),
-            d.ir_value(loc=loc, ip=ip),
-        ],
-        "st.global.v4.u32 [$0], {$1, $2, $3, $4};",
-        "l,r,r,r,r",
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
-    )
 
 
 @dsl_user_op
@@ -160,9 +120,9 @@ class DcpContextPushKernel(VllmCuTeDSLJitKernel["DcpContextPushKernel.CompileKey
                     for d in cutlass.range_constexpr(world):
                         _st_u32(dst[d] + dst_offset, word)
                 else:
-                    w0, w1, w2, w3 = _ld_v4(src_addr)
+                    w0, w1, w2, w3 = ld_global_v4(src_addr, nc=True)
                     for d in cutlass.range_constexpr(world):
-                        _st_v4(dst[d] + dst_offset, w0, w1, w2, w3)
+                        st_global_v4(dst[d] + dst_offset, w0, w1, w2, w3)
                 v += num_threads
 
         @cute.kernel

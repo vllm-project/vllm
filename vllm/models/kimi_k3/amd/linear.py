@@ -896,9 +896,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             for layer_idx in range(config.num_hidden_layers)
         ):
             topk_buffer_device = "cuda" if torch.cuda.is_available() else "cpu"
+            dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+            dcp_kg_slack = dcp_size - 1 if dcp_size > 1 else 0
             self.topk_indices_buffer = torch.empty(
                 (
-                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    vllm_config.scheduler_config.max_num_batched_tokens + dcp_kg_slack,
                     config.dsa_config.index_topk,
                 ),
                 dtype=torch.int32,
