@@ -113,6 +113,9 @@ def w8a8_block_matmul(
         As.stride(-1),
         Bs.stride(1),
         Bs.stride(0),
+        A_LARGE=A.numel() > 2**31,
+        B_LARGE=B.numel() > 2**31,
+        C_LARGE=C.numel() > 2**31,
         **config,
     )
 

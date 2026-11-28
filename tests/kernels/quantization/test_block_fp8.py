@@ -161,6 +161,55 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
+@pytest.mark.parametrize(
+    "M,N,K",
+    [
+        (2**31 // 34816 + 128, 34816, 256),  # M * N passes 2**31: C offsets
+        (2**31 // 17408 + 128, 256, 17408),  # M * K passes 2**31: A offsets
+        (64, 2**31 // 256 + 128, 256),  # N * K passes 2**31: B offsets
+    ],
+    ids=["C", "A", "B"],
+)
+@torch.inference_mode()
+def test_w8a8_block_fp8_matmul_rows_past_int32_offsets(M, N, K):
+    """Rows of A, B or C whose element offset does not fit in int32."""
+    # The checked block (the last 64 rows of A and C, the last 128 rows of B)
+    # lies past the int32 bound in the tensor this case makes large.
+    assert max((M - 64) * K, (N - 128) * K, (M - 64) * N) >= 2**31
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        if on_gfx1250():
+            pytest.skip("gfx1250 takes the torch fallback, not this kernel")
+    need = M * K + N * K + 2 * M * N + 4 * M * (K // 128) + 2**30
+    free, _ = torch.accelerator.get_memory_info()
+    if free < need:
+        pytest.skip(f"needs {need / 2**30:.1f} GiB of free device memory")
+    block_size = [128, 128]
+    fp8_dtype = current_platform.fp8_dtype()
+
+    torch.manual_seed(0)
+    # Only the checked block needs random data; this keeps the peak memory near
+    # the size of A, B and C themselves.
+    A_fp8 = torch.zeros(M, K, dtype=fp8_dtype)
+    A_fp8[-64:] = torch.randn(64, K, dtype=torch.bfloat16).to(fp8_dtype)
+    B_fp8 = torch.zeros(N, K, dtype=fp8_dtype)
+    B_fp8[-128:] = torch.randn(128, K, dtype=torch.bfloat16).to(fp8_dtype)
+    As = torch.rand(M, K // 128, dtype=torch.float32) * 1e-2
+    Bs = torch.rand(N // 128, K // 128, dtype=torch.float32) * 1e-2
+
+    out = w8a8_triton_block_scaled_mm(A_fp8, B_fp8, As, Bs, block_size, torch.bfloat16)
+    # The reference sees only the checked block, so its own offsets stay small.
+    ref = native_w8a8_block_matmul(
+        A_fp8[-64:], B_fp8[-128:], As[-64:], Bs[-1:], block_size, torch.bfloat16
+    )
+
+    rel_diff = torch.mean(
+        torch.abs(out[-64:, -128:].to(torch.float32) - ref.to(torch.float32))
+    ) / torch.mean(torch.abs(ref.to(torch.float32)))
+    assert rel_diff < 0.001
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )

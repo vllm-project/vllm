@@ -869,6 +869,9 @@ def _w8a8_triton_block_scaled_mm(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    A_LARGE: tl.constexpr,
+    B_LARGE: tl.constexpr,
+    C_LARGE: tl.constexpr,
 ):
     """Triton-accelerated function used to perform linear operations (dot
     product) on input tensors `A` and `B` with block-wise quantization, and
@@ -884,8 +887,16 @@ def _w8a8_triton_block_scaled_mm(
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
+    # The element offsets into A, B and C reach M * K, N * K and M * N, which can
+    # pass 2**31. The launcher sets A_LARGE, B_LARGE and C_LARGE for those tensors,
+    # and their row indices become int64; a call with all three unset compiles to
+    # the int32 kernel unchanged.
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    if A_LARGE:
+        offs_am = offs_am.to(tl.int64)
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    if B_LARGE:
+        offs_bn = offs_bn.to(tl.int64)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
@@ -915,7 +926,10 @@ def _w8a8_triton_block_scaled_mm(
     else:
         c = accumulator.to(tl.float32)
 
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    pid_cm = pid_m
+    if C_LARGE:
+        pid_cm = pid_m.to(tl.int64)
+    offs_cm = pid_cm * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = C + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
@@ -1088,6 +1102,9 @@ def w8a8_triton_block_scaled_mm(
         As.stride(-1),
         Bs.stride(1),
         Bs.stride(0),
+        A_LARGE=A.numel() > 2**31,
+        B_LARGE=B.numel() > 2**31,
+        C_LARGE=C.numel() > 2**31,
         **config,
     )
 
