@@ -168,6 +168,8 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         )
         self.register_buffer("k_scale", torch.ones((), dtype=torch.float32))
         self.register_buffer("v_scale", torch.ones((), dtype=torch.float32))
+        # Checkpoints never hold these; dummy loading must keep the default.
+        self.k_scale.dummy_weight_value = self.v_scale.dummy_weight_value = 1.0
 
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:

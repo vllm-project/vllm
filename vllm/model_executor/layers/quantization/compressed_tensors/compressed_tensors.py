@@ -1333,6 +1333,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer.q_zero_point = torch.nn.Parameter(
             torch.zeros(n_scales, requires_grad=False)
         )
+        # Checkpoints may omit these; dummy loading must keep the defaults.
+        for kind, default in (("k", 1.0), ("v", 1.0), ("q", -1.0)):
+            getattr(layer, f"{kind}_scale").dummy_weight_value = default
+            getattr(layer, f"{kind}_zero_point").dummy_weight_value = 0.0
 
         # TP-aware loading for attn_head strategy follows attention head partitioning:
         # - q_scale is partitioned over query heads.
