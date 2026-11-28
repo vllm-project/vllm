@@ -28,6 +28,8 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    CanonicalPageMapping,
+    CopyRun,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingSpec,
@@ -36,6 +38,34 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 logger = init_logger(__name__)
+
+
+def _slice_page_mapping(
+    mapping: CanonicalPageMapping | None, start: int, size: int
+) -> CanonicalPageMapping | None:
+    """Restrict a logical page mapping to one kernel block's payload."""
+    if mapping is None:
+        return None
+    runs = []
+    for run in mapping.runs:
+        for i in range(run.num_fragments):
+            local = run.local_offset + i * run.local_stride
+            begin = max(start, local)
+            end = min(start + size, local + run.fragment_size)
+            if begin < end:
+                canonical = run.canonical_offset + i * run.canonical_stride
+                fragment_size = end - begin
+                runs.append(
+                    CopyRun(
+                        begin - start,
+                        canonical + begin - local,
+                        fragment_size,
+                        1,
+                        fragment_size,
+                        fragment_size,
+                    )
+                )
+    return replace(mapping, local_page_size_bytes=size, runs=tuple(runs))
 
 
 class OffloadingConnectorWorker:
@@ -95,6 +125,7 @@ class OffloadingConnectorWorker:
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
+        kernel_blocks_per_page: dict[str, int] = {}
         for kv_cache_group in selected_groups:
             assert not kv_cache_group.host_resident
             num_blocks = kv_cache_config.num_blocks
@@ -102,18 +133,6 @@ class OffloadingConnectorWorker:
             for layer_name, layer_kv_cache_spec in per_layer_specs.items():
                 ref = group_kernel_blocks(kv_caches[layer_name], num_blocks)
                 page = layer_kv_cache_spec.page_size_bytes
-                # A padded page split into kernel blocks spreads its padding
-                # over them, but offloading copies the payload from page start.
-                if (
-                    isinstance(layer_kv_cache_spec, AttentionSpec)
-                    and page > layer_kv_cache_spec.unpadded_page_size_bytes
-                    and kv_caches[layer_name].shape[0] != num_blocks
-                ):
-                    raise NotImplementedError(
-                        "KV offloading does not support padded KV pages split "
-                        f"into kernel blocks (layer {layer_name}). Use an "
-                        "attention backend that takes the full block size."
-                    )
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size
                 # Packed layouts (e.g. DSv4) interleave layers per block, so the
@@ -144,6 +163,12 @@ class OffloadingConnectorWorker:
                     ).page_size_bytes
                 else:
                     raise NotImplementedError
+                kernel_blocks_per_page[layer_name] = (
+                    kv_caches[layer_name].shape[0] // num_blocks
+                    if isinstance(layer_kv_cache_spec, AttentionSpec)
+                    and page > unpadded_page_size_bytes[layer_name]
+                    else 1
+                )
 
         # Packed layouts (e.g. DSv4) interleave all layers within each manager
         # block: a layer view's block stride exceeds its page size. Offload the
@@ -209,13 +234,23 @@ class OffloadingConnectorWorker:
                         or mapping.local_page_size_bytes
                         == unpadded_page_size_bytes[layer_name]
                     )
-                    block_data_refs[layer_name].append(
-                        CanonicalKVCacheRef(
-                            tensor_idx=curr_tensor_idx,
-                            page_size_bytes=(unpadded_page_size_bytes[layer_name]),
-                            mapping=mapping,
+                    num_kernel_blocks = kernel_blocks_per_page[layer_name]
+                    payload = unpadded_page_size_bytes[layer_name] // num_kernel_blocks
+                    stride = page_size_bytes[layer_name] // num_kernel_blocks
+                    # Each kernel block has its own trailing padding.
+                    for i in range(num_kernel_blocks):
+                        block_data_refs[layer_name].append(
+                            CanonicalKVCacheRef(
+                                tensor_idx=curr_tensor_idx,
+                                page_size_bytes=payload,
+                                mapping=(
+                                    _slice_page_mapping(mapping, i * payload, payload)
+                                    if num_kernel_blocks > 1
+                                    else mapping
+                                ),
+                                byte_offset=i * stride,
+                            )
                         )
-                    )
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
         for kv_cache_group in selected_groups:

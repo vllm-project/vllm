@@ -670,6 +670,8 @@ class CanonicalKVCacheRef:
     page_size_bytes: int
     # How this worker's page maps into a canonical page; None = uncertified
     mapping: CanonicalPageMapping | None = None
+    # Start of this reference within a physical device or direct-layout CPU page.
+    byte_offset: int = 0
 
 
 @dataclass(slots=True)

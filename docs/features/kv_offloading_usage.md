@@ -15,6 +15,9 @@ Three specs are available, selected by the `spec_name` key in `kv_connector_extr
 
 Within `TieringOffloadingSpec`, only the CPU primary tier has direct GPU access. Secondary tiers cannot read from or write to GPU memory; all GPU↔secondary transfers are staged through the CPU primary tier.
 
+Padded GPU pages split into smaller attention-kernel blocks are supported;
+offloading copies each kernel block's payload while skipping its padding.
+
 ```mermaid
 flowchart LR
     GPU <--> CPU["CPU primary tier"]

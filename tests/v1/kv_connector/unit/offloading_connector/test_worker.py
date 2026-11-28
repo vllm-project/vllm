@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from typing import cast
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 import torch
@@ -677,10 +679,19 @@ def test_register_packed_kv_caches_skips_scratch_group():
     assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, 2 * page)]]
 
 
-def test_register_split_padded_pages_raises():
-    """Offloading reads each page's payload from its start, which a padded page
-    split into kernel blocks does not keep: its padding sits after every
-    kernel block."""
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.LBHNC])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Requires GPU offloading",
+)
+def test_split_padded_pages_roundtrip(layout, dist_init):
+    """Restore every kernel block's data across the gaps in a padded page."""
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+        OffloadingConnectorWorker,
+    )
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
     from vllm.v1.worker.utils import allocate_kv_cache
 
     unpadded = AttentionSpec(
@@ -711,12 +722,45 @@ def test_register_split_padded_pages_raises():
     kv_caches = allocate_kv_cache(
         kv_cache_config,
         torch.device(f"{DEVICE_TYPE}:0"),
-        KVCacheLayout.LBNHC,
+        layout,
         [BLOCK_SIZE],
     )
-    worker, _ = _make_worker(kv_cache_config)
-    with pytest.raises(NotImplementedError, match="split into kernel blocks"):
+    base_config = _offloading_config()
+    offload_config = replace(
+        base_config,
+        worker_kv_bytes_per_block=spec.page_size_bytes,
+        extra_config={"cpu_bytes_to_use": 32 * spec.page_size_bytes},
+        engine_id=uuid4().hex,
+        parallel=replace(base_config.parallel, world_size=1, tp_size=1),
+    )
+    worker = OffloadingConnectorWorker(
+        CPUOffloadingSpec(offload_config), create_vllm_config(), kv_cache_config
+    )
+    cache = kv_caches["layer0"]
+    torch.manual_seed(0)
+    cache.copy_(torch.randn_like(cache))
+    expected = cache.clone()
+    gpu = GPULoadStoreSpec(
+        list(range(NUM_BLOCKS)), group_sizes=(NUM_BLOCKS,), block_indices=(0,)
+    )
+    cpu = CPULoadStoreSpec(list(range(NUM_BLOCKS)))
+    try:
         worker.register_kv_caches(kv_caches)
+        assert worker.worker is not None
+        worker.prepare_store_kv(
+            OffloadingConnectorMetadata({}, {1: TransferJob("req", gpu, cpu)})
+        )
+        worker.start_kv_transfers(_empty_metadata())
+        worker.worker.wait({1})
+        worker.get_finished(set())
+        cache.zero_()
+        worker.start_kv_transfers(
+            OffloadingConnectorMetadata({2: TransferJob("req", cpu, gpu)}, {})
+        )
+        worker.worker.wait({2})
+        assert torch.equal(cache, expected)
+    finally:
+        worker.shutdown()
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
