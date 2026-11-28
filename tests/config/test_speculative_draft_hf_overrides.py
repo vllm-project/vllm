@@ -156,6 +156,76 @@ def test_dspark_width_is_independent_of_mtp_stages(
     assert config.draft_model_config.hf_config.architectures == [architecture]
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "case", ["embedded", "independent", "different_revision", "explicit_quantization"]
+)
+def test_dspark_online_targets(tmp_path, case):
+    """Only an embedded draft following the target policy requantizes its experts."""
+    from vllm.config import LoadConfig
+    from vllm.config.quantization import resolve_quantization_config
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PerBlockOnlineMoEMethod,
+    )
+    from vllm.model_executor.model_loader.weight_utils import get_quant_config
+
+    config = {
+        "architectures": ["DeepseekV41ForCausalLM"],
+        "model_type": "deepseek_v41",
+        "dtype": "bfloat16",
+        "quantization_config": {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [32, 32],
+            "scale_fmt": "ue8m0",
+            "expert_dtype": "fp4",
+        },
+        "text_config": {
+            "num_hidden_layers": 4,
+            "hidden_size": 512,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "vocab_size": 1024,
+            "max_position_embeddings": 1024,
+            "num_nextn_predict_layers": 1,
+            "dspark_block_size": 5,
+        },
+    }
+    for name in ("target", "independent"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "config.json").write_text(json.dumps(config))
+    target = ModelConfig(
+        model=str(tmp_path / "target"),
+        skip_tokenizer_init=True,
+        revision="target-revision",
+        dtype="bfloat16",
+        quantization_config=resolve_quantization_config(
+            None, {"targets": {"*ffn.experts*": "fp8_per_block"}}
+        ),
+    )
+    spec = SpeculativeConfig(
+        method="dspark",
+        model=str(tmp_path / "independent") if case == "independent" else None,
+        revision="another" if case == "different_revision" else None,
+        quantization=target.quantization if case == "explicit_quantization" else None,
+        num_speculative_tokens=5,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft = spec.draft_model_config
+    online = get_quant_config(draft, LoadConfig()).online_quantization_config
+    if case == "embedded":
+        assert online is not None
+        selected = online.resolve_quant_method_cls(
+            RoutedExperts, "model.layers.4.ffn.experts"
+        )
+        assert selected is not None and selected[-1] is Fp8PerBlockOnlineMoEMethod
+    else:
+        assert online is None
+
+
 def _make_minimax_dspark_hf_kwargs() -> dict:
     return dict(
         model_type="minimax_m3_vl",

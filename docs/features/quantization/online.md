@@ -177,6 +177,7 @@ Currently supported combinations are:
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized FP8 MoE with dynamic activation quantization (`fp8`, compressed-tensors, Quark; per-tensor, per-channel or block weight scales) | any online MoE method | Target-specific hardware requirements |
+| Serialized MXFP4 MoE (`Mxfp4MoEMethod`, e.g. DeepSeek-V4.1-Flash experts) | any online MoE method | Target-specific hardware requirements |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
@@ -208,6 +209,30 @@ vllm serve ricursiveAI/Ripple-65B-Preview-NVFP4 \
 Unconverted checkpoint-quantized layers require native support for their
 checkpoint format. NVFP4-to-MXFP4 conversion can reduce accuracy; validate it
 per model or consider MXFP8 for dense and attention linears.
+
+MXFP4 MoE checkpoints can be re-quantized to block FP8 in the same way, for
+example to run DeepSeek-V4.1-Flash on AITER's block-FP8 MoE kernels on ROCm
+gfx942:
+
+```bash
+VLLM_ROCM_USE_AITER=1 vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+  --tensor-parallel-size 8 --moe-backend aiter \
+  --quantization-config '{"targets":{"*ffn.experts*":"fp8_per_block"}}'
+```
+
+From an MXFP4 source, `fp8_per_block` keeps power-of-two block scales. The
+conversion is then exact when the E8M0 scales within each 128×128 block of a
+tensor-parallel shard span a factor of at most 2^14, which holds for every
+routed expert of DeepSeek-V4.1-Flash-1017 with a tensor parallel size of 1, 2,
+4 or 8. In other blocks the smallest values are rounded. The expert weights
+take twice the memory (8 instead of 4 bits per value).
+
+DeepSeek-V4.1 clamps its SwiGLU (`swiglu_limit`). AITER's block-FP8 MoE
+kernels apply such a clamp from AITER v0.1.30
+([ROCm/aiter#7019](https://github.com/ROCm/aiter/pull/7019)); with an older
+AITER, vLLM raises an error when it builds the model, before loading the
+weights. Exact expert-weight conversion alone does not ensure identical model
+outputs.
 
 !!! info
 

@@ -259,7 +259,13 @@ class DeepseekV4FP8Config(Fp8Config):
             from vllm.model_executor.layers.quantization.modelopt import CkptCtx
 
             rows, cols = self.weight_block_size
-            return _mxfp8_linear_method_cls()(
+            method_cls = _mxfp8_linear_method_cls()
+            if current_platform.is_rocm() and self.online_quantization_config:
+                from .amd.fp8_dense import Bf16EmulatedLinearMethod
+
+                if Bf16EmulatedLinearMethod.matches(self.online_quantization_config):
+                    method_cls = Bf16EmulatedLinearMethod
+            return method_cls(
                 QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic),
                 CkptCtx(scale_block_size=(rows, cols)),
             )

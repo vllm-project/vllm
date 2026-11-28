@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -802,6 +803,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         a1_scale = layer.w13_input_scale
         a2_scale = layer.w2_input_scale
+
+        if (
+            self.block_quant
+            and self.moe_block_shape == [128, 128]
+            and self.fp8_backend == Fp8MoeBackend.AITER
+            and self.moe.tp_shard_with_padding
+        ):
+            from vllm.model_executor.model_loader.reload.layerwise import (
+                get_layerwise_info,
+            )
+
+            # After processing, layerwise reload copies the temporary results
+            # back into the original parameters and reinstalls them on the layer.
+            # AITER retains scale references in its runtime quantization config.
+            saved = get_layerwise_info(layer).kernel_tensors
+            if saved is not None:
+                parameters, _ = saved
+                w1_scale = parameters[f"w13_{self.weight_scale_name}"]
+                w2_scale = parameters[f"w2_{self.weight_scale_name}"]
 
         quant_config = make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,

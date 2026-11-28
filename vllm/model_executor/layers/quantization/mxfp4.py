@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Iterator
 
 import torch
 
@@ -38,6 +39,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequantize_mxfp4_moe_weights,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -649,6 +653,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
     supports_pre_processed_weights = True
+    power_of_two_weight_scales = True
 
     def __init__(self, moe: FusedMoEConfig, activation_key: QuantKey | None = None):
         super().__init__(moe)
@@ -1029,6 +1034,19 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 routing_tables=layer._expert_routing_tables(),
             )
             self.moe_kernel.fused_experts.keep_constants(layer)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized MXFP4 experts, for online
+        requantization."""
+        return dequantize_mxfp4_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            out_dtype=layer.orig_dtype,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:

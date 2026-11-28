@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
@@ -112,6 +114,31 @@ def _fp8_quant_per_channel(weight: torch.Tensor, scale: torch.Tensor) -> torch.T
         rows = slice(start, start + chunk_rows)
         out[rows] = (weight[rows] / scale[rows]).clamp_(fp8_min, fp8_max).to(out.dtype)
     return out
+
+
+def _per_block_cast_to_fp8_pow2(
+    x: torch.Tensor, block_size: list[int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Block-quantize a 2D weight to FP8 with power-of-two scales.
+
+    Values with power-of-two group scales, such as MXFP4, stay exact when the
+    exponents within a block span no more than the FP8 format.
+    """
+    fp8_dtype = current_platform.fp8_dtype()
+    _, fp8_max = get_fp8_min_max()
+    m, n = x.shape
+    block_m, block_n = block_size
+    padded = x.new_zeros(
+        round_up(m, block_m), round_up(n, block_n), dtype=torch.float32
+    )
+    padded[:m, :n] = x
+    blocks = padded.view(padded.shape[0] // block_m, block_m, -1, block_n)
+    amax = blocks.abs().amax(dim=(1, 3), keepdim=True)
+    # amax / scale = mantissa * fp8_max with mantissa in [0.5, 1).
+    _, exponent = torch.frexp(amax / fp8_max)
+    scale = torch.where(amax > 0, torch.ldexp(torch.ones_like(amax), exponent), 1.0)
+    quantized = (blocks / scale).to(fp8_dtype).view_as(padded)[:m, :n]
+    return quantized.contiguous(), scale.view(blocks.shape[0], blocks.shape[2])
 
 
 def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
@@ -767,6 +794,8 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
     """Online blockwise FP8 MoE quantization.
     Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
+    _whole_tp_blocks: bool = False
+
     def __init__(
         self,
         *,
@@ -775,6 +804,115 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         super().__init__(
             weight_block_size=[128, 128],
             moe=moe,
+        )
+
+    def create_weights(self, layer: RoutedExperts, *args, **kwargs):
+        from vllm.config import get_current_vllm_config_or_none
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+        from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+        from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+
+        cfg = get_current_vllm_config_or_none()
+        moe = layer.moe_config
+        self._whole_tp_blocks = False
+        if (
+            current_platform.is_rocm()
+            and self.fp8_backend == Fp8MoeBackend.AITER
+            and isinstance(self.requantization_source, Mxfp4MoEMethod)
+            and moe.moe_backend == "aiter"
+            and cfg is not None
+            and cfg.model_config is not None
+            and cfg.model_config.hf_config.model_type
+            in ("deepseek_v41", "deepseek_v41_text")
+            and (moe.hidden_dim_unpadded, moe.intermediate_size) == (5120, 2304)
+            and (moe.tp_size, moe.dp_size, moe.ep_size) == (8, 1, 1)
+            and moe.intermediate_size_per_partition_unpadded == 288
+            and moe.intermediate_size_per_partition == 384
+            and not cfg.parallel_config.enable_expert_parallel
+            and not cfg.kernel_config.monokernel
+            and not moe.has_bias
+            and not moe.is_lora_enabled
+            and not layer.expert_map_manager.num_fused_shared_experts
+            and not direct_reload_enabled()
+        ):
+            from vllm.platforms.rocm import on_gfx942
+
+            self._whole_tp_blocks = on_gfx942()
+            if self._whole_tp_blocks:
+                # The standard loader uses the destination width in checkpoint
+                # units (rows, packed nibbles or scale groups) for each rank.
+                moe.tp_shard_with_padding = True
+        return super().create_weights(layer, *args, **kwargs)
+
+    def _source_intermediate_width(self, layer: RoutedExperts) -> int:
+        if self._whole_tp_blocks:
+            # The TP loader already zero-filled the missing checkpoint blocks.
+            # Zeroing every rank's 288:384 tail would erase live channels.
+            return layer.moe_config.intermediate_size_per_partition
+        return super()._source_intermediate_width(layer)
+
+    def set_requantization_source(self, source_method: "QuantizeMethodBase") -> None:
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+        from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+        if (
+            self.fp8_backend == Fp8MoeBackend.AITER
+            and isinstance(source_method, Mxfp4MoEMethod)
+            and self.moe.activation == MoEActivation.SILU
+            and (limit := self.moe.swiglu_limit) is not None
+            and 0 < limit < float("inf")
+        ):
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if not rocm_aiter_ops.supports_fp8_block_silu_limit():
+                raise ValueError(
+                    f"MXFP4 to block FP8 with swiglu_limit={limit} requires AITER "
+                    "v0.1.30 or newer for FP8 blockscale SiLU clamping "
+                    "(ROCm/aiter#7019). Upgrade AITER or remove this online "
+                    "quantization target."
+                )
+        super().set_requantization_source(source_method)
+
+    def _setup_kernel(
+        self,
+        layer: RoutedExperts,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> None:
+        if not self._whole_tp_blocks:
+            return super()._setup_kernel(
+                layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+            )
+
+        from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
+
+        # The converted shard is already device-native FP8. Enter the serialized
+        # loader immediately after its FN-to-FNUZ normalization, before shuffle.
+        runtime = Fp8MoEMethod(
+            Fp8Config(weight_block_size=self.weight_block_size), layer
+        )
+        if (
+            runtime.fp8_backend != self.fp8_backend
+            or runtime.experts_cls is not self.experts_cls
+        ):
+            raise ValueError("Converted FP8 experts selected a different backend")
+        runtime._setup_kernel(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
+        )
+        # Keep this object's source-weight loader for future reloads. Inference
+        # uses exactly the checkpoint method's kernel, quant config and bound
+        # entry points, including its input-scale protocol.
+        self.moe_kernel = runtime.moe_kernel
+        self.moe_quant_config = runtime.moe_quant_config
+        self.accepts_quantized_input = runtime.accepts_quantized_input
+        self.apply = runtime.apply  # type: ignore[method-assign]
+        self.apply_monolithic = (  # type: ignore[method-assign]
+            runtime.apply_monolithic
         )
 
     def maybe_roundup_sizes(
@@ -801,6 +939,51 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        if self._whole_tp_blocks:
+            from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+                repack_mxfp4_fnuz_checkpoint_blocks,
+            )
+
+            # This placement has six complete and two empty TP partitions.
+            moe = layer.moe_config
+            empty = (
+                moe.tp_rank * moe.intermediate_size_per_partition
+                >= moe.intermediate_size
+            )
+            w13, w13_scale = repack_mxfp4_fnuz_checkpoint_blocks(
+                layer.w13_weight, layer.w13_weight_scale, empty_partition=empty
+            )
+            w2, w2_scale = repack_mxfp4_fnuz_checkpoint_blocks(
+                layer.w2_weight, layer.w2_weight_scale, empty_partition=empty
+            )
+        else:
+            w13, w2, w13_scale, w2_scale = self._quantize_loaded_weights(layer)
+
+        layer.weight_block_size = self.weight_block_size
+
+        # Activation quantization is dynamic (including in re-quantization)
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+
+        # Shuffle weights to runtime format and setup kernel.
+        self._setup_kernel(
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        self.release_requantization_source_weights(layer)
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
+    def _quantize_loaded_weights(
+        self, layer: Module
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the block-FP8 `(w13, w2, w13_scale, w2_scale)` of the layer."""
         w13_weight, w2_weight = self.get_weights_for_quantization(layer)
         self._zero_padding(layer, w13_weight, w2_weight)
 
@@ -833,38 +1016,16 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             device=w2.device,
         )
 
-        for expert in range(num_experts):
-            w13[expert], w13_scale[expert] = per_block_cast_to_fp8(
-                w13_weight[expert],
-                block_size=block_size,
-                use_ue8m0=False,
-            )
-            w2[expert], w2_scale[expert] = per_block_cast_to_fp8(
-                w2_weight[expert],
-                block_size=block_size,
-                use_ue8m0=False,
-            )
-
-        layer.weight_block_size = block_size
-
-        # Activation quantization is dynamic (including in re-quantization)
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
-
-        # Shuffle weights to runtime format and setup kernel.
-        self._setup_kernel(
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            w13_input_scale=None,
-            w2_input_scale=None,
+        cast = (
+            _per_block_cast_to_fp8_pow2
+            if getattr(self.requantization_source, "power_of_two_weight_scales", False)
+            else partial(per_block_cast_to_fp8, use_ue8m0=False)
         )
-        self.release_requantization_source_weights(layer)
+        for expert in range(num_experts):
+            w13[expert], w13_scale[expert] = cast(w13_weight[expert], block_size)
+            w2[expert], w2_scale[expert] = cast(w2_weight[expert], block_size)
 
-        # Prevent duplicate processing (e.g., during weight reload)
-        layer._already_called_process_weights_after_loading = True
+        return w13, w2, w13_scale, w2_scale
 
 
 class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):

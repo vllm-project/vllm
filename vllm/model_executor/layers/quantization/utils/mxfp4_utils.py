@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from typing import Any
 
 import torch
@@ -550,3 +551,136 @@ def mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     quant_tensor, scale, _ = downcast_to_mxfp(x, axis=-1)
 
     return quant_tensor, scale
+
+
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+_DEQUANT_CHUNK_BYTES = 1 << 30
+
+
+def dequantize_mxfp4_weight(
+    weight: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
+) -> torch.Tensor:
+    """Dequantize OCP MXFP4 weights exactly.
+
+    Args:
+        weight: `[..., N, K // 2]` packed E2M1 values, low nibble first.
+        scale: `[..., N, K // 32]` E8M0 scales.
+        out_dtype: The dequantized dtype. bf16 and fp32 hold every value within
+            their range exactly.
+
+    Returns:
+        `[..., N, K]` values, with negative zero mapped to positive zero.
+
+    """
+    exponent = scale.view(torch.uint8)
+    if (exponent == 255).any():
+        raise ValueError("MXFP4 weights have NaN (0xFF) E8M0 scales.")
+    compute_dtype = torch.float64 if out_dtype == torch.float64 else torch.float32
+    lut = torch.tensor(_E2M1_VALUES, dtype=compute_dtype, device=weight.device)
+    lut = torch.cat((lut, -lut))
+    lut[8] = 0.0
+    raw = weight.view(torch.uint8)
+    codes = torch.stack((raw & 0xF, raw >> 4), dim=-1).flatten(-2)
+    values = lut[codes.long()].unflatten(-1, (-1, 32))
+    factor = torch.ldexp(
+        torch.ones_like(values[..., :1]), exponent.int().unsqueeze(-1) - 127
+    )
+    return (values * factor).flatten(-2).to(out_dtype)
+
+
+def repack_mxfp4_fnuz_checkpoint_blocks(
+    weight: torch.Tensor, scale: torch.Tensor, *, empty_partition: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Repack MXFP4 experts into 128x128 block FP8 (e4m3fnuz) without rounding.
+
+    Each block scale comes from the largest E8M0 scale of the block, and the
+    result goes through the ROCm FN-to-FNUZ normalization of the FP8 loader.
+
+    Args:
+        weight: `[E, N, K // 2]` packed E2M1 values, N and K multiples of 128.
+        scale: `[E, N, K // 32]` E8M0 scales.
+        empty_partition: Whether this TP rank holds no checkpoint block.
+
+    Returns:
+        The `[E, N, K]` e4m3fnuz weights and `[E, N // 128, K // 128]` fp32
+        power-of-two block scales.
+
+    Raises:
+        ValueError: If a value is not representable with its block scale.
+
+    """
+    from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+        normalize_e4m3fn_to_e4m3fnuz,
+    )
+
+    experts, rows, packed_cols = weight.shape
+    cols = 2 * packed_cols
+    grid = (rows // 128, 128, cols // 128, 128)
+    encoded = torch.zeros(
+        (experts, rows, cols), dtype=torch.float8_e4m3fn, device=weight.device
+    )
+    factors = torch.ones(
+        (experts, rows // 128, cols // 128), dtype=torch.float32, device=weight.device
+    )
+    # Offline loading fills an absent FP8 block with zeros and unit FN scales.
+    if not empty_partition:
+        for expert in range(experts):
+            src_scale = scale[expert].view(torch.uint8)
+            ref = dequantize_mxfp4_weight(
+                weight[expert], src_scale, torch.float64
+            ).view(grid)
+            # The published converter uses the source E8M0 scale maximum,
+            # including groups whose payload is entirely zero.
+            max_exp = src_scale.view(rows // 128, 128, cols // 128, 4).amax((1, 3))
+            factor = torch.ldexp(
+                torch.ones_like(max_exp, dtype=torch.float64),
+                max_exp.int() - (127 + 6),
+            )
+            expanded = factor[:, None, :, None]
+            codes = (ref / expanded).to(torch.float8_e4m3fn)
+            if not torch.equal(codes.double() * expanded, ref):
+                raise ValueError(
+                    "MXFP4 expert cannot be represented exactly in block FP8"
+                )
+            encoded[expert] = codes.reshape(rows, cols)
+            factors[expert] = factor.float()
+    fnuz, factors, _ = normalize_e4m3fn_to_e4m3fnuz(encoded, factors)
+    return fnuz, factors
+
+
+def dequantize_mxfp4_moe_weights(
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Dequantize MXFP4 MoE weights for online requantization.
+
+    Args:
+        w13_weight: `[E, num_w13_shards * I, K // 2]` packed E2M1 values.
+        w13_scale: `[E, num_w13_shards * I, K // 32]` E8M0 scales.
+        w2_weight: `[E, K, I // 2]` packed E2M1 values.
+        w2_scale: `[E, K, I // 32]` E8M0 scales.
+        out_dtype: The dequantized dtype.
+
+    Returns:
+        An iterator of `(experts, w13, w2)` over groups of experts, bounding the
+        staging memory.
+
+    """
+    num_experts = w13_weight.shape[0]
+    # int64 codes, fp32 values and the `out_dtype` result per unpacked value.
+    expert_bytes = (
+        2
+        * (w13_weight[0].numel() + w2_weight[0].numel())
+        * (8 + 4 + out_dtype.itemsize)
+    )
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        yield (
+            experts,
+            dequantize_mxfp4_weight(w13_weight[experts], w13_scale[experts], out_dtype),
+            dequantize_mxfp4_weight(w2_weight[experts], w2_scale[experts], out_dtype),
+        )

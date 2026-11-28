@@ -27,6 +27,9 @@ logger = init_logger(__name__)
 
 class FusedMoEMethodBase(QuantizeMethodBase):
     accepts_quantized_input: bool = False
+    # Serialized weight scales are powers of two (e.g. E8M0), so online
+    # requantization can keep power-of-two scales and stay exact.
+    power_of_two_weight_scales: bool = False
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
