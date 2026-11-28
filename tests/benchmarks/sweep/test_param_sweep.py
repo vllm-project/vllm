@@ -2,16 +2,117 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import tempfile
+from argparse import BooleanOptionalAction
 from pathlib import Path
 
 import pytest
 
 from vllm.benchmarks.sweep import serve as sweep_serve
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep, ParameterSweepItem
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class TestParameterSweepItem:
     """Test ParameterSweepItem functionality."""
+
+    @pytest.mark.parametrize("value", [True, False])
+    @pytest.mark.parametrize("prefix", ["compilation-config", "compilation_config"])
+    @pytest.mark.parametrize("inline", [True, False])
+    def test_override_nested_boolean_is_parseable(self, value, prefix, inline):
+        """Replacing a dotted boolean must consume its old value as well."""
+        key = f"--{prefix}.use_inductor_graph_partition"
+        old_value = "false" if value else "true"
+        original = [f"{key}={old_value}"] if inline else [key, old_value]
+        original += ["--port", "8000"]
+        item = ParameterSweepItem(
+            {"compilation_config.use_inductor_graph_partition": value}
+        )
+        cmd = item.apply_to_cmd(original)
+        parser = FlexibleArgumentParser()
+        parser.add_argument("--compilation-config", type=json.loads)
+        parser.add_argument("--port", type=int)
+
+        args = parser.parse_args(cmd)
+
+        assert args.compilation_config == {"use_inductor_graph_partition": value}
+        assert args.port == 8000
+        assert len(cmd) == 3
+
+    @pytest.mark.parametrize(
+        "original",
+        [
+            ["--compilation-config.cudagraph_capture_sizes=[8,16]"],
+            [
+                "--compilation-config.cudagraph_capture_sizes+",
+                "8",
+                "--compilation_config.cudagraph_capture_sizes+=16",
+            ],
+        ],
+    )
+    def test_override_nested_list(self, original):
+        """The parser must not concatenate stale and swept capture sizes."""
+        item = ParameterSweepItem(
+            {"compilation_config.cudagraph_capture_sizes": [32, 64]}
+        )
+        parser = FlexibleArgumentParser()
+        parser.add_argument("--compilation-config", type=json.loads)
+
+        args = parser.parse_args(item.apply_to_cmd(original))
+
+        assert args.compilation_config == {"cudagraph_capture_sizes": [32, 64]}
+
+    @pytest.mark.parametrize(
+        "params,option",
+        [
+            ({"max_tokens": 300}, "--max-tokens"),
+            (
+                {"compilation_config.use_inductor_graph_partition": True},
+                "--compilation-config.use_inductor_graph_partition",
+            ),
+            (
+                {"compilation_config.cudagraph_capture_sizes": [32, 64]},
+                "--compilation-config.cudagraph_capture_sizes+",
+            ),
+        ],
+    )
+    def test_missing_override_value_names_the_option(self, params, option):
+        """Malformed base commands should identify the option missing a value."""
+        with pytest.raises(ValueError) as exc_info:
+            ParameterSweepItem(params).apply_to_cmd(["vllm", "serve", option])
+
+        assert (
+            str(exc_info.value) == f"Missing value for command-line option {option!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "original",
+        [
+            ["--max-tokens", "100", "--max-tokens", "200"],
+            ["--max_tokens=100", "--max-tokens", "200"],
+            ["--max-tokens", "100", "--max_tokens=200"],
+        ],
+    )
+    def test_override_all_occurrences(self, original):
+        """A later base-command value must not defeat the sweep value."""
+        cmd = ParameterSweepItem({"max_tokens": 300}).apply_to_cmd(original)
+        parser = FlexibleArgumentParser()
+        parser.add_argument("--max-tokens", type=int)
+
+        assert parser.parse_args(cmd).max_tokens == 300
+        assert cmd == ["--max-tokens", "300"]
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_override_both_boolean_polarities(self, value):
+        """Positive and negative flags refer to the same sweep parameter."""
+        original = ["--enable-prefix-caching", "--no-enable-prefix-caching"]
+        cmd = ParameterSweepItem({"enable_prefix_caching": value}).apply_to_cmd(
+            original
+        )
+        parser = FlexibleArgumentParser()
+        parser.add_argument("--enable-prefix-caching", action=BooleanOptionalAction)
+
+        assert parser.parse_args(cmd).enable_prefix_caching is value
+        assert len(cmd) == 1
 
     @pytest.mark.parametrize(
         "input_dict,expected",
