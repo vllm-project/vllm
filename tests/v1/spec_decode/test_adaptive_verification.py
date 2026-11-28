@@ -18,7 +18,9 @@ from vllm.v1.worker.gpu.async_utils import StepTimingSample
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_module
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
+    UndraftedConfidence,
     assign_draft_token_budget,
+    fill_undrafted,
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
@@ -40,6 +42,8 @@ def make_manager(
     manager.cost_tables = (np.zeros(num_reqs + 1), verify_cost_ms)
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
+    manager._undrafted = None
+    manager.draft_stop_params = None
     return manager
 
 
@@ -341,6 +345,120 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     assert draft_budget == 1
     assert valid_drafts == {"low": 2, "high": 2}
     assert num_non_draft_tokens == {"low": 1, "high": 1}
+
+
+def test_draft_stop_params_price_one_draft_position(monkeypatch):
+    """With draft early exit, each step hands the drafter the tokens one more draft
+    position must add (the drafter's cost over k, at the step's best tokens per ms)
+    and the draft budget."""
+    verify_cost_ms = np.array([1.0, 1.0, 1.0, 1.0, 100.0, 100.0, 100.0])
+    manager = make_manager(
+        np.array([[0.1, 0.1], [0.9, 0.9]], dtype=np.float32), verify_cost_ms
+    )
+    manager.cost_tables = (np.array([0.0, 0.3, 0.6]), verify_cost_ms)
+    manager._confidence_probs = torch.tensor([[0.1, 0.1], [0.9, 0.9]])
+    manager._batch_draft_capacity = torch.empty(2, dtype=torch.int32)
+    manager._num_non_draft_tokens = torch.empty(2, dtype=torch.int32)
+    manager._cu_num_logits = torch.empty(3, dtype=torch.int32)
+    manager.query_start_loc = torch.empty(3, dtype=torch.int32)
+    manager._draft_survival = None
+    manager._copy_admitted_drafts_to_host = False
+    manager.draft_stop_params = torch.zeros(2)
+    monkeypatch.setattr(
+        adaptive_module,
+        "async_tensor_h2d",
+        lambda array, *, out: out.copy_(torch.from_numpy(array)),
+    )
+    monkeypatch.setattr(
+        adaptive_module,
+        "assign_draft_token_budget",
+        lambda probs, idx_mapping, capacities, budget, survival: capacities.copy_(
+            global_topk_budget(probs, idx_mapping, capacities, budget)
+        ),
+    )
+
+    manager.get_num_tokens({"low": 3, "high": 3}, {"low": [1, 2], "high": [3, 4]})
+    manager.reallocate_drafts(["low", "high"], torch.arange(2))
+
+    # One draft (survival 0.9) is verified: 2.9 tokens in 0.6 + 1.0 ms.
+    tokens_per_ms = 2.9 / 1.6
+    assert manager.draft_stop_params.tolist() == pytest.approx(
+        [0.6 / 2 * tokens_per_ms, 1.0]
+    )
+
+
+def test_budget_estimates_positions_a_stopped_drafter_skipped():
+    """Positions a drafter that stopped early did not draft hold confidence 0, which
+    would never be verified; with draft early exit, budgets read estimates there."""
+    manager = make_manager(
+        np.array([[0.9, 0.0], [0.9, 0.0]], dtype=np.float32), np.ones(8)
+    )
+    num_tokens, drafts = {"low": 3, "high": 3}, {"low": [1, 2], "high": [3, 4]}
+    manager.get_num_tokens(num_tokens, drafts)
+    assert manager._batch_budget is not None
+    assert manager._batch_budget[2] == 2
+
+    manager._undrafted = UndraftedConfidence(max_num_reqs=2, num_steps=2)
+    num_drafted = SimpleNamespace(np=np.array([1, 1], dtype=np.int32))
+    manager._stale_num_drafted = [num_drafted]  # type: ignore[list-item]
+    manager.get_num_tokens(num_tokens, drafts)
+    assert manager._batch_budget is not None
+    assert manager._batch_budget[2] == 4
+
+
+def test_undrafted_confidence_averages_drafted_positions():
+    """Per slot and position, the mean confidence over the proposals that drafted the
+    position, shrunk towards the mean over all slots; a reset forgets the slot."""
+    estimates = UndraftedConfidence(max_num_reqs=2, num_steps=3)
+    confidences = np.array([[0.8, 0.6, 0.4], [0.2, 0.9, 0.7]])
+    estimates.update(confidences, np.array([2, 3], dtype=np.int32), np.arange(2))
+
+    # Each position's population mean starts from one pseudo-observation of 0.5.
+    population = np.array([1.5 / 3, 2.0 / 3, 1.2 / 2])
+    prior = estimates.PRIOR_COUNT * population
+    expected = (np.array([0.8, 0.6, 0.0]) + prior) / (np.array([1, 1, 0]) + 20.0)
+    assert estimates.mean(np.array([0]))[0] == pytest.approx(expected)
+    estimates.reset(0)
+    assert estimates.mean(np.array([0]))[0] == pytest.approx(population)
+
+
+def test_fill_undrafted_replaces_positions_past_each_draft_count():
+    confidences = np.array([[0.9, 0.8, 0.7], [0.6, 0.5, 0.4]])
+    filled = fill_undrafted(confidences, np.array([1, 3]), np.full((2, 3), 0.1))
+    assert filled.tolist() == [[0.9, 0.1, 0.1], [0.6, 0.5, 0.4]]
+
+
+@pytest.mark.skipif(
+    not torch.accelerator.is_available(), reason="needs an accelerator device"
+)
+def test_undrafted_estimates_fold_the_oldest_step_drafted_positions() -> None:
+    """With 3 batches in flight, a step's confidences enter the estimates when
+    budgets start reading them, at the positions each slot drafted."""
+    accelerator = torch.accelerator.current_accelerator()
+    assert accelerator is not None
+    device = torch.device(accelerator.type, torch.accelerator.current_device_index())
+    req_states = SimpleNamespace(device=device, num_speculative_steps=2, max_num_reqs=2)
+    manager = AdaptiveVerificationManager(
+        req_states,
+        torch.zeros(3, dtype=torch.int32, device=device),
+        num_bonus_tokens=1,
+        max_total_logits=16,
+        max_concurrent_batches=3,
+    )
+    num_drafted = torch.tensor([1, 2], dtype=torch.int32, device=device)
+    manager.enable_draft_early_exit(num_drafted, torch.zeros(2, device=device))
+    batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=torch.arange(2, device=device),
+        idx_mapping_np=np.arange(2),
+    )
+    probs = torch.tensor([[0.8, 0.0], [0.6, 0.4]], device=device)
+    for _ in range(3):
+        manager.record_confidences(probs, batch)  # type: ignore[arg-type]
+
+    assert manager._undrafted is not None
+    assert manager._undrafted.counts.tolist() == [[1, 0], [1, 1]]
+    assert manager._stale_num_drafted[manager._stale_idx].np.tolist() == [1, 2]
 
 
 def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):

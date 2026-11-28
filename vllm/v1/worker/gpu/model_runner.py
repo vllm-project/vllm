@@ -174,6 +174,9 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
+    AutoRegressiveSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
@@ -774,6 +777,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
         )
+        early_exit_speculator = self._draft_early_exit_speculator()
+        if self.adaptive_verification is not None and early_exit_speculator is not None:
+            self.adaptive_verification.enable_draft_early_exit(
+                early_exit_speculator.num_drafted_per_req,
+                early_exit_speculator.draft_stop_params,
+            )
 
         self.block_tables = BlockTables(
             block_sizes=[g.block_size for g in kv_cache_groups],
@@ -1792,11 +1801,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
+            early_exit_speculator = self._draft_early_exit_speculator()
             sampler_output = self.rejection_sampler(
                 logits,
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                num_drafts=(
+                    early_exit_speculator.num_drafted_per_req
+                    if early_exit_speculator is not None
+                    else None
+                ),
             )
 
         if shard_metadata is not None:
@@ -2456,6 +2471,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if num_spec_tokens < self.num_speculative_steps:
                 draft_tokens[:, num_spec_tokens:] = -1
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            early_exit_speculator = self._draft_early_exit_speculator()
+            if early_exit_speculator is not None:
+                early_exit_speculator.store_num_drafted(
+                    input_batch.idx_mapping, num_spec_tokens
+                )
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
@@ -2490,10 +2510,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
         # -1 marks a draft slot without a draft token.
         num_drafted = (draft_tokens != -1).sum(dim=-1)
+        early_exit_speculator = self._draft_early_exit_speculator()
+        if early_exit_speculator is not None:
+            # Slots past an early drafting stop keep older draft tokens.
+            num_drafted = torch.minimum(
+                num_drafted,
+                early_exit_speculator.num_drafted_per_req[input_batch.idx_mapping].to(
+                    num_drafted.dtype
+                ),
+            )
         num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
         num_in_forward = input_batch.cu_num_logits.diff() - num_bonus_tokens
         num_verified = torch.minimum(num_in_forward, num_drafted)
         return num_drafted, num_verified
+
+    def _draft_early_exit_speculator(self) -> AutoRegressiveSpeculator | None:
+        """The speculator, if it stops drafting early (draft_early_exit)."""
+        speculator = self.speculator
+        if isinstance(speculator, AutoRegressiveSpeculator) and (
+            speculator.draft_early_exit
+        ):
+            return speculator
+        return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()

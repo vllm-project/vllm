@@ -211,6 +211,72 @@ def build_cost_tables_from_curves(
     return draft_table, verify_table
 
 
+class UndraftedConfidence:
+    """Per-slot, per-position confidence estimates for positions an early drafting
+    stop skipped: the running mean of the slot's confidences at that position over
+    the proposals that drafted it, shrunk towards the same mean over all slots."""
+
+    # Pseudo-observations of the population mean each slot starts with.
+    PRIOR_COUNT = 20.0
+    # Most observations kept per slot and position, and per position over all slots;
+    # older ones are scaled down so the means follow recent confidences.
+    MAX_COUNT = 500.0
+    MAX_POPULATION_COUNT = 10_000.0
+
+    def __init__(self, max_num_reqs: int, num_steps: int):
+        self.sums = np.zeros((max_num_reqs, num_steps))
+        self.counts = np.zeros((max_num_reqs, num_steps))
+        self.population_sums = np.zeros(num_steps)
+        self.population_counts = np.zeros(num_steps)
+
+    def update(
+        self, confidences: np.ndarray, num_drafted: np.ndarray, slots: np.ndarray
+    ) -> None:
+        """Folds in one proposal: for each of its slots, the confidences at the
+        positions it drafted. `confidences` and `num_drafted` are indexed by slot."""
+        if len(slots) == 0:
+            return
+        drafted = np.arange(self.sums.shape[1]) < num_drafted[slots][:, None]
+        observed = np.where(drafted, confidences[slots], 0.0)
+        self.sums[slots] += observed
+        self.counts[slots] += drafted
+        self.population_sums += observed.sum(axis=0)
+        self.population_counts += drafted.sum(axis=0)
+        _rescale_counts(self.sums, self.counts, self.MAX_COUNT)
+        _rescale_counts(
+            self.population_sums, self.population_counts, self.MAX_POPULATION_COUNT
+        )
+
+    def reset(self, slot: int) -> None:
+        self.sums[slot] = 0.0
+        self.counts[slot] = 0.0
+
+    def mean(self, slots: np.ndarray) -> np.ndarray:
+        # A position no slot has drafted yet starts at 0.5.
+        population = (self.population_sums + 0.5) / (self.population_counts + 1.0)
+        return (self.sums[slots] + self.PRIOR_COUNT * population) / (
+            self.counts[slots] + self.PRIOR_COUNT
+        )
+
+
+def _rescale_counts(sums: np.ndarray, counts: np.ndarray, limit: float) -> None:
+    """Scales entries with more than `limit` observations down to `limit`, keeping
+    their means."""
+    over = counts > limit
+    scale = limit / counts[over]
+    sums[over] *= scale
+    counts[over] *= scale
+
+
+def fill_undrafted(
+    confidences: np.ndarray, num_drafted: np.ndarray, estimates: np.ndarray
+) -> np.ndarray:
+    """`confidences` with each row's positions at or past its draft count replaced
+    by `estimates`."""
+    undrafted = np.arange(confidences.shape[1]) >= num_drafted[:, None]
+    return np.where(undrafted, estimates, confidences)
+
+
 class AdmittedDraftCounts:
     """Per-request admitted draft counts, in flight to the host."""
 
@@ -265,6 +331,17 @@ class AdaptiveVerificationManager:
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
+        # With draft early exit (see enable_draft_early_exit): the drafter's
+        # stopping threshold and the draft budget, which it reads each step; each
+        # slot's draft count from the drafter; and per D2H slot, the draft counts
+        # and the slots of the proposal it holds.
+        self.draft_stop_params: torch.Tensor | None = None
+        self._draft_stop_threshold = 0.0
+        self.num_drafted_per_req: torch.Tensor | None = None
+        self._stale_num_drafted: list[CpuGpuBuffer] = []
+        self._stale_slots: list[np.ndarray] = []
+        self._undrafted: UndraftedConfidence | None = None
+
         # Batch-sharded sampling sizes its all-to-all from host counts, so it
         # needs the admitted split on the host.
         self._copy_admitted_drafts_to_host = copy_admitted_drafts_to_host
@@ -303,8 +380,35 @@ class AdaptiveVerificationManager:
             self._confidence_probs, idx_mapping, capacities, 1, self._draft_survival
         )
 
+    def enable_draft_early_exit(
+        self, num_drafted_per_req: torch.Tensor, draft_stop_params: torch.Tensor
+    ) -> None:
+        """Serve a drafter that stops early: each step, write its stopping
+        threshold and the draft budget to `draft_stop_params`. Positions a slot
+        did not draft, at or past its count in `num_drafted_per_req`, hold
+        confidence 0, which would hold budgets to the stale proposal's depth, so
+        budgets estimate them instead."""
+        self.num_drafted_per_req = num_drafted_per_req
+        self.draft_stop_params = draft_stop_params
+        max_num_reqs = self.req_states.max_num_reqs
+        self._stale_num_drafted = [
+            CpuGpuBuffer(max_num_reqs, dtype=torch.int32, device=self.req_states.device)
+            for _ in self._stale_confidences
+        ]
+        for slot in self._stale_num_drafted:
+            slot.np.fill(self.num_speculative_steps)
+        self._stale_slots = [
+            np.zeros(0, dtype=np.intp) for _ in self._stale_confidences
+        ]
+        self._undrafted = UndraftedConfidence(max_num_reqs, self.num_speculative_steps)
+
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
+        if self._undrafted is not None:
+            self._stale_num_drafted[self._stale_idx].np[req_idx] = (
+                self.num_speculative_steps
+            )
+            self._undrafted.reset(req_idx)
         for i, resets in enumerate(self._pending_resets):
             if i != self._stale_idx:
                 resets.append(req_idx)
@@ -387,8 +491,22 @@ class AdaptiveVerificationManager:
         ready_idx = (self._stale_idx + 1) % len(self._stale_confidences)
         with gpu_sync_allowed():
             self._copy_events[ready_idx].synchronize()
-        if resets := self._pending_resets[ready_idx]:
+        resets = self._pending_resets[ready_idx]
+        if self._undrafted is not None:
+            # A slot reset since that proposal now belongs to a new request.
+            slots = self._stale_slots[ready_idx]
+            slots = slots[~np.isin(slots, resets)]
+            self._undrafted.update(
+                self._stale_confidences[ready_idx].np,
+                self._stale_num_drafted[ready_idx].np,
+                slots,
+            )
+        if resets:
             self._stale_confidences[ready_idx].np[resets] = 1.0
+            if self._undrafted is not None:
+                self._stale_num_drafted[ready_idx].np[resets] = (
+                    self.num_speculative_steps
+                )
             resets.clear()
         # The oldest step's copy has landed: budgets read it, this step
         # overwrites the slot they were reading before.
@@ -397,11 +515,16 @@ class AdaptiveVerificationManager:
         self._confidence_probs[input_batch.idx_mapping] = confidence_probs[:num_reqs]
         write_slot = self._stale_confidences[write_idx]
         write_slot.gpu.copy_(self._confidence_probs)
+        if self.num_drafted_per_req is not None:
+            self._stale_num_drafted[write_idx].gpu.copy_(self.num_drafted_per_req)
+            self._stale_slots[write_idx] = input_batch.idx_mapping_np.copy()
 
         current_stream = torch.accelerator.current_stream(self.req_states.device)
         self._copy_stream.wait_stream(current_stream)
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
+            if self.num_drafted_per_req is not None:
+                self._stale_num_drafted[write_idx].copy_to_cpu()
             self._copy_events[write_idx].record()
 
     def get_num_tokens(
@@ -432,6 +555,12 @@ class AdaptiveVerificationManager:
             count=num_reqs,
         )
         stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
+        if self._undrafted is not None:
+            stale_confidences = fill_undrafted(
+                stale_confidences,
+                self._stale_num_drafted[self._stale_idx].np[slots],
+                self._undrafted.mean(slots),
+            )
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < scheduled_drafts[:, None]
@@ -466,9 +595,21 @@ class AdaptiveVerificationManager:
             req_id: int(num_tokens)
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
-        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
-        # Rank-local confidences must not select different TP execution sizes.
-        draft_budget = get_tp_group().broadcast_object(draft_budget, src=0)
+        tokens_per_ms = num_tokens_to_estimated_accepted_tokens / costs
+        draft_budget = int(np.argmax(tokens_per_ms))
+        # For draft early exit: drafting one more position costs draft_cost_ms / k
+        # (drafting time taken as linear in positions); it pays off if it adds at
+        # least that much time's worth of tokens at this step's expected rate.
+        draft_stop_threshold = float(
+            draft_cost_ms[len(req_ids)]
+            / self.num_speculative_steps
+            * tokens_per_ms[draft_budget]
+        )
+        # Rank-local confidences must not select different TP execution sizes
+        # (nor, with draft early exit, different draft lengths).
+        draft_budget, self._draft_stop_threshold = get_tp_group().broadcast_object(
+            (draft_budget, draft_stop_threshold), src=0
+        )
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -537,6 +678,12 @@ class AdaptiveVerificationManager:
             count=num_reqs,
         )
         num_tokens = int(num_non_draft_tokens.sum()) + draft_budget
+        if self.draft_stop_params is not None:
+            # This step's propose reads them.
+            async_tensor_h2d(
+                np.array([self._draft_stop_threshold, draft_budget], dtype=np.float32),
+                out=self.draft_stop_params,
+            )
 
         # Rank draft slots by survival probability and admit the best prefix.
         # capacities enters holding each request's valid draft count (the kernel

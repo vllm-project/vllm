@@ -11,6 +11,8 @@ class MultiModuleMTPSpeculatorConfig(MTPSpeculatorConfig):
     supports_pcp = False
     # Each draft step runs its own MTP module.
     one_token_draft_decodes = False
+    # Draft early exit loops over one captured draft step.
+    supported_options = MTPSpeculatorConfig.supported_options - {"draft_early_exit"}
 
     @property
     def num_prefill_lookahead_tokens(self) -> int:

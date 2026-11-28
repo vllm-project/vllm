@@ -97,7 +97,10 @@ def _gather_draft_sampled_kernel(
     expanded_local_pos_ptr,
     # [max_num_reqs]
     prefill_len_ptr,
+    # [max_num_reqs]
+    num_drafts_ptr,
     num_logits,
+    HAS_NUM_DRAFTS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     block = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -112,6 +115,11 @@ def _gather_draft_sampled_kernel(
     # slots in a step starting within the prefill are placeholders (e.g. the
     # padded first step after a P/D remote KV load).
     is_placeholder = (local_pos > 0) & (pos - local_pos < prefill_len)
+    if HAS_NUM_DRAFTS:
+        # So are the slots past the drafts a drafter that stopped early made:
+        # draft i sits at local position i + 1.
+        num_drafts = tl.load(num_drafts_ptr + req_state_idx, mask=mask)
+        is_placeholder |= local_pos > num_drafts
     token_id = tl.where(is_placeholder, -1, token_id)
     tl.store(draft_sampled_ptr + block, token_id, mask=mask)
     tl.store(pos_ptr + block, pos, mask=mask)
@@ -124,11 +132,13 @@ def gather_draft_sampled(
     expanded_idx_mapping: torch.Tensor,
     expanded_local_pos: torch.Tensor,
     prefill_len: torch.Tensor,
+    num_drafts: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather the input token and position of each logits row.
 
     Draft rows of requests that have not yet sampled past their prefill are
-    set to -1 so that the rejection kernels reject them.
+    set to -1 so that the rejection kernels reject them, and with `num_drafts`
+    (per request state), so are the draft rows past each request's count.
     """
     num_logits = logits_indices.shape[0]
     draft_sampled = input_ids.new_empty(num_logits)
@@ -143,7 +153,9 @@ def gather_draft_sampled(
         expanded_idx_mapping,
         expanded_local_pos,
         prefill_len,
+        num_drafts if num_drafts is not None else prefill_len,
         num_logits,
+        HAS_NUM_DRAFTS=num_drafts is not None,
         BLOCK_SIZE=BLOCK_SIZE,
     )
     return draft_sampled, pos
@@ -434,7 +446,11 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: DraftLogitsCache | None = None,
+        num_drafts: torch.Tensor | None = None,
     ) -> SamplerOutput:
+        """`num_drafts`: per request state, the drafts its drafter made, if it
+        can stop before filling every draft slot. Verification treats the slots
+        past it as placeholders and samples the first from the target."""
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
@@ -446,6 +462,7 @@ class RejectionSampler:
             input_batch.expanded_idx_mapping,
             input_batch.expanded_local_pos,
             self.sampler.req_states.prefill_len.gpu,
+            num_drafts,
         )
 
         logprobs_dims = self.sampler.get_logprobs_dims(input_batch.idx_mapping_np)
