@@ -54,10 +54,11 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 if not (
-    current_platform.has_device_capability(100) and has_flashinfer_trtllm_fused_moe()
+    current_platform.is_device_capability_family(100)
+    and has_flashinfer_trtllm_fused_moe()
 ):
     pytest.skip(
-        "Requires the FlashInfer TRT-LLM fused MoE (SM100+)",
+        "Requires the FlashInfer TRT-LLM fused MoE (SM10x)",
         allow_module_level=True,
     )
 

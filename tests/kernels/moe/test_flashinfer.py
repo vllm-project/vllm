@@ -231,6 +231,10 @@ class TestData:
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
 def test_flashinfer_per_tensor_moe_fp8_no_graph(
     m: int,
     n: int,
@@ -240,8 +244,6 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
     activation: MoEActivation,
     monkeypatch,
 ):
-    if not current_platform.has_device_capability(100):
-        pytest.skip("Test is only supported for sm >= 100")
     set_random_seed(7)
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(
