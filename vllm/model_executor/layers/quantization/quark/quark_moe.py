@@ -1561,6 +1561,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         kMxfp4Dynamic,
         kMxfp6E3M2Dynamic,
         kMxfp6E2M3Dynamic,
+        kMxfp8Dynamic,
         kFp8DynamicTensorSym,
         kFp8StaticTensorSym,
         None,
@@ -1617,19 +1618,23 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.static_input_scales = activation_quant_key == kFp8StaticTensorSym
 
-        # Select backend based on OCP MX scheme
-        if self.ocp_mx_scheme == "w_mxfp4":
+        # Select the backend once, keyed by the scheme's activation quant.
+        # Schemes not listed here (mxfp6, a_fp8 without static scales) stay NONE.
+        activation_keys: dict[str, QuantKey | None] = {
             # W4A16: weight-only MXFP4
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
-        elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
-            # W4A8: MXFP4 weights + static FP8 activations
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kFp8StaticTensorSym
-            )
-        elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
+            "w_mxfp4": None,
             # W4A4: MXFP4 weights + MXFP4 activations
+            "w_mxfp4_a_mxfp4": kMxfp4Dynamic,
+            # MXFP4 weights + dynamic per-group MXFP8 activations
+            "w_mxfp4_a_mxfp8": kMxfp8Dynamic,
+        }
+        if self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
+            # W4A8: MXFP4 weights + static FP8 activations
+            activation_keys["w_mxfp4_a_fp8"] = kFp8StaticTensorSym
+
+        if self.ocp_mx_scheme in activation_keys:
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp4Dynamic
+                moe, activation_key=activation_keys[self.ocp_mx_scheme]
             )
 
         # Validation for unsupported schemes
