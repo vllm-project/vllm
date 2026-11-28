@@ -85,7 +85,7 @@ AUX_WARP = CONSUMER_WARPS + 1
 WARPS = CONSUMER_WARPS + 2
 THREADS = WARPS * WARP_SIZE
 MIN_CTAS_PER_SM = 2
-STAGES = 5  # keeps two CTAs resident per SM
+STAGES = 4  # even ring: qkv_warm engages (kimi iter5; was 5 — odd ring disabled the warm)
 # The ring at S = 4 with one CTA per SM: 10 stages hold 10 of a CTA's 16 k-tiles
 # in shared memory before the PDL wait (measured 0.5 us faster than 8 after a
 # predecessor, 11 or more 3 us slower); the 16-token tile's stages are wider.
