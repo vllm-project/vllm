@@ -1046,6 +1046,25 @@ steps:
         tests/kernels/test_rocm_fp32_router_gemm.py
         tests/kernels/test_gate_linear_rocm_dispatch.py
 
+- label: ":nvidia: (H100) Gate Linear CuTeDSL Kernels"
+  key: kernels-gate-linear-cutedsl-h100
+  automatic_shard: true
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  device: h100
+  source_file_dependencies:
+  - vllm/cute_utils/
+  - vllm/platforms/cuda.py
+  - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_router_common.py
+  - vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py
+  - tests/kernels/test_ll_bf16_gemm.py
+  commands:
+    - nvidia-smi
+    - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
+
 # Disabled until b12x transitive dependencies are locked.
 # - label: ":nvidia: (DGX Spark) [Nightly] b12x Linear Kernels"
 #   key: b12x-linear-kernels-dgx-spark-nightly

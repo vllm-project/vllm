@@ -97,6 +97,7 @@ def test_c1_pdl_kernel_is_selected_automatically(monkeypatch):
 SHAPES = [
     (256, 7168, "DSV3"),
     (256, 14400, "DSV4-Flash"),
+    (384, 5120, "DSV4.1-Flash"),
     (128, 5120, "DeepSeek-V2"),
     (8, 4096, "Mixtral-8x7B"),
     (64, 2880, "non-tile-aligned-K"),
@@ -213,8 +214,8 @@ def test_arbitrary_N_splitk(N):
 
 @pytest.mark.parametrize(
     "N,K",
-    [(256, 7168), (256, 14400), (8, 4096), (384, 7168), (264, 6144)],
-    ids=["DSV3", "DSV4-Flash", "Mixtral", "DSV4-Pro", "Inkling"],
+    [(256, 7168), (256, 14400), (384, 5120), (8, 4096), (384, 7168), (264, 6144)],
+    ids=["DSV3", "DSV4-Flash", "DSV4.1-Flash", "Mixtral", "DSV4-Pro", "Inkling"],
 )
 def test_single_token(N, K):
     torch.manual_seed(42)
