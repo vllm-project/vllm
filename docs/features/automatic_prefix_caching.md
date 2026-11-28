@@ -12,6 +12,18 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+## Prefix-cache hits inside a block
+
+A prefix-cache hit normally covers whole KV cache blocks. Requests that share a prompt, such as the `n` samples of a parallel-sampling request, each recompute the shared prompt's last partial block: up to `block_size` tokens per request.
+
+For models whose layers are all full attention, `--prefix-match-unit` can be set to a divisor of the block size so hits land on that finer boundary. The partially hit block is copied before the request writes into it.
+
+```bash
+vllm serve <model> --block-size 64 --prefix-match-unit 16
+```
+
+This is not supported with decode context parallelism or a KV connector, and vLLM fails at startup if the value cannot take effect.
+
 ## Hybrid Mamba models
 
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.

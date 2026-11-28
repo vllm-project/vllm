@@ -827,11 +827,23 @@ def partial_hash_hits_enabled(
     dcp_world_size: int = 1,
     manager_classes: Sequence[type["SingleTypeKVCacheManager"]] | None = None,
 ) -> bool:
-    """Whether aligned Mamba states support sub-block prefix-cache hits.
+    """Whether prefix-cache hits can land inside a block: for aligned Mamba
+    states, or for a single uncompressed full-attention group.
 
     If `manager_classes` (one per group) is given, also require every other
     prefix-cacheable group to support fine-grained lookups.
     """
+    if len(kv_cache_groups) == 1:
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        group = kv_cache_groups[0]
+        return (
+            dcp_world_size == 1
+            and group.manager_cls is FullAttentionManager
+            and group.block_size > hash_block_size
+            and group.block_size % hash_block_size == 0
+            and all(s.tokens_per_state == 1 for s in group.kv_cache_specs.values())
+        )
     if not any(
         is_mamba_prefix_caching_group(group)
         and (
@@ -868,9 +880,10 @@ def resolve_kv_cache_block_sizes(
       group's effective block size. Attention groups are scaled by DCP;
       Mamba groups keep their full per-rank state and are not scaled.
     - `hash_block_size` is the granularity at which `Request.block_hashes`
-      is computed. Single group: equals scheduler block size, and any other
-      `cache_config.prefix_match_unit` is rejected while block hashing is
-      active. Multiple groups:
+      is computed. Single group: equals scheduler block size, unless
+      `cache_config.prefix_match_unit` enables partial hits on a
+      full-attention group; any other value is rejected while block hashing
+      is active. Multiple groups:
       `cache_config.prefix_match_unit` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
       An explicit override is also rejected if prefix-cache hits would fall
@@ -886,19 +899,27 @@ def resolve_kv_cache_block_sizes(
         if groups and not groups[0].dcp_sharded:
             dcp = 1
         bs = cache_config.block_size * dcp
+        unit = cache_config.prefix_match_unit
         # Reject a prefix_match_unit that would otherwise be silently ignored.
         if (
-            cache_config.prefix_match_unit not in (None, bs)
+            unit is not None
+            and unit != bs
             and len(groups) == 1
             and (
                 cache_config.enable_prefix_caching
                 or vllm_config.kv_transfer_config is not None
             )
         ):
+            if vllm_config.kv_transfer_config is None and partial_hash_hits_enabled(
+                groups, unit, vllm_config.parallel_config.decode_context_parallel_size
+            ):
+                return bs, unit
             raise ValueError(
-                f"Invalid prefix_match_unit={cache_config.prefix_match_unit}; "
-                "with a single KV cache group, prefix-cache hits land on the "
-                f"block size ({bs}). Unset it or set it to {bs}."
+                f"Invalid prefix_match_unit={unit}; with a single KV cache "
+                "group, prefix-cache hits land on the block size "
+                f"({bs}) unless the group is full attention without DCP or a "
+                "KV connector, and prefix_match_unit divides the block size. "
+                f"Unset it or set it to {bs}."
             )
         return bs, bs
 
@@ -997,7 +1018,7 @@ def resolve_cache_hit_alignment_tokens(
     `scheduler_block_size`.
     """
     groups = kv_cache_config.kv_cache_groups
-    if not vllm_config.cache_config.enable_prefix_caching or len(groups) <= 1:
+    if not vllm_config.cache_config.enable_prefix_caching or not groups:
         return scheduler_block_size
     manager_classes = [group.manager_cls for group in groups]
     if partial_hash_hits_enabled(
