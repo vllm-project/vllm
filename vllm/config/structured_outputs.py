@@ -3,7 +3,7 @@
 
 from typing import Literal, Self
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from vllm.config.utils import CompileFactors, config
 
@@ -36,6 +36,10 @@ class StructuredOutputsConfig:
     loaded and registered."""
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
+    compilation_timeout: int = Field(default=10, ge=0)
+    """Request deadline in seconds for asynchronous engine-side grammar
+    compilation, including queue time. Checked on scheduling steps.
+    Running compilations continue after expiry. Set to 0 to disable."""
 
     def compile_factors(self) -> CompileFactors:
         """This config does not affect the compiled graph.

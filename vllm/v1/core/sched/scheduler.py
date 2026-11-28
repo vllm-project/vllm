@@ -293,6 +293,10 @@ class Scheduler(SchedulerInterface):
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
         self.grammar_compile_error_reqs: dict[str, RequestError] = {}
+        self.grammar_compilation_timeout = (
+            vllm_config.structured_outputs_config.compilation_timeout
+        )
+        self._pending_grammar_compilations: set[Request] = set()
         self.encoder_cache_mismatch_reqs: set[str] = set()
         self._ec_metadata_resolver: PlaceholderMetadataResolver | None = None
 
@@ -781,6 +785,9 @@ class Scheduler(SchedulerInterface):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+
+        if self._pending_grammar_compilations:
+            self._expire_grammar_compilations(scheduled_timestamp)
 
         self.kv_cache_manager.new_step_starts()
 
@@ -3218,6 +3225,13 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            grammar_request = request.structured_output_request
+            if (
+                self.grammar_compilation_timeout
+                and grammar_request is not None
+                and grammar_request.compilation_submit_time is not None
+            ):
+                self._pending_grammar_compilations.add(request)
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -3311,6 +3325,9 @@ class Scheduler(SchedulerInterface):
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
+        if request.use_structured_output:
+            self._pending_grammar_compilations.discard(request)
+            self.grammar_compile_error_reqs.pop(request.request_id, None)
         self._inflight_prefills.discard(request)
         self._unreserve_parked(request)
         self._set_kv_fetch_stage(request, None)
@@ -3846,6 +3863,23 @@ class Scheduler(SchedulerInterface):
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
+    def _expire_grammar_compilations(self, now: float) -> None:
+        # Check deadlines even when normal admission is at capacity.
+        timeout = self.grammar_compilation_timeout
+        settled: list[Request] = []
+        for request in self._pending_grammar_compilations:
+            grammar_request = request.structured_output_request
+            assert grammar_request is not None
+            if grammar_request.is_grammar_ready:
+                settled.append(request)
+            elif grammar_request.cancel_grammar_if_expired(timeout, now):
+                self.grammar_compile_error_reqs[request.request_id] = RequestError(
+                    code="grammar_compilation_timeout",
+                    message=f"Grammar compilation timed out after {timeout}s.",
+                )
+                settled.append(request)
+        self._pending_grammar_compilations.difference_update(settled)
+
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
         it should be skipped for this step."""
@@ -3866,13 +3900,18 @@ class Scheduler(SchedulerInterface):
 
         elif request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             # Check whether grammar compilation has finished.
-            struct_output_req = request.structured_output_request
-            if not struct_output_req or struct_output_req.grammar is None:
+            if request.request_id in self.grammar_compile_error_reqs:
                 return False
-            if isinstance(struct_output_req.grammar, Exception):
+            struct_output_req = request.structured_output_request
+            if struct_output_req is None:
+                return False
+            grammar = struct_output_req.grammar
+            if grammar is None:
+                return False
+            if isinstance(grammar, Exception):
                 self.grammar_compile_error_reqs[request.request_id] = RequestError(
                     code="validation_error",
-                    message=f"Invalid structured outputs: {struct_output_req.grammar}",
+                    message=f"Invalid structured outputs: {grammar}",
                 )
                 return False
             # Grammar is ready, promote to waiting state.

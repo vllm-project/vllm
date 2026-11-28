@@ -31,6 +31,7 @@ class StructuredOutputRequest:
     # Implicit reasoning-end tokens the grammar rejects as the first content
     # token; masked while the request reasons. Computed on first use.
     masked_reasoning_end_ids: tuple[int, ...] | None = None
+    compilation_submit_time: float | None = None
 
     @staticmethod
     def from_sampling_params(
@@ -52,6 +53,20 @@ class StructuredOutputRequest:
             except Exception as e:
                 self._grammar = e
         return True
+
+    def cancel_grammar_if_expired(self, timeout: int, now: float) -> bool:
+        """Stop waiting for an overdue compilation and cancel queued work."""
+        future = self._grammar
+        submitted = self.compilation_submit_time
+        if (
+            timeout <= 0
+            or submitted is None
+            or not isinstance(future, Future)
+            or now - submitted < timeout
+            or future.done()
+        ):
+            return False
+        return future.cancel() or not future.done()
 
     @property
     def is_grammar_ready(self) -> bool:
