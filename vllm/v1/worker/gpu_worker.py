@@ -752,6 +752,17 @@ class Worker(WorkerBase):
         """
         maybe_apply_startup_plan(self)
 
+        # Allocate persistent IPC buffers before profiling sizes the KV cache.
+        # Keep autotuning outside the profile's transient activation peak.
+        if envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC:
+            from vllm.distributed.device_communicators import (
+                flashinfer_pcie_ipc_all_reduce,
+            )
+
+            flashinfer_pcie_ipc_all_reduce.warmup_flashinfer_pcie_ipc_allreduce(
+                self, enable_dispatch=False
+            )
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens

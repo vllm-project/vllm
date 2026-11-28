@@ -62,6 +62,13 @@ with KV connectors that share or register the KV cache in ways it doesn't suppor
 (LMCache's multi-process connector; NIXL, Mooncake or MoRIIO on ROCm), and with NIXL
 within a host that has no IMEX channel.
 
+When `VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1` enables the FlashInfer PCIe IPC
+all-reduce backend, its persistent communication workspace is allocated before
+KV cache memory profiling and is included in the non-KV memory budget.
+Enabling this backend can therefore reduce KV cache capacity. Its workspace size
+depends on the model hidden size, tensor parallel size, and largest CUDA graph
+capture size.
+
 ## Preemption
 
 Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
