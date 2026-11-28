@@ -297,6 +297,8 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
+    VLLM_TP_FP16_PARTIAL_SUMS: bool = False
+    VLLM_TP_FP16_PARTIAL_SUMS_SHIFT: int = 2
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -2104,6 +2106,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "1"))
+    ),
+    # If set, BF16 row-parallel layers under TP>1 all-reduce FP16 partial sums
+    # and round to BF16 once, after the sum (CUDA only).
+    "VLLM_TP_FP16_PARTIAL_SUMS": lambda: bool(
+        int(os.getenv("VLLM_TP_FP16_PARTIAL_SUMS", "0"))
+    ),
+    # k in [0, 14]: FP16 partial sums are prescaled by 2^-k (exact), so they
+    # overflow at 65504 * 2^k instead of 65504. The bound applies to their sum
+    # as well: models with massive activations in o_proj/down_proj outputs
+    # need a larger k. Overflow gives inf; nothing clamps it.
+    "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT": lambda: int(
+        env_with_choices(
+            "VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "2", [str(k) for k in range(15)]
+        )()
+        or "2"
     ),
     # Whether to use FlashInfer's single-node PCIe CUDA-IPC all-reduce.
     # This backend has a strict single-stream contract and is opt-in while its
