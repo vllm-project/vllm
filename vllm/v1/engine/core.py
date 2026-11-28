@@ -1097,6 +1097,13 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
+        if self.vllm_config.weight_transfer_config is not None and any(
+            self.collective_rpc("has_incomplete_weight_update")
+        ):
+            raise RuntimeError(
+                "Cannot resume scheduling while a weight update is incomplete. "
+                "Complete or retry the weight update before resuming."
+            )
         self._set_kv_cache_reclaimable(False)
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
