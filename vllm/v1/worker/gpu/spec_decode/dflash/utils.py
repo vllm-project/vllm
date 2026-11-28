@@ -59,6 +59,12 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     maybe_share_target_embed(dflash_model, draft_inner, target_inner)
 
+    target_embed_norm = getattr(target_inner, "embed_norm", None)
+    if target_embed_norm is not None and not getattr(
+        dflash_model, "has_own_embed_tokens", False
+    ):
+        draft_inner.embed_norm = target_embed_norm
+
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(dflash_model, "lm_head", None)
     if (

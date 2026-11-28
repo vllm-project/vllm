@@ -999,3 +999,124 @@ def test_top_k_tokens_stay_in_the_processor_vocabulary(default_vllm_config):
     _, ids = processor.get_top_k_tokens(head, hidden_states, 4)
     assert (ids < vocab_size).all()
     assert (processor.get_top_tokens(head, hidden_states) < vocab_size).all()
+
+
+def test_dflash_shares_and_applies_target_embed_norm():
+    """Targets with a post-embedding norm (e.g. Inkling2's `embed_norm`) must
+    share it alongside `embed_tokens` when loading a DFlash/DFlash2 drafter,
+    and `DFlashQwen3Model.embed_input_ids` must apply it before any separate
+    mask-embedding override."""
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+    from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
+
+    class _ScaleNorm(torch.nn.Module):
+        def __init__(self, scale: float):
+            super().__init__()
+            self.scale = scale
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x * self.scale
+
+    target_embed = torch.nn.Embedding(16, 4)
+    target_norm = _ScaleNorm(0.25)
+    target_inner = torch.nn.Module()
+    target_inner.embed_tokens = target_embed
+    target_inner.embed_norm = target_norm
+    target_model = torch.nn.Module()
+    target_model.model = target_inner
+    target_model.lm_head = torch.nn.Linear(4, 16, bias=False)
+
+    def _make_draft(has_own_embed: bool):
+        draft_inner = torch.nn.Module()
+        draft_inner.embed_tokens = torch.nn.Embedding(16, 4)
+        draft_inner.embed_norm = None
+        draft_inner.has_separate_mask_embedding = False
+        draft_inner.mask_token_id = 15
+        draft_inner.mask_embedding = torch.nn.Parameter(torch.full((4,), 7.0))
+        draft_inner.embed_input_ids = MethodType(
+            DFlashQwen3Model.embed_input_ids, draft_inner
+        )
+        draft = torch.nn.Module()
+        draft.model = draft_inner
+        draft.config = SimpleNamespace(has_own_lm_head=False)
+        draft.has_own_embed_tokens = has_own_embed
+        draft.lm_head = torch.nn.Linear(4, 16, bias=False)
+        return draft
+
+    spec_cfg = SimpleNamespace(
+        draft_model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        attention_backend=None,
+        kv_cache_dtype=None,
+        apply_draft_eplb_overrides=lambda cfg: cfg,
+    )
+    vllm_cfg = SimpleNamespace(
+        speculative_config=spec_cfg,
+        attention_config=SimpleNamespace(use_non_causal=False, backend=None),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        load_config=SimpleNamespace(),
+    )
+
+    draft_shared = _make_draft(has_own_embed=False)
+    with (
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.dflash.utils.replace",
+            side_effect=lambda obj, **kw: obj,
+        ),
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.dflash.utils.get_draft_load_config",
+            return_value=vllm_cfg.load_config,
+        ),
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.dflash.utils.get_model",
+            return_value=draft_shared,
+        ),
+        mock.patch(
+            "vllm.model_executor.models.qwen3_dflash.dflash_has_any_non_causal",
+            return_value=True,
+        ),
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.eagle.utils.in_single_pp_stage",
+            return_value=True,
+        ),
+    ):
+        loaded = load_dflash_model(target_model, vllm_cfg)
+
+    assert loaded.model.embed_tokens is target_embed
+    assert loaded.model.embed_norm is target_norm
+
+    ids = torch.tensor([1, 2, 15])
+    expected = target_norm(target_embed(ids))
+    torch.testing.assert_close(loaded.model.embed_input_ids(ids), expected)
+
+    # Separate mask_embedding.pt override stays un-renormalized.
+    loaded.model.has_separate_mask_embedding = True
+    out_sep = loaded.model.embed_input_ids(ids)
+    torch.testing.assert_close(out_sep[:2], expected[:2])
+    torch.testing.assert_close(out_sep[2], torch.full((4,), 7.0))
+
+    # Drafters with their own embed_tokens must not inherit target embed_norm.
+    draft_own = _make_draft(has_own_embed=True)
+    with (
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.dflash.utils.replace",
+            side_effect=lambda obj, **kw: obj,
+        ),
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.dflash.utils.get_draft_load_config",
+            return_value=vllm_cfg.load_config,
+        ),
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.dflash.utils.get_model",
+            return_value=draft_own,
+        ),
+        mock.patch(
+            "vllm.model_executor.models.qwen3_dflash.dflash_has_any_non_causal",
+            return_value=True,
+        ),
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.eagle.utils.in_single_pp_stage",
+            return_value=True,
+        ),
+    ):
+        loaded_own = load_dflash_model(target_model, vllm_cfg)
+    assert loaded_own.model.embed_norm is None
