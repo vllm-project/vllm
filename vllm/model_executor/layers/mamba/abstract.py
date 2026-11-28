@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from math import lcm, prod
 
 import torch
@@ -33,6 +33,7 @@ class MambaBase(AttentionLayerBase):
     requires_grid_checkpoint_alignment: bool = False
     _replayssm_ring_start: torch.Tensor
     _replayssm_prev_num_accepted: torch.Tensor
+    replayssm_materializer: Callable[[Sequence["MambaBase"]], Callable] | None = None
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw `[B, 1, 1, C]` int8 page view into per-state views.

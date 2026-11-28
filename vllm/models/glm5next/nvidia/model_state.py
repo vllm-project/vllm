@@ -4,6 +4,10 @@
 lifecycle of the specialized decode when `decode_backend=latency_specialized`
 selects it."""
 
+import torch
+
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 
@@ -18,6 +22,24 @@ class Glm5NextModelState(MambaHybridModelState):
         self.language_model = model
         if model.specialized_decode_config is not None:
             model.build_specialized_decode()
+
+    def prepare_attn(self, input_batch, *args, **kwargs):
+        """GDN's verify rows need not lead the batch; all other rows prefill."""
+        attn_metadata = super().prepare_attn(input_batch, *args, **kwargs)
+        metadata = next(
+            (m for m in attn_metadata.values() if isinstance(m, GDNAttentionMetadata)),
+            None,
+        )
+        # Autotune dummy runs and draft capture can omit Mamba metadata.
+        if self._use_replayssm_trackers and metadata is not None:
+            self._replayssm_query_start_loc = input_batch.query_start_loc
+            spec_rows = metadata.spec_sequence_masks_cpu
+            if spec_rows is None:
+                spec_rows = torch.zeros(input_batch.num_reqs, dtype=torch.bool)
+            async_tensor_h2d(
+                ~spec_rows, out=self._is_prefilling_gpu[: spec_rows.numel()]
+            )
+        return attn_metadata
 
     def initialize_kv_cache(self, kv_cache_config, block_tables):
         super().initialize_kv_cache(kv_cache_config, block_tables)

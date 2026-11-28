@@ -171,6 +171,8 @@ def test_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
             torch.zeros(1, 1, 1),
             torch.zeros(1, 1, 1, CHANNELS),
             torch.zeros(1, 1, CHANNELS),
+            torch.zeros(1, CHANNELS),
+            torch.zeros(1, CHANNELS),
         )
         return seen.pop()
 

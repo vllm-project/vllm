@@ -415,7 +415,8 @@ def test_prefill_checkpoint_resumes_suffix(
         out = torch.empty(
             1, qkv.shape[0], heads, D, device=device, dtype=torch.bfloat16
         )
-        layer._forward(qkv, g, b, out, g[0])
+        f_a = torch.zeros(qkv.shape[0], D, device=device, dtype=torch.bfloat16)
+        layer._forward(qkv, g, b, out, g[0], f_a, f_a)
         return out[:, spec_tokens:]
 
     checkpoint = MambaPrefillCheckpointMetadata(

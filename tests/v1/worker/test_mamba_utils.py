@@ -770,6 +770,121 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
         assert mixer._replayssm_prev_num_accepted[destination_slot].item() == 9
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_replayssm_ring_block_folds_before_precopy_and_publishes():
+    """With the rings in the block after the state (GLM-5.3 KDA), moving into
+    that block first folds the committed records into the old checkpoint, and a
+    crossed boundary is published from the new block's rings."""
+    from vllm.models.glm5next.nvidia import kda_replayssm
+
+    device = torch.device("cuda")
+    heads, dim = 1, 128
+    conv_shape = (dim, 6) if is_conv_state_dim_first() else (6, dim)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(conv_shape, (heads, dim, dim)),
+        dtypes=(torch.bfloat16, torch.float32),
+        state_alignment=16,
+        block_stride_alignment=16,
+    )
+    config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    config.cache_config.kv_cache_layout = KVCacheLayout.LBNHC.name
+    manager = MambaManager.config(enable_prefix_caching=True, num_speculative_blocks=1)
+    kv_config = get_kv_cache_config_from_groups(
+        config, [new_kv_cache_group(["layers.0.mixer"], spec, manager)], num_blocks=4
+    )
+
+    class RingBlockMixer(_TestReplaySSMMixer):
+        def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+            return spec.shapes
+
+        def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+            return spec.dtypes
+
+        def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+            super().bind_kv_cache(kv_cache)
+            pages = kv_cache.squeeze(dim=(1, 2))
+            self.kv_cache += kda_replayssm.ring_views(pages, heads, dim)
+
+    mixer = RingBlockMixer()
+    mixer.replayssm_buffer_len = 16
+    mixer.replayssm_materializer = kda_replayssm.replayssm_materializer
+    forward_context = {"layers.0.mixer": mixer}
+    bind_kv_cache_to_layers(
+        allocate_kv_cache(kv_config, device, KVCacheLayout.LBNHC), forward_context
+    )
+    initialize_replayssm_ring_trackers(kv_config, forward_context)
+    conv, state, *rings = mixer.kv_cache
+    start, committed = mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted
+
+    def replay(block, ring_block, ring_start, count):
+        s = state[block].double()
+        u, k, g = (ring[ring_block].double() for ring in rings)
+        for j in range(count):
+            row = (ring_start + j) % kda_replayssm.RING_LEN
+            s = s * g[:, row].exp()[:, None] + u[:, row, :, None] * k[:, row, None]
+        return s.float()
+
+    conv.normal_()
+    state.normal_()
+    for block in (2, 3):
+        rings[0][block].normal_()
+        rings[1][block].normal_()
+        rings[2][block].uniform_(-1, 0)
+    start[1], committed[1] = 7, 9
+    folded, live_conv = replay(1, 2, 7, 9), conv[1].clone()
+
+    cfg = _TestConfig(num_layers=1, max_num_reqs=1)
+    ctx = _make_gpu_ctx(cfg, kv_config, device, forward_context)
+    table = torch.tensor([[1, 2, 3]], dtype=torch.int32, device=device)
+    ctx.initialize_from_forward_context(
+        kv_config, forward_context, _COPY_FUNCS, [table], [table]
+    )
+    model_state = object.__new__(MambaHybridModelState)
+    model_state.prefix_caching = True
+    model_state._mamba_ctx = ctx
+    model_state._mamba_state_idx_gpu = torch.zeros(1, dtype=torch.int32, device=device)
+    model_state._mamba_src_col_gpu = torch.empty(1, dtype=torch.int32, device=device)
+    model_state._mamba_src_off_gpu = torch.empty(1, dtype=torch.int32, device=device)
+    model_state.num_accepted_tokens_gpu = torch.tensor([3], device=device).int()
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=device)
+    query_start = torch.tensor([0, 4], dtype=torch.int32, device=device)
+    batch = SimpleNamespace(
+        num_reqs=1, idx_mapping=idx_mapping, query_start_loc=query_start
+    )
+    # Tokens 15..18 move the live state into block 2; block 3 takes the rings.
+    model_state.preprocess_state(
+        batch, (table,), kv_config, torch.tensor([15], device=device).int()
+    )
+    for block in (1, 2):
+        torch.testing.assert_close(state[block], folded, atol=1e-5, rtol=1e-5)
+    assert start[1:3].tolist() == [16, 16] and committed[1:3].tolist() == [0, 0]
+    shifted = conv[2][:, :4] if is_conv_state_dim_first() else conv[2][:4]
+    expected = live_conv[:, 2:] if is_conv_state_dim_first() else live_conv[2:]
+    torch.testing.assert_close(shifted, expected, atol=0, rtol=0)
+
+    # 17 tokens after acceptance: block 1 gets the state at 16.
+    published = replay(2, 3, 16, 1)
+    assert ctx.replayssm is not None
+    ctx.replayssm.postprocess(
+        idx_mapping=idx_mapping,
+        query_metadata=query_start,
+        query_metadata_is_cumulative=True,
+        num_computed_tokens=torch.tensor([17], device=device).int(),
+        num_computed_is_post_step=True,
+        num_accepted_tokens=torch.tensor([2], device=device).int(),
+        is_prefilling=torch.zeros(1, dtype=torch.bool, device=device),
+        live_cols=model_state._mamba_state_idx_gpu,
+        num_reqs=1,
+    )
+    torch.testing.assert_close(state[1], published, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(state[2], folded, atol=1e-5, rtol=1e-5)
+    assert start[1:3].tolist() == [0, 16] and committed[1:3].tolist() == [0, 2]
+
+
 def test_mamba_groups_support_different_state_specs():
     gdn_spec = MambaSpec(
         block_size=16,

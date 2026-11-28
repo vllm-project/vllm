@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
+from dataclasses import replace
+
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -49,6 +51,7 @@ from vllm.model_executor.utils import (
     refill_derived,
     set_weight_attrs,
 )
+from vllm.models.glm5next.nvidia import kda_replayssm
 from vllm.models.glm5next.nvidia.ops.kda_prefill_conv import (
     causal_conv1d_planar,
     planar_conv_pays_off,
@@ -65,8 +68,10 @@ from vllm.utils.flashinfer import (
     has_flashinfer_packed_fused_kda_decode,
     has_flashinfer_recurrent_kda,
 )
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -416,6 +421,30 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     def get_cache_checkpoint_alignment(self) -> int | None:
         return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
+        layer_config = super().get_kv_cache_config(vllm_config)
+        if not self.use_replayssm:
+            return layer_config
+        assert layer_config is not None
+        return replace(
+            layer_config,
+            manager_config=layer_config.manager_config.replace_params(
+                num_speculative_blocks=1
+            ),
+        )
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        super().bind_kv_cache(kv_cache)
+        if self.use_replayssm:
+            self.kv_cache += kda_replayssm.ring_views(
+                kv_cache.squeeze(dim=(1, 2)), self.local_num_heads, self.head_dim
+            )
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.use_replayssm:
+            return kda_replayssm.KDAReplaySSMVerifyBackend
+        return super().get_attn_backend()
+
     def get_state_dtype(
         self,
     ) -> tuple[torch.dtype, torch.dtype]:
@@ -572,22 +601,40 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 dim=self.head_dim,
             )
 
-        # One option (`--kda-decode-backend`) for every decode row: with
-        # speculative decoding they are draft-verify rows of 1 + num_spec
-        # tokens, otherwise single-token rows.
-        self.kda_decode_backend = _resolve_kda_decode_backend(
-            additional_config.get("kda_decode_backend", "auto")
-            if isinstance(additional_config, dict)
-            else "auto",
-            self.local_num_heads,
-            self.head_dim,
-            self.conv_size,
-            1 + self.num_spec,
-            vllm_config.model_config.dtype,
-            conv_state_dtype,
-            recurrent_state_dtype,
-            self.kda_lower_bound,
-        )
+        self.use_replayssm = self.cache_config.use_replayssm
+        if self.use_replayssm:
+            self.kda_decode_backend = "replayssm"
+            kda_replayssm.check_supported(
+                vllm_config,
+                self.local_num_heads,
+                self.head_dim,
+                self.conv_size,
+                self.get_state_dtype(),
+                self.kda_lower_bound,
+                (self.f_b_proj, self.g_b_proj),
+            )
+            self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
+            self.replayssm_buffer_len = kda_replayssm.WINDOW
+            self.replayssm_materializer = kda_replayssm.replayssm_materializer
+            self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
+            self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        else:
+            # One option (`--kda-decode-backend`) for every decode row: with
+            # speculative decoding they are draft-verify rows of 1 + num_spec
+            # tokens, otherwise single-token rows.
+            self.kda_decode_backend = _resolve_kda_decode_backend(
+                additional_config.get("kda_decode_backend", "auto")
+                if isinstance(additional_config, dict)
+                else "auto",
+                self.local_num_heads,
+                self.head_dim,
+                self.conv_size,
+                1 + self.num_spec,
+                vllm_config.model_config.dtype,
+                conv_state_dtype,
+                recurrent_state_dtype,
+                self.kda_lower_bound,
+            )
         # FlashInfer's [3, width, P] fp32 conv weight and fp32 norm weight,
         # built in process_weights_after_loading.
         self._fi_conv_weight: torch.Tensor | None = None
@@ -825,12 +872,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # / spec-verify steps then skip the _cast_sigmoid kernel and its fp32
         # intermediate entirely.
         beta = beta_raw.unsqueeze(0)
-        g1 = self.f_b_proj(f_a)[0]
-        g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
-
-        g_proj_states = self.g_b_proj(g_a)[0]
-        # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
-        g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
+        # The ReplaySSM kernel projects f_a and g_a itself.
+        g1, g2 = (None, None) if self.use_replayssm else self._gates(f_a, g_a)
 
         core_attn_out = torch.empty(
             (1, num_tokens, self.local_num_heads, self.head_dim),
@@ -845,19 +888,32 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             beta=beta,
             core_attn_out=core_attn_out,
             g2=g2,
+            f_a=f_a,
+            g_a=g_a,
         )
         if not self._norm_in_forward:
             core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
 
+    def _gates(
+        self, f_a: torch.Tensor, g_a: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        g1 = self.f_b_proj(f_a)[0]
+        g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
+
+        g_proj_states = self.g_b_proj(g_a)[0]
+        # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
+        g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
+        return g1, g2
+
     @property
     def _norm_in_forward(self) -> bool:
-        """FlashInfer's fused decode applies o_norm itself, so with it
-        `_forward` returns normed output for every step type: a breakable CUDA
-        graph replays the code after `_forward` as captured, whatever the live
-        step."""
-        return self.kda_decode_backend == "flashinfer"
+        """FlashInfer's fused decode and the ReplaySSM kernel apply o_norm
+        themselves, so with them `_forward` returns normed output for every step
+        type: a breakable CUDA graph replays the code after `_forward` as
+        captured, whatever the live step."""
+        return self.kda_decode_backend in ("flashinfer", "replayssm")
 
     def process_weights_after_loading(self) -> None:
         """Build FlashInfer's conv and norm weights from the loaded weights;
@@ -1046,14 +1102,70 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         return out
 
+    def _replayssm_rows(
+        self,
+        metadata: GDNAttentionMetadata,
+        qkv: torch.Tensor,
+        beta: torch.Tensor,
+        f_a: torch.Tensor,
+        g_a: torch.Tensor,
+        out: torch.Tensor,
+    ) -> tuple[int, torch.Tensor | None]:
+        """Returns the number of leading rows written to `out`; in a step with
+        prefills, the verify rows' output for `spec_token_indx` instead."""
+        if not metadata.num_spec_decodes:
+            return 0, None
+        cursors = kda_replayssm.step_cursors(self, metadata)
+        beta = beta[0]
+        if metadata.num_prefills:
+            indx = metadata.spec_token_indx
+            qkv, beta, f_a, g_a = (
+                t.index_select(0, indx) for t in (qkv, beta, f_a, g_a)
+            )
+            out = out.new_empty(1, qkv.size(0), *out.shape[2:])
+        assert self._fi_conv_weight is not None and self._fi_norm_weight is not None
+        checkpoint, u_ring, k_ring, g_ring = self.kv_cache[1:]
+        kda_replayssm.kda_replayssm_step(
+            qkv.unflatten(-1, (3, self.local_num_heads, self.head_dim)),
+            beta,
+            f_a,
+            g_a,
+            self._fi_conv_weight.view(3, self.conv_size, self.local_num_heads, -1),
+            self.A_log.view(-1),
+            self.dt_bias.view(self.local_num_heads, -1),
+            self.f_b_proj.weight.view(self.local_num_heads, self.head_dim, -1),
+            self.g_b_proj.weight.view(self.local_num_heads, self.head_dim, -1),
+            self._fi_norm_weight,
+            cursors.query_start_loc,
+            cursors.slot,
+            cursors.ring_slot,
+            cursors.num_accepted,
+            cursors.ring_start,
+            cursors.num_committed,
+            self.kv_cache[0].unflatten(-1, (3, self.local_num_heads, self.head_dim)),
+            checkpoint,
+            u_ring,
+            k_ring,
+            g_ring,
+            out[0],
+            self.kda_lower_bound,
+            self.head_dim**-0.5,
+            self.o_norm.eps,
+        )
+        if metadata.num_prefills:
+            return 0, out
+        return metadata.num_spec_decode_tokens, None
+
     @eager_break_during_capture
     def _forward(
         self,
         qkv_proj_states: torch.Tensor,
-        g1: torch.Tensor,
+        g1: torch.Tensor | None,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
-        g2: torch.Tensor,
+        g2: torch.Tensor | None,
+        f_a: torch.Tensor,
+        g_a: torch.Tensor,
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1088,10 +1200,24 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         constant_caches = self.kv_cache
 
         qkv_proj_states = qkv_proj_states[:num_actual_tokens]
-        g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
+        num_fused_decodes, replayssm_spec_out = 0, None
+        if self.use_replayssm:
+            num_fused_decodes, replayssm_spec_out = self._replayssm_rows(
+                attn_metadata_narrowed,
+                qkv_proj_states,
+                beta,
+                f_a[:num_actual_tokens],
+                g_a[:num_actual_tokens],
+                core_attn_out,
+            )
+            if attn_metadata_narrowed.num_prefills == 0:
+                return
+            g1, g2 = self._gates(f_a, g_a)
+        assert g1 is not None and g2 is not None
+        g1 = g1[:, :num_actual_tokens]
 
-        (conv_state, recurrent_state) = constant_caches
+        conv_state, recurrent_state = constant_caches[:2]
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
         # Layout is process-global and resolved once at init (see __init__).
@@ -1107,7 +1233,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         conv_bias = self.conv1d.bias
 
-        num_fused_decodes = self._flashinfer_decode_rows(
+        num_fused_decodes += self._flashinfer_decode_rows(
             attn_metadata_narrowed,
             qkv_proj_states,
             g1,
@@ -1152,7 +1278,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             qkv_ns, g1_ns, beta_ns = qkv_proj_states, g1, beta
 
         # --- causal conv1d: spec (draft-verify) path ---
-        if use_spec:
+        if use_spec and replayssm_spec_out is None:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             conv_idx = spec_state_indices_tensor[:, 0][:num_spec_decodes]
@@ -1226,7 +1352,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             if non_spec_token_indx is None or non_spec_token_indx.numel() == 0
             else None
         )
-        if use_spec:
+        if replayssm_spec_out is not None:
+            core_attn_out_spec = replayssm_spec_out
+        elif use_spec:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             assert spec_query_start_loc is not None
@@ -1404,3 +1532,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             normed = self.o_norm(live_out, g2[num_fused_decodes:num_actual_tokens])
             if normed.data_ptr() != live_out.data_ptr():
                 live_out.copy_(normed)
+        if replayssm_spec_out is not None:
+            # The kernel's verify rows are normed already.
+            core_attn_out.index_copy_(1, spec_token_indx, replayssm_spec_out)
