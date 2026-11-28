@@ -1014,6 +1014,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tools = None
             data["tools"] = tools
 
+        if tools is not None:
+            # A tool call names its tool, so names must be unique.
+            seen: set[str] = set()
+            for tool in tools:
+                function = tool.get("function") if isinstance(tool, dict) else None
+                name = function.get("name") if isinstance(function, dict) else None
+                if not isinstance(name, str):
+                    continue
+                if name in seen:
+                    raise VLLMValidationError(
+                        f"Duplicate tool name `{name}` in `tools`. "
+                        "Each tool must have a unique name.",
+                        parameter="tools",
+                    )
+                seen.add(name)
+
         tool_choice = data.get("tool_choice")
         if tools is not None:
             # omitted tool_choice defaults to auto if tools are provided
