@@ -157,7 +157,7 @@ def producer_mailbox(ctx: Any) -> LamportMailbox | None:
     partial into it (`PACKAGE_GEMM_TPS`), else None: the one place that
     decides, for the o_proj (which GEMM) and the attention boundary (whether
     it publishes)."""
-    return fused_all_reduce(ctx).mailbox if ctx.tp in PACKAGE_GEMM_TPS else None
+    return fused_all_reduce(ctx).mailbox if ctx.tp in FUSED_TPS else None
 
 
 @functools.cache
