@@ -286,15 +286,16 @@ class P2PSession:
         """Withdraw queued stores, optionally for fetches arriving during drain."""
         return self._server.drain_stores(kv_request_ids)
 
-    def finish_request(self, kv_request_id: str) -> None:
+    def finish_request(self, kv_request_id: str, *, notify_peer: bool = False) -> None:
         """Called when the request is finishing locally.
 
         Finishes the client role (aborts any inbound load and drops any
         pending symmetric-P2P lookup state) and finalizes any outbound
         serving (server role) for this id. Roles that aren't active for
-        this id are silent no-ops.
+        this id are silent no-ops. A PD consumer that needed no fetch can
+        still notify the prefiller to release its already parked stores.
         """
-        self._client.finish(kv_request_id)
+        self._client.finish(kv_request_id, notify_peer=notify_peer)
         self._server.finish(kv_request_id)
 
     def abort_loads(self) -> None:
@@ -790,6 +791,11 @@ class P2PSession:
             and not msg[FetchMsg.BLOCK_INDEXES]
             and not self._client.can_send_terminal_fetch(msg[FetchMsg.KV_REQUEST_ID])
         ):
+            logger.debug(
+                "P2PSession %s: dropping terminal fetch for %s: newer round active",
+                self.peer_id,
+                msg[FetchMsg.KV_REQUEST_ID],
+            )
             return
         try:
             self._conn.send(msg)

@@ -512,6 +512,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         producer's address is what addresses the client-role load to
         cancel; also drops any pending symmetric-P2P lookup state via
         `session.finish_request`.
+        A PD consumer that never fetched sends a terminal empty fetch to
+        release the prefiller's unused stores.
         Prefiller side (`remote_decoder` set): looks up via kv_request_id
         because peer_id is no longer carried on store-time
         kv_transfer_params; if a session has bound the id, finish it. If
@@ -541,7 +543,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         if source is not None:
             source_session = self._sessions.get(source.peer_id)
             if source_session is not None:
-                source_session.finish_request(source.kv_request_id)
+                # A submitted PD fetch closes its own round; symmetric
+                # consumers send their terminal via ClientRole.finish.
+                source_session.finish_request(
+                    source.kv_request_id,
+                    notify_peer=not source.do_probe and not source.pd_fetch_submitted,
+                )
 
         if dest_id is not None:
             # Prefiller-side finish: identify the session via kv_request_id.
@@ -1216,6 +1223,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # match that demand and submit transfers immediately.
             for kv_request_id in result.new_fetch_ids:
                 if kv_request_id in result.terminal_fetch_ids:
+                    self._reaped_stores[kv_request_id] = time.monotonic()
                     self._kv_to_session.pop(kv_request_id, None)
                     for batch in self._unbound_stores.pop(kv_request_id, ()):
                         self._finished_jobs.append(
