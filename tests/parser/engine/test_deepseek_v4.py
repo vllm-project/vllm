@@ -427,6 +427,71 @@ class TestThinkTagAbsorption:
         assert "Answer" in content
 
 
+# A think token between quotes is text: the model quotes its own markers, and a
+# marker is the same token as the real delimiter.
+@pytest.mark.parametrize("streaming", [True, False], ids=["streaming", "offline"])
+@pytest.mark.parametrize(
+    ("thinking", "chunks", "reasoning", "content"),
+    [
+        *(
+            (
+                True,
+                [
+                    f"The tag {quote}",
+                    "</think>",
+                    f"{quote} ends the thinking. More thoughts.",
+                    "</think>",
+                    "The answer.",
+                ],
+                f"The tag {quote}</think>{quote} ends the thinking. More thoughts.",
+                "The answer.",
+            )
+            for quote in ("`", "'", '"')
+        ),
+        # A quote only before the token does not make it a mention.
+        (
+            True,
+            ['He said "ok"', "</think>", "The answer."],
+            'He said "ok"',
+            "The answer.",
+        ),
+        # Unquoted, it still ends the thinking.
+        (
+            True,
+            ["Some thoughts. ", "</think>", "The answer."],
+            "Some thoughts.",
+            "The answer.",
+        ),
+        # In the answer, a quoted <think> does not reopen the reasoning.
+        (
+            False,
+            ["Start with the `", "<think>", "` tag."],
+            "",
+            "Start with the `<think>` tag.",
+        ),
+    ],
+    ids=[
+        "backticks",
+        "single_quotes",
+        "double_quotes",
+        "quote_before_only",
+        "unquoted",
+        "think_start",
+    ],
+)
+def test_quoted_think_tokens_are_text(
+    mock_tokenizer, streaming, thinking, chunks, reasoning, content
+):
+    parser = DeepSeekV4Parser(
+        mock_tokenizer, chat_template_kwargs={"thinking": thinking}
+    )
+    if streaming:
+        result = simulate_reasoning_streaming(parser, chunks)
+    else:
+        result = parser.extract_reasoning("".join(chunks), None)
+    assert (result[0] or "", result[1] or "") == (reasoning, content)
+
+
 # ── Missing </｜DSML｜invoke> before </｜DSML｜tool_calls> ────────────
 
 

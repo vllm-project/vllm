@@ -30,6 +30,8 @@ from vllm.parser.engine.token_id_scanner import (
     TokenIDScanner,
 )
 
+_QUOTE_CHARS = frozenset("'\"`")
+
 
 @dataclass(slots=True)
 class _DropInfo:
@@ -220,6 +222,9 @@ class StreamingParserEngine:
         self._message_header_buffer = ""
         self._message_header_token_count = 0
         self._in_skipped_tool_span = False
+        # A quote-guarded terminal held until the next character is known.
+        self._pending_guard: tuple[str, str, int] | None = None
+        self._last_char = ""
         self._reset_args_state()
         self._reset_json_collection_state()
 
@@ -297,6 +302,9 @@ class StreamingParserEngine:
         events = self._process_scanner_items(self._scanner.flush_pending())
 
         events.extend(self._process_lex_tokens(self._lexer.flush()))
+
+        if self._pending_guard is not None:
+            events.extend(self._resolve_pending(None))
 
         if self._args_buffer:
             events.append(
@@ -410,7 +418,31 @@ class StreamingParserEngine:
                 return frozenset()
         return markers
 
+    def _resolve_pending(self, next_char: str | None) -> list[SemanticEvent]:
+        """Decide a held quote-guarded terminal: quoted on both sides means
+        plain text, anything else (or end of stream) applies the transition."""
+        assert self._pending_guard is not None
+        terminal, value, token_count = self._pending_guard
+        self._pending_guard = None
+        if next_char is not None and next_char in _QUOTE_CHARS:
+            return self._emit_for_state(value, token_count)
+        return self._on_terminal_unguarded(terminal, value, token_count)
+
     def _on_terminal(
+        self, terminal: str, value: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
+        events = self._resolve_pending(None) if self._pending_guard is not None else []
+        if (
+            terminal in self.config.quote_guarded_terminals
+            and self.state in self._PLAIN_STATES
+            and self._last_char in _QUOTE_CHARS
+        ):
+            self._pending_guard = (terminal, value, token_count)
+            return events
+        events.extend(self._on_terminal_unguarded(terminal, value, token_count))
+        return events
+
+    def _on_terminal_unguarded(
         self, terminal: str, value: str, token_count: int = 0
     ) -> list[SemanticEvent]:
         key = (self.state, terminal)
@@ -485,6 +517,17 @@ class StreamingParserEngine:
         return self._apply_transition(transition, value, token_count)
 
     def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        events: list[SemanticEvent] = []
+        if self._pending_guard is not None and text:
+            events = self._resolve_pending(text[0])
+        events.extend(self._emit_for_state_unguarded(text, token_count))
+        if text and self.state in self._PLAIN_STATES:
+            self._last_char = text[-1]
+        return events
+
+    def _emit_for_state_unguarded(
+        self, text: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
         if self.state == ParserState.MESSAGE_HEADER:
             self._message_header_buffer += text
             self._message_header_token_count += token_count
