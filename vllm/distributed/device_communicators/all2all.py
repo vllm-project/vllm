@@ -1055,10 +1055,22 @@ class MoriAll2AllManager(All2AllManagerBase):
                     "mori currently only support arch gfx942 and gfx950"
                 )
 
+        # Lossy packed-FP4 combine, so opt-in. Validated here because mori only
+        # rejects a non-IntraNode kernel type at the first combine.
+        fp4_combine = envs.VLLM_MORI_FP4_COMBINE
+        if fp4_combine and (self.internode or not on_gfx950()):
+            raise ValueError(
+                "VLLM_MORI_FP4_COMBINE=1 requires single-node MoRI on gfx950 (the "
+                "packed-FP4 combine is IntraNode-only and needs the OCP FP4 "
+                f"conversion instructions); internode={self.internode}, "
+                f"on_gfx950={on_gfx950()}"
+            )
+
         return dict(
             rank=rank,
             world_size=num_ep_ranks,
             data_type=quant_dtype,
+            quant_type="fp4_blockwise" if fp4_combine else "none",
             hidden_dim=token_hidden_size,
             scale_dim=scale_dim,
             scale_type_size=scale_type_size,

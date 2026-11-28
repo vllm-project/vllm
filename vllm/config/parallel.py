@@ -1453,6 +1453,29 @@ def resolve_mori_all2all(
     logger.info_once("MoRI all2all: EP%s", "v2" if parallel_config.mori_ep_v2 else "v1")
 
 
+def warn_if_mori_fp4_combine_ignored(
+    parallel_config: ParallelConfig, moe_backend: str
+) -> None:
+    """Warn when `VLLM_MORI_FP4_COMBINE` is set on a path that never builds
+    the MoRI EPv1 combine handle it configures."""
+    if not envs.VLLM_MORI_FP4_COMBINE:
+        return
+    if moe_backend == "aiter_mega_moe":
+        reason = "moe_backend=aiter_mega_moe runs its own fused combine"
+    elif parallel_config.all2all_backend == "mori" and parallel_config.mori_ep_v2:
+        reason = (
+            "all2all_backend=mori resolved to MoRI EPv2 "
+            "(VLLM_MORI_EP_V2=0 selects EPv1)"
+        )
+    else:
+        return
+    logger.warning_once(
+        "VLLM_MORI_FP4_COMBINE=1 is ignored: %s. It only applies to the MoRI "
+        "EPv1 combine.",
+        reason,
+    )
+
+
 def _resolve_mori_ep_v2(
     parallel_config: ParallelConfig,
     model_config: "ModelConfig | None",

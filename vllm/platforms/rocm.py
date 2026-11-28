@@ -1184,9 +1184,12 @@ class RocmPlatform(Platform):
 
         _maybe_default_dsv4_mxfp4_indexer(vllm_config)
 
-        if parallel_config.all2all_backend == "mori":
-            from vllm.config.parallel import resolve_mori_all2all
+        from vllm.config.parallel import (
+            resolve_mori_all2all,
+            warn_if_mori_fp4_combine_ignored,
+        )
 
+        if parallel_config.all2all_backend == "mori":
             resolve_mori_all2all(
                 parallel_config,
                 model_config,
@@ -1195,6 +1198,9 @@ class RocmPlatform(Platform):
                 sdma_picks_epv1=not on_gfx1250(),
                 validated_arch=on_gfx950() or on_gfx1250(),
             )
+        warn_if_mori_fp4_combine_ignored(
+            parallel_config, vllm_config.kernel_config.moe_backend
+        )
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
