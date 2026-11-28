@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
 from vllm import envs
+from vllm.config.utils import get_from_deprecated_env_if_set
 from vllm.logger import init_logger
 from vllm.tasks import SupportedTask
 
@@ -54,7 +55,16 @@ def init_entrypoints_middleware(
 
         app.add_middleware(WebSocketMetricsMiddleware)
 
-    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
+    debug_log_response = args.debug_log_api_server_response
+    if get_from_deprecated_env_if_set(
+        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+        removal_version="v0.36.0",
+        field_name="--debug-log-api-server-response",
+    ):
+        debug_log_response = (
+            debug_log_response or envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE
+        )
+    if debug_log_response:
         logger.warning(
             "CAUTION: Enabling log response in the API Server. "
             "This can include sensitive information and should be "

@@ -843,7 +843,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
-    # Whether to log responses from API Server for debugging
+    # Deprecated: use --debug-log-api-server-response instead.
+    # This environment variable will be removed in v0.36.0.
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE": lambda: (
         os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").lower() == "true"
     ),
