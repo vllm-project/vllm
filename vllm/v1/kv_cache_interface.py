@@ -230,6 +230,12 @@ class KVCacheSpec:
         raise NotImplementedError
 
     @property
+    def page_components(self) -> dict[str, tuple[int, int]]:
+        """Byte `(offset, size)` of each component of a page, by name, when
+        layers bind its components as separate views; empty to bind it whole."""
+        return {}
+
+    @property
     def page_size_bytes(self) -> int:
         """The size of a page with `block_size` tokens in bytes.
 
@@ -576,6 +582,17 @@ class MambaSpec(KVCacheSpec):
         )
 
     @property
+    def page_components(self) -> dict[str, tuple[int, int]]:
+        """Each state, by index, packed in order at the state alignment."""
+        components = {}
+        offset = 0
+        for i, (shape, dtype) in enumerate(zip(self.shapes, self.dtypes)):
+            size = prod(shape) * get_dtype_size(dtype)
+            components[str(i)] = (offset, size)
+            offset += round_up(size, self.state_alignment)
+        return components
+
+    @property
     def real_page_size_bytes(self) -> int:
         return self.state_content_size_bytes
 
@@ -727,8 +744,17 @@ class KVCacheGroup:
         )
 
     @property
+    def layer_specs(self) -> dict[str, KVCacheSpec]:
+        """Each layer's spec. A layer whose cache has several components, named
+        `"<layer name>:<component>"` in `kv_cache_specs`, has its first one's."""
+        layer_specs: dict[str, KVCacheSpec] = {}
+        for name, spec in self.kv_cache_specs.items():
+            layer_specs.setdefault(name.partition(":")[0], spec)
+        return layer_specs
+
+    @property
     def layer_names(self) -> list[str]:
-        return list(self.kv_cache_specs)
+        return list(self.layer_specs)
 
     @property
     def distinct_specs(self) -> tuple[KVCacheSpec, ...]:

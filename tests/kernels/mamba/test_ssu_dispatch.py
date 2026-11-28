@@ -38,7 +38,7 @@ from vllm.v1.worker.replayssm_utils import (
     _compact_replayssm_requests_kernel,
     _postprocess_replayssm_kernel,
 )
-from vllm.v1.worker.utils import allocate_kv_cache
+from vllm.v1.worker.utils import allocate_kv_cache, kv_cache_components
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -178,7 +178,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             get_state_dtype=lambda: spec.dtypes,
             state_alignment=16,
         )
-        MambaBase.bind_kv_cache(layer, page)
+        MambaBase.bind_kv_cache(layer, kv_cache_components(page, spec))
         caches[name] = layer.kv_cache
     rings = {name: states[2:] for name, states in caches.items()}
     for name, states in caches.items():

@@ -34,11 +34,14 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend, HiSparseBackend
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
+    KVCacheGroup,
     KVCacheLayout,
     MambaSpec,
 )
@@ -53,6 +56,7 @@ from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     request_memory,
+    split_kv_cache_components,
 )
 
 
@@ -1586,7 +1590,12 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
     pages = {name: pages[name] for name in reversed(names)}
     runner_pages: list[torch.Tensor] = []
-    bind_kv_cache(pages, ctx, runner_pages)
+    bind_kv_cache(
+        pages,
+        ctx,
+        runner_pages,
+        layer_kv_caches=split_kv_cache_components(pages, kv_config),
+    )
     initialize_replayssm_ring_trackers(kv_config, ctx)
     # ROCm rounds the shared allocation up to a 4 KiB RDMA page.
     expected_storage_size = 4096 if current_platform.is_rocm() else 4 * 256
@@ -1656,7 +1665,10 @@ def test_rebind_kv_cache_keeps_replayssm_trackers():
     def bind(num_blocks):
         config.num_blocks = num_blocks
         bind_kv_cache_to_layers(
-            {n: page[:num_blocks] for n, page in pages.items()}, ctx
+            split_kv_cache_components(
+                {n: page[:num_blocks] for n, page in pages.items()}, config
+            ),
+            ctx,
         )
         initialize_replayssm_ring_trackers(config, ctx)
 
@@ -1711,7 +1723,11 @@ def test_triton_replayssm_plans_in_first_layer_of_each_group():
         ],
     )
     bind_kv_cache_to_layers(
-        {name: torch.zeros((4, 1, 1, 128), dtype=torch.int8) for name in names}, ctx
+        split_kv_cache_components(
+            {name: torch.zeros((4, 1, 1, 128), dtype=torch.int8) for name in names},
+            config,
+        ),
+        ctx,
     )
     initialize_replayssm_ring_trackers(config, ctx)
 
@@ -1720,6 +1736,56 @@ def test_triton_replayssm_plans_in_first_layer_of_each_group():
     assert mixers[0]._replayssm_ring_start.shape == (4,)
     assert [m._plans_replayssm_decode for m in mixers] == [True, True, False]
     assert get_replayssm_block_copy_tensors(ctx) == []
+
+
+def test_layer_cache_components_are_bound_by_name():
+    """Each component of a layer's cache is planned as its own cache and bound
+    by name; a layer whose cache is one tensor is still bound that tensor."""
+
+    class _Layer:
+        def bind_kv_cache(self, kv_cache):
+            self.kv_cache = kv_cache
+
+    data = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
+    scales = AttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=1, dtype=torch.float32
+    )
+    group = KVCacheGroup.from_layers(
+        {
+            "layer:data": FullAttentionManager.layer_config(data),
+            "layer:scales": FullAttentionManager.layer_config(scales),
+            "plain": FullAttentionManager.layer_config(data),
+        }
+    )
+    assert group.layer_names == ["layer", "plain"]
+
+    config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    layout = KVCacheLayout.LBHNC
+    config.cache_config.kv_cache_layout = layout.name
+    kv_config = get_kv_cache_config_from_groups(
+        config, [group], 4 * group.page_size_bytes
+    )
+    kv_caches = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
+    ctx = {"layer": _Layer(), "plain": _Layer()}
+    bind_kv_cache_to_layers(kv_caches, ctx)
+
+    assert isinstance(ctx["plain"].kv_cache, torch.Tensor)
+    assert ctx["layer"].kv_cache.keys() == {"data", "scales"}
+    data_view = ctx["layer"].kv_cache["data"]
+    scales_view = ctx["layer"].kv_cache["scales"]
+    assert data_view.dtype == torch.float16
+    assert scales_view.dtype == torch.float32
+    assert data_view.shape[0] == scales_view.shape[0] == kv_config.num_blocks
+    assert data_view.numel() // scales_view.numel() == 8
+
+    # The views are disjoint regions of the backing allocation.
+    data_view.fill_(1)
+    assert (scales_view == 0).all()
 
 
 def test_bind_kv_cache(default_vllm_config):

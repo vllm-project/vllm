@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Iterable
-from math import lcm, prod
+from math import lcm
 
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
@@ -34,21 +32,16 @@ class MambaBase(AttentionLayerBase):
     _replayssm_ring_start: torch.Tensor
     _replayssm_prev_num_accepted: torch.Tensor
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        """Unpack a raw `[B, 1, 1, C]` int8 page view into per-state views.
-
-        Each block's `C` bytes hold the layer's states (e.g. conv, ssm)
-        packed by dtype/shape with the layer's state alignment.
-        """
-        pages = kv_cache.squeeze(dim=(1, 2))
-        states: list[torch.Tensor] = []
-        offset = 0
-        for shape, dtype in zip(self.get_state_shape(), self.get_state_dtype()):
-            nbytes = prod(shape) * get_dtype_size(dtype)
-            state = pages[:, offset : offset + nbytes].view(dtype)
-            states.append(state.view(-1, *shape))
-            offset += round_up(nbytes, self.state_alignment)
-        self.kv_cache = tuple(states)
+    def bind_kv_cache(self, kv_cache: torch.Tensor | dict[str, torch.Tensor]) -> None:
+        """View each state's raw `[B, 1, 1, C]` int8 pages, keyed by state index
+        (see `MambaSpec.page_components`), as that state (e.g. conv, ssm)."""
+        assert isinstance(kv_cache, dict)
+        self.kv_cache = tuple(
+            kv_cache[str(i)].squeeze(dim=(1, 2)).view(dtype).view(-1, *shape)
+            for i, (shape, dtype) in enumerate(
+                zip(self.get_state_shape(), self.get_state_dtype())
+            )
+        )
 
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:

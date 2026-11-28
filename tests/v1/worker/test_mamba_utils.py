@@ -53,6 +53,8 @@ from vllm.v1.worker.replayssm_utils import (
 from vllm.v1.worker.utils import (
     allocate_kv_cache,
     bind_kv_cache_to_layers,
+    kv_cache_components,
+    split_kv_cache_components,
 )
 
 # Conv + temporal copy specs, in the order the tests' MambaSpec shapes expect.
@@ -595,8 +597,10 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
         for mixer in mixers
     ]
     assert MambaManager.can_share_block_table(specs)
-    for mixer in mixers:
-        mixer.bind_kv_cache(torch.zeros((3, 1, 1, 128), dtype=torch.int8))
+    for mixer, spec in zip(mixers, specs):
+        mixer.bind_kv_cache(
+            kv_cache_components(torch.zeros((3, 1, 1, 128), dtype=torch.int8), spec)
+        )
         mixer.A = -torch.ones(1)
         mixer.replayssm_buffer_len = 16
 
@@ -683,7 +687,9 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
         mixer.replayssm_buffer_len = 16
         mixer.A = -torch.ones(1, device=device)
         forward_context[name] = mixer
-    bind_kv_cache_to_layers(pages, forward_context)
+    bind_kv_cache_to_layers(
+        split_kv_cache_components(pages, kv_config), forward_context
+    )
     initialize_replayssm_ring_trackers(kv_config, forward_context)
     source_slot, destination_slot = previous_column + 1, destination_column + 1
     original = {}
