@@ -187,9 +187,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
-        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
-            vllm_config, layer_names
-        )
+        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(vllm_config)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self._adaptive_verification = bool(

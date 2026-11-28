@@ -29,6 +29,7 @@ from vllm.triton_utils import LOG2E, tl, triton
 
 from .clip import CLIPEncoder, CLIPVisionEmbeddings
 from .utils import AutoWeightsLoader
+from .vision import InterpolatedPosEmbedCache, interpolate_cls_abs_pos
 
 LOG2E = tl.constexpr(LOG2E)
 
@@ -421,6 +422,7 @@ class ImageEncoderViT(nn.Module):
                     1, img_size // patch_size, img_size // patch_size, embed_dim
                 )
             )
+        self._abs_pos_cache = InterpolatedPosEmbedCache()
 
         self.blocks = nn.ModuleList()
         for i in range(depth):
@@ -463,25 +465,31 @@ class ImageEncoderViT(nn.Module):
             512, last_conv_output, kernel_size=3, stride=2, padding=1, bias=False
         )
 
-    def get_abs_pos(self, abs_pos: torch.Tensor, tgt_size: int):
+    @staticmethod
+    def _interpolate_abs_pos(abs_pos: torch.Tensor, tgt_size: int) -> torch.Tensor:
         dtype = abs_pos.dtype
+        old_pos_embed = abs_pos.permute(0, 3, 1, 2).to(torch.float32)
+        new_pos_embed = F.interpolate(
+            old_pos_embed,
+            size=(tgt_size, tgt_size),
+            mode="bicubic",
+            antialias=True,
+            align_corners=False,
+        ).to(dtype)
+        return new_pos_embed.permute(0, 2, 3, 1)
 
-        src_size = abs_pos.size(1)
-
-        if src_size != tgt_size:
-            old_pos_embed = abs_pos.permute(0, 3, 1, 2)
-            old_pos_embed = old_pos_embed.to(torch.float32)
-            new_pos_embed = F.interpolate(
-                old_pos_embed,
-                size=(tgt_size, tgt_size),
-                mode="bicubic",
-                antialias=True,
-                align_corners=False,
-            ).to(dtype)
-            new_pos_embed = new_pos_embed.permute(0, 2, 3, 1)
-            return new_pos_embed
-        else:
+    def get_abs_pos(self, abs_pos: torch.Tensor, tgt_size: int) -> torch.Tensor:
+        if abs_pos.size(1) == tgt_size:
             return abs_pos
+        if abs_pos is self.pos_embed:
+            return self._abs_pos_cache.get_or_compute(
+                abs_pos, tgt_size, self._interpolate_abs_pos
+            )
+        return self._interpolate_abs_pos(abs_pos, tgt_size)
+
+    def process_weights_after_loading(self) -> None:
+        if self.pos_embed is not None:
+            self._abs_pos_cache.refresh(self.pos_embed, self._interpolate_abs_pos)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
@@ -877,39 +885,34 @@ def _build_sam(
 
 
 class DeepCLIPVisionEmbeddings(CLIPVisionEmbeddings):
-    def get_abs_pos(self, abs_pos: torch.Tensor, tgt_size: int):
+    def __init__(self, config: CLIPVisionConfig) -> None:
+        super().__init__(config)
+        self._abs_pos_cache = InterpolatedPosEmbedCache()
+
+    def get_abs_pos(self, abs_pos: torch.Tensor, tgt_size: int) -> torch.Tensor:
         # abs_pos: L, C
         # tgt_size: M
         # return: M, C
-        dim = abs_pos.size(-1)
-        abs_pos_new = abs_pos.squeeze(0)
-        cls_token, old_pos_embed = abs_pos_new[:1], abs_pos_new[1:]
+        src_size = int(math.sqrt(abs_pos.squeeze(0).shape[0] - 1))
+        tgt_grid = int(math.sqrt(tgt_size))
+        if src_size != tgt_grid:
+            return interpolate_cls_abs_pos(abs_pos, tgt_grid)
+        return abs_pos
 
-        src_size = int(math.sqrt(abs_pos_new.shape[0] - 1))
-        tgt_size = int(math.sqrt(tgt_size))
-        dtype = abs_pos.dtype
+    def _get_pos_embed(self, tgt_size: int) -> torch.Tensor:
+        weight = self.position_embedding.weight
+        src_size = int(math.sqrt(weight.shape[0] - 1))
+        tgt_grid = int(math.sqrt(tgt_size))
+        if src_size == tgt_grid:
+            return self.position_embedding(self.position_ids)
+        return self._abs_pos_cache.get_or_compute(
+            weight, tgt_grid, interpolate_cls_abs_pos
+        )
 
-        if src_size != tgt_size:
-            old_pos_embed = (
-                old_pos_embed.view(1, src_size, src_size, dim)
-                .permute(0, 3, 1, 2)
-                .contiguous()
-            )
-            old_pos_embed = old_pos_embed.to(torch.float32)
-            new_pos_embed = F.interpolate(
-                old_pos_embed,
-                size=(tgt_size, tgt_size),
-                mode="bicubic",
-                antialias=True,
-                align_corners=False,
-            ).to(dtype)
-            new_pos_embed = new_pos_embed.permute(0, 2, 3, 1)
-            new_pos_embed = new_pos_embed.view(tgt_size * tgt_size, dim)
-            vision_pos_embed = torch.cat([cls_token, new_pos_embed], dim=0)
-            vision_pos_embed = vision_pos_embed.view(1, tgt_size * tgt_size + 1, dim)
-            return vision_pos_embed
-        else:
-            return abs_pos
+    def process_weights_after_loading(self) -> None:
+        self._abs_pos_cache.refresh(
+            self.position_embedding.weight, interpolate_cls_abs_pos
+        )
 
     def forward(
         self, pixel_values: torch.Tensor, patch_embeds: torch.Tensor | None = None
@@ -921,9 +924,7 @@ class DeepCLIPVisionEmbeddings(CLIPVisionEmbeddings):
 
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        embeddings = embeddings + self.get_abs_pos(
-            self.position_embedding(self.position_ids), embeddings.size(1)
-        )
+        embeddings = embeddings + self._get_pos_embed(embeddings.size(1))
         return embeddings
 
 

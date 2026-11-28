@@ -5,14 +5,10 @@
 A slot pass translates each row's logical tokens through the page table once
 for all KV heads (or fuses the lookup directly at tiny batches to avoid the
 extra launch), then an int16-pair kernel attends over the selected tokens with
-split-K and gated PDL overlap. Gathering K/V as int16 pairs of e4m3
-codes feeds the MMAs without byte-wise shared-memory loads. qsa.py's
-qsa_sparse_paged_attention dispatches here via use_fp8_decode_kernel; every
-QK/PV product matches the split-K kernel's (QK in bf16, PV in fp16, both
-exact) -- only fp32 summation grouping differs.
+split-K and gated PDL overlap. Q, K and V are gathered as int16 pairs of e4m3
+codes, which avoids byte-wise shared-memory loads, and unpacked exactly to fp16.
+qsa.py's qsa_sparse_paged_attention dispatches here via use_fp8_decode_kernel.
 """
-
-import functools
 
 import torch
 
@@ -90,62 +86,6 @@ def _qsa_physical_slots_kernel(
         tl.extra.cuda.gdc_launch_dependents()
 
 
-@functools.cache
-def _ptxas_has_bf16x2_e4m3() -> bool:
-    # cvt.rn.bf16x2.e4m3x2 needs PTX ISA 9.2 (ptxas >= 13.2); checked lazily
-    # after imports (e.g. flashinfer.triton may override TRITON_PTXAS_BLACKWELL_PATH
-    # with an older system ptxas).
-    if not current_platform.is_cuda():
-        return False
-    from triton.backends.nvidia.compiler import get_ptxas
-
-    major, minor = map(int, get_ptxas(100).version.split(".")[:2])
-    return (major, minor) >= (13, 2)
-
-
-@triton.jit
-def _e4m3_pairs_to_bf16(pairs, HIGH: tl.constexpr, USE_BF16_CVT: tl.constexpr):
-    """bf16 of one byte of each int16 pair of e4m3 codes (byte 0 = dim 2i,
-    byte 1 = dim 2i + 1); exact via PTX 9.2 cvt.rn.bf16x2.e4m3x2 (sm_100f+),
-    with fp16->bf16 fallback on older ptxas."""
-    if not USE_BF16_CVT:
-        return _e4m3_pairs_to_fp16(pairs, HIGH).to(tl.bfloat16)
-    if HIGH:
-        return tl.inline_asm_elementwise(
-            asm="""
-            {
-            .reg .b32 t;
-            .reg .b16 lo, hi;
-            prmt.b32 t, $1, 0, 0x3120;
-            mov.b32 {lo, hi}, t;
-            cvt.rn.bf16x2.e4m3x2 $0, hi;
-            }
-            """,
-            constraints="=r,r",
-            args=[pairs],
-            dtype=tl.bfloat16,
-            is_pure=True,
-            pack=2,
-        )
-    else:
-        return tl.inline_asm_elementwise(
-            asm="""
-            {
-            .reg .b32 t;
-            .reg .b16 lo, hi;
-            prmt.b32 t, $1, 0, 0x3120;
-            mov.b32 {lo, hi}, t;
-            cvt.rn.bf16x2.e4m3x2 $0, lo;
-            }
-            """,
-            constraints="=r,r",
-            args=[pairs],
-            dtype=tl.bfloat16,
-            is_pure=True,
-            pack=2,
-        )
-
-
 @triton.jit
 def _e4m3_pairs_to_fp16(pairs, HIGH: tl.constexpr):
     """fp16 of one byte of each int16 pair of e4m3 codes (byte 0 = dim 2i,
@@ -188,7 +128,7 @@ def _e4m3_pairs_to_fp16(pairs, HIGH: tl.constexpr):
 
 @triton.jit(do_not_specialize=["num_rows", "num_requests", "num_cache_blocks"])
 def _qsa_sparse_paged_decode_kernel(
-    q_ptr,
+    q_pairs_ptr,
     k_pairs_ptr,
     v_pairs_ptr,
     slots_ptr,
@@ -229,15 +169,15 @@ def _qsa_sparse_paged_decode_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_STAGES: tl.constexpr,
-    USE_BF16_CVT: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
     """Single-pass and split-K Blackwell fp8 attention kernel.
 
-    K and V are gathered as int16 pairs of e4m3 codes, which feed the MMA
-    operands without byte-wise shared-memory loads, and split exactly into
-    even/odd-dim halves: scores = Q_even K_even + Q_odd K_odd in bf16 and
-    O = [P V_even, P V_odd] in fp16.
+    Q, K and V are gathered as int16 pairs of e4m3 codes and split exactly
+    into even/odd-dim fp16 halves: scores = Q_even K_even + Q_odd K_odd and
+    O = [P V_even, P V_odd]. An fp8 tl.dot gains nothing here: BLOCK_M is too
+    small for tcgen05, so Triton would upcast to fp16 mma.sync anyway, and
+    staging fp8 K measured slower (more shared memory per CTA).
 
     When slots_ptr is None (tiny batches), page-table lookups are fused into
     the loop to avoid the slot-pass launch overhead. Otherwise slots_ptr holds
@@ -254,28 +194,28 @@ def _qsa_sparse_paged_decode_kernel(
     column_offsets = tl.arange(0, BLOCK_N)
     first_head = kv_head * GROUP_SIZE
     head_mask = head_offsets[:, None] < GROUP_SIZE
-    q_pairs = (
-        q_ptr
+    q_pair_ptrs = (
+        q_pairs_ptr
         + row * stride_q_row
         + (first_head + head_offsets[:, None]) * stride_q_head
-        + 2 * pair_offsets[None, :]
+        + pair_offsets[None, :]
     )
     if slots_ptr is None:
         if launch_pdl:
             tl.extra.cuda.gdc_wait()
-        query_even = tl.load(q_pairs, mask=head_mask, other=0.0)
-        query_odd = tl.load(q_pairs + 1, mask=head_mask, other=0.0)
+        q_pairs = tl.load(q_pair_ptrs, mask=head_mask, other=0)
         valid_count = tl.load(indices_ptr + row * stride_indices_row + TOPK)
         request = tl.load(token_to_req_ptr + row)
         safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
     else:
         # Load Q and valid_count before gdc_wait so they overlap the slot pass
         # tail (the slot pass already waited on earlier producers).
-        query_even = tl.load(q_pairs, mask=head_mask, other=0.0)
-        query_odd = tl.load(q_pairs + 1, mask=head_mask, other=0.0)
+        q_pairs = tl.load(q_pair_ptrs, mask=head_mask, other=0)
         valid_count = tl.load(indices_ptr + row * stride_indices_row + TOPK)
         if launch_pdl:
             tl.extra.cuda.gdc_wait()
+    query_even = _e4m3_pairs_to_fp16(q_pairs, False)
+    query_odd = _e4m3_pairs_to_fp16(q_pairs, True)
     score_scale = softmax_scale * 1.4426950408889634
 
     max_value = tl.full((BLOCK_M,), -1.0e20, dtype=tl.float32)
@@ -330,9 +270,9 @@ def _qsa_sparse_paged_decode_kernel(
             tl.load(k_head_ptr + pair_pointers, mask=valid[:, None], other=0)
         )
         value_pairs = tl.load(v_head_ptr + pair_pointers, mask=valid[:, None], other=0)
-        scores = tl.dot(
-            query_even, _e4m3_pairs_to_bf16(key_pairs, False, USE_BF16_CVT)
-        ) + tl.dot(query_odd, _e4m3_pairs_to_bf16(key_pairs, True, USE_BF16_CVT))
+        scores = tl.dot(query_even, _e4m3_pairs_to_fp16(key_pairs, False)) + tl.dot(
+            query_odd, _e4m3_pairs_to_fp16(key_pairs, True)
+        )
         scores *= score_scale
         scores = tl.where(valid[None, :], scores, -1.0e20)
         next_max = tl.maximum(max_value, tl.max(scores, axis=1))
@@ -482,7 +422,8 @@ def qsa_sparse_paged_decode(
     output_scale: float,
 ) -> torch.Tensor:
     """Sparse GQA over an fp8-e4m3 cache on Blackwell (single-pass & split-K)."""
-    # e4m3 code pairs; the cache views' strides and V's offset are even.
+    # e4m3 code pairs; strides and V's offset are even.
+    q_pairs = q.view(torch.int16)
     k_pairs = k_cache.view(torch.int16)
     v_pairs = v_cache.view(torch.int16)
     # Cache rows start on 16 bytes, which the gathers' vector width relies on.
@@ -554,7 +495,7 @@ def qsa_sparse_paged_decode(
 
     group_size = num_query_heads // num_kv_heads
     _qsa_sparse_paged_decode_kernel[(num_rows, num_kv_heads, num_splits)](
-        q,
+        q_pairs,
         k_pairs,
         v_pairs,
         slots,
@@ -567,8 +508,8 @@ def qsa_sparse_paged_decode(
         softmax_scale,
         output_scale,
         output_gate,
-        q.stride(0),
-        q.stride(1),
+        q_pairs.stride(0),
+        q_pairs.stride(1),
         k_pairs.stride(0),
         k_pairs.stride(1),
         k_pairs.stride(2),
@@ -595,7 +536,6 @@ def qsa_sparse_paged_decode(
         BLOCK_M=triton.next_power_of_2(group_size),
         BLOCK_N=block_n,
         NUM_STAGES=num_stages,
-        USE_BF16_CVT=_ptxas_has_bf16x2_e4m3(),
         num_warps=num_warps,
         num_stages=num_stages,
         launch_pdl=use_pdl,
@@ -651,8 +591,8 @@ def warmup_qsa_fp8_decode(
     block_m = triton.next_power_of_2(group_size)
     num_rows = 16
     num_requests = 16
-    q_ptr = TritonWarmupTensor(
-        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+    q_pairs_ptr = TritonWarmupTensor(
+        torch.int16, shape=(num_rows, num_query_heads, head_dim // 2)
     )
     indices_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows, selection_width + 1))
     block_table_ptr = TritonWarmupTensor(
@@ -669,6 +609,8 @@ def warmup_qsa_fp8_decode(
     )
     row_stride = num_query_heads * head_dim
     head_stride = head_dim
+    q_pair_row_stride = num_query_heads * (head_dim // 2)
+    q_pair_head_stride = head_dim // 2
     num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
     key_pairs = key_cache.view(torch.int16)
     value_pairs = value_cache.view(torch.int16)
@@ -751,7 +693,7 @@ def warmup_qsa_fp8_decode(
             )
 
         _qsa_sparse_paged_decode_kernel.warmup(
-            q_ptr,
+            q_pairs_ptr,
             key_pairs_ptr,
             value_pairs_ptr,
             slots_ptr,
@@ -764,8 +706,8 @@ def warmup_qsa_fp8_decode(
             1.0,
             1.0,
             output_gate_ptr,
-            row_stride,
-            head_stride,
+            q_pair_row_stride,
+            q_pair_head_stride,
             key_pairs.stride(0),
             key_pairs.stride(1),
             key_pairs.stride(2),
@@ -792,7 +734,6 @@ def warmup_qsa_fp8_decode(
             BLOCK_M=block_m,
             BLOCK_N=block_n,
             NUM_STAGES=num_stages,
-            USE_BF16_CVT=_ptxas_has_bf16x2_e4m3(),
             num_warps=num_warps,
             num_stages=num_stages,
             launch_pdl=use_pdl,

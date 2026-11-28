@@ -76,16 +76,31 @@ async fn post_decision(
     app: &mut axum::Router,
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
+    post(app, "/v1/decisions", Some("req"), body).await
+}
+
+async fn post_systemone(
+    app: &mut axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    post(app, "/v1/systemone", None, body).await
+}
+
+async fn post(
+    app: &mut axum::Router,
+    uri: &str,
+    request_id: Option<&str>,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(request_id) = request_id {
+        request = request.header("X-Request-Id", request_id);
+    }
     let response = app
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/decisions")
-                .header("content-type", "application/json")
-                .header("X-Request-Id", "req")
-                .body(Body::from(body.to_string()))
-                .expect("build request"),
-        )
+        .call(request.body(Body::from(body.to_string())).expect("build request"))
         .await
         .expect("call app");
     let status = response.status();
@@ -186,14 +201,14 @@ async fn decisions_read_each_question_from_its_label_logprobs() {
 
 
         ---
-        decision-req-2: temperature 0, max_tokens 1, logprobs None, logprob_token_ids Some([65, 66]), cache_salt Some("salt")
+        decision-req-2: temperature 0, max_tokens 1, logprobs None, logprob_token_ids Some([48, 49]), cache_salt Some("salt")
         <|im_start|>user
         The screen is broken.
 
         Question: Rate the damage.
-        A: none
-        B: total
-        Answer with the letter of one option only.<|im_end|>
+        0: none
+        1: total
+        Answer with the number of one level only.<|im_end|>
         <|im_start|>assistant
         <think>
 
@@ -246,7 +261,7 @@ async fn decisions_read_each_question_from_its_label_logprobs() {
             }
           ],
           "usage": {
-            "input_tokens": 389,
+            "input_tokens": 388,
             "input_tokens_details": {
               "cached_tokens": 0,
               "cache_write_tokens": 0
@@ -255,7 +270,7 @@ async fn decisions_read_each_question_from_its_label_logprobs() {
             "output_tokens_details": {
               "reasoning_tokens": 0
             },
-            "total_tokens": 392
+            "total_tokens": 391
           }
         }"#]]
     .assert_eq(&serde_json::to_string_pretty(&json).unwrap());
@@ -294,6 +309,37 @@ async fn decisions_read_more_labels_than_max_logprobs() {
     let params = requests[0].sampling_params.as_ref().unwrap();
     assert_eq!(params.logprobs, None);
     assert_eq!(params.logprob_token_ids.as_ref().map(Vec::len), Some(26));
+}
+
+/// Without a read strategy Python answers 501 too, with these messages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn decisions_without_a_read_strategy_answer_like_python() {
+    let (state, engine_task) = test_admin_state_with_backend_and_engine_script(
+        default_ready_response(),
+        chatml_backend(true),
+        |state| state,
+        no_engine_requests,
+    )
+    .await;
+    let mut app = build_router(state);
+    let mut messages = Vec::new();
+    for uri in ["/v1/decisions", "/v1/systemone"] {
+        let (status, json) = post(&mut app, uri, None, json!({})).await;
+        messages.push(format!(
+            "{uri}: {status} {}: {}",
+            json["error"]["type"].as_str().unwrap(),
+            json["error"]["message"].as_str().unwrap()
+        ));
+    }
+    engine_task.finish().await;
+    expect_test::expect![[r#"
+        [
+            "/v1/decisions: 501 Not Implemented NotImplementedError: The model does not support the Decisions API",
+            "/v1/systemone: 501 Not Implemented NotImplementedError: The model does not support the structured decision API",
+        ]
+    "#]]
+    .assert_debug_eq(&messages);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -351,6 +397,223 @@ async fn decisions_refuse_what_python_refuses() {
         ]
     "#]]
     .assert_debug_eq(&messages);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn systemone_reads_questions_by_id() {
+    let requests = Arc::default();
+    let (state, engine_task) = test_admin_state_with_backend_and_engine_script(
+        default_ready_response(),
+        chatml_backend(true),
+        with_probed_decisions,
+        generative_scoring_script(
+            vec![vec![-0.1, -2.5], vec![-1.0, -0.5, -3.0], vec![-0.2, -1.6]],
+            Arc::clone(&requests),
+        ),
+    )
+    .await;
+    let mut app = build_router(state);
+
+    let (status, mut json) = post_systemone(
+        &mut app,
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "state": {"ticket": "Charged twice.", "amount": 2.5},
+            "instructions": "You triage tickets.",
+            "questions": {
+                "urgent": {"type": "noul", "instructions": "Is money moving?"},
+                "team": {
+                    "type": "choice",
+                    "instructions": "Which team?",
+                    "criteria": {"billing": "charges", "shipping": null, "security": null},
+                },
+                "tone": {"type": "score", "instructions": "How upset?", "criteria": ["calm", "angry"]},
+            },
+            "chat_template_kwargs": {"enable_thinking": null, "flavor": "x"},
+            "cache_salt": "salt",
+            "priority": 5,
+            "request_id": "req",
+        }),
+    )
+    .await;
+    engine_task.finish().await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    json["created"] = json!("<created>");
+
+    let tokenizer = chatml_tokenizer(true);
+    let engine_requests = (requests.lock().unwrap().iter())
+        .map(|request| {
+            let params = request.sampling_params.as_ref().expect("sampling params");
+            let prompt = decode_prompt_token_ids(request).expect("prompt token IDs");
+            format!(
+                "{}: logprob_token_ids {:?}, cache_salt {:?}, priority {}\n{}",
+                request.request_id,
+                params.logprob_token_ids,
+                request.cache_salt,
+                request.priority,
+                tokenizer.decode(&prompt, false).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    expect_test::expect![[r#"
+        decision-req-0: logprob_token_ids Some([61698, 61699]), cache_salt Some("salt"), priority 5
+        <|im_start|>system
+        You triage tickets.<|im_end|>
+        <|im_start|>user
+        {"ticket": "Charged twice.", "amount": 2.5}
+
+        Question: Is money moving?
+        yes
+        no
+        Answer with yes or no only.<|im_end|>
+        <|im_start|>assistant
+        <think>
+
+        </think>
+
+
+        ---
+        decision-req-1: logprob_token_ids Some([65, 66, 67]), cache_salt Some("salt"), priority 5
+        <|im_start|>system
+        You triage tickets.<|im_end|>
+        <|im_start|>user
+        {"ticket": "Charged twice.", "amount": 2.5}
+
+        Question: Which team?
+        A: billing - charges
+        B: shipping
+        C: security
+        Answer with the letter of one option only.<|im_end|>
+        <|im_start|>assistant
+        <think>
+
+        </think>
+
+
+        ---
+        decision-req-2: logprob_token_ids Some([48, 49]), cache_salt Some("salt"), priority 5
+        <|im_start|>system
+        You triage tickets.<|im_end|>
+        <|im_start|>user
+        {"ticket": "Charged twice.", "amount": 2.5}
+
+        Question: How upset?
+        0: calm
+        1: angry
+        Answer with the number of one level only.<|im_end|>
+        <|im_start|>assistant
+        <think>
+
+        </think>
+
+    "#]]
+    .assert_eq(&engine_requests);
+    expect_test::expect![[r#"
+        {
+          "id": "decision-req",
+          "object": "structured_decision",
+          "created": "<created>",
+          "model": "Qwen/Qwen1.5-0.5B-Chat",
+          "answers": {
+            "urgent": {
+              "type": "noul",
+              "noul": 0.9168273033924488,
+              "probabilities": {
+                "yes": 0.9168273033924488,
+                "no": 0.08317269660755117
+              },
+              "confidence": 0.9048374166876468
+            },
+            "team": {
+              "type": "choice",
+              "choice": "shipping",
+              "probabilities": {
+                "billing": 0.3591881057825386,
+                "shipping": 0.5922010701861591,
+                "security": 0.04861082403130227
+              },
+              "confidence": 0.6065306597126333
+            },
+            "tone": {
+              "type": "score",
+              "score": 0.19781610813099337,
+              "legend": {
+                "0": "calm",
+                "1": "angry"
+              },
+              "probabilities": {
+                "0": 0.8021838918690066,
+                "1": 0.19781610813099337
+              },
+              "confidence": 0.8187307506379741
+            }
+          },
+          "usage": {
+            "input_tokens": 540,
+            "output_tokens": 3
+          },
+          "diagnostics": {
+            "urgent": {
+              "label_mass": 0.9869224153115456,
+              "argmax_is_label": true
+            },
+            "team": {
+              "label_mass": 1.0241971692519396,
+              "argmax_is_label": true
+            },
+            "tone": {
+              "label_mass": 1.0206272638190417,
+              "argmax_is_label": true
+            }
+          },
+          "joint": null
+        }"#]]
+    .assert_eq(&serde_json::to_string_pretty(&json).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn systemone_refuses_what_python_refuses() {
+    let (state, engine_task) = test_admin_state_with_backend_and_engine_script(
+        default_ready_response(),
+        chatml_backend(true),
+        with_probed_decisions,
+        no_engine_requests,
+    )
+    .await;
+    let mut app = build_router(state);
+    let choice = json!({"type": "choice", "criteria": {"a": null, "b": null}});
+    let many: serde_json::Map<_, _> = (0..65).map(|i| (format!("q{i}"), choice.clone())).collect();
+    let mut messages = Vec::new();
+    for body in [
+        json!({"state": "x", "questions": {"q": choice}, "images": ["https://example.com/a.png"]}),
+        json!({"state": "x", "questions": {"q": choice}, "audio": ["a"], "videos": ["v"]}),
+        json!({"state": "x", "questions": {"q": choice}, "chat_template_kwargs": {"enable_thinking": true}}),
+        json!({"state": "x", "questions": {"q": choice}, "joint": true}),
+        json!({"state": "x", "questions": many}),
+        json!({"state": "x", "questions": {}}),
+        json!({"state": "x", "questions": {"q": {"type": "noul", "criteria": ["yes", "no"]}}}),
+    ] {
+        let (status, json) = post_systemone(&mut app, body).await;
+        messages.push(format!(
+            "{status}: {}",
+            json["error"]["message"].as_str().unwrap()
+        ));
+    }
+    engine_task.finish().await;
+    expect_test::expect![[r#"
+        [
+            "400 Bad Request: this model does not take image inputs",
+            "400 Bad Request: this model does not take audio, video inputs",
+            "400 Bad Request: a read is the reply's first token, so thinking must be off",
+            "400 Bad Request: joint: this model reads each question on its own; joint reads need DiffusionGemma",
+            "400 Bad Request: questions: at most 64 for this model",
+            "400 Bad Request: questions: needs at least one question",
+            "400 Bad Request: question 'q': noul criteria must be an object with true and false",
+        ]
+    "#]].assert_debug_eq(&messages);
 }
 
 /// A decision read whose output stream fails after submission is classified

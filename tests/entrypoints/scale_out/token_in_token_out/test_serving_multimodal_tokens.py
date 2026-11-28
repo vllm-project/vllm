@@ -422,12 +422,13 @@ def _upload_processed_image(
     """
     _, objects = s3_store
     item = decode_mm_kwargs_item(render_data["features"]["kwargs_data"]["image"][0])
-    tensors = {
-        name: elem.data[None]
-        if isinstance(elem.field, MultiModalBatchedField)
-        else elem.data
-        for name, elem in item.items()
-    }
+    tensors = {}
+    for name, elem in item.items():
+        data = elem.data
+        if isinstance(elem.field, MultiModalBatchedField):
+            assert isinstance(data, torch.Tensor)
+            data = data.unsqueeze(0)
+        tensors[name] = data
     # A `None` value drops that tensor.
     tensors = {k: v for k, v in {**tensors, **extra_tensors}.items() if v is not None}
     payload = save_safetensors(tensors)
@@ -506,7 +507,9 @@ async def test_invalid_kwargs_refs_are_rejected(
     )
     item = decode_mm_kwargs_item(render_data["features"]["kwargs_data"]["image"][0])
     pixel_values = item["pixel_values"].data
-    grid = item["image_grid_thw"].data[None]
+    grid = item["image_grid_thw"].data
+    assert isinstance(grid, torch.Tensor)
+    grid = grid.unsqueeze(0)
     extra = {
         "extra_tensor": {"attention_mask": torch.ones(1, 4)},
         "zero_dim": {

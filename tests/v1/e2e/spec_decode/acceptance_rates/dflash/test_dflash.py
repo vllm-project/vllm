@@ -76,7 +76,7 @@ QWEN3_8_DSPINE = DFlashCorrectnessConfig(
 
 QWEN3_5_4B_DFLASH2 = DFlashCorrectnessConfig(
     model="Qwen/Qwen3.5-4B",
-    draft_model="vllm-project/Qwen3.5-4B-DFlash2",
+    draft_model="vllm/Qwen3.5-4B-DFlash2",
     expected_accuracy=0.8,
     expected_acceptance_len=4.55 * 0.9,
     num_speculative_tokens=15,

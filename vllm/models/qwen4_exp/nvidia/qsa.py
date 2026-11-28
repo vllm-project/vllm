@@ -300,6 +300,7 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
             self.max_seq_len_kv,
             self.block_size,
             block_topk,
+            kv_cache_spec.dtype,
             device,
         )
 
@@ -500,18 +501,17 @@ class Qwen4ExpQSAImpl(
         if self.index_group is None:
             nvidia_metadata = cast(Qwen4ExpQSANvidiaMetadata, attn_metadata)
             num_decode_tokens = nvidia_metadata.num_decode_tokens
-            if num_decode_tokens:
-                self.attend(
-                    layer,
-                    query[:num_decode_tokens],
-                    kv_cache,
-                    selected[:num_decode_tokens],
-                    nvidia_metadata.block_table,
-                    token_to_req[:num_decode_tokens],
-                    False,
-                    out[:num_decode_tokens],
-                    output_gate[:num_decode_tokens],
-                )
+            self.attend(
+                layer,
+                query[:num_decode_tokens],
+                kv_cache,
+                selected[:num_decode_tokens],
+                nvidia_metadata.block_table,
+                token_to_req[:num_decode_tokens],
+                False,
+                out[:num_decode_tokens],
+                output_gate[:num_decode_tokens],
+            )
             if num_decode_tokens == num_tokens:
                 return output
             prefill_rows = slice(num_decode_tokens, num_tokens)
@@ -529,6 +529,10 @@ class Qwen4ExpQSAImpl(
                     output_gate[prefill_rows],
                 )
             else:
+                k_scale = v_scale = 1.0
+                if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+                    k_scale = cast(float, layer._k_scale_float)
+                    v_scale = cast(float, layer._v_scale_float)
                 qsa_sparse_paged_prefill(
                     query[prefill_rows],
                     kv_cache,
@@ -545,6 +549,8 @@ class Qwen4ExpQSAImpl(
                     self.scale,
                     output_gate[prefill_rows],
                     out[prefill_rows],
+                    k_scale=k_scale,
+                    v_scale=v_scale,
                 )
             return output
 
@@ -623,6 +629,8 @@ class Qwen4ExpQSAImpl(
         output_gate: torch.Tensor,
         valid_counts: torch.Tensor | None = None,
     ) -> None:
+        if query.shape[0] == 0:
+            return
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         k_scale = v_scale = None
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
@@ -636,13 +644,13 @@ class Qwen4ExpQSAImpl(
             # other host-scale backends; folded into the kernel's scales.
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
-        if query.dtype != torch.bfloat16 or key_cache.dtype not in (
+        if query.dtype != layer.q_dtype or key_cache.dtype not in (
             torch.bfloat16,
             torch.float8_e4m3fn,
             torch.uint8,
         ):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires BF16 Q and BF16 or FP8-e4m3 K/V"
+                "Qwen4Exp QSA requires BF16 Q and K/V, or FP8-e4m3 Q and K/V"
             )
 
         from .ops.qsa import qsa_sparse_paged_attention
@@ -787,7 +795,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
-        if self.kv_cache_torch_dtype not in (torch.bfloat16, torch.uint8):
+        # uint8 storage must hold e4m3 bytes (not, e.g., fp8_e5m2): Q and the
+        # kernels assume e4m3.
+        if self.kv_cache_torch_dtype not in (torch.bfloat16, torch.uint8) or (
+            self.kv_cache_torch_dtype == torch.uint8
+            and self.kv_cache_dtype not in ("fp8", "fp8_e4m3")
+        ):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires BF16 or FP8-e4m3 (uint8) cache storage"
             )
@@ -830,6 +843,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             prefix=f"{prefix}.indexer",
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
+        # An FP8 cache (uint8 storage) takes FP8 Q, with unit scale.
+        self.q_dtype = (
+            torch.float8_e4m3fn
+            if self.kv_cache_torch_dtype == torch.uint8
+            else torch.bfloat16
+        )
         self.flashinfer_qsa_supported = (
             index_group is None
             and is_flashinfer_qsa_supported(
@@ -959,6 +978,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                         cdiv(cfg.model_config.max_model_len, block_size) * block_size,
                         self.indexer.compress_ratio,
                         self.block_topk,
+                        self.kv_cache_torch_dtype,
                         output.device,
                     )
             _ = torch.empty(
@@ -1014,6 +1034,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.impl.do_kv_cache_update(
                 self, key[:num_rows], value[:num_rows], main_kv_cache, slot_mapping
             )
+            assert query is not None
+            if query.dtype != self.q_dtype:
+                # Unit scale, as in qsa_prepare.
+                query = query[:num_tokens].to(self.q_dtype)
         else:
             query, output_gate = main_outputs
         if self.index_group is not None:

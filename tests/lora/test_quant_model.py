@@ -23,17 +23,15 @@ MODELS: list[ModelWithQuantization]
 if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
-            model_path="vllm-project/Qwen3-0.6B-GPTQ-Int4",
+            model_path="vllm/Qwen3-0.6B-GPTQ-Int4",
             quantization="gptq",
         ),
     ]
 else:
     MODELS = [
+        ModelWithQuantization(model_path="vllm/Qwen3-0.6B-AWQ", quantization="awq"),
         ModelWithQuantization(
-            model_path="vllm-project/Qwen3-0.6B-AWQ", quantization="awq"
-        ),
-        ModelWithQuantization(
-            model_path="vllm-project/Qwen3-0.6B-GPTQ-Int4",
+            model_path="vllm/Qwen3-0.6B-GPTQ-Int4",
             quantization="gptq",
         ),
     ]
