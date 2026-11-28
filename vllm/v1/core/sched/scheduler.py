@@ -511,6 +511,12 @@ class Scheduler(SchedulerInterface):
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+        self.srpf_starvation_clock = 0
+        import os
+
+        self.srpf_starvation_threshold = int(
+            os.environ.get("VLLM_SRPF_STARVATION_THRESHOLD", "3")
+        )
 
         # Remaining-block reservations of in-flight prefills gate async loads.
         # Parked async KV loads can number thousands, so theirs are cached until
@@ -579,6 +585,24 @@ class Scheduler(SchedulerInterface):
         return max(
             1, request.num_output_placeholder_steps * self.num_sampled_tokens_per_step
         )
+
+    def _get_srpf_key_for_req(self, req: Request) -> tuple:
+        """Sort key for Shortest Remaining Prefill First (SRPF) with starvation aging.
+
+        Returns (not is_starved, remaining_prefill, arrival_time).
+        Starved requests (starvation > srpf_starvation_threshold) sort first to
+        interleave long chunked prefills and prevent starvation under continuous
+        short request arrivals. Within each class (starved vs non-starved),
+        requests are ordered by remaining prefill tokens, breaking ties by arrival time.
+        """
+        starvation = getattr(req, "frozen_starvation_clock", 0)
+        if req.status != RequestStatus.WAITING_FOR_REMOTE_KVS:
+            starvation += self.srpf_starvation_clock - getattr(
+                req, "last_scheduled_clock", self.srpf_starvation_clock
+            )
+        is_starved = starvation > getattr(self, "srpf_starvation_threshold", 3)
+        remaining_prefill = max(0, req.num_prompt_tokens - req.num_computed_tokens)
+        return (not is_starved, remaining_prefill, req.arrival_time)
 
     def _mamba_block_aligned_split(
         self,
@@ -807,6 +831,24 @@ class Scheduler(SchedulerInterface):
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
             )
 
+        # SRPF + Aging Queue Sorting Prototype
+        import os
+
+        if (
+            self.policy == SchedulingPolicy.FCFS
+            and os.environ.get("VLLM_ENABLE_SRPF") == "1"
+        ):
+            self.running.sort(key=self._get_srpf_key_for_req)
+
+            for q in (self.waiting, self.async_kv_waiting, self.kv_holding_waiting):
+                _sorted_reqs = sorted(q, key=self._get_srpf_key_for_req)
+                if hasattr(q, "clear") and hasattr(q, "extend"):
+                    q.clear()
+                    q.extend(_sorted_reqs)
+                elif hasattr(q, "_heap"):
+                    q._heap.clear()
+                    q._heap.extend(_sorted_reqs)
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -938,13 +980,27 @@ class Scheduler(SchedulerInterface):
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                     else:
-                        preempted_req = self.running[-1]
+                        # If SRPF is enabled, self.running is reordered, so
+                        # [-1] is the heaviest request. We must scan for the
+                        # youngest request (max arrival_time) to protect
+                        # heavy requests from thrashing.
+                        import os
+
+                        if os.environ.get("VLLM_ENABLE_SRPF") == "1":
+                            preempted_req = max(
+                                self.running, key=lambda r: r.arrival_time
+                            )
+                        else:
+                            preempted_req = self.running[-1]
 
                     # A deferred free will not help with immediate allocation.
                     if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
-                    if self.policy == SchedulingPolicy.PRIORITY:
+                    if (
+                        self.policy == SchedulingPolicy.PRIORITY
+                        or os.environ.get("VLLM_ENABLE_SRPF") == "1"
+                    ):
                         preempted_encoder_inputs = scheduled_encoder_inputs.get(
                             preempted_req.request_id
                         )
@@ -1599,6 +1655,16 @@ class Scheduler(SchedulerInterface):
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     num_async_kv_loads += 1
+                    request.frozen_starvation_clock = getattr(
+                        request, "frozen_starvation_clock", 0
+                    ) + (
+                        self.srpf_starvation_clock
+                        - getattr(
+                            request,
+                            "last_scheduled_clock",
+                            self.srpf_starvation_clock,
+                        )
+                    )
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -1697,6 +1763,13 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+
+        if self._pause_state == PauseState.UNPAUSED:
+            self.srpf_starvation_clock += 1
+            scheduled_reqs = scheduled_running_reqs + scheduled_new_reqs
+            for req in scheduled_reqs:
+                req.last_scheduled_clock = self.srpf_starvation_clock
+                req.frozen_starvation_clock = 0
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -2976,6 +3049,15 @@ class Scheduler(SchedulerInterface):
         async_head, head = async_kv.peek_request(), self.waiting.peek_request()
         if self.policy == SchedulingPolicy.PRIORITY:
             return async_kv if async_head < head else self.waiting
+        import os
+
+        if os.environ.get("VLLM_ENABLE_SRPF") == "1":
+            return (
+                async_kv
+                if self._get_srpf_key_for_req(async_head)
+                < self._get_srpf_key_for_req(head)
+                else self.waiting
+            )
         return async_kv if async_head.arrival_time < head.arrival_time else self.waiting
 
     def _admits_inflight_kv_load(self) -> bool:
@@ -3216,6 +3298,7 @@ class Scheduler(SchedulerInterface):
             if self.connector is not None:
                 # Before enqueueing: may_load_async can use what this records.
                 self.connector.on_new_request(request)
+            request.last_scheduled_clock = getattr(self, "srpf_starvation_clock", 0)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.spec_decode_metrics_level != "none":
@@ -3863,6 +3946,8 @@ class Scheduler(SchedulerInterface):
             else:
                 request.status = RequestStatus.WAITING
             self._refresh_queued_workload(request)
+            request.last_scheduled_clock = getattr(self, "srpf_starvation_clock", 0)
+            return True
 
         elif request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             # Check whether grammar compilation has finished.
