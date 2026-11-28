@@ -74,6 +74,41 @@ def _compute_eplb_load_stats(
     return avg_tokens, max_tokens
 
 
+def _rank_load_imbalance(
+    logical_loads: torch.Tensor,
+    physical_to_logical_map: torch.Tensor,
+    ep_size: int,
+) -> float:
+    """Per-layer rank load imbalance of a placement: the sum over layers of the
+    busiest rank's load divided by the sum over layers of the mean rank load.
+
+    Each MoE layer waits for its busiest rank, so the sum of per-layer maxima
+    tracks MoE time. Summing the load over layers before taking the max would
+    let hot spots on different ranks in different layers cancel out.
+
+    Args:
+        logical_loads: Load per logical expert, [num_layers, num_logical].
+        physical_to_logical_map: [num_layers, num_physical], all entries valid.
+        ep_size: Number of EP ranks; the physical slots split evenly over them.
+
+    """
+    loads = logical_loads.float()
+    mapping = physical_to_logical_map.to(device=loads.device, dtype=torch.long)
+    replica_counts = torch.zeros_like(loads)
+    replica_counts.scatter_add_(
+        dim=1, index=mapping, src=torch.ones_like(mapping, dtype=loads.dtype)
+    )
+    loads_per_replica = torch.gather(
+        loads / replica_counts.clamp_min(1), dim=1, index=mapping
+    )
+    loads_per_rank = loads_per_replica.reshape(loads.shape[0], ep_size, -1).sum(-1)
+    mean_load = loads_per_rank.mean(dim=1).sum()
+    if mean_load == 0:
+        return 1.0
+
+    return (loads_per_rank.max(dim=1).values.sum() / mean_load).item()
+
+
 @dataclass(slots=True)
 class EplbModelState:
     """EPLB metrics."""
@@ -1060,40 +1095,11 @@ class EplbState:
                     and rank_mapping is None
                     and bool((old_physical_to_logical_map >= 0).all())
                 ):
-                    logical_loads = load_window_cpu.float()
-                    ep_size = ep_group.size()
-
-                    def rank_load_imbalance(
-                        mapping: torch.Tensor,
-                        logical_loads: torch.Tensor = logical_loads,
-                        ep_size: int = ep_size,
-                    ) -> float:
-                        mapping = mapping.to(
-                            device=logical_loads.device,
-                            dtype=torch.long,
-                        )
-                        replica_counts = torch.zeros_like(logical_loads)
-                        replica_counts.scatter_add_(
-                            dim=1,
-                            index=mapping,
-                            src=torch.ones_like(mapping, dtype=logical_loads.dtype),
-                        )
-                        loads_per_replica = torch.gather(
-                            logical_loads / replica_counts.clamp_min(1),
-                            dim=1,
-                            index=mapping,
-                        )
-                        loads_per_rank = loads_per_replica.reshape(
-                            logical_loads.shape[0], ep_size, -1
-                        ).sum(dim=(0, 2))
-                        mean_load = loads_per_rank.mean()
-                        if mean_load == 0:
-                            return 1.0
-                        return (loads_per_rank.max() / mean_load).item()
-
-                    current_imbalance = rank_load_imbalance(old_physical_to_logical_map)
-                    proposed_imbalance = rank_load_imbalance(
-                        new_physical_to_logical_map
+                    current_imbalance = _rank_load_imbalance(
+                        load_window_cpu, old_physical_to_logical_map, ep_group.size()
+                    )
+                    proposed_imbalance = _rank_load_imbalance(
+                        load_window_cpu, new_physical_to_logical_map, ep_group.size()
                     )
                     relative_improvement = (
                         current_imbalance - proposed_imbalance
