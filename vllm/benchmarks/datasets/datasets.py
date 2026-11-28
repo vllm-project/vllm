@@ -2265,6 +2265,13 @@ def get_samples(
             args.hf_split = args.hf_split if args.hf_split else "val"
             args.hf_subset = None
         elif (
+            args.dataset_path in DocVQADataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in DocVQADataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = DocVQADataset
+            args.hf_split = args.hf_split if args.hf_split else "validation"
+            args.hf_subset = args.hf_subset if args.hf_subset else "DocVQA"
+        elif (
             args.dataset_path in BFCLDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in BFCLDataset.SUPPORTED_DATASET_PATHS
         ):
@@ -4386,6 +4393,75 @@ class MMStarDataset(HuggingFaceDataset):
                 # Default: prompt is plain text,
                 # image is in mm_content for the bench to assemble.
                 prompt = question_text
+                mm_for_request = mm_content
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_for_request,
+                    request_id=request_id_prefix + str(ind),
+                )
+            )
+
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# DocVQA Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class DocVQADataset(HuggingFaceDataset):
+    """Document visual question answering on scanned document pages.
+
+    lmms-lab/DocVQA: https://huggingface.co/datasets/lmms-lab/DocVQA
+    (subsets `DocVQA` and `InfographicVQA`, splits `validation` and `test`).
+
+    Each request is one page image and one question about it, with the
+    prompt used by lmms-eval. Pages are large and text-dense, so requests
+    have many image tokens and short answers, which is the shape of
+    document understanding and OCR workloads.
+    """
+
+    DEFAULT_OUTPUT_LEN = 32
+    SUPPORTED_DATASET_PATHS = {"lmms-lab/DocVQA", "lmms-lab-encoder/DocVQA"}
+    IS_MULTIMODAL = True
+    PROMPT_SUFFIX = "\nAnswer the question using a single word or phrase."
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        assert self.data is not None, "Dataset must be loaded before sampling"
+        sampled_requests: list[SampleRequest] = []
+
+        for ind, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt_text = item["question"].strip() + self.PROMPT_SUFFIX
+            mm_content = process_image(item["image"])
+            prompt_len = len(tokenizer(prompt_text).input_ids)
+
+            prompt: str | list[dict]
+            if enable_multimodal_chat:
+                prompt = self.apply_multimodal_chat_transformation(
+                    prompt_text, mm_content
+                )
+                mm_for_request = None
+            else:
+                prompt = prompt_text
                 mm_for_request = mm_content
 
             sampled_requests.append(
