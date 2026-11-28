@@ -62,6 +62,58 @@ with KV connectors that share or register the KV cache in ways it doesn't suppor
 (LMCache's multi-process connector; NIXL, Mooncake or MoRIIO on ROCm), and with NIXL
 within a host that has no IMEX channel.
 
+### Estimating KV cache capacity
+
+You can estimate how many tokens fit in the KV cache, and how many requests can run
+at full context length, before you start a server. For a model with standard
+(full) attention, each token stores one key and one value vector per KV head in
+every layer:
+
+```text
+KV cache bytes per token = 2 x num_hidden_layers x num_key_value_heads x head_dim x bytes per element
+```
+
+The values come from the model's `config.json` (`head_dim` is often
+`hidden_size / num_attention_heads` when it isn't listed). Bytes per element is 2
+for a `bfloat16` or `float16` KV cache and 1 with `--kv-cache-dtype fp8`.
+
+Work out the estimate per GPU when the model is split across GPUs: with tensor
+parallelism each GPU holds `num_key_value_heads / tensor_parallel_size` of the KV
+heads (at least one), and with pipeline parallelism each GPU holds only its own
+layers. Estimate each GPU's capacity from its own memory, layers and KV heads; the
+lowest result sets the capacity.
+
+Then:
+
+```text
+KV cache tokens ≈ available KV cache memory / KV cache bytes per token
+Maximum concurrency ≈ KV cache tokens / max_model_len
+```
+
+For example, `meta-llama/Llama-3.1-8B-Instruct` has 32 layers, 8 KV heads and a
+head dimension of 128, so a `bfloat16` KV cache needs
+`2 x 32 x 8 x 128 x 2 = 131,072` bytes (128 KiB) per token. With 20 GiB available
+for the KV cache, that is about 163,840 tokens, or 5 requests at a
+`max_model_len` of 32,768. An `fp8` KV cache halves the bytes per token and roughly
+doubles both numbers.
+
+vLLM logs the resulting capacity at startup, which you can compare with your
+estimate:
+
+```text
+GPU KV cache size: ... tokens, Maximum concurrency for ... tokens per request: ...x
+```
+
+!!! note
+    This is an estimate for standard attention. Sliding-window layers keep only
+    the most recent tokens, Mamba layers in hybrid models store a fixed-size
+    state per request, and MLA layers store a compressed latent instead of separate
+    keys and values. vLLM also allocates the cache in whole blocks, so the logged
+    capacity is the reference. The maximum concurrency assumes every request uses
+    the full `max_model_len`; requests with shorter prompts and outputs, or that share a
+    prefix through prefix caching, need less, so more of them can run at once,
+    up to `max_num_seqs`.
+
 ## Preemption
 
 Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
