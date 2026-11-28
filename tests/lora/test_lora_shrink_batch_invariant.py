@@ -2,15 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Batch-invariant LoRA shrink: fixed split-K partials, fixed-order reduction."""
 
+import json
+
 import pytest
 import torch
 
 import vllm.lora.ops.triton_ops.lora_shrink_op as shrink_op
 import vllm.lora.ops.triton_ops.utils as lora_utils
-from vllm import envs
+from vllm import SamplingParams, envs
 from vllm.config.lora import LoRAConfig
 from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_shrink
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT
+from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
@@ -99,9 +102,37 @@ def test_lora_shrink_matches_reference(
 
 
 @pytest.mark.parametrize("nslices", [1, 3])
+@pytest.mark.parametrize(
+    "batch_invariant,tuned",
+    [
+        pytest.param((True, "atomic"), False, id="batch-invariant-overrides-atomic"),
+        pytest.param((True, "kernel"), False, id="batch-invariant-kernel"),
+        pytest.param((False, "kernel"), False, id="lora-only-kernel"),
+        pytest.param((True, "atomic"), True, id="batch-invariant-tuned-atomic"),
+        pytest.param((True, "kernel"), True, id="batch-invariant-tuned-kernel"),
+    ],
+    indirect=["batch_invariant"],
+)
 def test_lora_shrink_invariant_across_batch_sizes(
-    batch_invariant, monkeypatch, nslices
+    batch_invariant, monkeypatch, nslices, tuned, tmp_path
 ):
+    if tuned:
+        gpu = torch.cuda.get_device_name().replace(" ", "_").replace("-", "_")
+        config = {
+            "block_m": 32,
+            "block_n": 16,
+            "block_k": 32,
+            "split_k": 64,
+            "num_warps": 4,
+            "num_ctas": 1,
+            "num_stages": 2,
+        }
+        configs = {"3": {str(nslices): {"1": {"2560": {"16": config}}}}}
+        (tmp_path / f"{gpu}_SHRINK.json").write_text(json.dumps(configs))
+        monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+        lora_utils.load_lora_op_config.cache_clear()
+        lora_utils.get_lora_op_configs.cache_clear()
+
     reduce_kernel, reduce_grids = shrink_op._lora_shrink_reduce_kernel, []
 
     class RecordReduce:
@@ -128,3 +159,39 @@ def test_lora_shrink_invariant_across_batch_sizes(
         out = _shrink(inputs, weights, mapping, 0.7, batch_invariant)
         assert torch.equal(out[:, pos], expected), num_tokens
     assert len(reduce_grids) == 7
+
+
+def test_batch_invariant_lora_ignores_tuned_shrink_config(
+    vllm_runner, qwen3_lora_files, monkeypatch, tmp_path
+):
+    """BI generation must not read tuned LoRA files, even invalid ones."""
+    gpu = torch.cuda.get_device_name().replace(" ", "_").replace("-", "_")
+    (tmp_path / f"{gpu}_SHRINK.json").write_text("invalid JSON")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        enable_lora=True,
+        max_lora_rank=8,
+        max_model_len=128,
+        max_num_seqs=8,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        kernel_config={"enable_flashinfer_autotune": False},
+        gpu_memory_utilization=0.2,
+    ) as runner:
+        params = SamplingParams(temperature=0, seed=0, max_tokens=4, ignore_eos=True)
+        lora = LoRARequest("Alice", 1, qwen3_lora_files)
+        prompt = "Hello, my name is"
+        (single,) = runner.llm.generate(
+            [prompt], params, lora_request=lora, use_tqdm=False
+        )
+        batch = runner.llm.generate(
+            [prompt] * 8, params, lora_request=lora, use_tqdm=False
+        )
+        assert len(single.outputs[0].token_ids) == 4
+        assert all(
+            output.outputs[0].token_ids == single.outputs[0].token_ids
+            for output in batch
+        )

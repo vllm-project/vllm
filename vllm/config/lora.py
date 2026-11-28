@@ -41,8 +41,9 @@ class LoRAConfig:
     accumulate partial results using atomic adds in one kernel.
     `kernel` sums FP32 partials in a separate fixed-order kernel.
     Does not enable model-wide batch invariance or affect fused MoE LoRA.
-    A matching `VLLM_TUNED_CONFIG_FOLDER` shrink config takes precedence, followed
-    by `VLLM_BATCH_INVARIANT=1` (which selects `kernel`), then this option.
+    `VLLM_BATCH_INVARIANT=1` selects `kernel` and ignores tuned LoRA configs.
+    Otherwise, a matching `VLLM_TUNED_CONFIG_FOLDER` shrink config takes
+    precedence over this option.
     See https://github.com/vllm-project/vllm/issues/70061.
     """
     fully_sharded_loras: bool = False

@@ -169,11 +169,8 @@ def _get_lora_b_ptr(
 @functools.lru_cache
 def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    # Explicit shrink tuning takes precedence over both reduction switches.
-    # Other LoRA ops keep their existing batch-invariant tuning policy.
-    if user_defined_config_folder is not None and (
-        op_type == "shrink" or not is_batch_invariant
-    ):
+    # Batch-invariant mode uses fixed configs for all LoRA ops.
+    if user_defined_config_folder is not None and not is_batch_invariant:
         gpu_name = torch.cuda.get_device_name()
         gpu_name = gpu_name.replace(" ", "_")
         gpu_name = gpu_name.replace("-", "_")
