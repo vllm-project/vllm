@@ -18,7 +18,9 @@ from vllm.utils.math_utils import cdiv, next_power_of_2
 GROUP_SIZE = 8
 
 
-def q_dtype(kv_dtype: torch.dtype, attention_config: AttentionConfig) -> torch.dtype:
+def get_q_dtype(
+    kv_dtype: torch.dtype, attention_config: AttentionConfig
+) -> torch.dtype:
     """FlashInfer prefill Q dtype: FP8 for an opted-in FP8 cache, else BF16."""
     if (
         kv_dtype == torch.uint8

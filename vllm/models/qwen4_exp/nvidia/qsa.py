@@ -77,9 +77,9 @@ from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_flashinfer import (
     GROUP_SIZE,
+    get_q_dtype,
     get_workspace_size,
     is_flashinfer_qsa_supported,
-    q_dtype,
     qsa_sparse_paged_prefill,
 )
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
@@ -279,10 +279,10 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
         num_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        query_dtype = q_dtype(kv_cache_spec.dtype, vllm_config.attention_config)
+        q_dtype = get_q_dtype(kv_cache_spec.dtype, vllm_config.attention_config)
         self.use_flashinfer = is_flashinfer_qsa_supported(
             kv_cache_spec.dtype,
-            query_dtype,
+            q_dtype,
             self.block_size,
             block_topk,
             kv_cache_spec.head_size,
@@ -306,7 +306,7 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
             self.max_seq_len_kv,
             self.block_size,
             block_topk,
-            query_dtype,
+            q_dtype,
             kv_cache_spec.dtype,
             device,
         )
@@ -546,14 +546,14 @@ class Qwen4ExpQSAImpl(
                 if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                     k_scale = cast(float, layer._k_scale_float)
                     v_scale = cast(float, layer._v_scale_float)
-                query_dtype = cast(torch.dtype, layer.flashinfer_query_dtype)
+                q_dtype = cast(torch.dtype, layer.flashinfer_q_dtype)
                 if prefill_query is None:
                     prefill_query = query[prefill_rows]
-                    if prefill_query.dtype != query_dtype:
+                    if prefill_query.dtype != q_dtype:
                         # Unfused prepare writes BF16 Q; unit scale as in
                         # qsa_prepare.
-                        prefill_query = prefill_query.to(query_dtype)
-                assert prefill_query.dtype == query_dtype
+                        prefill_query = prefill_query.to(q_dtype)
+                assert prefill_query.dtype == q_dtype
                 qsa_sparse_paged_prefill(
                     prefill_query,
                     kv_cache,
@@ -858,7 +858,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         self.block_topk = self.indexer.token_topk // self.indexer.compress_ratio
         attention_config = vllm_config.attention_config
-        self.flashinfer_query_dtype = q_dtype(
+        self.flashinfer_q_dtype = get_q_dtype(
             self.kv_cache_torch_dtype, attention_config
         )
 
@@ -873,9 +873,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 self.num_kv_heads,
             )
 
-        self.flashinfer_qsa_supported = flashinfer_supported(
-            self.flashinfer_query_dtype
-        )
+        self.flashinfer_qsa_supported = flashinfer_supported(self.flashinfer_q_dtype)
         if (
             self.kv_cache_torch_dtype == torch.uint8
             and not attention_config.use_prefill_query_quantization
@@ -1006,7 +1004,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                         cdiv(cfg.model_config.max_model_len, block_size) * block_size,
                         self.indexer.compress_ratio,
                         self.block_topk,
-                        self.flashinfer_query_dtype,
+                        self.flashinfer_q_dtype,
                         self.kv_cache_torch_dtype,
                         output.device,
                     )
@@ -1053,7 +1051,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             fp8_prefill = (
                 self.index_group is None
                 and flashinfer_prefill is not None
-                and self.flashinfer_query_dtype == torch.float8_e4m3fn
+                and self.flashinfer_q_dtype == torch.float8_e4m3fn
             )
             query = qkv.new_empty(
                 num_decode_tokens if fp8_prefill else num_tokens,
