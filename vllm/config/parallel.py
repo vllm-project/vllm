@@ -308,11 +308,12 @@ class ParallelConfig:
     cannot support it (`tensor_parallel_size` must be > 1, `max_num_seqs` at
     least `tensor_parallel_size`, and `max_logprobs` non-negative). Models opt in
     by implementing `compute_logits_local`."""
-    enable_ep_weight_filter: bool = False
+    enable_ep_weight_filter: bool = True
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
     disk, which can drastically reduce storage I/O for MoE models with
-    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  With EPLB,
+    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5). Disable
+    with `--no-enable-ep-weight-filter`.  With EPLB,
     each rank also reads the experts its redundant slots replicate in the
     initial placement; elastic EP loads every expert.  Has no effect on 3D
     fused-expert checkpoints (e.g. GPT-OSS) or non-MoE models."""

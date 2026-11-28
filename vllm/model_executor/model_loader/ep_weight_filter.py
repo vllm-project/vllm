@@ -111,9 +111,10 @@ def should_skip_weight(
     if eid is None:
         # Not an expert weight (dense / shared-expert / embedding) → keep.
         return False
-    # Only skip heavy weight tensors, never scale/metadata tensors.
-    # Scale tensors are tiny and some backends need them from ALL experts
-    # (e.g. FlashInfer NVFP4 computes a global max of activation scales).
-    if not weight_name.endswith((".weight", ".weight_packed")):
+    # Skip weights and their block scales; keep scalars like input_scale,
+    # which some backends reduce over all experts (e.g. FlashInfer NVFP4).
+    if not weight_name.endswith(
+        (".weight", ".weight_packed", ".weight_scale", ".weight_scale_inv", ".scale")
+    ):
         return False
     return eid not in local_expert_ids

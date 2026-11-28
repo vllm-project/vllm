@@ -482,6 +482,19 @@ class DefaultModelLoader(BaseModelLoader):
         num_experts = model_config.get_num_experts()
         if num_experts <= 0:
             return
+        # The ids come from the config: require one MoE per layer with that
+        # many experts (not e.g. Ernie 4.5-VL's text + vision MoEs).
+        from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+        moes = [m for m in model.modules() if isinstance(m, RoutedExperts)]
+        parents = [m.layer_name.rpartition(".")[0] for m in moes]
+        if (
+            not moes
+            or len(set(parents)) < len(parents)
+            or any(m.moe_config.num_logical_experts != num_experts for m in moes)
+        ):
+            logger.warning_once("EP weight filter disabled: MoE layout differs.")
+            return
 
         # EP size/rank computation mirrors FusedMoEParallelConfig.make():
         #   ep_size = dp_size * pcp_size * tp_size (flattened)
