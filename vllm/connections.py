@@ -6,7 +6,14 @@ import functools
 import socket
 import threading
 import time
-from collections.abc import Callable, Coroutine, Mapping, MutableMapping
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Coroutine,
+    Mapping,
+    MutableMapping,
+)
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
@@ -31,6 +38,26 @@ _T = TypeVar("_T")
 # per-attempt timeout and sleeps _RETRY_BACKOFF_FACTOR ** N seconds.
 _RETRY_BACKOFF_FACTOR = 4
 _RESPONSE_READ_CHUNK_SIZE = 64 * KiB_bytes
+
+
+@asynccontextmanager
+async def _get_async_response_once(
+    url: str,
+    *,
+    headers: MutableMapping[str, str],
+    timeout: float | None,
+    allow_redirects: bool,
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    async with (
+        aiohttp.ClientSession(trust_env=True) as client,
+        client.get(
+            url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        ) as response,
+    ):
+        yield response
 
 
 class HTTPResponseSizeExceededError(VLLMValidationError):
@@ -513,19 +540,23 @@ class HTTPConnection:
     ):
         self._validate_http_url(url)
 
-        client = self.get_sync_client()
         extra_headers = extra_headers or {}
+        client = self.get_sync_client() if self.reuse_client else None
+        request = client.get if client is not None else requests.get
         # Requests can consume redirect bodies before returning the response.
         hooks = None
         if deadline is not None:
+            client_hooks = (
+                client.hooks.get("response", ()) if client is not None else ()
+            )
             hooks = {
                 "response": [
                     functools.partial(_set_body_read_deadline, deadline=deadline),
-                    *client.hooks.get("response", ()),
+                    *client_hooks,
                 ]
             }
 
-        return client.get(
+        return request(
             url,
             headers=self._headers(**extra_headers),
             stream=stream,
@@ -544,10 +575,17 @@ class HTTPConnection:
     ):
         self._validate_http_url(url)
 
-        client = await self.get_async_client()
         extra_headers = extra_headers or {}
+        if self.reuse_client:
+            client = await self.get_async_client()
+            return client.get(
+                url,
+                headers=self._headers(**extra_headers),
+                timeout=timeout,
+                allow_redirects=allow_redirects,
+            )
 
-        return client.get(
+        return _get_async_response_once(
             url,
             headers=self._headers(**extra_headers),
             timeout=timeout,
