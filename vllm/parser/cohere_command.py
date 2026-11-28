@@ -40,6 +40,7 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.cohere_command_reasoning_parser import (
     BaseCohereCommandReasoningParser,
@@ -140,7 +141,13 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
         for defs_key in ("$defs", "definitions"):
             if defs_key in tool_parameters:
                 json_schema[defs_key] = tool_parameters.pop(defs_key)
-        tool_grammar = str(xgr.Grammar.from_json_schema(json.dumps(json_schema)))
+        try:
+            tool_grammar = str(xgr.Grammar.from_json_schema(json.dumps(json_schema)))
+        except RuntimeError as err:
+            raise VLLMValidationError(
+                f"Failed to transform tool parameters schema into a grammar: {err}",
+                parameter="tools",
+            ) from err
         for match in re.findall(r"\b(\w+)\s*::=", tool_grammar):
             tool_grammar = re.sub(
                 rf"\b{re.escape(match)}\b", tool_name + match, tool_grammar
