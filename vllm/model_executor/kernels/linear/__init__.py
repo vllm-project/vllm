@@ -273,6 +273,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import PlatformEnum, current_platform
+from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
@@ -1003,6 +1004,34 @@ def init_int8_linear_kernel(
     )
 
 
+_HUMMING_INT4_G128_CAPABILITIES = frozenset({80})
+
+
+def _prefer_humming_for_int4_g128(
+    kernels: list[type[MPLinearKernel]],
+    config: MPLinearLayerConfig,
+    compute_capability: int | None,
+) -> list[type[MPLinearKernel]]:
+    """Move Humming directly ahead of Marlin for int4 group-128 weights, with or
+    without zero points and with 16-bit activations, on SM80. Other formats and
+    devices are unmeasured and keep Marlin."""
+    is_int4 = config.weight_type == scalar_types.uint4b8 or (
+        config.weight_type == scalar_types.uint4 and config.zero_points
+    )
+    if not (
+        compute_capability in _HUMMING_INT4_G128_CAPABILITIES
+        and is_int4
+        and config.group_size == 128
+        and config.act_type in (torch.float16, torch.bfloat16)
+        and HummingLinearKernel in kernels
+        and MarlinLinearKernel in kernels
+    ):
+        return kernels
+    kernels = [k for k in kernels if k is not HummingLinearKernel]
+    kernels.insert(kernels.index(MarlinLinearKernel), HummingLinearKernel)
+    return kernels
+
+
 def choose_mp_linear_kernel(
     config: MPLinearLayerConfig, compute_capability: int | None = None
 ) -> type[MPLinearKernel]:
@@ -1043,6 +1072,9 @@ def choose_mp_linear_kernel(
         "mixed-precision",
         quantization="mixed_precision",
         compute_capability=compute_capability,
+    )
+    platform_kernels = _prefer_humming_for_int4_g128(
+        platform_kernels, config, compute_capability
     )
 
     failure_reasons = []
