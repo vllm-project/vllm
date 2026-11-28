@@ -24,6 +24,7 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import store_params_in_triton
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.checkpoint_weight_patch import (
@@ -1264,6 +1265,49 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
     assert torch.equal(layer.scale, loaded_scale)
     assert "scale" in layer._non_persistent_buffers_set
     assert "0.scale" not in model.state_dict()
+
+
+class _SwizzledTritonQuantMethod(QuantizeMethodBase):
+    """Stores a reshaped weight in a stand-in triton_kernels tensor, like the
+    Triton MXFP4 MoE backends."""
+
+    def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+        pass
+
+    def apply(self, layer, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        swizzled = layer.weight.data.t().contiguous()
+        layer.weight_triton = SimpleNamespace(storage=SimpleNamespace(data=swizzled))
+        store_params_in_triton(layer, weight=layer.weight_triton)
+
+
+def test_layerwise_reload_keeps_triton_kernel_storage():
+    # Regression test for #69692: the triton_kernels tensor pointed at the
+    # params processed during reload, keeping a second copy of every expert
+    # weight alive while captured CUDA graphs kept reading the first one.
+    layer = torch.nn.Module()
+    layer.quant_method = _SwizzledTritonQuantMethod()
+    weight = torch.nn.Parameter(torch.zeros(4, 8), requires_grad=False)
+    weight.weight_loader = default_weight_loader
+    layer.register_parameter("weight", weight)
+    model = torch.nn.Sequential(layer)
+    record_metadata_for_reloading(model)
+
+    layer.weight.weight_loader(layer.weight, torch.full((4, 8), 1.0))
+    layer.quant_method.process_weights_after_loading(layer)
+    kernel_ptr = layer.weight_triton.storage.data.data_ptr()
+
+    initialize_layerwise_reload(model)
+    loaded = torch.arange(32.0).reshape(4, 8)
+    layer.weight.weight_loader(layer.weight, loaded)
+    finalize_layerwise_reload(model, model_config=None)
+
+    kernel_data = layer.weight_triton.storage.data
+    assert kernel_data.data_ptr() == kernel_ptr
+    assert layer.weight.data_ptr() == kernel_ptr
+    assert torch.equal(kernel_data, loaded.t())
 
 
 @pytest.fixture
