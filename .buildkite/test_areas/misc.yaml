@@ -68,6 +68,7 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 45
   source_file_dependencies: &v1-core-kv-metrics-deps
+    - csrc/fs_io.cpp
     - vllm/config/
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"

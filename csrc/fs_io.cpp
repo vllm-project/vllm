@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include <filesystem>
 #include <string>
@@ -20,6 +21,42 @@ constexpr int kODirectFlag = 0;
 extern "C" {
 
 namespace {
+
+// Metadata failures must not fail a successful cache transfer. Batches run
+// without the GIL, so they keep only the first error and report it once.
+inline void record_access_time_error(int error, int& first_error) {
+  // ENOENT means the block was removed concurrently; nothing to refresh.
+  if (error != 0 && error != ENOENT && first_error == 0) first_error = error;
+}
+
+// Must be called with the GIL held.
+inline void report_access_time_error(int error) {
+  if (error == 0) return;
+  PyObject* module = PyImport_ImportModule("vllm.v1.kv_offload.tiering.fs.io");
+  if (module != nullptr) {
+    PyObject* result =
+        PyObject_CallMethod(module, "_report_access_time_error", "i", error);
+    Py_XDECREF(result);
+    Py_DECREF(module);
+  }
+  // Diagnostics must not turn a successful cache transfer into an error.
+  PyErr_Clear();
+}
+
+inline int refresh_file_access(int fd) {
+  struct timespec times[2]{};
+  times[0].tv_nsec = UTIME_NOW;
+  times[1].tv_nsec = UTIME_OMIT;
+  return futimens(fd, times) == 0 ? 0 : errno;
+}
+
+inline int refresh_existing_file(const char* path) {
+  const int fd = open(path, O_RDONLY);
+  if (fd < 0) return errno;
+  const int err = refresh_file_access(fd);
+  close(fd);
+  return err;
+}
 
 // Returns 0 on success, or the std::error_code's POSIX-compatible value on
 // failure, mirroring the errno convention used by the syscalls below.
@@ -47,8 +84,13 @@ constexpr int kShortWrite = -2;
 // subsequent cleanup call can overwrite it. On failure, the temp file is
 // removed.
 inline int _store_block(const char* tmp_path, const char* dest_path,
-                        const char* src, size_t size, bool use_o_direct) {
+                        const char* src, size_t size, bool use_o_direct,
+                        bool track_file_access, int& access_time_error) {
   if (access(dest_path, F_OK) == 0) {
+    if (track_file_access) {
+      record_access_time_error(refresh_existing_file(dest_path),
+                               access_time_error);
+    }
     return kAlreadyPresent;
   }
 
@@ -99,7 +141,8 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
 // transient/ambiguous and leave the file untouched; a close failure after a
 // full read is harmless and does not fail the load.
 inline int _load_block(const char* source_path, char* dst, size_t size,
-                       bool use_o_direct) {
+                       bool use_o_direct, bool track_file_access,
+                       int& access_time_error) {
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
   const int fd = open(source_path, O_RDONLY | o_direct_flag, 0);
   if (fd < 0) {
@@ -118,6 +161,10 @@ inline int _load_block(const char* source_path, char* dst, size_t size,
     close(fd);
     unlink(source_path);
     return EIO;
+  }
+
+  if (track_file_access) {
+    record_access_time_error(refresh_file_access(fd), access_time_error);
   }
 
   // A close error after a successful full read is harmless: the data is
@@ -221,10 +268,11 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   PyObject* dest_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
   int use_o_direct = 1;
+  int track_file_access = 0;
 
-  if (!PyArg_ParseTuple(args, "O!O!O!|p", &PyList_Type, &tmp_paths_obj,
+  if (!PyArg_ParseTuple(args, "O!O!O!|pp", &PyList_Type, &tmp_paths_obj,
                         &PyList_Type, &dest_paths_obj, &PyList_Type,
-                        &buffers_obj, &use_o_direct)) {
+                        &buffers_obj, &use_o_direct, &track_file_access)) {
     return nullptr;
   }
 
@@ -250,13 +298,14 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   Py_ssize_t failed_index = -1;
   int failure_errno = 0;
   Py_ssize_t num_written = 0;
+  int access_time_error = 0;
 
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       const char* buf = static_cast<const char*>(buffers[i].buf);
-      const int err =
-          _store_block(tmp_paths[i], dest_paths[i], buf,
-                       static_cast<size_t>(buffers[i].len), use_o_direct);
+      const int err = _store_block(
+          tmp_paths[i], dest_paths[i], buf, static_cast<size_t>(buffers[i].len),
+          use_o_direct, track_file_access, access_time_error);
       if (err == kAlreadyPresent) {
         continue;
       }
@@ -271,6 +320,7 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   }
 
   release_buffer_list(buffers);
+  report_access_time_error(access_time_error);
 
   if (failure_errno == kShortWrite) {
     // Keep in sync with the message in fs/io.py.
@@ -302,9 +352,11 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   PyObject* source_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
   int use_o_direct = 1;
+  int track_file_access = 0;
 
-  if (!PyArg_ParseTuple(args, "O!O!|p", &PyList_Type, &source_paths_obj,
-                        &PyList_Type, &buffers_obj, &use_o_direct)) {
+  if (!PyArg_ParseTuple(args, "O!O!|pp", &PyList_Type, &source_paths_obj,
+                        &PyList_Type, &buffers_obj, &use_o_direct,
+                        &track_file_access)) {
     return nullptr;
   }
 
@@ -325,13 +377,14 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
 
   Py_ssize_t failed_index = -1;
   int failure_errno = 0;
+  int access_time_error = 0;
 
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       char* buf = static_cast<char*>(buffers[i].buf);
       const int err =
           _load_block(source_paths[i], buf, static_cast<size_t>(buffers[i].len),
-                      use_o_direct);
+                      use_o_direct, track_file_access, access_time_error);
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
@@ -342,6 +395,7 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   }
 
   release_buffer_list(buffers);
+  report_access_time_error(access_time_error);
 
   if (failed_index >= 0) {
     // PyErr_SetFromErrnoWithFilename() reads the errno to format exception.
@@ -374,7 +428,8 @@ static PyMethodDef fs_io_C_methods[] = {
     {"batch_store_block", batch_store_block, METH_VARARGS,
      "batch_store_block(tmp_paths: list[str], dest_paths: list[str],\n"
      "                  buffers: list[bytes-like],\n"
-     "                  use_o_direct: bool = True) -> int\n"
+     "                  use_o_direct: bool = True, track_file_access: bool = "
+     "False) -> int\n"
      "\n"
      "Store a batch of blocks, each from its own buffer, to disk. Returns the "
      "number transferred; blocks already on disk are skipped. Raises on first "
@@ -382,7 +437,8 @@ static PyMethodDef fs_io_C_methods[] = {
     {"batch_load_block", batch_load_block, METH_VARARGS,
      "batch_load_block(source_paths: list[str],\n"
      "                 buffers: list[writable bytes-like],\n"
-     "                 use_o_direct: bool = True) -> None\n"
+     "                 use_o_direct: bool = True, track_file_access: bool = "
+     "False) -> None\n"
      "\n"
      "Load a batch of blocks from disk into corresponding buffers. "
      "Raises on first error."},

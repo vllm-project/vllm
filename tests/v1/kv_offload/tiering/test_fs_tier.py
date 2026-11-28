@@ -370,6 +370,68 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
         tier.shutdown()
 
 
+@pytest.mark.parametrize("track_file_access", ["false", 1, None])
+def test_invalid_access_tracking_rejected(tmp_path, track_file_access):
+    with pytest.raises(ValueError, match="track_file_access must be a boolean"):
+        SecondaryTierFactory.create_secondary_tier(
+            {
+                "type": "fs",
+                "root_dir": str(tmp_path),
+                "track_file_access": track_file_access,
+            },
+            memoryview(bytearray(32)),
+            _MOCK_OFFLOADING_SPEC,
+        )
+
+
+@pytest.mark.parametrize("track_file_access", [False, True])
+@pytest.mark.parametrize("use_c_ext", [False, True])
+def test_factory_access_tracking_roundtrip(
+    tmp_path, monkeypatch, track_file_access, use_c_ext
+):
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+    tensor = _page_aligned_zero_tensor(2, _BLOCK_ELEMENTS)
+    tensor[0] = 7
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {
+            "type": "fs",
+            "root_dir": str(tmp_path),
+            "n_read_threads": 1,
+            "n_write_threads": 1,
+            "track_file_access": track_file_access,
+        },
+        memoryview(tensor.numpy()),
+        _MOCK_OFFLOADING_SPEC,
+    )
+    try:
+        assert isinstance(tier, FileSystemTierManager)
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        assert drain(tier)[0].success
+        path = tier.file_mapper.get_file_name(key(1))
+        for job_id, operation in enumerate(("reuse", "load"), 2):
+            future = time.time_ns() + 10**15
+            os.utime(path, ns=(future, 1_000_000_000))
+            start = time.time_ns()
+            if operation == "reuse":
+                tier.submit_store(make_job(job_id, [key(1)], [0]))
+            else:
+                tier.submit_load(make_job(job_id, [key(1)], [1], is_promotion=True))
+            assert drain(tier)[0].success
+            stat = os.stat(path)
+            assert stat.st_mtime_ns == 1_000_000_000
+            if track_file_access:
+                assert start <= stat.st_atime_ns <= time.time_ns()
+            elif operation == "reuse":
+                assert stat.st_atime_ns == future
+        assert torch.equal(tensor[0], tensor[1])
+    finally:
+        tier.shutdown()
+
+
 @pytest.mark.parametrize(
     "access_mode, can_read, can_write",
     [

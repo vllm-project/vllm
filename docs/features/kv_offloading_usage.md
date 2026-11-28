@@ -293,12 +293,29 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `type` | yes | — | Must be `fs`. |
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
+| `track_file_access` | no | `false` | Refresh file access time after successful loads and existing-file store reuse, for external access-age eviction. |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
 | `access_mode` | no | `readwrite` | `read`, `write`, or `readwrite` (see [Secondary Tiers](#secondary-tiers)). |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
+
+#### Access-Time Tracking
+
+Set `"track_file_access": true` inside the `{"type": "fs", ...}` entry in
+`secondary_tiers` when an external evictor uses file access age. Both native and
+Python I/O update atime after each successful block load and when a store finds
+an existing block. Modification time and cached bytes are preserved; new files
+already receive current timestamps on creation.
+
+Tracking defaults to `false` to avoid extra metadata operations on shared storage.
+With tracking disabled, `relatime` can leave repeated reads unrecorded, and
+`noatime` disables automatic read timestamps. Validate mount behavior against the
+evictor's protection window. Metadata-update failures warn once per error type per process without failing
+the transfer and weaken protection. GPU/CPU-only cache hits do not access the
+filesystem and are not tracked. Tracking does not lock out an external evictor
+or implement TTL, a capacity limit, or deletion itself.
 
 #### On-Disk Layout
 
