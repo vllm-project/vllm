@@ -1923,8 +1923,8 @@ def test_skip_special_tokens_change_preserves_bytes_across_hidden_eos(
     assert decoder.output_token_ids == [19526, eos, 254, 0]
 
 
-def test_skip_special_tokens_change_preserves_spacing_and_handles_invalid_ids():
-    """Toggling preserves spaces_between_special_tokens=False and tolerates bad IDs."""
+def test_skip_special_tokens_change_preserves_spacing():
+    """Toggling preserves spaces_between_special_tokens=False."""
     raw = Tokenizer(
         models.WordLevel({"hello": 0, "<s1>": 1, "<s2>": 2}, unk_token="hello")
     )
@@ -1950,24 +1950,27 @@ def test_skip_special_tokens_change_preserves_spacing_and_handles_invalid_ids():
     fast.update([1], stop_terminated=False)
     assert p1 + fast.get_next_output_text(finished=True, delta=True) == "<s1><s1>"
 
-    gpt2 = AutoTokenizer.from_pretrained("gpt2")
-    eos = gpt2.eos_token_id
-    assert eos is not None
-    for decoder_class in (FastIncrementalDetokenizer, SlowIncrementalDetokenizer):
-        decoder = decoder_class(
-            gpt2,
-            _make_streaming_input_request(
-                "decode-invalid", [], SamplingParams(skip_special_tokens=True)
-            ),
-        )
-        decoder.update([-1, 0], stop_terminated=False)
-        assert decoder.get_next_output_text(finished=True, delta=True) == "!"
-        decoder.set_skip_special_tokens(False)
-        decoder.update([eos, 0], stop_terminated=False)
-        assert (
-            decoder.get_next_output_text(finished=True, delta=True)
-            == gpt2.decode([eos], skip_special_tokens=False) + "!"
-        )
+
+@pytest.mark.parametrize("fast", [False, True])
+def test_skip_special_tokens_change_handles_invalid_ids(fast: bool):
+    """Toggling tolerates prior out-of-range token IDs."""
+    raw = Tokenizer(models.WordLevel({"!": 0, "<eos>": 1}, unk_token="!"))
+    raw.decoder = decoders.Fuse()
+    tokenizer = TokenizersBackend(
+        tokenizer_object=raw, additional_special_tokens=["<eos>"]
+    )
+    decoder_class = FastIncrementalDetokenizer if fast else SlowIncrementalDetokenizer
+    decoder = decoder_class(
+        tokenizer,
+        _make_streaming_input_request(
+            "decode-invalid", [], SamplingParams(skip_special_tokens=True)
+        ),
+    )
+    decoder.update([-1, 0], stop_terminated=False)
+    assert decoder.get_next_output_text(finished=True, delta=True) == "!"
+    decoder.set_skip_special_tokens(False)
+    decoder.update([1, 0], stop_terminated=False)
+    assert decoder.get_next_output_text(finished=True, delta=True) == "<eos>!"
 
 
 def _add_streaming_request_with_queued_chunk(

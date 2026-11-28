@@ -31,6 +31,8 @@ _MAX_UTF8_SEED_EXTENSION = 3
 # Bounds the walk over prompt tokens that decode to no text (e.g. long runs of
 # skipped special tokens); such prompts are seeded with the full prompt.
 _MAX_SEED_WINDOW = 256
+# Rust tokenizers DecodeStream/decode take u32 token IDs (issue #21951).
+_MAX_U32_TOKEN_ID = 0xFFFFFFFF
 
 
 def get_decode_stream_seed(
@@ -239,6 +241,9 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.request_id = request.request_id
         self.skip_special_tokens = sampling_params.skip_special_tokens
         self._stream_skip_special_tokens = sampling_params.skip_special_tokens
+        self._track_skip_switch = (
+            request.resumable and sampling_params.skip_special_tokens
+        )
         self._initial_prompt_ids = request.prompt_token_ids
         self._initial_prompt_len = len(request.prompt_token_ids or ())
         self._spaces_between_special_tokens = (
@@ -266,7 +271,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self._configure_special_token_spacing()
 
     def _on_skipped_stop_token(self, token_index: int) -> None:
-        if self._stream_skip_special_tokens:
+        if self._track_skip_switch:
             self._excluded_token_indices.add(token_index)
 
     def _configure_special_token_spacing(self) -> None:
@@ -304,7 +309,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         visible = [
             tid
             for tid in raw
-            if tid not in self._special_ids and 0 <= tid <= 0xFFFFFFFF
+            if tid not in self._special_ids and 0 <= tid <= _MAX_U32_TOKEN_ID
         ]
         return visible[:-skip_tail] if skip_tail else visible
 
@@ -321,9 +326,13 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self._configure_special_token_spacing()
         if not self._stream_skip_special_tokens:
             return
+        assert self._track_skip_switch, (
+            "set_skip_special_tokens requires request.resumable=True"
+        )
         # Switch DecodeStream once from skip_special_tokens=True to False;
         # all prior tokens were decoded with special tokens hidden.
         self._stream_skip_special_tokens = False
+        self._track_skip_switch = False
         pending = [tid for tid in self._pending_ids if tid not in self._special_ids]
         self._pending_ids.clear()
         seed_ids = self._visible_seed_ids(skip_tail=len(pending))
@@ -341,13 +350,13 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
     def decode_next(self, next_token_id: int) -> str:
         if (
-            self.skip_special_tokens
-            and self._special_ids is not None
+            self._special_ids is not None
+            and self.skip_special_tokens
             and next_token_id in self._special_ids
         ):
             return ""
         token = self._protected_step(next_token_id)
-        if self._stream_skip_special_tokens:
+        if self._track_skip_switch:
             if token is None:
                 if (len(self.token_ids) - 1) not in self._excluded_token_indices:
                     self._pending_ids.append(next_token_id)
@@ -375,7 +384,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             # Handle rare observed overflow, still to be diagnosed.
             # See https://github.com/vllm-project/vllm/issues/21951.
             logger.exception("Encountered invalid token id: %r", next_token_id)
-            if self._stream_skip_special_tokens:
+            if self._track_skip_switch:
                 self._excluded_token_indices.add(len(self.token_ids) - 1)
             token = None
         except Exception as e:
@@ -390,8 +399,9 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
                 " for request %s, resetting decode stream.",
                 self.request_id,
             )
-            self._pending_ids.clear()
-            self._stream_reset_offset = len(self.token_ids) - 1
+            if self._track_skip_switch:
+                self._pending_ids.clear()
+                self._stream_reset_offset = len(self.token_ids) - 1
             self.stream = tokenizers.decoders.DecodeStream(
                 skip_special_tokens=self._stream_skip_special_tokens
             )
