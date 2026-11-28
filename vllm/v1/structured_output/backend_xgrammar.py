@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -32,6 +33,50 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
+
+
+class UnsatisfiableGrammarError(VLLMValidationError):
+    """No output can satisfy the constraint, so no backend can serve it.
+
+    Unlike other validation errors, `auto` must not fall back to another
+    backend for this one.
+    """
+
+
+@functools.cache
+def _byte_level_compiler() -> "xgr.GrammarCompiler":
+    vocab = [bytes([b]) for b in range(256)] + [b"<eos>"]
+    tokenizer_info = xgr.TokenizerInfo(
+        vocab, vocab_type=xgr.VocabType.RAW, stop_token_ids=[256]
+    )
+    # Grammars here come straight from requests: do not cache them.
+    return xgr.GrammarCompiler(tokenizer_info, max_threads=1, cache_enabled=False)
+
+
+def _reject_if_unsatisfiable(grammar: "xgr.Grammar", kind: str) -> None:
+    """Raise `UnsatisfiableGrammarError` if `grammar` matches no output.
+
+    XGrammar builds some unsatisfiable grammars without error, e.g. a rule that
+    only refers back to itself. Served as is, such a grammar rejects the first
+    sampled token and the request fails mid-generation with HTTP 500. Every
+    output starts with some byte, so a grammar that allows neither a first byte
+    nor an immediate end matches nothing, whatever the model's tokenizer.
+    """
+    try:
+        ctx = _byte_level_compiler().compile_grammar(grammar)
+    except Exception:
+        # Leave anything this check cannot compile to the backend, as before.
+        logger.debug("Skipping the satisfiability check", exc_info=True)
+        return
+    matcher = xgr.GrammarMatcher(ctx)
+    if matcher.is_terminated():
+        return
+    bitmask = xgr.allocate_token_bitmask(1, ctx.tokenizer_info.vocab_size)
+    matcher.fill_next_token_bitmask(bitmask)
+    if not bitmask.any():
+        raise UnsatisfiableGrammarError(
+            f"The {kind} is unsatisfiable: no output can match it."
+        )
 
 
 @dataclass
@@ -482,7 +527,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 "structured_outputs.regex must not contain a NUL character ('\\x00')"
             )
         try:
-            compile_regex_with_timeout(
+            grammar = compile_regex_with_timeout(
                 xgr.Grammar.from_regex,
                 so_params.regex,
             )
@@ -490,6 +535,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             raise VLLMValidationError(
                 f"Failed to transform regex into a grammar: {err}"
             ) from err
+        _reject_if_unsatisfiable(grammar, "regex")
         return
 
     if so_params.choice:
@@ -520,28 +566,31 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                     "The provided JSON schema contains features not supported "
                     "by xgrammar."
                 )
-            xgr.Grammar.from_json_schema(schema)
+            grammar = xgr.Grammar.from_json_schema(schema)
         except VLLMValidationError:
             raise
         except Exception as err:
             raise VLLMValidationError(
                 f"Failed to transform json schema into a grammar: {err}"
             ) from err
+        _reject_if_unsatisfiable(grammar, "JSON schema")
         return
 
     if so_params.json_object:
         return
 
     if so_params.grammar:
-        # Parse the grammar with the same syntax `compile_grammar` will use,
-        # but don't compile it. The grammar is passed on unchanged.
+        # Parse the grammar with the same syntax `compile_grammar` will use.
+        # It is only compiled against a byte-level vocabulary to reject
+        # unsatisfiable grammars; the grammar is passed on unchanged.
         try:
             if grammar_is_likely_lark(so_params.grammar):
-                xgr.Grammar.from_lark(so_params.grammar)
+                grammar = xgr.Grammar.from_lark(so_params.grammar)
             else:
-                xgr.Grammar.from_ebnf(so_params.grammar)
+                grammar = xgr.Grammar.from_ebnf(so_params.grammar)
         except Exception as e:
             raise VLLMValidationError("Invalid grammar specification.") from e
+        _reject_if_unsatisfiable(grammar, "grammar")
         return
 
     if so_params.structural_tag:
