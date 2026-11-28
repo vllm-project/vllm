@@ -705,6 +705,7 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
         moriio_wrapper=wrapper,
         transfer_id_to_request_id={"tA": "req-1"},
         _unmatched_write_failures=OrderedDict(),
+        _failed_sync_recving=set(),
         get_finished=lambda: (set(), set()),
     )
 
@@ -901,7 +902,7 @@ def write_producer(monkeypatch, producer_role):
         _has_mamba=False,
         model_config=SimpleNamespace(get_total_num_kv_heads=lambda: 8),
         moriio_wrapper=wrapper,
-        moriio_config=SimpleNamespace(transfer_timeout=30.0),
+        moriio_config=SimpleNamespace(transfer_timeout=30.0, defer_timeout=60.0),
         kv_caches={"layer0": None, "layer1": None},
         _transfer_layer_names={"layer0", "layer1"},
         _remote_agents={f"{_DECODE_HOST}:{_DECODE_PORT}_dp0": {"agent"}},

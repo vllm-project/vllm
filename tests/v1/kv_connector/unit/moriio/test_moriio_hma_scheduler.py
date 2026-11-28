@@ -1151,6 +1151,7 @@ def _make_read_scheduler():
         _reqs_need_send={},
         _reqs_need_abort={},
         _req_kv_params={},
+        _write_recvs_in_flight={},
         _max_decode_tail_blocks=1,
     )
 
@@ -1307,6 +1308,7 @@ def _mixed_precision_read_step(scheduler, local_block_ids):
 def _report_read_result(scheduler, meta, dst_block_ids, read_failed):
     worker = _FakeWorker(
         _has_mamba=False,
+        _single_kv_cache_group=True,
         _recving_local_blocks={"req": dst_block_ids},
         _invalid_block_ids=set(),
         _unzeroed_read_block_ids=meta.unzeroed_read_block_ids,
@@ -1511,6 +1513,44 @@ def test_update_state_preserves_each_mamba_group():
         [90],
         [80],
     ]
+
+
+@pytest.mark.parametrize(
+    "case, routable",
+    [
+        ("full", True),
+        ("no_address", False),
+        ("no_transfer_id", False),
+        ("bad_port", False),
+        ("no_remote_engine", False),
+    ],
+)
+def test_read_abort_before_scheduling_releases_only_routable_requests(case, routable):
+    """The serving layer submits a pre-aborted request under its own id after
+    rejecting one; unless add_new_req can route its release, it must not reach
+    build_connector_meta, which would raise and kill the engine."""
+    sched = _make_read_scheduler()
+    sched._has_mamba = False
+    sched.blocks_per_sw = [0]
+    request = _make_read_request([[10, 11]])
+    request.request_id = "9ed3b2574f8750be"
+    request.status = moriio_connector.RequestStatus.FINISHED_ABORTED
+    params = request.kv_transfer_params
+    if case == "no_address":
+        for key in ("remote_host", "remote_handshake_port", "remote_notify_port"):
+            del params[key]
+    elif case == "no_transfer_id":  # llm-d sidecar requests carry none
+        del params["transfer_id"]
+    elif case == "bad_port":
+        params["remote_notify_port"] = "not-a-port"
+    elif case == "no_remote_engine":
+        del params["remote_engine_id"]
+
+    assert sched.request_finished(request, [[]]) == (False, None)
+
+    assert ("9ed3b2574f8750be" in sched._reqs_need_recv) is routable
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
+    assert ("9ed3b2574f8750be" in meta.reqs_to_recv) is routable
 
 
 def test_align_read_blocks_allows_configured_lookahead_tail():

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -815,6 +815,56 @@ class KVCacheManager:
             num_valid_blocks = cdiv(num_computed_tokens, group.block_size)
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
+
+    def get_block_ids_from_token(
+        self, request_id: str, start_token: int
+    ) -> tuple[list[int], ...]:
+        """Get the non-null block ids holding the request's KV from
+        `start_token` on, in every KV cache group. Recurrent-state blocks
+        before `start_token` are prefix-cache checkpoints, not later state."""
+        block_ids: list[list[int]] = []
+        for manager, blocks in zip(
+            self.coordinator.single_type_managers,
+            self.get_blocks(request_id).blocks,
+        ):
+            if not isinstance(manager, CrossAttentionManager):
+                # The manager's block size includes DCP sharding.
+                blocks = blocks[start_token // manager.block_size :]
+            block_ids.append([b.block_id for b in blocks if not b.is_null])
+        return tuple(block_ids)
+
+    def get_block_ids_from_first_of(
+        self, request_id: str, block_ids: Sequence[Collection[int]]
+    ) -> tuple[list[int], ...] | None:
+        """Get the request's non-null block ids, in every KV cache group, from
+        the first token it holds in `block_ids` (one collection per group)
+        on. Returns None if the request holds none of them."""
+        first_token: int | None = None
+        for manager, blocks, group_block_ids in zip(
+            self.coordinator.single_type_managers,
+            self.get_blocks(request_id).blocks,
+            block_ids,
+        ):
+            for idx, block in enumerate(blocks):
+                if block.is_null or block.block_id not in group_block_ids:
+                    continue
+                token = (
+                    0
+                    if isinstance(manager, CrossAttentionManager)
+                    else idx * manager.block_size
+                )
+                if first_token is None or token < first_token:
+                    first_token = token
+                break
+        if first_token is None:
+            return None
+        return self.get_block_ids_from_token(request_id, first_token)
+
+    def evict_blocks_by_group(self, block_ids: Sequence[set[int]]) -> None:
+        """Evict blocks from the prefix cache, given one set of block IDs per
+        KV cache group. Each group is evicted from its own block pool."""
+        for manager, ids in zip(self.coordinator.single_type_managers, block_ids):
+            manager.block_pool.evict_blocks(ids)
 
     def estimate_cached_tokens(self, request: Request) -> int:
         """Estimate the number of tokens cached by the request."""

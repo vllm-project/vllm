@@ -18,6 +18,9 @@ from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
 from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp, standalone_server
 from vllm import SamplingParams, TokensPrompt
 from vllm.config import CUDAGraphMode, KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
+    UMBPStoreConnectorWorker,
+)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 
@@ -35,10 +38,12 @@ def umbp_llm(vllm_runner, socket_dir, tmp_path, monkeypatch, request):
     """Qwen3 on batch-invariant kernels, storing its prefixes through UMBP.
 
     `request.param` holds connector options, plus `runner` for `vllm_runner`
-    overrides and `standalone` to store through a `umbp_standalone_server`.
+    overrides, `transfer` for `KVTransferConfig` overrides and `standalone` to
+    store through a `umbp_standalone_server`.
     """
     options = {"capacity_bytes": 1 << 30, **getattr(request, "param", {})}
     runner_kwargs = {"enforce_eager": True, **options.pop("runner", {})}
+    transfer_kwargs = options.pop("transfer", {})
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with contextlib.ExitStack() as stack:
@@ -64,6 +69,7 @@ def umbp_llm(vllm_runner, socket_dir, tmp_path, monkeypatch, request):
                     kv_connector="UMBPStoreConnector",
                     kv_role="kv_both",
                     kv_connector_extra_config={**pool_config, **options},
+                    **transfer_kwargs,
                 ),
                 **runner_kwargs,
             )
@@ -285,6 +291,63 @@ def test_synchronous_restore_survives_block_zeroing(umbp_llm):
 
     assert _external_tokens(umbp_llm) - before == 8 * block_size
     _assert_same_outputs(computed, restored)
+
+
+@pytest.fixture
+def lost_pool_loads(monkeypatch):
+    """Append to the returned list to empty the pool right before the next
+    load, as an eviction between a lookup hit and its load does."""
+    pending: list[bool] = []
+    start_load_kv = UMBPStoreConnectorWorker.start_load_kv
+
+    def lose_pool_then_load(self, forward_context, metadata):
+        if pending and any(metadata.load_requests.values()):
+            pending.clear()
+            assert self.runtime.clear()
+        start_load_kv(self, forward_context, metadata)
+
+    monkeypatch.setattr(UMBPStoreConnectorWorker, "start_load_kv", lose_pool_then_load)
+    # The worker has to run in this process for the patch to reach it.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    return pending
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize(
+    "umbp_llm",
+    [
+        pytest.param(
+            {
+                "load_async": False,
+                "transfer": {"kv_load_failure_policy": policy},
+                "runner": {"async_scheduling": async_scheduling},
+            },
+            id=f"{policy}-{'async' if async_scheduling else 'sync'}_scheduling",
+        )
+        for policy in ("recompute", "fail")
+        for async_scheduling in (True, False)
+    ],
+    indirect=True,
+)
+def test_failed_synchronous_load_follows_failure_policy(lost_pool_loads, umbp_llm):
+    """A synchronous load fills blocks of a request that is already running.
+    When it fails, `recompute` must reproduce the cold run and `fail` must end
+    the request with an error; neither may decode from the unfilled blocks.
+    """
+    prompt = _prompt(0, 8 * BLOCK_SIZE + 7)
+    computed = umbp_llm.generate(prompt, PARAMS, use_tqdm=False)
+    _reset_gpu_prefix_cache(umbp_llm)
+
+    lost_pool_loads.append(True)
+    recovered = umbp_llm.generate(prompt, PARAMS, use_tqdm=False)
+
+    assert not lost_pool_loads, "the prompt was not restored through a load"
+    transfer_config = umbp_llm.llm_engine.vllm_config.kv_transfer_config
+    if transfer_config.kv_load_failure_policy == "fail":
+        assert recovered[0].outputs[0].finish_reason == "error"
+        assert not recovered[0].outputs[0].token_ids
+    else:
+        _assert_same_outputs(computed, recovered)
 
 
 HYBRID_MODEL = "ibm-granite/granite-4.0-h-350m"
