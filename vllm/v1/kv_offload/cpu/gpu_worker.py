@@ -165,9 +165,23 @@ def _build_copy_plan(ref: CanonicalKVCacheRef, gpu_to_cpu: bool) -> CopyPlan:
     sizes: list[int] = []
     for run in mapping.runs:
         for i in range(run.num_fragments):
-            local.append(run.local_offset + i * run.local_stride)
-            canonical.append(run.canonical_offset + i * run.canonical_stride)
-            sizes.append(run.fragment_size)
+            offset = run.local_offset + i * run.local_stride
+            canonical_offset = run.canonical_offset + i * run.canonical_stride
+            remaining = run.fragment_size
+            while remaining:
+                physical_offset = offset
+                size = remaining
+                if ref.kernel_page_size_bytes is not None:
+                    assert ref.kernel_page_stride_bytes is not None
+                    page, within = divmod(offset, ref.kernel_page_size_bytes)
+                    physical_offset = page * ref.kernel_page_stride_bytes + within
+                    size = min(size, ref.kernel_page_size_bytes - within)
+                local.append(physical_offset)
+                canonical.append(canonical_offset)
+                sizes.append(size)
+                offset += size
+                canonical_offset += size
+                remaining -= size
     src, dst = (local, canonical) if gpu_to_cpu else (canonical, local)
     return CopyPlan(
         frag_offsets_src=np.asarray(src, dtype=np.uint64),
