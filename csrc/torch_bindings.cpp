@@ -610,6 +610,20 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? state_indices=None, Tensor? has_initial_state=None) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_KDA_PREFILL_SM90
+  // SM90 KDA chunked prefill with FlashKDA's fwd arguments: q, k, v are the
+  // q|k|v sections of one packed buffer; raw gate and beta logits; fp32 state.
+  ops.def(
+      "kda_prefill_sm90(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, "
+      "float scale, Tensor(a!) out, Tensor(c!) workspace, Tensor A_log, "
+      "Tensor dt_bias, float lower_bound, Tensor? initial_state=None, "
+      "Tensor(b!)? final_state=None, Tensor? cu_seqlens=None, "
+      "Tensor(d!)? checkpoint_state=None, "
+      "Tensor? checkpoint_offsets=None) -> ()");
+  ops.def(
+      "kda_prefill_sm90_workspace_size(int T_total, int H, int N=1) -> int");
+#endif
+
 #ifdef VLLM_ENABLE_BEAM_KERNELS
   // Beam's MNNVL all-reduce fused with its norm-residual-norm boundary.
   ops.def(
@@ -971,6 +985,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("fused_kda_chunk", TORCH_BOX(&fused_kda_chunk));
 #endif
 
+#ifdef VLLM_ENABLE_KDA_PREFILL_SM90
+  ops.impl("kda_prefill_sm90", TORCH_BOX(&kda_prefill_sm90));
+#endif
+
 #ifdef VLLM_ENABLE_BEAM_KERNELS
   ops.impl("beam_allreduce_norm", TORCH_BOX(&beam_allreduce_norm));
   ops.impl("beam_allreduce", TORCH_BOX(&beam_allreduce));
@@ -1070,6 +1088,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
            TORCH_BOX(&cutlass_scaled_mm_supports_block_fp8));
   ops.impl("cutlass_scaled_mm_supports_fp4",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp4));
+#endif
+#ifdef VLLM_ENABLE_KDA_PREFILL_SM90
+  ops.impl("kda_prefill_sm90_workspace_size",
+           TORCH_BOX(&kda_prefill_sm90_workspace_size));
 #endif
 }
 

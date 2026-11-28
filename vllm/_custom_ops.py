@@ -2995,6 +2995,60 @@ def fused_kda_decode(
     return out
 
 
+def kda_prefill_sm90_workspace_size(
+    max_tokens: int, num_heads: int, max_seqs: int
+) -> int:
+    """Workspace bytes of `kda_prefill_sm90` for any call with at most
+    `max_tokens` tokens and `max_seqs` sequences."""
+    return torch.ops._C.kda_prefill_sm90_workspace_size(max_tokens, num_heads, max_seqs)
+
+
+def kda_prefill_sm90(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    out: torch.Tensor,
+    workspace: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    lower_bound: float,
+    initial_state: torch.Tensor,
+    final_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
+) -> None:
+    """SM90 KDA chunked prefill, a drop-in for FlashKDA's `fwd` (same
+    arguments). q, k, v are `[1, T, H, 128]` bf16 views of one packed q|k|v
+    buffer (k = q + H * 128, v = q + 2 * H * 128 elements, one token stride);
+    g raw gate logits `[1, T, H, 128]`, beta raw logits `[1, T, H]` (rows may
+    be strided); out `[1, T, H, 128]` (rows may be strided); fp32 states
+    `[N, H, 128, 128]`; int32 `cu_seqlens` and `checkpoint_offsets` (multiples
+    of 16). `workspace` is uint8 of `kda_prefill_sm90_workspace_size` bytes,
+    any contents."""
+    torch.ops._C.kda_prefill_sm90(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale,
+        out,
+        workspace,
+        A_log,
+        dt_bias,
+        lower_bound,
+        initial_state,
+        final_state,
+        cu_seqlens,
+        checkpoint_state,
+        checkpoint_offsets,
+    )
+
+
 def fused_gdn_decode_post_conv_mtp(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,

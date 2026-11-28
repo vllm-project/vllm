@@ -496,6 +496,22 @@ void fused_kda_chunk(
     std::optional<torch::stable::Tensor> has_initial_state);
 #endif
 
+#ifdef VLLM_ENABLE_KDA_PREFILL_SM90
+void kda_prefill_sm90(
+    torch::stable::Tensor const& q, torch::stable::Tensor const& k,
+    torch::stable::Tensor const& v, torch::stable::Tensor const& g,
+    torch::stable::Tensor const& beta, double scale, torch::stable::Tensor& out,
+    torch::stable::Tensor& workspace, torch::stable::Tensor const& A_log,
+    torch::stable::Tensor const& dt_bias, double lower_bound,
+    std::optional<torch::stable::Tensor> initial_state,
+    std::optional<torch::stable::Tensor> final_state,
+    std::optional<torch::stable::Tensor> cu_seqlens,
+    std::optional<torch::stable::Tensor> checkpoint_state,
+    std::optional<torch::stable::Tensor> checkpoint_offsets);
+
+int64_t kda_prefill_sm90_workspace_size(int64_t T_total, int64_t H, int64_t N);
+#endif
+
 #ifdef VLLM_ENABLE_BEAM_KERNELS
 void beam_allreduce_norm(
     torch::stable::Tensor const& input, torch::stable::Tensor const& residual,

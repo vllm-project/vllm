@@ -1183,6 +1183,21 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building fused GDN decode for archs: ${FUSED_GDN_DECODE_ARCHS}")
   endif()
 
+  # SM90-only KDA chunked prefill (wgmma, TMA, PDL), a drop-in for FlashKDA's
+  # fwd. fence.acquire.gpu needs PTX ISA 8.6 (CUDA 12.8).
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+    cuda_archs_loose_intersection(KDA_PREFILL_SM90_ARCHS "9.0a" "${CUDA_ARCHS}")
+  endif()
+  if(KDA_PREFILL_SM90_ARCHS)
+    set(KDA_PREFILL_SM90_SRC "csrc/kda/kda_prefill_sm90.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${KDA_PREFILL_SM90_SRC}"
+      CUDA_ARCHS "${KDA_PREFILL_SM90_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${KDA_PREFILL_SM90_SRC}")
+    message(STATUS
+      "Building SM90 KDA prefill for archs: ${KDA_PREFILL_SM90_ARCHS}")
+  endif()
+
   # Beam's kernels use NVLink multicast and thread-block clusters. Their norms
   # must not contract into FMAs to keep the FP32 boundary exact.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
@@ -1363,6 +1378,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(FUSED_GDN_DECODE_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_GDN_DECODE=1)
+    endif()
+    if(KDA_PREFILL_SM90_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_KDA_PREFILL_SM90=1)
     endif()
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE

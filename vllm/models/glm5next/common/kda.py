@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
+from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
@@ -168,9 +169,29 @@ def _resolve_kda_prefill_backend(
     CuTe DSL kernel (opt-in; updates the state pool in place) or the Triton
     `chunk_kda_with_fused_gate` path. `backend` comes from
     `additional_config.kda_prefill_backend` (auto / triton / flashkda /
-    flashinfer)."""
-    if backend not in ("auto", "triton", "flashkda", "flashinfer"):
+    flashkda_sm90 / flashinfer); flashkda_sm90 (opt-in) runs vLLM's own SM90
+    kernel `_C.kda_prefill_sm90` with FlashKDA's arguments."""
+    if backend not in ("auto", "triton", "flashkda", "flashkda_sm90", "flashinfer"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
+    if backend == "flashkda_sm90":
+        capability = current_platform.get_device_capability()
+        if not (
+            current_platform.is_cuda()
+            and capability is not None
+            and (capability.major, capability.minor) == (9, 0)
+            and hasattr(torch.ops._C, "kda_prefill_sm90")
+            and head_dim == 128
+            and dtype == torch.bfloat16
+            and state_dtype == torch.float32
+            and lower_bound is not None
+        ):
+            raise RuntimeError(
+                "kda_prefill_backend=flashkda_sm90 requires CUDA SM90, a build "
+                "with the kda_prefill_sm90 op, bfloat16 activations, a float32 "
+                "recurrent state, head_dim=128 and a bounded KDA gate."
+            )
+        logger.info_once("Using vLLM's SM90 KDA prefill (kda_prefill_sm90).")
+        return "flashkda_sm90"
     if backend == "flashinfer":
         if not _is_flashinfer_kda_prefill_supported(
             head_dim, dtype, state_dtype, lower_bound
@@ -640,14 +661,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.head_dim,
                 self.get_state_dtype()[1],
             )
-        if self.kda_prefill_backend == "flashkda":
-            import vllm._flashkda_C  # noqa: F401
-
+        if self.kda_prefill_backend in ("flashkda", "flashkda_sm90"):
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             max_seqs = vllm_config.scheduler_config.max_num_seqs
-            workspace_size = torch.ops._flashkda_C.get_workspace_size(
-                max_tokens, self.local_num_heads, max_seqs
-            )
+            if self.kda_prefill_backend == "flashkda_sm90":
+                workspace_size = ops.kda_prefill_sm90_workspace_size(
+                    max_tokens, self.local_num_heads, max_seqs
+                )
+            else:
+                import vllm._flashkda_C  # noqa: F401
+
+                workspace_size = torch.ops._flashkda_C.get_workspace_size(
+                    max_tokens, self.local_num_heads, max_seqs
+                )
             self._flashkda_buffer_specs = (
                 (
                     (max_seqs, self.local_num_heads, self.head_dim, self.head_dim),
@@ -700,8 +726,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if out is None:
             out = workspace_out[:, : q.shape[1]]
         # FlashKDA accepts row-strided q/k/v (contiguous H/D rows, aligned
-        # token stride), so the packed q|k|v views are passed without a copy.
-        torch.ops._flashkda_C.fwd(
+        # token stride), so the packed q|k|v views are passed without a copy;
+        # kda_prefill_sm90 takes the same arguments and needs q, k, v to be
+        # the sections of that one packed buffer.
+        fwd = (
+            torch.ops._C.kda_prefill_sm90
+            if self.kda_prefill_backend == "flashkda_sm90"
+            else torch.ops._flashkda_C.fwd
+        )
+        fwd(
             q,
             k,
             v,
@@ -1293,7 +1326,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 initial_state = gather_initial_states(
                     recurrent_state, prefill_state_indices, prefill_has_initial_state
                 )
-                if self.kda_prefill_backend == "flashkda":
+                if self.kda_prefill_backend in ("flashkda", "flashkda_sm90"):
                     core_attn_out_non_spec, last_recurrent_state = (
                         self._flashkda_prefill(
                             q=q_p,
