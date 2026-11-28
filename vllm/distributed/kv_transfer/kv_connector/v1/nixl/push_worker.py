@@ -220,6 +220,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Pre-process metadata; defer NIXL ops to the writer thread."""
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
+            self._step_housekeeping()
             return
 
         # D-side: track reqs waiting for P to push.
@@ -277,6 +278,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             for req_id, block_ids in metadata.push_finished_blocks.items():
                 self._finished_blocks_inbox.put((req_id, block_ids))
             self._push_writer_wake.set()
+
+        self._step_housekeeping()
 
     # --- Writer thread ------------------------------------------------- #
 

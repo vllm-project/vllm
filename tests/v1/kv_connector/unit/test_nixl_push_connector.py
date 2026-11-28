@@ -375,6 +375,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
+        w._expired_send_reqs = set()
         w.draft_tp_mappings = {}
         w._head_sharded_draft_kv_heads = None
         w._head_sharded_draft_regions = set()
@@ -950,6 +951,12 @@ def test_start_load_kv_skips_liveness_for_unconnected_engine(
 
 
 class TestPushWriterNotifs:
+    @staticmethod
+    def _step(w):
+        # Leases are reaped in start_load_kv(), before this step's results.
+        w._step_housekeeping()
+        return w.get_transfer_results()
+
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
         on the engine main thread inside `_get_new_notifs`."""
@@ -1001,6 +1008,7 @@ class TestPushWriterNotifs:
         w._invalid_block_ids = queue.Queue()
         w._pending_recv_notifs = {}
         w._replicated_pcp_done_sending = set()
+        w._expired_send_reqs = set()
         w.use_host_buffer = False
         return w
 
@@ -1068,16 +1076,16 @@ class TestPushWriterNotifs:
         request_id = self._make_sending_req(w)
         w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "PROC", sibling_state]
 
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._step(w).finished_sending == set()
         assert w._sending_transfers[request_id] == [102]
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._step(w).finished_sending == set()
         assert request_id not in w._sending_transfers
         assert request_id in w._reqs_to_send
         assert w._evict_finished_inbox.empty()
 
         w.expected_consumer_notifications_by_req = {}
         w._reqs_to_send[request_id] = time.perf_counter() - 1
-        assert w.get_transfer_results().finished_sending == {request_id}
+        assert self._step(w).finished_sending == {request_id}
         assert request_id not in w._send_failures
         assert w._evict_finished_inbox.get_nowait() == request_id
 
@@ -1140,24 +1148,24 @@ class TestPushWriterNotifs:
             "PROC",
             "DONE",
         ]
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._step(w).finished_sending == set()
 
         w.expected_consumer_notifications_by_req = {}
         w._reqs_to_send[request_id] = time.perf_counter() - 1
         # The second WRITE is still in flight: the lease does not expire yet.
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._step(w).finished_sending == set()
         assert request_id in w._reqs_to_send
         assert w._evict_finished_inbox.empty()
 
-        reported = w.get_transfer_results().finished_sending
+        reported = self._step(w).finished_sending
         if first_state == "ERR":
             # A failed WRITE is not success; the expired lease reclaims it.
             assert reported == set()
-            reported = w.get_transfer_results().finished_sending
+            reported = self._step(w).finished_sending
         assert reported == {request_id}
         assert w._evict_finished_inbox.get_nowait() == request_id
 
-        assert w.get_transfer_results().finished_sending == set()
+        assert self._step(w).finished_sending == set()
         assert request_id not in w._reqs_to_send
         assert request_id not in w._sending_transfers
         assert request_id not in w._send_failures
@@ -1174,7 +1182,7 @@ class TestPushWriterNotifs:
         during: list[set[str]] = []
 
         def submit(*args):
-            during.append(w.get_transfer_results().finished_sending)
+            during.append(self._step(w).finished_sending)
 
         monkeypatch.setattr(w, "_start_push_kv", submit)
         NixlPushConnectorWorker._do_start_push_kv(
@@ -1182,7 +1190,7 @@ class TestPushWriterNotifs:
         )
 
         assert during == [set()]
-        assert w.get_transfer_results().finished_sending == {request_id}
+        assert self._step(w).finished_sending == {request_id}
 
     def test_released_request_is_not_pushed(self, monkeypatch: pytest.MonkeyPatch):
         """A registration arriving after the request's blocks were released

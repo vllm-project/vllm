@@ -1112,6 +1112,9 @@ class NixlBaseConnectorWorker:
         # Replicated-KV PCP ranks > 0 never transfer; requests they are asked
         # to send are reported finished immediately (see get_finished).
         self._replicated_pcp_done_sending: set[ReqId] = set()
+        # Requests whose send lease expired, reaped once per step in
+        # start_load_kv() and reported by the next get_transfer_results().
+        self._expired_send_reqs: set[ReqId] = set()
         # Set of requests that have been part of a batch, regardless of status.
         self._reqs_to_process: set[ReqId] = set()
 
@@ -3519,6 +3522,8 @@ class NixlBaseConnectorWorker:
 
         done_sending.update(self._replicated_pcp_done_sending)
         self._replicated_pcp_done_sending.clear()
+        done_sending.update(self._expired_send_reqs)
+        self._expired_send_reqs.clear()
 
         # Process receive failures reported by background threads. Each
         # producer already recorded a specific metric (handshake or
@@ -3642,10 +3647,6 @@ class NixlBaseConnectorWorker:
 
         self._sync_device_after_direct_recv(direct_device_recving)
 
-        # Handle timeout to avoid stranding blocks on remote.
-        self._reap_expired_send_leases(done_sending)
-
-        self._cleanup_remote_engines()
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
@@ -3675,6 +3676,13 @@ class NixlBaseConnectorWorker:
     def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
         """Completed receives whose remote lease may have lapsed mid-read."""
         return set()
+
+    def _step_housekeeping(self) -> None:
+        """Per-step work kept out of get_transfer_results(), which may be
+        polled between steps. Called at the end of start_load_kv()."""
+        # Reap expired leases, so as not to strand blocks on remote.
+        self._reap_expired_send_leases(self._expired_send_reqs)
+        self._cleanup_remote_engines()
 
     def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
         """Reclaim expired send-side KV leases into `done_sending`.

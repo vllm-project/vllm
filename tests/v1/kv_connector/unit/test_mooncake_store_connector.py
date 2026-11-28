@@ -408,6 +408,11 @@ def test_get_transfer_results_delegates_to_store_worker():
     worker.get_transfer_results.assert_called_once_with(finished_req_ids, metadata)
     assert result is transfer_results
 
+    # Polls between steps have no metadata.
+    connector.clear_connector_metadata()
+    assert connector.get_transfer_results(set()) is transfer_results
+    worker.get_transfer_results.assert_called_with(set(), None)
+
 
 def test_get_kv_connector_kv_cache_events_returns_none_when_disabled():
     vllm_config = _make_vllm_config()

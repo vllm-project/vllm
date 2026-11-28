@@ -127,6 +127,10 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra = kv_transfer_config.kv_connector_extra_config
         return bool(extra.get("rebuild_sliding_window", False))
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,

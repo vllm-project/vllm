@@ -487,6 +487,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     ) -> bool:
         return False
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

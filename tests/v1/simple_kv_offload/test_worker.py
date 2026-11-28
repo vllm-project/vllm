@@ -317,6 +317,22 @@ class _RecordingBackend:
         self.calls.append({"is_store": is_store, "wait_event": wait_event})
 
 
+def test_load_completion_reported_after_metadata_cleared():
+    """Loads that finish between steps, after the metadata is cleared, are still
+    reported, e.g. to a transfer poll."""
+    worker = _make_worker(kv_cache_config=None, cpu_capacity_bytes=0)
+    worker.bind_connector_metadata(
+        SimpleCPUOffloadMetadata(load_event=0, load_event_to_reqs={0: ["req"]})
+    )
+    worker.clear_connector_metadata()
+    done = MagicMock()
+    done.query.return_value = True
+    worker._load_events.append((0, done))
+
+    assert worker.get_finished(set()) == (None, {"req"})
+    assert worker.get_finished(set()) == (None, None)
+
+
 def test_transfer_hooks_pass_wait_event_for_store_only():
     """wait_for_save gates stores on a compute-done event; start_load_kv does not."""
     worker = _make_worker(

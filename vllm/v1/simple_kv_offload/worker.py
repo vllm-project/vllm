@@ -79,6 +79,9 @@ class SimpleCPUOffloadWorker:
 
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
+        # Pending load event -> request IDs, from the latest metadata. Kept
+        # after the metadata is cleared, for get_finished() between steps.
+        self._load_event_to_reqs: dict[int, list[str]] = {}
 
         # Compute-done event recorded before each store; reused across steps
         # (get_finished runs once per step, copy queue is FIFO).
@@ -315,6 +318,7 @@ class SimpleCPUOffloadWorker:
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
+        self._load_event_to_reqs = metadata.load_event_to_reqs
         if metadata.load_event >= 0:
             self._pending_load_event_indices.add(metadata.load_event)
         if metadata.store_event >= 0:
@@ -373,33 +377,29 @@ class SimpleCPUOffloadWorker:
 
         Returns:
             tuple of (finished_sending, finished_recving).
-            - finished_sending: always None (stores use worker metadata).
+            - finished_sending: always None (stores are reported by
+              build_connector_worker_meta()).
             - finished_recving: req_ids whose loads have completed.
 
         """
-        metadata = self._connector_metadata
         finished_recving: set[str] = set()
 
         if self._pending_load_event_indices:
             load_wm = self._poll_stream_events(is_store=False)
             for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
                 self._pending_load_event_indices.discard(j)
-                req_ids = (
-                    metadata.load_event_to_reqs.get(j) if metadata is not None else None
-                )
-                if req_ids:
+                if req_ids := self._load_event_to_reqs.get(j):
                     finished_recving.update(req_ids)
-
-        if self._pending_store_event_indices:
-            store_wm = self._poll_stream_events(is_store=True)
-            for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
-                self._pending_store_event_indices.discard(j)
-                self._completed_store_events[j] = 1
 
         return None, finished_recving or None
 
     def build_connector_worker_meta(self) -> SimpleCPUOffloadWorkerMetadata | None:
         """Return completed store events since the last call."""
+        if self._pending_store_event_indices:
+            store_wm = self._poll_stream_events(is_store=True)
+            for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
+                self._pending_store_event_indices.discard(j)
+                self._completed_store_events[j] = 1
         if not self._completed_store_events:
             return None
         meta = SimpleCPUOffloadWorkerMetadata(

@@ -754,15 +754,15 @@ async def test_hisparse_full_prefix_hit_completes_without_writes(
                 pending = {"d": pull}
                 decoder.process_pulling_result(response, pending)
                 assert pending == {} and pull.pull_tasks_count == 0
-                assert await decoder.fetch_finished_recving_reqs() == set()
+                assert decoder.get_transfer_results().finished_recving == set()
                 assert decoder.get_block_ids_with_load_errors() == set()
                 reg.assert_called_once()
             assert torch.all(host == 0xCC) and torch.all(gpu == 0xDD)
             expected = {"p"} if index == len(ranks) - 1 else set()
-            assert await producer.fetch_finished_sending_reqs() == expected
+            assert producer.get_transfer_results().finished_sending == expected
         write.assert_not_called()
     assert "tx-1" not in producer.reqs_need_send
-    assert await producer.fetch_finished_sending_reqs() == set()
+    assert producer.get_transfer_results().finished_sending == set()
 
 
 @pytest.mark.cpu_test

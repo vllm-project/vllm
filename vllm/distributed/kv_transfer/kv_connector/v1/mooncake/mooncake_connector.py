@@ -105,6 +105,7 @@ from vllm.v1.worker.utils import select_common_block_size
 logger = init_logger(__name__)
 
 _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
+_SEND_EXPIRY_CHECK_INTERVAL_S: Final[float] = 1.0
 # Decode restarts mint new layout ids, so stale peer layouts pile up. Evicting
 # one only costs that peer a LAYOUT_MISS and one layout resend.
 _MAX_PEER_LAYOUTS: Final[int] = 1024
@@ -788,6 +789,14 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
 
 
+def _drain(items: set[ReqId]) -> set[ReqId]:
+    """Empty a set that other threads may be adding to."""
+    drained: set[ReqId] = set()
+    while items:
+        drained.add(items.pop())
+    return drained
+
+
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
@@ -795,6 +804,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
         # Registers the device KV cache with an RDMA engine.
         return KVCacheAccess.REGISTERS
+
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -1544,6 +1557,8 @@ class MooncakeConnectorWorker:
             self._mooncake_receiver_t.start()
             logger.debug("Mooncake Decoder: start receiver thread")
 
+        # Filled from the sender and receiver loops, drained from the worker
+        # thread. Never replaced, so that no addition is lost.
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
         # Written from the receiver loop, drained from the worker thread.
@@ -1716,6 +1731,7 @@ class MooncakeConnectorWorker:
             asyncio.create_task(self._sender_worker(sock))
             for _ in range(self.num_sender_tasks)
         ]
+        sender_tasks.append(asyncio.create_task(self._expire_sends_periodically()))
 
         ready_event.set()
 
@@ -2698,16 +2714,16 @@ class MooncakeConnectorWorker:
         )
         self._kv_unregistered = False
 
-    async def fetch_finished_recving_reqs(self) -> set[ReqId]:
-        finished_recving_reqs = self.finished_recving_reqs
-        self.finished_recving_reqs = set()
-        return finished_recving_reqs
+    async def _expire_sends_periodically(self) -> None:
+        while True:
+            await asyncio.sleep(_SEND_EXPIRY_CHECK_INTERVAL_S)
+            try:
+                self._expire_sends()
+            except Exception:
+                logger.exception("Expiring unsent requests failed")
 
-    async def fetch_finished_sending_reqs(self) -> set[ReqId]:
-        finished_sending_reqs = self.finished_sending_reqs
-        self.finished_sending_reqs = set()
-
-        # Handle timeout to avoid stranding blocks on remote.
+    def _expire_sends(self) -> None:
+        """Handle timeout to avoid stranding blocks on remote. Runs on sender_loop."""
         now = time.perf_counter()
 
         expired_transfer_id = []
@@ -2733,7 +2749,7 @@ class MooncakeConnectorWorker:
                         send_meta.p_req_id,
                     )
                 self.xfer_stats.record_kv_expired_req()
-                finished_sending_reqs.add(send_meta.p_req_id)
+                self.finished_sending_reqs.add(send_meta.p_req_id)
                 expired_transfer_id.append(transfer_id)
 
         for transfer_id in expired_transfer_id:
@@ -2747,27 +2763,13 @@ class MooncakeConnectorWorker:
                 break
             del self._expired_transfer_ids[transfer_id]
 
-        return finished_sending_reqs
-
     def get_finished(self) -> tuple[set[str] | None, set[str] | None]:
         """Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
-        recv_fut = None
-        send_fut = None
-        if not self.is_kv_producer:
-            recv_fut = asyncio.run_coroutine_threadsafe(
-                self.fetch_finished_recving_reqs(), self.receiver_loop
-            )
-
-        if not self.is_kv_consumer:
-            send_fut = asyncio.run_coroutine_threadsafe(
-                self.fetch_finished_sending_reqs(), self.sender_loop
-            )
-
-        finished_recving_reqs = recv_fut.result() if recv_fut else set()
-        finished_sending_reqs = send_fut.result() if send_fut else set()
+        finished_sending_reqs = _drain(self.finished_sending_reqs)
+        finished_recving_reqs = _drain(self.finished_recving_reqs)
 
         if finished_sending_reqs or finished_recving_reqs:
             logger.debug(

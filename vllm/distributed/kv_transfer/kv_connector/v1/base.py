@@ -187,6 +187,17 @@ class KVConnectorBase_V1(ABC):
     _cache_hit_source = CacheHitSource.EXTERNAL_UNSPECIFIED
 
     @property
+    def supports_transfer_polling(self) -> bool:
+        """Whether the worker may call `get_transfer_results()` and
+        `get_block_ids_with_load_errors()` between steps, as often as every
+        fraction of a millisecond and with no finished request IDs, to report
+        finished transfers sooner, followed by `build_connector_worker_meta()`
+        when they find any. These calls are made on the thread that runs the
+        model, on its stream. Defaults to False.
+        """
+        return False
+
+    @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         """Whether external hits can complete divergent local hybrid hits.
 

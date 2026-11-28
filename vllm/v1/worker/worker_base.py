@@ -156,6 +156,15 @@ class WorkerBase:
         """Basic health check (override for device-specific checks)."""
         return
 
+    def next_kv_transfer_poll_time(self) -> float | None:
+        """When `poll_kv_transfers()` is next due between RPCs
+        (`time.monotonic()`), or None if it isn't needed."""
+        return None
+
+    def poll_kv_transfers(self) -> None:
+        """Collect finished KV transfers for the next model output."""
+        return
+
     def probe_forward(self) -> str | None:
         """Readiness probe for `/health_generate`: run a dummy forward pass and
         wait for it to complete on the device.

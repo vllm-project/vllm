@@ -308,6 +308,10 @@ class SchedulerOutput:
     # synchronously during this step (load_async=False).
     has_sync_kv_loads: bool = False
 
+    # Whether async KV loads or sends are in flight, so workers should poll
+    # the connector for finished transfers between steps.
+    has_pending_kv_transfers: bool = False
+
     # Execution-auxiliary output control metadata consumed by the worker connector.
     aux_output_connector_metadata: AuxOutputConnectorMetadata | None = None
 

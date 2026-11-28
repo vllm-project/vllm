@@ -91,6 +91,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # the scheduler-side aggregation (world_size workers, and any
             # sibling connector inside a MultiConnector) still completes.
             self._replicated_pcp_done_sending.update(metadata.reqs_to_send)
+            self._step_housekeeping()
             return
 
         # Keep around the requests that have been part of a batch. This is
@@ -124,6 +125,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         expiration_time - metadata.scheduler_clock
                     )
                 self._reqs_to_send[req_id] = expiration_time
+
+        self._step_housekeeping()
 
     def _is_remote_read_expired(self, meta: ReqMeta) -> bool:
         """Whether the remote's lease on the blocks has (nearly) run out, after

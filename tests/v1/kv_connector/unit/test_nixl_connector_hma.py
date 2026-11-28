@@ -391,6 +391,7 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
     worker._get_new_notifs = MagicMock(return_value=set())
     worker._pop_done_transfers = MagicMock(return_value=({"request"}, set()))
     worker._replicated_pcp_done_sending = set()
+    worker._expired_send_reqs = set()
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
     worker._send_pending_recv_notifs = MagicMock()

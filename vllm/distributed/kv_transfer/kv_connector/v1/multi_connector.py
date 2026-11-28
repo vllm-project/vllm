@@ -225,6 +225,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_transfer_polling for c in self._connectors
+        )
+
     @classmethod
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"

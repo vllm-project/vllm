@@ -1929,7 +1929,8 @@ async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
             producer.reqs_need_send[send_meta.transfer_id] = send_meta
 
             async def expire_before_send():
-                assert await producer.fetch_finished_sending_reqs() == {"p-req-1"}
+                producer._expire_sends()
+                assert producer.get_finished()[0] == {"p-req-1"}
 
             metadata = _xfer_meta(
                 [
@@ -2105,12 +2106,58 @@ async def test_worker_get_finished_timeout(monkeypatch):
             expire_time=time.perf_counter() + 100,
         )
 
-        finished_reqs = await prefill_worker.fetch_finished_sending_reqs()
+        prefill_worker._expire_sends()
+        finished_reqs = prefill_worker.get_transfer_results().finished_sending
 
         assert "p-req-expired" in finished_reqs
         assert "p-req-active" not in finished_reqs
         assert "tx-expired" not in prefill_worker.reqs_need_send
         assert "tx-active" in prefill_worker.reqs_need_send
+
+
+def test_transfer_results_do_not_wait_for_the_sender_loop():
+    """The worker polls between steps, so a busy event loop must not block it.
+    Sends expire on that loop, without any call from the worker."""
+    vllm_config = _make_worker_vllm_config("kv_producer")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch.object(mooncake_connector, "_SEND_EXPIRY_CHECK_INTERVAL_S", 0.01),
+    ):
+        producer = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        assert producer is not None
+        unblock = threading.Event()
+        try:
+            producer.finished_sending_reqs.add("p-req-sent")
+            producer.sender_loop.call_soon_threadsafe(unblock.wait, 30)
+            start = time.perf_counter()
+            assert producer.get_transfer_results().finished_sending == {"p-req-sent"}
+            assert producer.get_transfer_results().finished_sending == set()
+            assert time.perf_counter() - start < 10
+            unblock.set()
+
+            producer.reqs_need_send["tx-expired"] = SendBlockMeta(
+                p_req_id="p-req-expired",
+                transfer_id="tx-expired",
+                local_block_ids=[[1]],
+                ready=MagicMock(),
+                expire_time=time.perf_counter() - 1,
+            )
+            expiry = asyncio.run_coroutine_threadsafe(
+                producer._expire_sends_periodically(), producer.sender_loop
+            )
+            deadline = time.perf_counter() + 10
+            finished: set[str] = set()
+            while not finished and time.perf_counter() < deadline:
+                finished = producer.get_transfer_results().finished_sending
+                time.sleep(0.01)
+            expiry.cancel()
+            assert finished == {"p-req-expired"}
+        finally:
+            unblock.set()
+            producer.shutdown()
 
 
 class _BootstrapClientStub:
@@ -2294,6 +2341,7 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
         set_current_vllm_config(vllm_config),
         patch_worker_dependencies(),
         patch.object(mooncake_connector.httpx, "AsyncClient", _BootstrapClientStub),
+        patch.object(mooncake_connector, "_SEND_EXPIRY_CHECK_INTERVAL_S", 60.0),
     ):
         producer = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
@@ -2354,7 +2402,8 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
             assert response.err_msg is not None
             assert "not paired" in response.err_msg
 
-            assert await producer.fetch_finished_sending_reqs() == expired
+            producer._expire_sends()
+            assert producer.get_finished()[0] == expired
         finally:
             listener.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -2389,7 +2438,8 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
             ready=asyncio.Event(),
             expire_time=time.perf_counter() - 1,
         )
-        assert await producer.fetch_finished_sending_reqs() == {"p-req-expired"}
+        producer._expire_sends()
+        assert producer.get_finished()[0] == {"p-req-expired"}
 
         req_blocks = {"d-req-expired": ("xfer-expired", [[100]])}
         if with_live_req:

@@ -3145,6 +3145,7 @@ def _add_prefill_stages(decode, stages):
         )
         for pp_rank, stage in enumerate(stages)
     }
+    decode._engine_by_address["prefill-host", 1234] = "prefill"
 
 
 def _pull_page_pairs(
@@ -3527,6 +3528,8 @@ def test_pull_from_hma_pp_stages_only_notifies_a_stage_without_blocks_to_read(
     results = decode.get_transfer_results()
     assert results.finished_recving == results.failed_recving == {"req"}
     now = 131.0
+    for stage in stages:
+        stage.start_load_kv(NixlConnectorMetadata())
     output = aggregator.aggregate(
         [
             create_model_runner_output(

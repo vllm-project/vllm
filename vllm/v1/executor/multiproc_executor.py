@@ -1190,10 +1190,19 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers."""
-        assert self.rpc_broadcast_mq is not None
+        rpc_mq = self.rpc_broadcast_mq
+        watch_dog = get_watch_dog()
+        assert rpc_mq is not None
         while True:
-            with get_watch_dog().disable():
-                rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
+            # Poll for finished KV transfers until the next RPC arrives.
+            while (poll_time := self.worker.next_kv_transfer_poll_time()) is not None:
+                rpc_mq.spin_until_readable((), poll_time)
+                if rpc_mq.shutting_down or rpc_mq.readable():
+                    break
+                watch_dog.feed()
+                self.worker.poll_kv_transfers()
+            with watch_dog.disable():
+                rpc_request = rpc_mq.dequeue(indefinite=True)
             self._execute_worker_rpc(rpc_request)
             del rpc_request
 

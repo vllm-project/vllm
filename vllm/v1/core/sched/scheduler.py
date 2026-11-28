@@ -529,6 +529,9 @@ class Scheduler(SchedulerInterface):
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
         self._aborted_kv_loads: set[str] = set()
+        # Requests with an async KV load in progress or blocks held for a send.
+        # Workers poll for finished transfers while it is non-empty.
+        self._kv_transfer_req_ids: set[str] = set()
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -1598,6 +1601,7 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    self._kv_transfer_req_ids.add(request.request_id)
                     num_async_kv_loads += 1
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
@@ -1810,6 +1814,7 @@ class Scheduler(SchedulerInterface):
             ),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
+            has_pending_kv_transfers=bool(self._kv_transfer_req_ids),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
@@ -3332,6 +3337,8 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
+        if connector_delay_free_blocks:
+            self._kv_transfer_req_ids.add(request_id)
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
@@ -3342,6 +3349,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         self._free_request_blocks(request)
         del self.requests[request.request_id]
+        self._kv_transfer_req_ids.discard(request.request_id)
 
     @property
     def pause_state(self) -> PauseState:
@@ -3901,6 +3909,7 @@ class Scheduler(SchedulerInterface):
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
             assert req_id in self.requests
+            self._kv_transfer_req_ids.discard(req_id)
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)

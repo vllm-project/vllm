@@ -303,6 +303,10 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         # reconciles to the boundary every group agrees on.
         return self.mode == MoRIIOMode.READ and self._transfers_mamba_state
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -3163,9 +3167,6 @@ class MoRIIOConnectorWorker:
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
-        heartbeat = getattr(self, "_heartbeat", None)
-        if heartbeat is not None:
-            heartbeat.check_health()
         done_sending, done_recving = set(), set()
 
         if self.is_producer:
@@ -3212,15 +3213,10 @@ class MoRIIOConnectorWorker:
                 # transfer_id was registered in transfer_id_to_request_id.
                 self._unmatched_write_completions |= fresh
                 done_recving = self._unmatched_write_completions
-            else:
-                # READ mode: the scheduler treats KV loads as synchronous
-                # (load_kv_async=False), so requests go directly to RUNNING
-                # instead of WAITING_FOR_REMOTE_KVS. We still call
-                # _pop_done_transfers() to send the notify to the prefill
-                # side and clean up internal state, but we must NOT report
-                # these as done_recving because the scheduler doesn't
-                # expect a finished_recving signal for RUNNING requests.
-                self._pop_done_transfers()
+            # READ mode loads are synchronous (load_kv_async=False): requests
+            # go directly to RUNNING, so finished reads are never reported
+            # here. start_load_kv() releases them on the prefill side, once
+            # awaited and before this step's load error query.
 
         done_recving = {
             self.transfer_id_to_request_id[id]
@@ -3644,6 +3640,8 @@ class MoRIIOConnectorWorker:
         """Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
         """
+        if (heartbeat := getattr(self, "_heartbeat", None)) is not None:
+            heartbeat.check_health()
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
             if self.mode == MoRIIOMode.WRITE:
@@ -3721,6 +3719,7 @@ class MoRIIOConnectorWorker:
 
         if remote_engine_id is None and not wait_handshake_readd_req:
             self._await_reads_issued_this_step()
+            self._pop_done_transfers()
             return
         _deadline = time.monotonic() + self.moriio_config.transfer_timeout
         while True:
@@ -3749,6 +3748,7 @@ class MoRIIOConnectorWorker:
 
         self._await_reads_issued_this_step()
         self._reqs_to_send.update(metadata.reqs_to_send)
+        self._pop_done_transfers()
 
     def wait_for_save(self, metadata: MoRIIOConnectorMetadata):
         if self.mode == MoRIIOMode.WRITE and self.is_producer:

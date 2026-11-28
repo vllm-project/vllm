@@ -2384,6 +2384,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pending_aux_output=pending_aux_output,
             num_drafted_tokens_per_req=num_drafted_tokens_per_req,
             num_verified_tokens_per_req=num_verified_tokens_per_req,
+            take_kv_transfer_results=self.kv_connector.transfer_results_taker(),
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.

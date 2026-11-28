@@ -44,7 +44,9 @@ def test_worker_rpc_payload_released_before_next_dequeue():
     worker_proc: Any = WorkerProc.__new__(WorkerProc)
     worker_proc.rpc_broadcast_mq = queue
     worker_proc.rank = 0
-    worker_proc.worker = SimpleNamespace(consume=lambda payload: payload)
+    worker_proc.worker = SimpleNamespace(
+        consume=lambda payload: payload, next_kv_transfer_poll_time=lambda: None
+    )
     worker_proc.handle_output = lambda output: None
     with pytest.raises(_ExitWorkerLoop):
         worker_proc.worker_busy_loop()

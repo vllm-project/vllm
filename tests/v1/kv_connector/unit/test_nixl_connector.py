@@ -2608,6 +2608,7 @@ def recv_worker():
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
     worker._replicated_pcp_done_sending = set()
+    worker._expired_send_reqs = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
     worker._reqs_to_send = {}
@@ -3562,20 +3563,36 @@ class TestPeerReplacement:
         )
         return metadata
 
+    def _results(self):
+        # Peers are released by the next step's start_load_kv().
+        result = self.worker.get_transfer_results()
+        self.worker._step_housekeeping()
+        return result
+
     def _fail_old_peer(self):
         self.worker.start_load_kv(self._request("old"))
         self.nixl.invalid_remote_agents.add("old")
         self.transport.check_xfer_state.return_value = "ERR"
 
+    def test_expired_send_lease_reaped_per_step(self):
+        """Leases are reaped in start_load_kv(), not by (possibly polled)
+        get_transfer_results(), which reports them next."""
+        self.worker._reqs_to_process.add("sent")
+        self.worker._reqs_to_send["sent"] = time.perf_counter() - 1
+        assert not self.worker.get_transfer_results().finished_sending
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        assert self.worker.get_transfer_results().finished_sending == {"sent"}
+        assert not self.worker.get_transfer_results().finished_sending
+
     def test_cleans_old_peer_after_confirmed_handshake(self):
         self._connect("healthy", host="other-host")
         old_handle = self.worker._remote_stages["old"][0].xfer_side_handles[0]
         self.worker.start_load_kv(self._request())
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.remove_remote_agent.assert_not_called()
 
         self._connect()
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.release_dlist_handle.assert_called_once_with(old_handle)
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert set(self.worker._remote_agents) == {"new", "healthy"}
@@ -3587,13 +3604,13 @@ class TestPeerReplacement:
             self.worker.transfer_topo.get_engine_info("old")
 
         self.worker.start_load_kv(NixlConnectorMetadata())
-        assert self.worker.get_transfer_results().finished_recving == {"new-req"}
+        assert self._results().finished_recving == {"new-req"}
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
     @pytest.mark.parametrize("host,port", [("other-host", 1234), ("localhost", 5678)])
     def test_preserves_other_addresses(self, host, port):
         self._connect(host=host, port=port)
-        self.worker.get_transfer_results()
+        self._results()
         assert "old" in self.worker._remote_agents
         self.transport.remove_remote_agent.assert_not_called()
 
@@ -3602,7 +3619,7 @@ class TestPeerReplacement:
         self.worker._handshake_futures["new"].set_exception(
             RuntimeError("handshake failed")
         )
-        assert self.worker.get_transfer_results().failed_recving == {"new-req"}
+        assert self._results().failed_recving == {"new-req"}
         assert "old" in self.worker._remote_agents
         assert self.worker._engine_by_address == {("localhost", 1234): "old"}
         self.transport.remove_remote_agent.assert_not_called()
@@ -3627,12 +3644,12 @@ class TestPeerReplacement:
         self.transport.check_xfer_state.side_effect = states
         self._connect()
 
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert result.finished_recving == result.failed_recving == set()
         assert self.worker.get_block_ids_with_load_errors() == set()
         self.transport.remove_remote_agent.assert_not_called()
 
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert result.finished_recving == {"old-req"}
         assert result.failed_recving == ({"old-req"} if failed else set())
         assert self.worker.get_block_ids_with_load_errors() == (
@@ -3649,14 +3666,14 @@ class TestPeerReplacement:
             "old-req", "old", metadata.reqs_to_recv["old-req"]
         )
         self._connect()
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.remove_remote_agent.assert_not_called()
 
         self.worker.start_load_kv(NixlConnectorMetadata())
         self.transport.send_notif.assert_called_once_with(
             "old", notif_msg=b"old-prefill:1"
         )
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert result.finished_recving == {"old-req"}
         assert result.failed_recving == set()
         self.transport.remove_remote_agent.assert_called_once_with("old")
@@ -3668,12 +3685,12 @@ class TestPeerReplacement:
         else:
             self._connect()
         self.worker._ensure_handshake("other", "other-host", 1234, 1)
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.remove_remote_agent.assert_not_called()
         self.transport.check_remote_metadata.assert_not_called()
 
         self._connect("other", host="other-host")
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
     @pytest.mark.parametrize("invalidated", [False, True])
@@ -3686,7 +3703,7 @@ class TestPeerReplacement:
         self.worker._ready_requests.put(("old-req", metadata.reqs_to_recv["old-req"]))
         if not invalidated:
             self._connect()
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
         self.worker.start_load_kv(NixlConnectorMetadata())
@@ -3704,7 +3721,7 @@ class TestPeerReplacement:
         elif isinstance(missing, Exception):
             self.transport.check_remote_metadata.side_effect = missing
 
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert result.finished_recving == result.failed_recving == {"old-req"}
         assert self.worker.get_block_ids_with_load_errors() == {1}
         assert ("old" not in self.worker._remote_agents) is (missing is True)
@@ -3732,7 +3749,7 @@ class TestPeerReplacement:
         self.worker.start_load_kv(self._request("old"))
         self.transport.check_xfer_state.side_effect = error
 
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert result.finished_recving == result.failed_recving == {"old-req"}
         assert ("old" not in self.worker._remote_agents) is disconnected
         assert self.transport.release_dlist_handle.call_count == disconnected
@@ -3745,7 +3762,7 @@ class TestPeerReplacement:
     ):
         old_handle = self.worker._remote_stages["old"][0].xfer_side_handles[0]
         self._fail_old_peer()
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.release_dlist_handle.assert_called_once_with(old_handle)
         assert not self.worker._engine_by_address
         with pytest.raises(KeyError):
@@ -3758,7 +3775,7 @@ class TestPeerReplacement:
             self.worker._handshake_futures["old"].set_exception(
                 RuntimeError("handshake failed")
             )
-            result = self.worker.get_transfer_results()
+            result = self._results()
             assert result.failed_recving == result.finished_recving == {"next"}
             assert "old" not in self.worker._remote_agents
             assert self.worker._ready_requests.empty()
@@ -3771,7 +3788,7 @@ class TestPeerReplacement:
         self.transport.check_xfer_state.return_value = "DONE"
         self.worker.start_load_kv(NixlConnectorMetadata())
         assert self.transport.make_prepped_xfer.call_args.args[3] == fresh_handle
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert result.finished_recving == {"next"} and not result.failed_recving
         self.transport.release_dlist_handle.assert_called_once_with(old_handle)
 
@@ -3790,7 +3807,7 @@ class TestPeerReplacement:
         )
         old_handle = self.worker._remote_stages["old"][0].xfer_side_handles[0]
 
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert not result.finished_recving and not result.failed_recving
         self.transport.release_dlist_handle.assert_not_called()
         self.worker.start_load_kv(self._request("old", req_id="blocked"))
@@ -3799,7 +3816,7 @@ class TestPeerReplacement:
         self.transport.check_xfer_state.side_effect = lambda h: (
             "DONE" if h == 11 else "PROC"
         )
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert (
             result.finished_recving == result.failed_recving == {"old-req", "blocked"}
         )
@@ -3815,17 +3832,17 @@ class TestPeerReplacement:
         # A peer that is invalidated again soon after recovery (eg a persistent
         # RDMA fault) must not re-handshake on every request.
         self._fail_old_peer()
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
         self._connect("old")
         self._fail_old_peer()
-        assert self.worker.get_transfer_results().failed_recving == {"old-req"}
+        assert self._results().failed_recving == {"old-req"}
         assert "old" in self.worker._remote_agents
 
         self.transport.make_prepped_xfer.reset_mock()
         self.worker.start_load_kv(self._request("old", req_id="next"))
-        assert self.worker.get_transfer_results().failed_recving == {"next"}
+        assert self._results().failed_recving == {"next"}
         self.transport.make_prepped_xfer.assert_not_called()
         assert "old" not in self.worker._handshake_futures
         self.transport.remove_remote_agent.assert_called_once()
@@ -3833,7 +3850,7 @@ class TestPeerReplacement:
         backoff, release_at = self.worker._invalid_engine_backoff["old"]
         assert backoff == 1.0
         self.worker._invalid_engine_backoff["old"] = (backoff, release_at - backoff)
-        self.worker.get_transfer_results()
+        self._results()
         assert self.transport.remove_remote_agent.call_count == 2
         assert "old" not in self.worker._remote_agents
 
@@ -3842,12 +3859,12 @@ class TestPeerReplacement:
         with patch.object(
             self.transport, "release_xfer_handle", side_effect=RuntimeError("in use")
         ):
-            result = self.worker.get_transfer_results()
+            result = self._results()
             assert not result.finished_recving and not result.failed_recving
             assert self.worker._recving_transfers["old-req"]
             self.transport.release_dlist_handle.assert_not_called()
 
-        result = self.worker.get_transfer_results()
+        result = self._results()
         assert result.finished_recving == result.failed_recving == {"old-req"}
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
@@ -3863,7 +3880,7 @@ class TestPeerReplacement:
             ) as expiry,
         ):
             self.worker.start_load_kv(metadata)
-            result = self.worker.get_transfer_results()
+            result = self._results()
             assert result.finished_recving == {"old-req"}
             assert result.failed_recving == ({"old-req"} if expired else set())
             assert expiry.call_count == int(expired)
@@ -3893,7 +3910,7 @@ class TestPeerReplacement:
         ) as declined:
             self.worker.start_load_kv(metadata)
             now["t"] = completed_at
-            result = self.worker.get_transfer_results()
+            result = self._results()
         assert result.finished_recving == {"old-req"}
         assert result.failed_recving == ({"old-req"} if lapsed else set())
         assert declined.call_count == int(lapsed)
@@ -3905,13 +3922,13 @@ class TestPeerReplacement:
         self.transport.check_xfer_state.side_effect = lambda h: (
             "PROC" if h == 11 else "ERR"
         )
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.make_prepped_xfer.reset_mock()
 
         self.worker.start_load_kv(
             self._request("old", blocks=(), awaiting_kvs=awaiting_kvs, req_id="empty")
         )
-        result = self.worker.get_transfer_results()
+        result = self._results()
         expected = {"empty"} if awaiting_kvs else set()
         assert result.finished_recving == result.failed_recving == expected
         self.transport.make_prepped_xfer.assert_not_called()
@@ -3924,7 +3941,7 @@ class TestPeerReplacement:
         self.worker._engine_ttl = 1
         self.worker._engine_last_active["old"] = time.perf_counter() - 10
         self.worker._evict_stale_engines()
-        self.worker.get_transfer_results()
+        self._results()
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert not self.worker._failed_remote_engines
         assert not self.worker._invalid_remote_engines

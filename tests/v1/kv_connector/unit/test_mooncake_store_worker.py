@@ -2185,6 +2185,22 @@ def test_wait_for_save_retires_preempted_attempt_before_queueing():
     assert not w.kv_send_thread.is_live_store_job(stale)
 
 
+def test_polls_keep_requests_whose_saves_are_not_queued_yet():
+    w = _make_bare_worker()
+    w.kv_send_thread = _make_store_sending_thread(MagicMock())
+    w.kv_recv_threads = []
+    req = _make_store_req("req-a", [b"a0", b"a1"])
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    meta.add_request(req)
+    w.kv_send_thread.stored_requests["req-a"] = set()
+    w.get_transfer_results({"req-a"}, meta)
+    assert w.finished_store_req == {"req-a"}
+
+    w.get_transfer_results(set(), None)
+    assert w.finished_store_req == {"req-a"}
+    assert "req-a" in w.kv_send_thread.stored_requests
+
+
 def test_store_recving_thread_reports_failed_block_ids():
     store = MagicMock()
     store.batch_get_into_multi_buffers.return_value = [256, -5, -7]
