@@ -58,10 +58,26 @@ _GFX1201_2D_CONFIGS = {
     256: (None, (32, 32, 4, 1), (128, 32, 8, 1)),
     512: (None, (64, 16, 8, 1), (64, 16, 8, 1)),
 }
+# 2D launch for sliding-window prefill, same layout as _GFX1201_2D_CONFIGS. Tuned with
+# 16-bit KV, also used with fp8 KV / fp8 query until fp8 is tuned.
+_GFX1201_SW_2D_CONFIGS = {
+    64: ((32, 32, 2, 1), (64, 32, 2, 1), (128, 32, 4, 1)),
+    128: ((32, 16, 2, 1), (64, 32, 4, 1), (64, 32, 4, 1)),
+    256: ((64, 16, 4, 1), (64, 16, 4, 1), (128, 16, 8, 1)),
+    512: ((16, 16, 4, 1), (64, 16, 8, 1), (64, 16, 8, 1)),
+}
 _GFX1100_2D_CONFIGS = {
     64: ((16, 32, 2, 1), (32, 32, 2, 1), (128, 64, 8, 1)),
     128: (None, (64, 32, 4, 1), (128, 32, 8, 1)),
     256: ((32, 32, 8, 1), (64, 32, 8, 1), (128, 64, 8, 1)),
+    512: ((64, 32, 8, 1), (64, 32, 8, 1), (64, 32, 8, 1)),
+}
+# 2D launch for sliding-window prefill, same layout as _GFX1100_2D_CONFIGS. Tuned with
+# 16-bit KV, also used with an fp8 KV cache until fp8 is tuned.
+_GFX1100_SW_2D_CONFIGS = {
+    64: ((16, 32, 2, 1), (32, 32, 2, 1), (128, 32, 4, 1)),
+    128: ((64, 16, 4, 1), (64, 32, 4, 1), (128, 32, 8, 1)),
+    256: ((64, 16, 8, 1), (64, 16, 8, 1), (128, 64, 8, 1)),
     512: ((64, 32, 8, 1), (64, 32, 8, 1), (64, 32, 8, 1)),
 }
 # 2D decode (decode batches above the split-KV threshold): padded head size ->
@@ -1168,8 +1184,13 @@ def unified_attention(
         and q.element_size() <= 2
         and not is_batch_invariant
     ):
+        sliding_window_layer = window_size[0] >= 0 and chunk_lookback < 0
         config = _prefill_band_config(
-            _GFX1201_2D_CONFIGS, head_size_padded, max_seqlen_q
+            _GFX1201_SW_2D_CONFIGS
+            if sliding_window_layer and max_seqlen_q > MAX_3D_QUERY_LEN
+            else _GFX1201_2D_CONFIGS,
+            head_size_padded,
+            max_seqlen_q,
         )
         avg_query_len = q.shape[0] // max(num_seqs, 1)
         if (
@@ -1383,8 +1404,13 @@ def unified_attention(
                 and not use_td
             ):
                 if max_seqlen_q > 1:
+                    sliding_window_layer = window_size[0] >= 0 and chunk_lookback < 0
                     config = _prefill_band_config(
-                        _GFX1100_2D_CONFIGS, head_size_padded, max_seqlen_q
+                        _GFX1100_SW_2D_CONFIGS
+                        if sliding_window_layer and max_seqlen_q > MAX_3D_QUERY_LEN
+                        else _GFX1100_2D_CONFIGS,
+                        head_size_padded,
+                        max_seqlen_q,
                     )
                     if config is not None:
                         (
