@@ -849,6 +849,10 @@ class OnlineRenderer:
             default_template_kwargs,
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
+        chat_params = chat_params.with_request_template_source(
+            getattr(request, "chat_template", None),
+            getattr(request, "chat_template_kwargs", None),
+        )
 
         reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
         if reuse_ids:

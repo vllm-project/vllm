@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from dataclasses import dataclass
+from threading import Event
 from typing import Any
 
 import pytest
 import torch
 
+from vllm.exceptions import RetryableRequestError
 from vllm.renderers.base import _SwappableExecutor
-from vllm.renderers.hf import HfRenderer
+from vllm.renderers.hf import HfRenderer, _RequestTemplateExecutor
 from vllm.renderers.params import TokenizeParams
 from vllm.utils.async_utils import make_async
 
@@ -95,6 +97,47 @@ def test_swappable_executor_keeps_make_async_wrappers_alive():
         asyncio.run(_run())
     finally:
         pool.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_request_template_slots_outlive_timeout_and_cancellation():
+    executor = _RequestTemplateExecutor(workers=2)
+    loop = asyncio.get_running_loop()
+    started: asyncio.Queue[None] = asyncio.Queue()
+    release = Event()
+
+    def render() -> str:
+        loop.call_soon_threadsafe(started.put_nowait, None)
+        assert release.wait(timeout=5)
+        return "rendered"
+
+    timed = asyncio.create_task(executor.render(render, timeout=0.1))
+    cancelled = asyncio.create_task(executor.render(render, timeout=0))
+    try:
+        for _ in range(2):
+            await asyncio.wait_for(started.get(), timeout=5)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        with pytest.raises(TimeoutError):
+            await timed
+        with pytest.raises(RetryableRequestError):
+            await executor.render(lambda: "another render", timeout=0)
+
+        release.set()
+
+        async def render_when_available() -> str:
+            while True:
+                try:
+                    return await executor.render(lambda: "next render", timeout=0)
+                except RetryableRequestError:
+                    await asyncio.sleep(0)
+
+        assert await asyncio.wait_for(render_when_available(), 5) == "next render"
+    finally:
+        release.set()
+        await asyncio.gather(timed, cancelled, return_exceptions=True)
+        executor.shutdown()
 
 
 def test_replace_executor_does_not_break_tokenize_or_decode():

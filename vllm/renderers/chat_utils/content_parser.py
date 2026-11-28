@@ -499,10 +499,19 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         )
         self._add_placeholder("image", placeholder)
 
-    async def _audio_with_uuid_async(self, audio_url: str | None, uuid: str | None):
-        audio = (
-            await self._connector.fetch_audio_async(audio_url) if audio_url else None
-        )
+    async def _audio_with_uuid_async(
+        self, audio_url: str | None, uuid: str | None, *, from_video: bool = False
+    ):
+        if not audio_url:
+            return None, uuid
+        try:
+            audio = await self._connector.fetch_audio_async(audio_url)
+        except VLLMUnprocessableEntityError as exc:
+            if from_video and isinstance(
+                exc.__cause__, MediaFetchDeadlineExceededError
+            ):
+                exc.parameter = "video_url"
+            raise
         return audio, uuid
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
@@ -550,7 +559,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             self._tracker.model_config, self._mm_processor_kwargs
         ):
             audio_placeholder = self._tracker.add(
-                "audio", partial(self._audio_with_uuid_async, video_url, uuid)
+                "audio",
+                partial(self._audio_with_uuid_async, video_url, uuid, from_video=True),
             )
             self._add_placeholder("audio", audio_placeholder)
 

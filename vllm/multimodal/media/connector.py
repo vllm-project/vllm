@@ -58,6 +58,17 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
 }
 
 
+def _media_request_field(media_io: MediaIO) -> str:
+    return next(
+        (
+            f"{modality}_url"
+            for modality, io_type in MODALITY_IO_MAP.items()
+            if isinstance(media_io, io_type)
+        ),
+        "image_url",
+    )
+
+
 def _wrap_media_fetch_error(
     url: str, exc: Exception, *, request_field: str = "image_url"
 ) -> VLLMUnprocessableEntityError | Exception:
@@ -424,15 +435,9 @@ class MediaConnector:
                     **budget_kwargs,
                 )
             except Exception as e:
-                request_field = next(
-                    (
-                        f"{modality}_url"
-                        for modality, io_type in MODALITY_IO_MAP.items()
-                        if isinstance(media_io, io_type)
-                    ),
-                    "image_url",
+                wrapped = _wrap_media_fetch_error(
+                    url, e, request_field=_media_request_field(media_io)
                 )
-                wrapped = _wrap_media_fetch_error(url, e, request_field=request_field)
                 if isinstance(wrapped, VLLMUnprocessableEntityError):
                     raise wrapped from e
                 raise
@@ -482,18 +487,30 @@ class MediaConnector:
                 if self.download_budget is not None
                 else {}
             )
+            deadline = asyncio.timeout(
+                2 * fetch_timeout if fetch_timeout is not None else None
+            )
             try:
-                data = await connection.async_get_bytes(
-                    url_spec.url,
-                    timeout=fetch_timeout,
-                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-                    max_bytes=max_bytes,
-                    **budget_kwargs,
+                async with deadline:
+                    data = await connection.async_get_bytes(
+                        url_spec.url,
+                        timeout=fetch_timeout,
+                        allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                        max_bytes=max_bytes,
+                        **budget_kwargs,
+                    )
+            except Exception as exc:
+                cause = exc
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    cause = MediaFetchDeadlineExceededError(
+                        "Media fetch exceeded its time limit"
+                    )
+                    cause.__cause__ = exc
+                wrapped = _wrap_media_fetch_error(
+                    url, cause, request_field=_media_request_field(media_io)
                 )
-            except Exception as e:
-                wrapped = _wrap_media_fetch_error(url, e)
                 if isinstance(wrapped, VLLMUnprocessableEntityError):
-                    raise wrapped from e
+                    raise wrapped from cause
                 raise
 
             await loop.run_in_executor(

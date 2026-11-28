@@ -443,6 +443,12 @@ class ModelConfig:
     template rendering, and multimodal preprocessing across concurrent
     requests.
 
+    The Python Hugging Face renderer uses this count to size a separate
+    pool for request-supplied chat templates. If all its workers are busy,
+    new requests with a template override receive HTTP 503. A render
+    holds its worker until it finishes, even if the request times out or
+    disconnects.
+
     If unset, defaults to 4 for the async renderer path, or to 1 for pooling
     runners (their preprocessing runs on the renderer workers, which is not
     compatible with the multimodal processor cache when multi-threaded). A
