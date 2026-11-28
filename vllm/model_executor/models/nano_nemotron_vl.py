@@ -364,11 +364,24 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
             assert self.supports_video
             mm_max_tokens["video"] = seq_len
 
-        if mm_counts.get("audio", 0) > 0:
+        if (num_audios := mm_counts.get("audio", 0)) > 0:
             assert self.supports_audio
-            mm_max_tokens["audio"] = seq_len
+            extractor = self.get_hf_processor().audio_extractor
+            assert extractor is not None
+            mm_max_tokens["audio"] = extractor.audio_token_count(
+                self.get_max_audio_len(seq_len, num_audios)
+            )
 
         return mm_max_tokens
+
+    def get_max_audio_len(self, seq_len: int, num_audios: int) -> int:
+        sound_config = self.sound_config
+        assert sound_config is not None
+        tokens_per_audio = max(1, seq_len // max(num_audios, 1))
+        return min(
+            MAX_AUDIO_LEN_S * sound_config.sampling_rate,
+            ParakeetExtractor.audio_length(sound_config, tokens_per_audio),
+        )
 
 
 class NanoNemotronVLMultiModalProcessor(
@@ -909,18 +922,12 @@ class NanoNemotronVLDummyInputsBuilder(
         else:
             dummy_video = {}
 
-        if sound_config := self.info.sound_config:
+        if self.info.sound_config:
             num_audios = mm_counts.get("audio", 0)
             audio_overrides = mm_options.get("audio") if mm_options else None
-            tokens_per_audio = max(1, seq_len // max(num_audios, 1))
-            max_audio_num_samples = MAX_AUDIO_LEN_S * sound_config.sampling_rate
-            calculated_max_audio_num_samples = ParakeetExtractor.audio_length(
-                sound_config, tokens_per_audio
-            )
-            audio_len = min(max_audio_num_samples, calculated_max_audio_num_samples)
             dummy_audio = {
                 "audio": self._get_dummy_audios(
-                    length=audio_len,
+                    length=self.info.get_max_audio_len(seq_len, num_audios),
                     num_audios=num_audios,
                     overrides=audio_overrides,
                 )
