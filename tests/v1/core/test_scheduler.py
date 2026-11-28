@@ -1737,6 +1737,44 @@ def test_cache_aware_admission_requires_fcfs_and_prefix_caching(kwargs: dict):
     assert scheduler.cache_aware_window == 0
 
 
+def test_short_conv_same_step_hit_waits_a_step():
+    """A group that writes and reads its state in one launch (Inkling's short
+    conv, `same_step_hits=False`) cannot read blocks another request fills in
+    the same step. A copy of a prompt scheduled with it waits one step, then
+    takes the full hit."""
+    block_size = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        mamba_layer_config=SlidingWindowManager.layer_config(
+            AttentionSpec(
+                block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+            sliding_window=4,
+            same_step_hits=False,
+        ),
+    )
+    num_tokens = 3 * block_size + 5
+    (a,) = create_requests(
+        num_requests=1, num_tokens=num_tokens, max_tokens=1, req_ids=["a"]
+    )
+    (a_copy,) = create_requests(
+        num_requests=1, num_tokens=num_tokens, max_tokens=1, req_ids=["a_copy"]
+    )
+    scheduler.add_request(a)
+    scheduler.add_request(a_copy)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a"]
+    scheduler.update_from_output(
+        output, ModelRunnerOutput(req_ids=["a"], sampled_token_ids=[[0]])
+    )
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a_copy"]
+    assert output.num_scheduled_tokens["a_copy"] == num_tokens - 3 * block_size
+
+
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-
