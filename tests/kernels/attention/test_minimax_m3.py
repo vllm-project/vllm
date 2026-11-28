@@ -1423,8 +1423,8 @@ def test_flashinfer_indexer_impl_matches_triton(local_blocks, index_dtype, monke
     )
 
 
-# NVFP4 index cache (SM100/SM103): MSA Q8KV4 decode on the packed pages, FP8
-# gather + Q8KV8 prefill. Both rank pages from e4m3_rn_satfinite(e2m1 * scale).
+# NVFP4 index cache: MSA Q8KV4 decode on packed pages, FP8 gather + Q8KV8
+# prefill. SM107 decode keeps exact FP16 products; the other paths round to E4M3.
 _E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 _NVFP4_PAGE_WIDTH = HEAD_DIM // 2 + HEAD_DIM // 16
 _requires_q8_indexer = pytest.mark.skipif(
@@ -1454,8 +1454,10 @@ def _random_nvfp4_index_pages(
     return raw[:, :page_bytes].view(num_pages, BLOCK_SIZE, _NVFP4_PAGE_WIDTH)
 
 
-def _dequant_nvfp4_index_pages(pages: torch.Tensor) -> torch.Tensor:
-    """Reference `[P, 128, 128]` e4m3: e2m1 * scale, clamped, rounded once."""
+def _dequant_nvfp4_index_pages(
+    pages: torch.Tensor, *, exact_fp16: bool = False
+) -> torch.Tensor:
+    """Reference keys: E4M3 by default; exact FP16 products for SM107 decode."""
     num_pages = pages.shape[0]
     flat = pages.reshape(num_pages, -1)
     data = flat[:, : BLOCK_SIZE * HEAD_DIM // 2].view(num_pages, BLOCK_SIZE, -1)
@@ -1468,6 +1470,8 @@ def _dequant_nvfp4_index_pages(pages: torch.Tensor) -> torch.Tensor:
     value = value * scale.float().view(num_pages, BLOCK_SIZE, -1).repeat_interleave(
         16, dim=-1
     )
+    if exact_fp16:
+        return value.to(torch.float16)
     return value.clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
 
 
@@ -1650,8 +1654,12 @@ def test_nvfp4_indexer_impl_matches_reference(
     with set_forward_context({impl.index_cache.prefix: md}, vllm_config):
         assert impl(index_q) == (None, None)
 
-    # Reference: max over each history page's 128 tokens of q . k.
+    # SM107 decode preserves FP16 products; prefill gathers E4M3 keys.
+    # Widen the chosen operands to FP32 for the independent dot-product oracle.
     keys = _dequant_nvfp4_index_pages(index_cache).float()
+    decode_keys = _dequant_nvfp4_index_pages(
+        index_cache, exact_fp16=current_platform.is_device_capability(107)
+    ).float()
     q = index_q.float().view(num_tokens, num_idx_heads, HEAD_DIM)
     max_pages = num_blocks
     scores = torch.full(
@@ -1661,7 +1669,8 @@ def test_nvfp4_indexer_impl_matches_reference(
     token = 0
     for req, (seq_len, q_len) in enumerate(zip(batch.seq_lens, batch.query_lens)):
         pages = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
-        k = keys[common.block_table_tensor[req, :pages].long()]
+        reference_keys = decode_keys if req < len(decode_seq_lens) else keys
+        k = reference_keys[common.block_table_tensor[req, :pages].long()]
         rows = slice(token, token + q_len)
         scores[rows, :, :pages] = torch.einsum("nhd,pkd->nhpk", q[rows], k).amax(dim=-1)
         positions = torch.arange(seq_len - q_len, seq_len, device=device)
@@ -1798,7 +1807,9 @@ def test_nvfp4_indexer_decode_cuda_graph_replay(
     graph.replay()
 
     num_real = 3 * decode_query_len
-    keys = _dequant_nvfp4_index_pages(index_cache).float()
+    keys = _dequant_nvfp4_index_pages(
+        index_cache, exact_fp16=current_platform.is_device_capability(107)
+    ).float()
     q = index_q[:num_real].float().view(num_real, num_idx_heads, HEAD_DIM)
     scores = torch.full(
         (num_real, num_idx_heads, max_blocks), float("-inf"), device=device
