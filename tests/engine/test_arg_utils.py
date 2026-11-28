@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
+from vllm import LLM
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -718,6 +719,31 @@ def test_multi_node_world_size_includes_pcp():
     )
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.parallel_config.world_size == 2
+
+
+def test_encoder_only_pooling_rejects_explicit_prefix_caching():
+    engine_args = EngineArgs(
+        model="BAAI/bge-small-en-v1.5",
+        runner="pooling",
+        enable_prefix_caching=True,
+    )
+    with pytest.raises(ValueError, match="not supported for pooling models"):
+        engine_args.create_engine_config()
+
+
+def test_encoder_only_pooling_disables_prefix_caching_by_default():
+    engine_args = EngineArgs(model="BAAI/bge-small-en-v1.5", runner="pooling")
+    engine_config = engine_args.create_engine_config()
+    assert engine_config.cache_config.enable_prefix_caching is False
+
+
+def test_llm_rejects_encoder_only_prefix_caching_before_startup():
+    with pytest.raises(ValueError, match="not supported for pooling models"):
+        LLM(
+            model="BAAI/bge-small-en-v1.5",
+            runner="pooling",
+            enable_prefix_caching=True,
+        )
 
 
 def test_prefix_cache_default():

@@ -119,6 +119,11 @@ For more detailed information, please refer to the link below.
 
 ## Offline Inference
 
+Encoder-only pooling models with bidirectional attention, such as BGE, do not
+support prefix caching. Leave it at the model's default or disable it explicitly.
+Passing `enable_prefix_caching=True` to `LLM`, or `--enable-prefix-caching` to
+`vllm serve`, raises a configuration error before engine startup.
+
 Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs.
