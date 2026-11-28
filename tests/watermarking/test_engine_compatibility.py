@@ -9,7 +9,7 @@ from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 
-MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
+MODEL = "vllm/tiny-random-LlamaForCausalLM"
 MAX_NUM_BATCHED_TOKENS = 32
 
 pytestmark = pytest.mark.skipif(
@@ -175,7 +175,7 @@ def test_watermark_with_prefix_cache_and_chunked_prefill(watermarked_llm: LLM):
     cold = watermarked_llm.generate(prompt, params)[0]
     cached = watermarked_llm.generate(prompt, params)[0]
 
-    assert cached.num_cached_tokens > 0
+    assert cached.num_cached_tokens is not None and cached.num_cached_tokens > 0
     assert cold.outputs[0].token_ids == cached.outputs[0].token_ids
 
 

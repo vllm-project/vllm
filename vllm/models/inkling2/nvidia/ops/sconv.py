@@ -496,7 +496,7 @@ def shift_rel_proj(rel_proj: torch.Tensor, is_local: bool) -> torch.Tensor:
     return torch.cat([proj.masked_fill(outside[:, None], 0), pad], 1).contiguous()
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["T"])
 def _attn_prologue_kernel(
     k_ptr,  # [T, H * D] K projection
     v_ptr,  # [T, H * D] V projection
@@ -647,7 +647,7 @@ def _attn_prologue_kernel(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["T"])
 def _qr_rel_kernel(
     q_ptr,
     r_ptr,

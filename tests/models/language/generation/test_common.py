@@ -93,7 +93,7 @@ def hf_reference_cache():
             marks=[pytest.mark.core_model]
             + ([pytest.mark.flaky(reruns=2)] if current_platform.is_xpu() else []),
         ),
-        pytest.param("vllm-project/slovak-gpt-j-405M"),  # gptj
+        pytest.param("vllm/slovak-gpt-j-405M"),  # gptj
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
         pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
         pytest.param(

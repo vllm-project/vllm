@@ -1096,10 +1096,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         scheduler_config: "SchedulerConfig | None" = None,
+        seq_len: int | None = None,
     ) -> MultiModalInput:
         """Create dummy data for profiling the memory usage of a model."""
         model_config = self.info.ctx.model_config
-        seq_len = model_config.max_model_len
+        if seq_len is None:
+            seq_len = self.info.get_dummy_seq_len(model_config.max_model_len)
         if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
             seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
 

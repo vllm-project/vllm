@@ -350,8 +350,10 @@ class HYV4Model(nn.Module):
             vllm_config, self.supports_ihc_sequence_parallel
         )
 
+        # The DFly drafter on the last stage embeds through the target table.
         if get_pp_group().is_first_rank or (
-            self.config.tie_word_embeddings and get_pp_group().is_last_rank
+            (self.config.tie_word_embeddings or self.dfly_enabled)
+            and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,

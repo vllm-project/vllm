@@ -223,16 +223,16 @@ pub fn convert_logit_bias(
     Ok(Some(converted))
 }
 
-/// Extract common request metadata from HTTP headers: the external request ID,
-/// session ID, priority, and the optional data-parallel rank used for engine
-/// routing.
+/// Extract common request metadata from HTTP headers: the external request ID
+/// (see [`resolve_request_id`]), session ID, priority, and the optional
+/// data-parallel rank used for engine routing.
 pub fn resolve_request_context(
     headers: &HeaderMap,
+    prefix: &str,
     request_id: Option<&str>,
 ) -> Result<ResolvedRequestContext, ApiError> {
-    let request_id_header: Option<String> = header_value(headers, "X-Request-Id")?;
     Ok(ResolvedRequestContext {
-        request_id: resolve_base_request_id(request_id_header.as_deref(), request_id),
+        request_id: resolve_request_id(headers, prefix, request_id)?,
         data_parallel_rank: header_value(headers, "X-data-parallel-rank")?,
         priority: header_value(headers, "X-Vllm-Priority")?,
         session_id: header_value(headers, "X-Session-ID")?,
@@ -263,16 +263,22 @@ where
     }
 }
 
-/// Resolve the base external request ID before API-specific prefixes such as
-/// `chatcmpl-`.
-pub fn resolve_base_request_id(
-    request_id_header: Option<&str>,
+/// Resolve the external request ID: the route's `prefix` (such as `chatcmpl-`)
+/// followed by the `X-Request-Id` header, the body `request_id`, or a random ID,
+/// as Python's routes prefix `_base_request_id`.
+pub fn resolve_request_id(
+    headers: &HeaderMap,
+    prefix: &str,
     request_id: Option<&str>,
-) -> String {
-    request_id_header.or(request_id).map(ToOwned::to_owned).unwrap_or_else(|| {
-        let mut id = Uuid::new_v4().simple().to_string();
-        id.truncate(8);
-        id
+) -> Result<String, ApiError> {
+    let request_id_header: Option<String> = header_value(headers, "X-Request-Id")?;
+    Ok(match request_id_header.as_deref().or(request_id) {
+        Some(base) => format!("{prefix}{base}"),
+        None => {
+            let mut base = Uuid::new_v4().simple().to_string();
+            base.truncate(8);
+            format!("{prefix}{base}")
+        }
     })
 }
 
@@ -349,6 +355,23 @@ mod tests {
         assert_eq!(converted, Some(HashMap::from([(7, 1.0), (42, -2.5)])));
     }
 
+    /// The request ID is the route prefix followed by the `X-Request-Id`
+    /// header, else the body `request_id`, else a random ID.
+    #[test]
+    fn resolve_request_id_prefixes_header_then_body_then_random() {
+        let mut headers = HeaderMap::new();
+        let id = resolve_request_id(&headers, "tokenize-", Some("body-id")).unwrap();
+        assert_eq!(id, "tokenize-body-id");
+        let id = resolve_request_id(&headers, "tokenize-", None).unwrap();
+        assert!(
+            id.starts_with("tokenize-") && id.len() > "tokenize-".len(),
+            "{id}"
+        );
+        headers.insert("X-Request-Id", HeaderValue::from_static("client-req-1"));
+        let id = resolve_request_id(&headers, "tokenize-", Some("body-id")).unwrap();
+        assert_eq!(id, "tokenize-client-req-1");
+    }
+
     /// A request header is absent (`None`) when missing or empty, parsed when
     /// valid, and a 400 when present but unreadable or unparsable.
     #[test]
@@ -356,7 +379,7 @@ mod tests {
         let resolve = |name: &str, value: HeaderValue| {
             let mut headers = HeaderMap::new();
             headers.insert(HeaderName::from_bytes(name.as_bytes()).unwrap(), value);
-            resolve_request_context(&headers, Some("body-id"))
+            resolve_request_context(&headers, "", Some("body-id"))
         };
 
         let context = resolve("X-Vllm-Priority", HeaderValue::from_static(" -5 ")).unwrap();

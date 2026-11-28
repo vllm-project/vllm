@@ -251,9 +251,11 @@ async def test_shutdown_children_uses_engine_process_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_unit_args(shutdown_timeout=0.0))
-    supervisor._processes = [
-        SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)
-    ]
+    monkeypatch.setattr(
+        supervisor,
+        "_processes",
+        [SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)],
+    )
     calls = []
     timeout_calls = []
 
@@ -285,12 +287,18 @@ async def test_handles_child_exit(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_unit_args())
-    supervisor._processes = [
-        SimpleNamespace(
-            name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True
-        ),
-        SimpleNamespace(name="APIServer_DPRank_5", exitcode=17, is_alive=lambda: False),
-    ]
+    monkeypatch.setattr(
+        supervisor,
+        "_processes",
+        [
+            SimpleNamespace(
+                name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True
+            ),
+            SimpleNamespace(
+                name="APIServer_DPRank_5", exitcode=17, is_alive=lambda: False
+            ),
+        ],
+    )
 
     async def fake_probe(*_args, **_kwargs) -> bool:
         return True

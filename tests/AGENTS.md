@@ -31,7 +31,7 @@
   with a timeout, and force race orderings with events.
 - **No personal-account checkpoints.** Tests must not load models from
   personal Hugging Face accounts; see `docs/contributing/model/tests.md`
-  (Model loading) for moving them into `vllm-project`.
+  (Model loading) for moving them into the `vllm` org.
 - **Make sure CI runs it.** A test no step in `.buildkite/test_areas/*.yaml`
   selects never runs, which looks like passing. Check that the step's
   `commands` and pytest markers (`core_model`, `slow_test`, `distributed`)

@@ -718,6 +718,7 @@ steps:
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_all_gather.py
   - tests/distributed/test_custom_all_reduce.py
   - tests/kernels/test_engram.py
+  - tests/single_rank_group.py
   commands:
   # Swap-AB decode: the kernel tests need SM10x and a CuTe DSL built with
   # CUDA 13.2+; the dispatch and warmup-key tests run on the CPU.

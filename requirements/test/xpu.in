@@ -17,6 +17,9 @@ absl-py
 accelerate
 peft>=0.22.0 # required for HF audio LoRA reference tests
 lm_eval[api]>=0.4.12
+protobuf<7 # Required by LMCache's connector test dependencies.
+prometheus-client<=0.24.1 # Required by LMCache's connector test dependencies.
+grpcio<=1.78.0 # Required by LMCache's connector test dependencies.
 nltk>=3.10.4 # pin transitive rouge-score/lm-eval dep for known GHSAs
 modelscope<1.38
 runai-model-streamer[s3,gcs,azure]>=0.17.1

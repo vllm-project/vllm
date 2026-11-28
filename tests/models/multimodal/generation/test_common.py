@@ -359,7 +359,7 @@ VLM_TEST_SETTINGS = {
         ],
     ),
     "deepseek_vl_v2": VLMTestInfo(
-        models=["vllm-project/deepseek-vl2-tiny"],  # model repo using dynamic module
+        models=["vllm/deepseek-vl2-tiny"],  # model repo using dynamic module
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: (
             f"<|User|>: {img_prompt}\n\n<|Assistant|>: "

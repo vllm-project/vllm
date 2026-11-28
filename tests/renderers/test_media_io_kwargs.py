@@ -9,6 +9,9 @@ import pytest
 
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.multimodal.media.connector import merge_media_io_kwargs
@@ -16,6 +19,7 @@ from vllm.multimodal.utils import encode_video_url
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.renderers.params import ChatParams
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -25,6 +29,23 @@ _UNSET = object()
 DEFAULT_KW = {"image": {"num_frames": 32, "fps": 2}}
 REQ_KW = {"image": {"num_frames": 16}}
 MERGED_KW = {"image": {"num_frames": 16, "fps": 2}}
+MODEL_DEFAULT_KW = {"image": {"image_mode": "RGB", "rgba_background_color": [1, 2, 3]}}
+MODEL_REQUEST_KW = {"image": {"image_mode": None}}
+MODEL_MERGED_KW = {"image": {"image_mode": None, "rgba_background_color": [1, 2, 3]}}
+
+
+def _make_model_config() -> ModelConfig:
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        max_model_len=4096,
+    )
+    model_config.multimodal_config = MultiModalConfig(media_io_kwargs=MODEL_DEFAULT_KW)
+    return model_config
+
+
+@pytest.fixture(scope="module")
+def model_config_with_media_io_defaults() -> ModelConfig:
+    return _make_model_config()
 
 
 # =========================================================================
@@ -33,12 +54,15 @@ MERGED_KW = {"image": {"num_frames": 16, "fps": 2}}
 class _StubRenderer(BaseRenderer):
     """Captures what the downstream stages of each render path receive."""
 
-    def __init__(self, rendered_prompt=None):
+    def __init__(self, rendered_prompt=None, model_config=None):
         # Deliberately no super().__init__: none of the tested paths touch
         # the resources, tokenizer, or cache created there.
         self._applied_extras: list[dict] = []
         self._chat_params_seen: list[ChatParams] = []
         self._eng_prompts: list = []
+        self.tokenizer = None
+        if model_config is not None:
+            self.model_config = model_config
         # The dict `render_messages` hands back. The chat-path merge helper
         # only touches prompts that carry multimodal payload, so tests for it
         # need a prompt that has `multi_modal_data`/`multi_modal_uuids`.
@@ -259,6 +283,96 @@ class TestCmplPath:
             sync_r._eng_prompts[0]["media_io_kwargs"]
             == async_r._eng_prompts[0]["media_io_kwargs"]
         )
+
+    def test_model_defaults_applied_by_offline_renderer(
+        self, model_config_with_media_io_defaults
+    ):
+        renderer = _StubRenderer(model_config=model_config_with_media_io_defaults)
+        renderer.render_cmpl(
+            [{"prompt": "hello", "multi_modal_data": {"image": "<img>"}}],
+            object(),
+        )
+
+        assert renderer._eng_prompts[0]["media_io_kwargs"] == MODEL_DEFAULT_KW
+
+    def test_online_renderer_forwards_request_media_io_kwargs(
+        self, model_config_with_media_io_defaults
+    ):
+        model_config = model_config_with_media_io_defaults
+        renderer = _StubRenderer(model_config=model_config)
+        online_renderer = OnlineRenderer(
+            model_config=model_config,
+            renderer=renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+            trust_request_mm_kwargs=True,
+        )
+        request = CompletionRequest(
+            model=model_config.model,
+            prompt="hello",
+            media_io_kwargs=MODEL_REQUEST_KW,
+        )
+
+        outputs = asyncio.run(
+            online_renderer.preprocess_cmpl(
+                request,
+                [{"prompt": "hello", "multi_modal_data": {"image": "<img>"}}],
+                tok_params=object(),
+            )
+        )
+
+        assert outputs[0]["media_io_kwargs"] == MODEL_MERGED_KW
+
+    def test_online_renderer_chat_uses_model_defaults(
+        self, model_config_with_media_io_defaults
+    ):
+        model_config = model_config_with_media_io_defaults
+        renderer = _StubRenderer(
+            rendered_prompt={"multi_modal_data": {"image": "<img>"}},
+            model_config=model_config,
+        )
+        online_renderer = OnlineRenderer(
+            model_config=model_config,
+            renderer=renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+            trust_request_mm_kwargs=True,
+        )
+        request = ChatCompletionRequest(
+            model=model_config.model,
+            messages=[{"role": "user", "content": "hello"}],
+            media_io_kwargs=MODEL_REQUEST_KW,
+        )
+
+        _, outputs = asyncio.run(
+            online_renderer.preprocess_chat(
+                request,
+                [{"role": "user", "content": "hello"}],
+                default_template=None,
+                default_template_content_format="auto",
+                default_template_kwargs=None,
+                tok_params=object(),
+            )
+        )
+
+        assert outputs[0]["media_io_kwargs"] == MODEL_MERGED_KW
+
+    def test_model_defaults_applied_by_offline_chat_renderer(
+        self, model_config_with_media_io_defaults
+    ):
+        renderer = _StubRenderer(
+            rendered_prompt={"multi_modal_data": {"image": "<img>"}},
+            model_config=model_config_with_media_io_defaults,
+        )
+        renderer.render_chat(
+            [[{"role": "user", "content": "hello"}]],
+            _make_chat_params(),
+            object(),
+        )
+
+        assert renderer._eng_prompts[0]["media_io_kwargs"] == MODEL_DEFAULT_KW
 
 
 # =========================================================================
