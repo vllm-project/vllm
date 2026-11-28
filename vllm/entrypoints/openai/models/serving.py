@@ -4,6 +4,7 @@
 from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
+from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -109,6 +110,7 @@ class OpenAIServingModels:
         self.static_lora_modules = lora_modules
         self.lora_requests: dict[str, LoRARequest] = {}
         self.lora_id_counter = AtomicCounter(0)
+        self._lora_memory_rev_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
         for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers():
@@ -246,6 +248,74 @@ class OpenAIServingModels:
             del self.lora_requests[lora_name]
             logger.info("Removed LoRA adapter: name '%s'", lora_name)
             return f"Success: LoRA adapter '{lora_name}' removed successfully."
+
+    def prepare_lora_weight_update(self, adapter: dict[str, Any]) -> dict[str, Any]:
+        """Validate and resolve one LoRA adapter spec for `/start_weight_update`.
+
+        Reuses existing `lora_int_id` when updating an already-registered
+        adapter, allocates a new monotonic ID otherwise, and assigns a unique
+        `memory://<lora_name>@<rev>` path so prefix-cache keys stay isolated
+        per adapter revision.
+        """
+        lora_name = str(adapter.get("lora_name", "")).strip()
+        if not lora_name:
+            raise ValueError("'lora_name' must be a non-empty string.")
+        if self.is_base_model(lora_name):
+            raise ValueError(
+                f"The lora adapter '{lora_name}' conflicts with a served base model."
+            )
+
+        peft_config = adapter.get("peft_config")
+        if not isinstance(peft_config, dict):
+            raise ValueError(
+                f"LoRA adapter '{lora_name}' requires 'peft_config' as a JSON object."
+            )
+
+        existing = self.lora_requests.get(lora_name)
+        raw_int_id = adapter.get("lora_int_id")
+        if raw_int_id is not None:
+            lora_int_id = int(raw_int_id)
+            if lora_int_id < 1:
+                raise ValueError(f"'lora_int_id' must be >= 1, got {lora_int_id}.")
+        elif existing is not None:
+            lora_int_id = existing.lora_int_id
+        else:
+            lora_int_id = self.lora_id_counter.inc(1)
+
+        rev = self._lora_memory_rev_counter.inc(1)
+        lora_path = f"memory://{lora_name}@{rev}"
+
+        base_model_name = adapter.get("base_model_name")
+        if base_model_name is not None and not self.is_base_model(base_model_name):
+            base_model_name = None
+
+        return {
+            "lora_name": lora_name,
+            "lora_int_id": lora_int_id,
+            "lora_path": lora_path,
+            "peft_config": peft_config,
+            "base_model_name": base_model_name,
+            "is_3d_lora_weight": bool(adapter.get("is_3d_lora_weight", False)),
+        }
+
+    def commit_lora_weight_update(self, adapter: dict[str, Any]) -> None:
+        """Publish a committed LoRA adapter into the frontend model registry."""
+        lora_name = adapter["lora_name"]
+        lora_path = adapter["lora_path"]
+        self.lora_requests[lora_name] = LoRARequest(
+            lora_name=lora_name,
+            lora_int_id=adapter["lora_int_id"],
+            lora_path=lora_path,
+            base_model_name=adapter.get("base_model_name"),
+            load_inplace=False,
+            is_3d_lora_weight=bool(adapter.get("is_3d_lora_weight", False)),
+        )
+        logger.info(
+            "Committed LoRA adapter weight update: name '%s', id %d, path '%s'",
+            lora_name,
+            adapter["lora_int_id"],
+            lora_path,
+        )
 
     async def _check_load_lora_adapter_request(
         self, request: LoadLoRAAdapterRequest

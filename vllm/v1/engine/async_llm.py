@@ -1536,9 +1536,13 @@ class AsyncLLM(EngineClient):
         """Release the trainer connection without shutting down inference."""
         await self.collective_rpc("shutdown_weight_transfer_engine")
 
-    async def start_weight_update(self) -> None:
+    async def start_weight_update(
+        self,
+        lora_adapter: dict[str, Any] | None = None,
+    ) -> None:
         """Start a new weight update."""
-        await self.collective_rpc("start_weight_update")
+        kwargs = {"lora_adapter": lora_adapter} if lora_adapter is not None else None
+        await self.collective_rpc("start_weight_update", kwargs=kwargs)
 
     async def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""

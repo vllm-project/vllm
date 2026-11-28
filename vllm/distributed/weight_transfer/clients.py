@@ -82,8 +82,12 @@ class HTTPVLLMWeightSyncClient:
     def shutdown_weight_transfer_engine(self) -> None:
         self._post("shutdown_weight_transfer_engine")
 
-    def start_weight_update(self) -> None:
-        self._post("start_weight_update")
+    def start_weight_update(
+        self,
+        lora_adapter: dict[str, Any] | None = None,
+    ) -> Any:
+        payload = {"lora_adapter": lora_adapter} if lora_adapter is not None else None
+        return self._post("start_weight_update", payload)
 
     def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
         self._post(
@@ -94,9 +98,15 @@ class HTTPVLLMWeightSyncClient:
         self,
         weight_version: str | None = None,
         baseline: dict[str, str] | None = None,
-    ) -> None:
+        *,
+        reset_prefix_cache: bool | None = None,
+    ) -> Any:
         """Finish the update; raise if the weights differ from `baseline`."""
-        fields = {"weight_version": weight_version, "baseline": baseline}
+        fields: dict[str, Any] = {
+            "weight_version": weight_version,
+            "baseline": baseline,
+            "reset_prefix_cache": reset_prefix_cache,
+        }
         json = {key: value for key, value in fields.items() if value is not None}
         result = self._post("finish_weight_update", json or None)
         if baseline is not None and not result["match"]:
@@ -104,6 +114,7 @@ class HTTPVLLMWeightSyncClient:
             raise RuntimeError(
                 f"{len(mismatches)} weights differ from the baseline: {mismatches[:5]}"
             )
+        return result
 
 
 class RayVLLMWeightSyncClient:
@@ -127,10 +138,21 @@ class RayVLLMWeightSyncClient:
 
         ray.get([h.shutdown_weight_transfer_engine.remote() for h in self.handles])
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(
+        self,
+        lora_adapter: dict[str, Any] | None = None,
+    ) -> None:
         import ray
 
-        ray.get([h.start_weight_update.remote() for h in self.handles])
+        if lora_adapter is None:
+            ray.get([h.start_weight_update.remote() for h in self.handles])
+        else:
+            ray.get(
+                [
+                    h.start_weight_update.remote(lora_adapter=lora_adapter)
+                    for h in self.handles
+                ]
+            )
 
     def update_weights(self, update_info: WeightTransferUpdatePayload) -> None:
         import ray
