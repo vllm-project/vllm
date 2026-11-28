@@ -160,6 +160,10 @@ impl TextBackend for HfTextBackend {
         self.model_config.dtype()
     }
 
+    fn max_model_len(&self) -> Result<Option<u32>> {
+        self.model_config.max_model_len()
+    }
+
     fn model_id(&self) -> &str {
         &self.model_id
     }
