@@ -65,9 +65,16 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
 
     def make_empty_with_aux(batch_size, dtype, device):
         tensors = make_empty(batch_size, dtype, device)
+        # Aux hidden states are taken from the residual stream, which some
+        # models (e.g. Muse Spark) keep in a wider dtype than the model dtype.
+        aux_dtype = (
+            tensors["hidden_states"].dtype
+            if "hidden_states" in tensors.tensors
+            else dtype
+        )
         for key in upstream_keys:
             tensors[key] = torch.zeros(
-                (batch_size, hidden_size), dtype=dtype, device=device
+                (batch_size, hidden_size), dtype=aux_dtype, device=device
             )
         return tensors
 
