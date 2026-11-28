@@ -315,6 +315,8 @@ class KernelConfig:
     """Benchmark FlashInfer kernel implementations during warmup and use the
     fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
+    enable_triton_autotune: bool = None  # type: ignore[assignment]
+    """If True, run Triton autotuning during kernel warmup."""
     enable_flashinfer_mm_encoder_autotune: bool = False
     """Include multimodal encoders and projectors in FlashInfer autotuning.
     Disabled by default because profiling can increase startup time. Requires
@@ -544,6 +546,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "enable_triton_autotune",
             "enable_flashinfer_mm_encoder_autotune",
             "enable_rocm_segmented_attn_autotune",
             "enable_rocm_aiter_gemm_warmup",
@@ -554,6 +557,7 @@ class KernelConfig:
 
     @field_validator(
         "enable_flashinfer_autotune",
+        "enable_triton_autotune",
         "enable_cutedsl_warmup",
         "enable_jit_warmup",
         mode="wrap",

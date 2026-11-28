@@ -12,12 +12,15 @@ Tests cover:
 
 import json
 
+import pytest
+
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     _get_default_ssm_launch_config,
     _try_get_optimal_ssm_config_cached,
     get_ssm_config_file_name,
     get_ssm_configs,
     get_ssm_device_name,
+    save_ssm_configs,
     try_get_optimal_ssm_config,
 )
 
@@ -209,3 +212,50 @@ def test_empty_config_falls_back_to_heuristic(monkeypatch, tmp_path):
     )
 
     _clear_caches()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_autotune_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_TRITON_AUTOTUNE_CACHE_DIR", str(tmp_path / "autotune"))
+    _clear_caches()
+    yield
+    _clear_caches()
+
+
+def test_save_then_load_round_trip():
+    save_ssm_configs(
+        _HEADDIM,
+        16,
+        _CACHE_DTYPE,
+        {8: {"BLOCK_SIZE_M": 16, "num_warps": 2}},
+    )
+    assert get_ssm_configs(_HEADDIM, 16, _CACHE_DTYPE) == {
+        8: {"BLOCK_SIZE_M": 16, "num_warps": 2}
+    }
+    # batch=1, nheads=8 -> effective_batch 8
+    assert try_get_optimal_ssm_config(_HEADDIM, 16, 1, 8, _CACHE_DTYPE, False) == (
+        16,
+        2,
+    )
+
+
+def test_user_folder_beats_autotune_cache(monkeypatch, tmp_path):
+    save_ssm_configs(
+        _HEADDIM,
+        16,
+        _CACHE_DTYPE,
+        {8: {"BLOCK_SIZE_M": 16, "num_warps": 2}},
+    )
+    _write_config(
+        tmp_path,
+        dstate=16,
+        payload={"8": {"BLOCK_SIZE_M": 4, "num_warps": 1}},
+    )
+    monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+    _clear_caches()
+    configs = get_ssm_configs(_HEADDIM, 16, _CACHE_DTYPE)
+    assert configs is not None
+    assert configs[8] == {
+        "BLOCK_SIZE_M": 4,
+        "num_warps": 1,
+    }
