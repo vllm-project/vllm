@@ -142,10 +142,15 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
 
     maybe_share_target_embed(eagle_model, draft_inner, target_inner)
 
+    # A reduced draft vocabulary (EAGLE-3) has a head of its own, even when no
+    # checkpoint has marked it as loaded (dummy start).
+    draft_vocab_size = getattr(draft_model_config.hf_config, "draft_vocab_size", None)
     draft_head = share_target_lm_head(
         eagle_model,
         get_target_lm_head(target_model, target_language_model),
         speculative_config.draft_lm_head_quantization,
+        can_share=draft_vocab_size is None
+        or draft_vocab_size == vllm_config.model_config.get_vocab_size(),
     )
     if draft_head is not None:
         # MTP layers route logits through layer.shared_head.head, not
