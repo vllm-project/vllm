@@ -460,12 +460,19 @@ class Molmo2VisionBlockCollection(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
-        hidden_states = []
-        for r in self.resblocks:
-            x = r(x)
-            hidden_states.append(x)
-        return hidden_states
+    def forward(self, x: torch.Tensor, layers: Sequence[int]) -> list[torch.Tensor]:
+        """Return the outputs of `layers`, in that order.
+
+        Only these outputs are kept, and blocks after the deepest one are skipped.
+        Negative indices count from the last block.
+        """
+        layers = [range(len(self.resblocks))[layer] for layer in layers]
+        outputs: dict[int, torch.Tensor] = {}
+        for i, block in enumerate(islice(self.resblocks, max(layers) + 1)):
+            x = block(x)
+            if i in layers:
+                outputs[i] = x
+        return [outputs[layer] for layer in layers]
 
 
 class Molmo2VisionTransformer(nn.Module):
@@ -529,6 +536,8 @@ class Molmo2VisionTransformer(nn.Module):
         self,
         x: torch.Tensor,
         patch_num: tuple[int, int] | None = None,
+        *,
+        layers: Sequence[int],
     ) -> list[torch.Tensor]:
         """: param x: (batch_size, num_patch, n_pixels)."""
         if patch_num is None:
@@ -538,8 +547,7 @@ class Molmo2VisionTransformer(nn.Module):
 
         x = self.add_pos_emb(x, patch_num)
 
-        hidden_states = self.transformer(x)
-        return hidden_states
+        return self.transformer(x, layers)
 
 
 class ImagePoolingAttention(nn.Module):
@@ -828,12 +836,9 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         """: param images: (batch_size, num_crops, num_patch, n_pixels)."""
         B, T, N, D = images.shape
         images = images.view(B * T, N, D)
-        image_features = self.image_vit(images)
-
-        features = []
-        for layer in self.vit_layers:
-            features.append(image_features[layer])
-        image_features = torch.cat(features, dim=-1)
+        image_features = torch.cat(
+            self.image_vit(images, layers=self.vit_layers), dim=-1
+        )
 
         if self.num_prefix_tokens > 0:
             image_features = image_features[:, 1:]
