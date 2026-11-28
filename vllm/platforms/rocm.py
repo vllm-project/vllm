@@ -1328,6 +1328,73 @@ class RocmPlatform(Platform):
         torch.accelerator.synchronize(device)
 
     @classmethod
+    def create_ubatch_comm_stream(
+        cls, device: torch.device, priority: int
+    ) -> torch.cuda.Stream:
+        """Create the DBO comm stream as a CU-masked stream (mask: every CU).
+
+        HIP maps a process's other streams, whatever their priority, onto a
+        pool of `GPU_MAX_HW_QUEUES` hardware queues, so a pooled comm stream can
+        share the compute stream's queue and serialize with it. A CU-masked
+        stream gets a queue outside the pool. Serve with `GPU_MAX_HW_QUEUES=3`:
+        with the default of 4, the extra queue can share a command-processor
+        pipe with the compute stream's queue and slow both.
+
+        With HIP's static queues and stream priority honoured
+        (`DEBUG_HIP_DYNAMIC_QUEUES=0` and `DEBUG_HIP_IGNORE_STREAM_PRIORITY=0`),
+        the high-priority pooled stream already gets a queue of its own, while
+        a CU-masked queue would share a command-processor pipe with the compute
+        stream's queue, so the pooled stream is kept.
+
+        The call takes no flags, so the stream is a blocking one: work on the
+        legacy default stream is ordered against it. vLLM computes on a
+        dedicated stream on ROCm (`vllm.utils.torch_utils.current_stream`),
+        never on the default one.
+        """
+        if (
+            os.environ.get("DEBUG_HIP_DYNAMIC_QUEUES") == "0"
+            and os.environ.get("DEBUG_HIP_IGNORE_STREAM_PRIORITY") == "0"
+        ):
+            logger.info_once(
+                "DBO comm stream: pooled with high priority, as HIP's static "
+                "queues are set"
+            )
+            return super().create_ubatch_comm_stream(device, priority)
+
+        import ctypes
+
+        from vllm.utils.system_utils import find_loaded_library
+
+        hip_path = find_loaded_library("libamdhip64")
+        if hip_path is not None:
+            num_cus = torch.cuda.get_device_properties(device).multi_processor_count
+            words = (num_cus + 31) // 32
+            mask = (ctypes.c_uint32 * words)(
+                *((1 << min(32, num_cus - 32 * i)) - 1 for i in range(words))
+            )
+            hip = ctypes.CDLL(hip_path)
+            handle = ctypes.c_void_p()
+            with torch.cuda.device(device):
+                rc = hip.hipExtStreamCreateWithCUMask(
+                    ctypes.byref(handle), ctypes.c_uint32(words), mask
+                )
+            if rc == 0:
+                logger.info_once(
+                    "DBO comm stream: CU-masked, on its own hardware queue"
+                )
+                return torch.cuda.ExternalStream(handle.value, device=device)
+            # A failed HIP call leaves its error sticky for the next torch
+            # launch on this thread; reading it clears it.
+            hip.hipGetLastError()
+            logger.warning_once(
+                "DBO comm stream: hipExtStreamCreateWithCUMask failed (%d); "
+                "using a pooled stream, which can share the compute stream's "
+                "hardware queue",
+                rc,
+            )
+        return super().create_ubatch_comm_stream(device, priority)
+
+    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 

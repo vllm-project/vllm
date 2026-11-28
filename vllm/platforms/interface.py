@@ -1410,6 +1410,13 @@ class Platform:
         return
 
     @classmethod
+    def create_ubatch_comm_stream(
+        cls, device: torch.device, priority: int
+    ) -> torch.cuda.Stream:
+        """Create the stream that dual batch overlap runs communication on."""
+        return torch.cuda.Stream(device=device, priority=priority)
+
+    @classmethod
     def supports_mx(cls) -> bool:
         """Returns whether the current platform supports MX types."""
         return False
