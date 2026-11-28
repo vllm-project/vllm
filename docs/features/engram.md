@@ -125,7 +125,7 @@ the same pool as the weights and the KV cache:
 vllm serve <qwen4exp-checkpoint> --engram-config '{"disk_offload": true}'
 ```
 
-It applies only to Qwen4Exp on CUDA and takes precedence over `cpu_offload`.
+It applies only to Qwen4Exp on CUDA/ROCm and takes precedence over `cpu_offload`.
 
 Rows are read with `preadv` and copied to fixed device buffers before the
 forward, so CUDA graphs replay unchanged. They stay in the checkpoint format

@@ -47,6 +47,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
 )
 from ..common.ops.ple import ple_conv, ple_gate, ple_ngram_ids
+from ..nvidia.ngram_embedding import Qwen4ExpPLEDiskOffloadEmbedding
 
 logger = init_logger(__name__)
 
@@ -262,14 +263,18 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
         engram_config = get_current_vllm_config().engram_config
         embedding_cls = (
-            Qwen4ExpPLEPinnedHostEmbedding
+            Qwen4ExpPLEDiskOffloadEmbedding
+            if engram_config is not None and engram_config.disk_offload
+            else Qwen4ExpPLEPinnedHostEmbedding
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
+        # Disk-offload ranks hold full rows, so they only shard tokens.
         self.use_reduce_scatter = (
             self.use_sequence_parallel
             and get_etp_group().world_size == get_tp_group().world_size
+            and embedding_cls is not Qwen4ExpPLEDiskOffloadEmbedding
         )
         self.ngram_embedding = embedding_cls(
             padded_vocab_size,
@@ -307,6 +312,24 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             embeddings = sp_shard(embeddings)
         return embeddings.view(output_dtype)
 
+    def compute_ngram_ids(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
+    ) -> torch.Tensor:
+        """Hash the request layout into n-gram ids outside the forward."""
+        return ple_ngram_ids(
+            input_ids=input_ids,
+            query_start_loc=query_start_loc,
+            ngram_context=ngram_context,
+            layer_multipliers=self.layer_multipliers,
+            ngram_heads_vocab_sizes=self.ngram_heads_vocab_sizes,
+            ngram_heads_offsets=self.ngram_heads_offsets,
+            eos_token_id=self.eos_token_id,
+            heads_per_ngram=self.heads_per_ngram,
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -315,6 +338,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     ) -> torch.Tensor:
         """Return full embeddings or a token shard after combining vocabulary owners."""
         input_ids = input_ids.reshape(-1)
+        if isinstance(self.ngram_embedding, Qwen4ExpPLEDiskOffloadEmbedding):
+            output = self.ngram_embedding.staged_rows(input_ids.shape[0])
+            if not self.use_sequence_parallel:
+                return output
+            return self._sp_shard_embeddings(output)
         ngram_ids = input_ids.new_empty(
             (input_ids.shape[0], self.ngram_heads), dtype=torch.int64
         )
@@ -402,12 +430,32 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"expected {expected_shape}, got "
                         f"{tuple(loaded_weight.shape)}"
                     )
+                if isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
+                    embedding.accept_checkpoint_shard(
+                        shard_index, loaded_weight, shard_size, "weight"
+                    )
+                    loaded.add("ngram_embedding.weight")
+                    continue
                 embedding.weight.weight_loader(
                     embedding.weight,
                     loaded_weight,
                     checkpoint_start=checkpoint_start,
                 )
                 loaded.add("ngram_embedding.weight")
+                continue
+            # AMD Quark exports store the table as one tensor; keep it as one shard.
+            if name == "ngram_embedding.weight" and isinstance(
+                self.ngram_embedding, Qwen4ExpPLEDiskOffloadEmbedding
+            ):
+                embedding = self.ngram_embedding
+                rows, dim = embedding.org_vocab_size, embedding.embedding_dim
+                if tuple(loaded_weight.shape) != (rows, dim):
+                    raise ValueError(
+                        "Shape mismatch for the unsharded PLE embedding: expected "
+                        f"{(rows, dim)}, got {tuple(loaded_weight.shape)}"
+                    )
+                embedding.accept_checkpoint_shard(0, loaded_weight, rows, "weight")
+                loaded.add(name)
                 continue
             regular_weights.append((name, loaded_weight))
 

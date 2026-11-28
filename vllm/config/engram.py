@@ -165,8 +165,8 @@ class EngramConfig:
         if self.disk_offload:
             from vllm.platforms import current_platform
 
-            if field != "ple_layer_ids" or not current_platform.is_cuda():
-                raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
+            if field != "ple_layer_ids" or not current_platform.is_cuda_alike():
+                raise ValueError("disk_offload requires a Qwen4Exp model on CUDA/ROCm")
         if self.peer_group_size and field not in _PEER_GROUP_FIELDS:
             raise ValueError(
                 "peer_group_size requires a model with Engram pool support"
