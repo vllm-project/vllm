@@ -15,7 +15,32 @@ from vllm.model_executor.kernels.linear import (
     B12xTensorFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
-from vllm.utils.b12x import B12xWarmupUnit, b12x_warmup_token_counts
+from vllm.utils.b12x import (
+    B12xWarmupUnit,
+    b12x_plan_capacity,
+    b12x_warmup_token_counts,
+)
+
+
+@pytest.mark.parametrize(
+    ("batched", "scheduled", "capture_sizes", "expected"),
+    [
+        (2048, None, [1, 2, 8, 128], (2048, (1, 2, 8, 128))),
+        (2048, 4096, [1, 2, 8], (4096, (1, 2, 8))),
+        (64, None, [0, 1, 64, 128], (128, (1, 64))),
+        (256, None, None, (256, ())),
+    ],
+)
+def test_b12x_plan_capacity_covers_scheduler_and_capture_sizes(
+    batched, scheduled, capture_sizes, expected
+) -> None:
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=batched, max_num_scheduled_tokens=scheduled
+        ),
+        compilation_config=SimpleNamespace(cudagraph_capture_sizes=capture_sizes),
+    )
+    assert b12x_plan_capacity(config) == expected
 
 
 def test_b12x_warmup_token_counts_cover_serving_regimes() -> None:

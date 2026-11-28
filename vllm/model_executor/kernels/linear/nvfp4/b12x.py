@@ -6,10 +6,15 @@ from __future__ import annotations
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
+from vllm.utils.b12x import (
+    B12xWarmupUnit,
+    plan_b12x_blockscaled,
+    reuse_packed_weight_storage,
+)
 from vllm.utils.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
@@ -159,15 +164,33 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         super().process_weights_after_loading(layer)
         blockscaled = _import_b12x_blockscaled()
         assert blockscaled is not None
-        packed_weight = blockscaled.pack_weight(
+        packed = blockscaled.pack_weight(
             layer.weight,
             layer.weight_scale,
             recipe="nvfp4",
             global_scale=layer.weight_global_scale,
         )
         layer.b12x_nvfp4_packed_weight = reuse_packed_weight_storage(
-            getattr(layer, "b12x_nvfp4_packed_weight", None), packed_weight
+            getattr(layer, "b12x_nvfp4_packed_weight", None), packed
         )
+        query_fields = dict(
+            recipe="nvfp4",
+            in_features=packed.in_features,
+            padded_in_features=packed.padded_in_features,
+            out_features=packed.out_features,
+            activation_mode="a16",
+            global_scale_kind=packed.global_scale_kind,
+        )
+        # A weight reload keeps the prepared plan when the shapes are unchanged.
+        planned = getattr(layer, "b12x_nvfp4_plan_query", None)
+        if planned is None or any(
+            getattr(planned, name) != value for name, value in query_fields.items()
+        ):
+            query, plan = plan_b12x_blockscaled(
+                blockscaled, get_current_vllm_config(), query_fields
+            )
+            layer.b12x_nvfp4_plan = plan
+            layer.b12x_nvfp4_plan_query = query
 
     def get_b12x_warmup_unit(
         self,
@@ -175,8 +198,10 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         token_counts: tuple[int, ...],
         output_dtype: torch.dtype,
     ) -> B12xWarmupUnit:
+        plan = layer.b12x_nvfp4_plan
+
         def compile() -> None:
-            for tokens in token_counts:
+            for tokens in sorted(set(token_counts) | set(plan.token_counts)):
                 source = torch.zeros(
                     (tokens, layer.weight.shape[1] * 2),
                     dtype=output_dtype,
@@ -186,12 +211,8 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
 
         return B12xWarmupUnit(
             name="NVFP4 W4A16",
-            key=(
-                type(self),
-                layer.weight.device,
-                tuple(layer.weight.shape),
-                output_dtype,
-            ),
+            # Every layer owns a plan that must be prepared before capture.
+            key=(type(self), plan.handle, output_dtype),
             compile=compile,
         )
 
@@ -205,9 +226,23 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
             raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
         blockscaled = _import_b12x_blockscaled()
         assert blockscaled is not None
+        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+        # The plan covers every row count the scheduler can send. A larger
+        # call cannot prepare a new plan on first use without evicting kernels
+        # already captured in CUDA graphs.
+        capacity = layer.b12x_nvfp4_plan_query.num_tokens
+        if x_2d.shape[0] > capacity:
+            raise ValueError(
+                f"b12x NVFP4 W4A16 got {x_2d.shape[0]} rows, above the planned "
+                f"capacity of {capacity} (the scheduler's token budget). Inputs "
+                "outside the language model, such as vision-encoder linears, are "
+                "not supported on this backend: keep them unquantized or use "
+                "another --linear-backend."
+            )
         output = blockscaled.mm(
-            x.reshape(-1, x.shape[-1]).contiguous(),
+            x_2d,
             layer.b12x_nvfp4_packed_weight,
+            plan=layer.b12x_nvfp4_plan,
             required_mode="a16",
         )
         if bias is not None:
