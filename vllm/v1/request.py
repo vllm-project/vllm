@@ -227,6 +227,10 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        # The number of NaNs in draft logits. A value greater than 0
+        # indicates that the draft model output is corrupted
+        self.num_draft_nans_in_logits = 0
+
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 

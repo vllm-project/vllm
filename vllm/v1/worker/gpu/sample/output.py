@@ -22,6 +22,9 @@ class SamplerOutput:
     num_sampled: torch.Tensor
     num_rejected: torch.Tensor
     sampling_mask_tensors: SamplingMaskTensors | None = None
+    # [num_reqs] NaN counts in the draft logits, aligned with the
+    # verifier's read set. None when disabled or no draft logits.
+    num_draft_nans: torch.Tensor | None = None
 
 
 @triton.jit
