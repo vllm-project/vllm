@@ -782,3 +782,93 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+    @pytest.mark.parametrize(
+        ("kv_group_size", "head_dim", "dtype", "atol"),
+        [
+            (4, 128, torch.float16, 1e-3),
+            (6, 256, torch.float16, 1e-3),
+            (8, 128, torch.float16, 1e-3),
+            (24, 128, torch.float16, 1e-3),
+            # Outputs are near 6e4, where bf16 steps are 256 to 512.
+            (4, 128, torch.bfloat16, 1024.0),
+        ],
+    )
+    def test_k8v4_gqa_decode_matches_per_head_decode(
+        self, kv_group_size, head_dim, dtype, atol
+    ):
+        """GQA decode must match decoding each query head on its own.
+
+        With `Hq == Hk` the launcher uses the per-head kernel, so slicing one
+        query head per KV head gives the reference for the grouped kernel.
+        """
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k8v4", head_dim)
+        D, Hk, B, seq_len, block_size = head_dim, 2, 2, 70, 16
+        Hq = Hk * kv_group_size
+        num_blocks = math.ceil(seq_len / block_size)
+        device = torch.device(DEVICE_TYPE)
+        PiT = _build_hadamard(D, DEVICE_TYPE)
+        centroids = get_centroids(D, cfg.centroid_bits).float().to(device)
+        midpoints = (centroids[:-1] + centroids[1:]) / 2
+
+        torch.manual_seed(0)
+        keys = torch.randn(seq_len, Hk, D, device=device, dtype=dtype)
+        values = torch.randn(seq_len, Hk, D, device=device, dtype=dtype)
+        if dtype == torch.bfloat16:
+            # Values past the fp16 maximum, which a bf16 model must keep.
+            values = values * 1e4 + 6e4
+        query = torch.randn(B, Hq, D, device=device, dtype=dtype)
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            Hk,
+            cfg.slot_size_aligned,
+            device=device,
+            dtype=torch.uint8,
+        )
+        triton_turboquant_store(
+            keys,
+            values,
+            kv_cache,
+            torch.arange(seq_len, device=device, dtype=torch.int32),
+            PiT,
+            midpoints,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+        )
+
+        def decode(q):
+            return triton_turboquant_decode_attention(
+                query=q.contiguous(),
+                kv_cache=kv_cache,
+                block_table=torch.arange(
+                    num_blocks, device=device, dtype=torch.int32
+                ).repeat(B, 1),
+                seq_lens=torch.tensor([seq_len, seq_len - 27], device=device).int(),
+                Pi=PiT,
+                centroids=centroids,
+                scale=1.0 / math.sqrt(D),
+                mse_bits=cfg.key_mse_bits,
+                key_packed_size=cfg.key_packed_size,
+                value_quant_bits=cfg.effective_value_quant_bits,
+                key_fp8=cfg.key_fp8,
+                norm_correction=cfg.norm_correction,
+                PiT=PiT,
+                max_num_kv_splits=4,
+            ).float()
+
+        out = decode(query)
+        for g in range(kv_group_size):
+            heads = slice(g, Hq, kv_group_size)
+            torch.testing.assert_close(
+                out[:, heads], decode(query[:, heads]), rtol=0, atol=atol
+            )
