@@ -11,15 +11,15 @@ struct RunMetrics {
     input_sequence_throughput: Option<f64>,
     output_throughput: f64,
     total_token_throughput: f64,
-    mean_ttft_ms: f64,
-    median_ttft_ms: f64,
-    p99_ttft_ms: f64,
-    mean_tpot_ms: f64,
-    median_tpot_ms: f64,
-    p99_tpot_ms: f64,
-    mean_itl_ms: f64,
-    mean_e2el_ms: f64,
-    p99_e2el_ms: f64,
+    mean_ttft_ms: Option<f64>,
+    median_ttft_ms: Option<f64>,
+    p99_ttft_ms: Option<f64>,
+    mean_tpot_ms: Option<f64>,
+    median_tpot_ms: Option<f64>,
+    p99_tpot_ms: Option<f64>,
+    mean_itl_ms: Option<f64>,
+    mean_e2el_ms: Option<f64>,
+    p99_e2el_ms: Option<f64>,
     max_output_tokens_per_s: f64,
     completed: f64,
     failed: f64,
@@ -43,15 +43,15 @@ impl RunMetrics {
             input_sequence_throughput: get_opt(json, "input_sequence_throughput"),
             output_throughput: get(json, "output_throughput"),
             total_token_throughput: get(json, "total_token_throughput"),
-            mean_ttft_ms: get(json, "mean_ttft_ms"),
-            median_ttft_ms: get(json, "median_ttft_ms"),
-            p99_ttft_ms: get(json, "p99_ttft_ms"),
-            mean_tpot_ms: get(json, "mean_tpot_ms"),
-            median_tpot_ms: get(json, "median_tpot_ms"),
-            p99_tpot_ms: get(json, "p99_tpot_ms"),
-            mean_itl_ms: get(json, "mean_itl_ms"),
-            mean_e2el_ms: get(json, "mean_e2el_ms"),
-            p99_e2el_ms: get(json, "p99_e2el_ms"),
+            mean_ttft_ms: get_opt(json, "mean_ttft_ms"),
+            median_ttft_ms: get_opt(json, "median_ttft_ms"),
+            p99_ttft_ms: get_opt(json, "p99_ttft_ms"),
+            mean_tpot_ms: get_opt(json, "mean_tpot_ms"),
+            median_tpot_ms: get_opt(json, "median_tpot_ms"),
+            p99_tpot_ms: get_opt(json, "p99_tpot_ms"),
+            mean_itl_ms: get_opt(json, "mean_itl_ms"),
+            mean_e2el_ms: get_opt(json, "mean_e2el_ms"),
+            p99_e2el_ms: get_opt(json, "p99_e2el_ms"),
             max_output_tokens_per_s: get(json, "max_output_tokens_per_s"),
             completed: get(json, "completed"),
             failed: get(json, "failed"),
@@ -123,34 +123,7 @@ pub async fn run_multi(config: &BenchConfig, num_runs: usize) -> Result<()> {
 fn print_multi_run_summary(runs: &[RunMetrics]) {
     let n = runs.len();
 
-    // Collect each metric into a series, compute stats
-    let mut stats = vec![compute_stats("Request throughput (req/s)", runs, |r| {
-        r.request_throughput
-    })];
-    if runs.iter().all(|r| r.input_sequence_throughput.is_some()) {
-        stats.push(compute_stats("Input throughput (inputs/s)", runs, |r| {
-            r.input_sequence_throughput.unwrap_or_default()
-        }));
-    }
-    stats.extend([
-        compute_stats("Output throughput (tok/s)", runs, |r| r.output_throughput),
-        compute_stats("Total token throughput (tok/s)", runs, |r| {
-            r.total_token_throughput
-        }),
-        compute_stats("Peak output tokens/s", runs, |r| r.max_output_tokens_per_s),
-        compute_stats("Mean TTFT (ms)", runs, |r| r.mean_ttft_ms),
-        compute_stats("Median TTFT (ms)", runs, |r| r.median_ttft_ms),
-        compute_stats("P99 TTFT (ms)", runs, |r| r.p99_ttft_ms),
-        compute_stats("Mean TPOT (ms)", runs, |r| r.mean_tpot_ms),
-        compute_stats("Median TPOT (ms)", runs, |r| r.median_tpot_ms),
-        compute_stats("P99 TPOT (ms)", runs, |r| r.p99_tpot_ms),
-        compute_stats("Mean ITL (ms)", runs, |r| r.mean_itl_ms),
-        compute_stats("Mean E2EL (ms)", runs, |r| r.mean_e2el_ms),
-        compute_stats("P99 E2EL (ms)", runs, |r| r.p99_e2el_ms),
-        compute_stats("Completed requests", runs, |r| r.completed),
-        compute_stats("Failed requests", runs, |r| r.failed),
-        compute_stats("Duration (s)", runs, |r| r.duration),
-    ]);
+    let stats = summary_stats(runs);
 
     println!("{:=^80}", format!(" Multi-Run Summary ({n} runs) "));
     println!(
@@ -234,6 +207,59 @@ fn print_multi_run_summary(runs: &[RunMetrics]) {
             );
         }
     }
+}
+
+/// Rows of the multi-run summary table. Latency metrics only exist in the
+/// result JSON when they were measured (`--percentile-metrics`, the chosen
+/// `--metric-percentiles`, pooling backends), so a row is shown only when every
+/// run has it, the same rule `compare` uses, instead of printing zeros.
+fn summary_stats(runs: &[RunMetrics]) -> Vec<MetricStats> {
+    type OptMetric = fn(&RunMetrics) -> Option<f64>;
+
+    fn push_if_all(
+        stats: &mut Vec<MetricStats>,
+        label: &'static str,
+        runs: &[RunMetrics],
+        f: OptMetric,
+    ) {
+        if runs.iter().all(|r| f(r).is_some()) {
+            stats.push(compute_stats(label, runs, |r| f(r).unwrap_or_default()));
+        }
+    }
+
+    let mut stats = vec![compute_stats("Request throughput (req/s)", runs, |r| {
+        r.request_throughput
+    })];
+    push_if_all(&mut stats, "Input throughput (inputs/s)", runs, |r| {
+        r.input_sequence_throughput
+    });
+    stats.extend([
+        compute_stats("Output throughput (tok/s)", runs, |r| r.output_throughput),
+        compute_stats("Total token throughput (tok/s)", runs, |r| {
+            r.total_token_throughput
+        }),
+        compute_stats("Peak output tokens/s", runs, |r| r.max_output_tokens_per_s),
+    ]);
+    let latency: [(&'static str, OptMetric); 9] = [
+        ("Mean TTFT (ms)", |r| r.mean_ttft_ms),
+        ("Median TTFT (ms)", |r| r.median_ttft_ms),
+        ("P99 TTFT (ms)", |r| r.p99_ttft_ms),
+        ("Mean TPOT (ms)", |r| r.mean_tpot_ms),
+        ("Median TPOT (ms)", |r| r.median_tpot_ms),
+        ("P99 TPOT (ms)", |r| r.p99_tpot_ms),
+        ("Mean ITL (ms)", |r| r.mean_itl_ms),
+        ("Mean E2EL (ms)", |r| r.mean_e2el_ms),
+        ("P99 E2EL (ms)", |r| r.p99_e2el_ms),
+    ];
+    for (label, f) in latency {
+        push_if_all(&mut stats, label, runs, f);
+    }
+    stats.extend([
+        compute_stats("Completed requests", runs, |r| r.completed),
+        compute_stats("Failed requests", runs, |r| r.failed),
+        compute_stats("Duration (s)", runs, |r| r.duration),
+    ]);
+    stats
 }
 
 fn compute_stats<F>(label: &'static str, runs: &[RunMetrics], f: F) -> MetricStats
@@ -322,15 +348,15 @@ mod tests {
             input_sequence_throughput: None,
             output_throughput: 0.0,
             total_token_throughput: 0.0,
-            mean_ttft_ms: 0.0,
-            median_ttft_ms: 0.0,
-            p99_ttft_ms: 0.0,
-            mean_tpot_ms: 0.0,
-            median_tpot_ms: 0.0,
-            p99_tpot_ms: 0.0,
-            mean_itl_ms: 0.0,
-            mean_e2el_ms: 0.0,
-            p99_e2el_ms: 0.0,
+            mean_ttft_ms: None,
+            median_ttft_ms: None,
+            p99_ttft_ms: None,
+            mean_tpot_ms: None,
+            median_tpot_ms: None,
+            p99_tpot_ms: None,
+            mean_itl_ms: None,
+            mean_e2el_ms: None,
+            p99_e2el_ms: None,
             max_output_tokens_per_s: 0.0,
             completed: 0.0,
             failed: 0.0,
@@ -366,5 +392,53 @@ mod tests {
         assert_eq!(s.n_present, 0);
         assert_eq!(s.n_total, 2);
         assert_eq!(s.mean, 0.0);
+    }
+
+    fn labels(stats: &[MetricStats]) -> Vec<&'static str> {
+        stats.iter().map(|s| s.label).collect()
+    }
+
+    #[test]
+    fn summary_skips_metrics_that_were_not_measured() {
+        // `--percentile-metrics ttft,tpot --metric-percentiles 50,90`: no ITL,
+        // E2EL or p99 keys in the result JSON.
+        let json = serde_json::json!({
+            "request_throughput": 4.0,
+            "mean_ttft_ms": 10.0,
+            "median_ttft_ms": 9.0,
+            "p50_ttft_ms": 9.0,
+            "p90_ttft_ms": 12.0,
+            "mean_tpot_ms": 2.0,
+            "median_tpot_ms": 2.0,
+            "completed": 20,
+        });
+        let runs = vec![RunMetrics::from_json(&json), RunMetrics::from_json(&json)];
+        let stats = summary_stats(&runs);
+        let labels = labels(&stats);
+
+        for shown in ["Mean TTFT (ms)", "Median TTFT (ms)", "Mean TPOT (ms)"] {
+            assert!(labels.contains(&shown), "{shown} missing from {labels:?}");
+        }
+        for hidden in [
+            "P99 TTFT (ms)",
+            "P99 TPOT (ms)",
+            "Mean ITL (ms)",
+            "Mean E2EL (ms)",
+            "P99 E2EL (ms)",
+        ] {
+            assert!(!labels.contains(&hidden), "{hidden} should not be shown");
+        }
+        let ttft = stats.iter().find(|s| s.label == "Mean TTFT (ms)").unwrap();
+        assert_eq!(ttft.mean, 10.0);
+    }
+
+    #[test]
+    fn summary_skips_metric_missing_from_some_runs() {
+        let mut with_e2el = mk_run(None);
+        with_e2el.mean_e2el_ms = Some(50.0);
+        let runs = vec![with_e2el, mk_run(None)];
+        let labels = labels(&summary_stats(&runs));
+        assert!(!labels.contains(&"Mean E2EL (ms)"));
+        assert!(labels.contains(&"Completed requests"));
     }
 }
