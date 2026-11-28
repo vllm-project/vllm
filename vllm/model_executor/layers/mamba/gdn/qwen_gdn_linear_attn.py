@@ -90,7 +90,10 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule_replayssm,
     fused_sigmoid_gating_delta_rule_update,
 )
-from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.chunk import (
+    l2norm_fwd,
+    register_gdn_prefill_warmup,
+)
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
     fused_gdn_decode_post_conv_mtp_triton,
 )
@@ -480,6 +483,29 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
+def _register_fla_prefill_warmup(vllm_config: VllmConfig) -> None:
+    text_config = vllm_config.model_config.hf_text_config
+    num_v_heads = getattr(text_config, "linear_num_value_heads", None)
+    num_k_heads = getattr(text_config, "linear_num_key_heads", None)
+    head_k_dim = getattr(text_config, "linear_key_head_dim", None)
+    head_v_dim = getattr(text_config, "linear_value_head_dim", None)
+    if (
+        num_v_heads is None
+        or num_k_heads is None
+        or head_k_dim is None
+        or head_v_dim is None
+    ):
+        return
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    register_gdn_prefill_warmup(
+        dtype=vllm_config.model_config.dtype,
+        H=num_v_heads // tp_size,
+        Hg=num_k_heads // tp_size,
+        K=head_k_dim,
+        V=head_v_dim,
+    )
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -498,6 +524,9 @@ class ChunkGatedDeltaRule(CustomOp):
 
         # On XPU "sycl" bypasses this module entirely (fused whole-layer op),
         # so the chunked prefill path stays on Triton/FLA.
+
+        if active_backend == "triton":
+            _register_fla_prefill_warmup(vllm_config)
 
         if active_backend == "flashinfer":
             self._forward_method = self.forward_cuda
