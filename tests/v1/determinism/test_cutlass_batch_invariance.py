@@ -174,7 +174,25 @@ def test_fp8_scaled_mm_batch_invariant_fixed_config(
     torch.testing.assert_close(back_output, baseline, rtol=0, atol=0)
 
 
+@pytest.fixture
+def rocm_batch_invariant_matmul():
+    # hipBLASLt cannot be made batch invariant, so on ROCm the worker installs
+    # the Triton matmul overrides (init_batch_invariance) that the dequant +
+    # F.linear path relies on. They are process-global: remove them afterwards.
+    import vllm.model_executor.determinism.batch_invariant as bi
+
+    if not current_platform.is_rocm() or bi._batch_invariant_MODE:
+        yield
+        return
+    bi.enable_batch_invariant_mode()
+    yield
+    assert bi._batch_invariant_LIB is not None
+    bi._batch_invariant_LIB._destroy()
+    bi._batch_invariant_MODE = False
+
+
 @requires_fp8
+@pytest.mark.usefixtures("rocm_batch_invariant_matmul")
 @pytest.mark.parametrize("scheme", ["fp8_per_tensor", "fp8_per_channel"])
 @torch.inference_mode()
 def test_online_fp8_linear_batch_invariant(
