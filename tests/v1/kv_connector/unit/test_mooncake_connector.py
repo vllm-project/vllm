@@ -1181,7 +1181,7 @@ def test_scheduler_request_finished():
     delay_free, _ = scheduler_connector.request_finished(request, block_ids=([12],))
     assert delay_free is False
     assert len(scheduler_connector._reqs_need_send) == 0
-    assert "id-1" in scheduler_connector._reqs_not_processed
+    assert "id-1" in scheduler_connector._transfers_not_processed
 
 
 def _live_peer_monitor() -> MagicMock:
@@ -1526,7 +1526,7 @@ async def test_prefill_early_abort_cleanup_is_idempotent():
     worker.reqs_need_send = {"recorded": pending("recorded"), "unrelated": unrelated}
 
     metadata = MooncakeConnectorMetadata()
-    metadata.reqs_not_processed = {"never-recorded", "recorded"}
+    metadata.transfers_not_processed = {"never-recorded", "recorded"}
 
     # The second call repeats the abort after the record is already gone.
     for _ in range(2):
