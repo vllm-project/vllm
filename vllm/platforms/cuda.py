@@ -165,6 +165,22 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TURBOQUANT,
             ]
         else:
+            # FA2 has no FP8 KV cache. On SM89, Triton runs it faster than
+            # FlashInfer and without FlashInfer's fixed workspace.
+            if (
+                device_capability == (8, 9)
+                and kv_cache_dtype is not None
+                and is_quantized_kv_cache(kv_cache_dtype)
+            ):
+                fallbacks = [
+                    AttentionBackendEnum.TRITON_ATTN,
+                    AttentionBackendEnum.FLASHINFER,
+                ]
+            else:
+                fallbacks = [
+                    AttentionBackendEnum.FLASHINFER,
+                    AttentionBackendEnum.TRITON_ATTN,
+                ]
             return [
                 *(
                     [AttentionBackendEnum.TRITON_FLASH_ATTN]
@@ -172,8 +188,7 @@ def _get_backend_priorities(
                     else []
                 ),
                 AttentionBackendEnum.FLASH_ATTN,
-                AttentionBackendEnum.FLASHINFER,
-                AttentionBackendEnum.TRITON_ATTN,
+                *fallbacks,
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
             ]
