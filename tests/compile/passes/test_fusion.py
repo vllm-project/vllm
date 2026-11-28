@@ -305,6 +305,50 @@ class AddRMSNormNvfp4Model(torch.nn.Module):
         return x, residual
 
 
+class RMSNormMxfp4GemmModel(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float,
+        n: int,
+        fused_add: bool,
+        hadamard_rotate: bool = False,
+    ):
+        super().__init__()
+        from aiter.ops.shuffle import shuffle_weight
+
+        self.fused_add = fused_add
+        self.hadamard_rotate = hadamard_rotate
+        self.norm = RMSNorm(hidden_size, eps)
+
+        # Weight and scale in the ASM-path layout of AiterMxfp4LinearKernel
+        weight = torch.randint(0, 256, (n, hidden_size // 2), dtype=torch.uint8)
+        scale = torch.randint(118, 123, (n, hidden_size // 32), dtype=torch.uint8)
+        sm, sn = scale.shape
+        scale = scale.view(sm // 32, 2, 16, sn // 8, 2, 4, 1)
+        scale = scale.permute(0, 3, 5, 2, 4, 1, 6).contiguous().view(sm, sn)
+        self.weight_scale = scale.view(torch.float8_e8m0fnu)
+        self.weight = shuffle_weight(
+            weight.view(torch.float4_e2m1fn_x2), layout=(16, 16)
+        )
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = residual = torch.relu(x)
+        if self.fused_add:
+            x, residual = self.norm(x, residual)
+        else:
+            x = self.norm(x)
+        x = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
+            x,
+            self.weight,
+            self.weight_scale,
+            True,
+            torch.bfloat16,
+            hadamard_rotate=self.hadamard_rotate,
+        )
+        return x, residual
+
+
 def _run_fusion_test(
     model,
     fusion_pass,
@@ -575,6 +619,137 @@ def test_aiter_fusion_rmsnorm_quant(
         _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [8192])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("n", [10240, 1024])
+@pytest.mark.parametrize("fused_add", [True, False])
+@pytest.mark.skipif(
+    (
+        not current_platform.is_rocm()
+        or not IS_AITER_FOUND
+        or not current_platform.supports_mx()
+    ),
+    reason="Only test on ROCm (gfx950+) with aiter package installed",
+)
+def test_aiter_fusion_rmsnorm_mxfp4_quant(
+    dtype: torch.dtype,
+    hidden_size: int,
+    eps: float,
+    n: int,
+    fused_add: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """One dynamic-shape graph must give the GEMM the scale layout it expects
+    at every M. N=10240 is preshuffle-tuned (row-major scales below M=32,
+    shuffled above); N=1024 only takes the ASM GEMM (always shuffled).
+    """
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            RocmAiterRMSNormQuantFusionPass,
+        )
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        )
+        backend2 = TestBackend(
+            NoOpEliminationPass(vllm_config), PostCleanupPass(vllm_config)
+        )
+
+        model = RMSNormMxfp4GemmModel(hidden_size, eps, n, fused_add)
+        model_fused = torch.compile(model, backend=backend)
+        model_unfused = torch.compile(model, backend=backend2)
+
+        for num_tokens in [1, 16, 31, 32, 64, 65, 256, 2048]:
+            x = torch.rand(num_tokens, hidden_size)
+            torch._dynamo.mark_dynamic(x, 0)
+            result_fused, residual_fused = model_fused(x)
+            result_unfused, residual_unfused = model_unfused(x)
+
+            # The fused kernel rounds the e8m0 scale differently from the HIP
+            # quant (measured rel. error <= 0.057); a wrong layout gives ~1.
+            diff = (result_fused - result_unfused).float().norm()
+            assert diff / result_unfused.float().norm() < 0.07, num_tokens
+            torch.testing.assert_close(residual_fused, residual_unfused, atol=0, rtol=0)
+
+        assert fusion_pass.matched_count == 1
+        if fused_add:
+            backend.check_before_ops([torch.ops.vllm_ir.fused_add_rms_norm.default])
+            backend.check_after_ops(
+                [rocm_aiter_ops.get_rmsnorm_with_add_mxfp4_quant_op()]
+            )
+        else:
+            backend.check_before_ops([torch.ops.vllm_ir.rms_norm.default])
+            backend.check_after_ops([rocm_aiter_ops.get_rmsnorm_mxfp4_quant_op()])
+
+
+@pytest.mark.skipif(
+    (
+        not current_platform.is_rocm()
+        or not IS_AITER_FOUND
+        or not current_platform.supports_mx()
+    ),
+    reason="Only test on ROCm (gfx950+) with aiter package installed",
+)
+def test_aiter_fusion_rmsnorm_mxfp4_quant_no_hadamard(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The fused quant does not rotate, so hadamard_rotate=True must not fuse."""
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            RocmAiterRMSNormQuantFusionPass,
+        )
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(torch.bfloat16)
+        torch.manual_seed(1)
+
+        fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        )
+
+        model = RMSNormMxfp4GemmModel(
+            8192, 1e-5, 10240, fused_add=True, hadamard_rotate=True
+        )
+        x = torch.rand(32, 8192)
+        torch._dynamo.mark_dynamic(x, 0)
+        torch.compile(model, backend=backend)(x)
+
+        assert fusion_pass.matched_count == 0
 
 
 class TestGatedModel(torch.nn.Module):
