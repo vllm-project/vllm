@@ -181,6 +181,7 @@ def detokenize_incrementally(
     read_offset: int,
     skip_special_tokens: bool = False,
     spaces_between_special_tokens: bool = True,
+    flush: bool = False,
 ) -> tuple[list[str], str, int, int]:
     """Detokenizes the input ids incrementally and returns the new tokens
     and the new text.
@@ -205,31 +206,47 @@ def detokenize_incrementally(
         skip_special_tokens: Whether to skip special tokens.
         spaces_between_special_tokens: Whether to add spaces between special
             tokens.
+        flush: When True, no new token is appended; instead the text held
+            back for a potential unfinished byte sequence is emitted. Used
+            once when the sequence finishes, since no later token can
+            complete the sequence. `prev_tokens` must already hold every
+            token decoded so far.
 
     """
-    new_token_id = all_input_ids[-1]
-    # This is the first iteration for this sequence
-    is_first_iter = prev_tokens is None
-    if is_first_iter:
-        (prev_tokens, prefix_offset, read_offset) = convert_prompt_ids_to_tokens(
-            tokenizer, all_input_ids[:-1], skip_special_tokens=skip_special_tokens
-        )
-    assert prev_tokens is not None
-
-    # If the new token id is out of bounds, return an empty string.
-    if 0 <= new_token_id < len(tokenizer):
-        # Put new_token_id in a list so skip_special_tokens is respected
-        new_tokens = tokenizer.convert_ids_to_tokens(
-            [new_token_id], skip_special_tokens=skip_special_tokens
-        )
-        if isinstance(new_tokens, str):
-            new_tokens = [new_tokens]
-        else:
-            # This is required to guard against out-of-vocab prompt token ids
-            # (for example when using dummy weights)
-            _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
+    if flush:
+        # No new token: prev_tokens already holds every token decoded so
+        # far. Emit the held-back text; the returned offsets advance past
+        # it so a repeat flush is a no-op.
+        if prev_tokens is None:
+            return [], "", prefix_offset, read_offset
+        new_tokens: list[str] = []
+        prefix_offset = min(prefix_offset, len(prev_tokens))
+        read_offset = min(read_offset, len(prev_tokens))
+        is_first_iter = False
     else:
-        new_tokens = [""]
+        new_token_id = all_input_ids[-1]
+        # This is the first iteration for this sequence
+        is_first_iter = prev_tokens is None
+        if is_first_iter:
+            (prev_tokens, prefix_offset, read_offset) = convert_prompt_ids_to_tokens(
+                tokenizer, all_input_ids[:-1], skip_special_tokens=skip_special_tokens
+            )
+        assert prev_tokens is not None
+
+        # If the new token id is out of bounds, return an empty string.
+        if 0 <= new_token_id < len(tokenizer):
+            # Put new_token_id in a list so skip_special_tokens is respected
+            new_tokens = tokenizer.convert_ids_to_tokens(
+                [new_token_id], skip_special_tokens=skip_special_tokens
+            )
+            if isinstance(new_tokens, str):
+                new_tokens = [new_tokens]
+            else:
+                # This is required to guard against out-of-vocab prompt token ids
+                # (for example when using dummy weights)
+                _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
+        else:
+            new_tokens = [""]
     output_token_count = len(prev_tokens) + len(new_tokens)
     window_start = (
         0 if is_first_iter else min(prefix_offset, read_offset, len(prev_tokens))
@@ -266,7 +283,9 @@ def detokenize_incrementally(
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
 
-    if len(new_text) <= len(prefix_text) or new_text.endswith("�"):
+    if len(new_text) <= len(prefix_text) or (
+        not flush and new_text.endswith("�")
+    ):
         # utf-8 char at the end means it's a potential unfinished byte sequence
         # from byte fallback tokenization.
         # If it's in the middle, it's probably a real invalid id generated

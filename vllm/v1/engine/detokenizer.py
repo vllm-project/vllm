@@ -135,6 +135,11 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         else:
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
+        # Set when a stop string matches. The finished-read flush must not
+        # run afterwards: update() truncates the output text at the stop
+        # but keeps the stop tokens in the output ids, so flushing would
+        # decode them back into the output.
+        self._stop_matched = False
 
         # Generation data
         self.output_text = ""
@@ -188,6 +193,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             )
             if stop is not None:
                 stop_string, truncate_to = stop
+                self._stop_matched = True
                 stop_end = len(self.output_text) if truncate_to == -1 else truncate_to
                 if not self.include_stop_str_in_output:
                     stop_end += len(stop_string)
@@ -204,9 +210,26 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
     def decode_next(self, next_token_id: int) -> str:
         raise NotImplementedError
 
+    def flush(self) -> str:
+        """Return text held back for a potential unfinished byte sequence.
+
+        Called once when the sequence finishes. The default implementation
+        holds nothing back.
+        """
+        return ""
+
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
         this method is returned"""
+        if finished and not self._stop_matched:
+            # Flush text held back for a potential unfinished byte sequence
+            # (for example a trailing replacement character). At finish no
+            # later token can complete the sequence. The flush is
+            # idempotent, so a repeated finished read emits nothing new.
+            # A matched stop string skips the flush: the output text was
+            # truncated at the stop while the stop tokens stay in the
+            # output ids, so flushing would re-append the stop string.
+            self.output_text += self.flush()
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:
@@ -233,6 +256,14 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.skip_special_tokens = sampling_params.skip_special_tokens
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
+        # Whether the last DecodeStream.step() held text back for a
+        # potential unfinished byte sequence (step returns None then).
+        # The flush only needs to decode when this is set.
+        self._last_step_held_back = False
+        # Prompt token ids, kept so the finished-read flush can decode
+        # with prompt context: a leading "▁" renders as a space only
+        # after another token, so decoding the output ids alone drops it.
+        self._prompt_token_ids = list(request.prompt_token_ids or [])
 
         # Use native prefill to prime the decode stream with the prompt tail.
         # Look up DecodeStream on the module so backend patches (e.g. the
@@ -269,6 +300,10 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
     def decode_next(self, next_token_id: int) -> str:
         token = self._protected_step(next_token_id)
+        # step() returns None when the text is held back for a potential
+        # unfinished byte sequence (and on invalid-token errors, where the
+        # prefix check in flush() guards the decode).
+        self._last_step_held_back = token is None
 
         if not self.spaces_between_special_tokens:
             special_token = self.added_token_ids.get(next_token_id)
@@ -306,6 +341,46 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             token = self.stream.step(self.tokenizer, next_token_id)
         return token
 
+    def flush(self) -> str:
+        """Drain text the decode stream held back for an incomplete sequence.
+
+        `DecodeStream` buffers a trailing partial UTF-8 sequence and only
+        releases it once a later token completes it, so at finish the
+        held-back text is the difference between a decode of the prompt
+        plus output ids and the text emitted so far. The decode needs the
+        prompt context: a leading "▁" renders as a space only after
+        another token, so decoding the output ids alone drops it and the
+        prefix check fails (for example prompt "Hello" streaming
+        " world" while the output ids alone decode to "world�"). The
+        flag keeps this a no-op when the last step released everything,
+        so a finished read costs no decode in the common case. The
+        prefix checks keep this a no-op when incremental decoding already
+        diverged from a full decode.
+        """
+        if not self._last_step_held_back:
+            return ""
+        self._last_step_held_back = False
+        prompt_text = self.tokenizer.decode(
+            self._prompt_token_ids, skip_special_tokens=self.skip_special_tokens
+        )
+        expected_full = self.tokenizer.decode(
+            self._prompt_token_ids + self.token_ids,
+            skip_special_tokens=self.skip_special_tokens,
+        )
+        if expected_full.startswith(prompt_text):
+            expected = expected_full[len(prompt_text) :]
+        else:
+            # The prompt and output bytes interact (for example a
+            # prompt-final byte token completing with the first output
+            # token), so the prompt text is not a prefix of the full
+            # decode. Fall back to decoding the output ids alone.
+            expected = self.tokenizer.decode(
+                self.token_ids, skip_special_tokens=self.skip_special_tokens
+            )
+        if expected.startswith(self.output_text):
+            return expected[len(self.output_text) :]
+        return ""
+
 
 class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
     def __init__(self, tokenizer: TokenizerLike, request: EngineCoreRequest):
@@ -335,6 +410,11 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             self.read_offset = 0
         # Grows by one string per output token, in place.
         gc_untrack(self.tokens)
+        # Number of prompt tokens held in `self.tokens`. Output tokens are
+        # appended after these, so this bounds the flush window to tokens
+        # still present in `output_token_ids` (a stop match truncates the
+        # ids but not `self.tokens`).
+        self._prompt_window_len = len(self.tokens)
 
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 
@@ -366,6 +446,23 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.read_offset = read_offset
 
         return decoded_text
+
+    def flush(self) -> str:
+        """Emit text held back for a potential unfinished byte sequence."""
+        retained = self._prompt_window_len + self.num_output_tokens()
+        _, text, prefix_offset, read_offset = detokenize_incrementally(
+            tokenizer=self.tokenizer,
+            all_input_ids=self.token_ids,
+            prev_tokens=self.tokens[:retained],
+            prefix_offset=self.prefix_offset,
+            read_offset=self.read_offset,
+            skip_special_tokens=self.skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
+            flush=True,
+        )
+        self.prefix_offset = prefix_offset
+        self.read_offset = read_offset
+        return text
 
 
 def check_stop_strings(

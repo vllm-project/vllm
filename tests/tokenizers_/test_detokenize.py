@@ -59,12 +59,14 @@ def _run_incremental_decode(
     starting_index: int,
     spaces_between_special_tokens: bool = True,
     fast: bool | None = None,
+    stop: list[str] | None = None,
 ):
     prompt_token_ids = all_input_ids[:starting_index]
 
     params = SamplingParams(
         skip_special_tokens=skip_special_tokens,
         spaces_between_special_tokens=spaces_between_special_tokens,
+        stop=stop,
     )
     request = EngineCoreRequest(
         request_id="",
@@ -87,7 +89,10 @@ def _run_incremental_decode(
 
     output_text = ""
     for i, token_id in enumerate(all_input_ids[starting_index:]):
-        detokenizer.update([token_id], False)
+        stopped = detokenizer.update([token_id], False)
+        if stopped is not None:
+            output_text += detokenizer.get_next_output_text(True, delta=True)
+            break
         finished = i == len(all_input_ids) - 1
         output_text += detokenizer.get_next_output_text(finished, delta=True)
 
@@ -294,6 +299,109 @@ def test_oov_decode(tokenizer, fast):
 
     assert decoded_text == ""
     assert out_ids == [len(tokenizer)]
+
+
+@pytest.mark.parametrize("tokenizer_name", ["openai-community/gpt2"])
+@pytest.mark.parametrize("fast", (True, False))
+@pytest.mark.parametrize(
+    "case",
+    [
+        "genuine_trailing_replacement_char",
+        "trailing_lone_lead_byte",
+    ],
+)
+def test_decode_trailing_replacement_char_flushed_on_finish(
+    tokenizer, fast, case
+):
+    """A trailing U+FFFD is emitted when generation finishes.
+
+    Both incremental detokenizers hold back text ending in U+FFFD as a
+    potential unfinished byte sequence. At finish no later token can
+    complete the sequence, so the held-back text is flushed and the
+    finished text matches a full decode of the same ids.
+    See https://github.com/vllm-project/vllm/issues/68324.
+    """
+    if case == "genuine_trailing_replacement_char":
+        # The model really generated U+FFFD.
+        ids = tokenizer.encode("hello \ufffd", add_special_tokens=False)
+    else:
+        # A lone lead byte: an incomplete UTF-8 sequence at the end of
+        # generation decodes to U+FFFD with replacement. "\u00c3" is the
+        # GPT-2 byte-level token for byte 0xC3.
+        ids = tokenizer.encode("hello ", add_special_tokens=False) + [
+            tokenizer.convert_tokens_to_ids("\u00c3")
+        ]
+
+    decoded_text, out_ids = _run_incremental_decode(
+        tokenizer,
+        ids,
+        skip_special_tokens=True,
+        starting_index=0,
+        fast=fast,
+    )
+
+    assert decoded_text == tokenizer.decode(ids, skip_special_tokens=True)
+    assert out_ids == ids
+
+
+@pytest.mark.parametrize(
+    "tokenizer_name", ["hf-internal-testing/llama-tokenizer"]
+)
+@pytest.mark.parametrize("fast", (True, False))
+def test_decode_held_back_text_keeps_prompt_context(tokenizer, fast):
+    """A held-back trailing U+FFFD is flushed with prompt context.
+
+    The fast DecodeStream is primed with the prompt, so a leading "▁"
+    renders as a space in the streamed text. Decoding the output ids
+    alone drops that space ("world�" instead of " world�"), so the
+    flush must decode prompt plus output ids and strip the prompt text.
+    See https://github.com/vllm-project/vllm/pull/68358.
+    """
+    prompt_ids = tokenizer.encode("Hello", add_special_tokens=False)
+    world_id = tokenizer.convert_tokens_to_ids("▁world")
+    byte_id = tokenizer.convert_tokens_to_ids("<0xC3>")
+    ids = prompt_ids + [world_id, byte_id]
+
+    decoded_text, out_ids = _run_incremental_decode(
+        tokenizer,
+        ids,
+        skip_special_tokens=True,
+        starting_index=len(prompt_ids),
+        fast=fast,
+    )
+
+    full_text = tokenizer.decode(ids, skip_special_tokens=True)
+    prompt_text = tokenizer.decode(prompt_ids, skip_special_tokens=True)
+    assert decoded_text == full_text[len(prompt_text) :]
+    assert out_ids == ids[len(prompt_ids):]
+
+
+@pytest.mark.parametrize("tokenizer_name", ["openai-community/gpt2"])
+@pytest.mark.parametrize("fast", (True, False))
+def test_stop_string_not_reappended_on_finish(tokenizer, fast):
+    """A stop string excluded from output stays excluded at finish.
+
+    update() truncates the output text at the stop string but keeps the
+    stop tokens in the output ids. The finished-read flush must not
+    decode those ids back into the output, on either path.
+    See https://github.com/vllm-project/vllm/issues/68324.
+    """
+    ids = tokenizer.encode(
+        "Hello world. STOP and then more text after the stop.",
+        add_special_tokens=False,
+    )
+
+    decoded_text, _ = _run_incremental_decode(
+        tokenizer,
+        ids,
+        skip_special_tokens=True,
+        starting_index=0,
+        fast=fast,
+        stop=["STOP"],
+    )
+
+    assert decoded_text == "Hello world. "
+    assert "STOP" not in decoded_text
 
 
 # ---------- convert_ids_list_to_tokens collision tests ----------
