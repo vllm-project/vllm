@@ -103,6 +103,29 @@
         "random-input-len": 128,
         "random-output-len": 128
       }
+    },
+    {
+      "test_name": "serving_qwen3vl_4b_tp1_random_mm_1img",
+      "qps_list": ["inf"],
+      "max_concurrency_list": [16, 64],
+      "server_parameters": {
+        "model": "Qwen/Qwen3-VL-4B-Instruct",
+        "tensor_parallel_size": 1,
+        "max_model_len": 8192,
+        "limit_mm_per_prompt": {"image": 1}
+      },
+      "client_parameters": {
+        "model": "Qwen/Qwen3-VL-4B-Instruct",
+        "backend": "openai-chat",
+        "endpoint": "/v1/chat/completions",
+        "dataset_name": "random-mm",
+        "random_input_len": 128,
+        "random_output_len": 128,
+        "random_mm_base_items_per_request": 1,
+        "random_mm_limit_mm_per_prompt": {"image": 1},
+        "random_mm_num_mm_items_range_ratio": 0,
+        "num_prompts": 100
+      }
     }
   ]
 }
