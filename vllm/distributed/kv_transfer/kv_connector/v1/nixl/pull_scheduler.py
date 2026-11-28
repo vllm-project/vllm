@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     kv_lease_extension,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import trim_null_head
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -148,26 +149,29 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     # a full prefix cache hit on the local node. We need to call
                     # send_notif in _read_blocks to free the memory on the remote node.
 
-                    unhashed_local_block_ids: BlockIds = (
-                        blocks.get_unhashed_block_ids_all_groups()
-                        if num_external_tokens > 0
-                        else ()
-                    )
-                    local_block_ids = self.get_exchange_clipped_blocks(
-                        unhashed_local_block_ids
-                    )
+                    awaiting_kvs = num_external_tokens > 0
                     # Blocks covered by the local prefix cache, per KV cache group.
                     # Each count fixes where that group's DCP slice starts, which the
                     # worker needs to line up with the remote's slice.
-                    local_num_computed_blocks = tuple(
-                        len(
-                            [
-                                block
-                                for block in group
-                                if block.block_hash is not None and not block.is_null
-                            ]
-                        )
-                        for group in blocks.blocks
+                    local_num_computed_blocks: list[int] = []
+                    unhashed_local_block_ids: list[list[int]] = []
+                    for group in blocks.blocks:
+                        num_computed = 0
+                        unhashed_ids: list[int] = []
+                        for block in trim_null_head(group):
+                            if block.is_null:
+                                continue
+                            if block.block_hash is not None:
+                                num_computed += 1
+                            elif awaiting_kvs:
+                                unhashed_ids.append(block.block_id)
+                        local_num_computed_blocks.append(num_computed)
+                        if awaiting_kvs:
+                            unhashed_local_block_ids.append(unhashed_ids)
+                    local_block_ids: BlockIds = (
+                        self.get_exchange_clipped_blocks(unhashed_local_block_ids)
+                        if awaiting_kvs
+                        else ()
                     )
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
@@ -175,10 +179,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     self._reqs_need_recv[request.request_id] = (
                         request,
                         local_block_ids,
-                        local_num_computed_blocks,
+                        tuple(local_num_computed_blocks),
                         # Parked in WAITING_FOR_REMOTE_KVS only when there is
                         # something to pull; a full local hit stays RUNNING.
-                        num_external_tokens > 0,
+                        awaiting_kvs,
                     )
 
                 else:
