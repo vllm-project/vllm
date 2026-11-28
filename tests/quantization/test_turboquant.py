@@ -397,6 +397,44 @@ class TestTurboQuantWorkspaceReservation:
             ),
         ]
 
+    @pytest.mark.parametrize(
+        "mode,cuda,tiered",
+        [
+            ("TURBOQUANT_K8V4", True, True),  # FP8 keys
+            ("TURBOQUANT_4BIT_NC", True, True),
+            ("TURBOQUANT_4BIT_NC", False, False),  # ROCm (FlyDSL) and others
+            ("ULTRAQUANT_4BIT", True, False),  # has its own decode
+        ],
+    )
+    def test_decode_workspace_covers_split_tiers(self, monkeypatch, mode, cuda, tiered):
+        """mid_o is reserved for the largest batch x splits product decode can
+        request. Only TurboQuant's Triton decode on CUDA tiers the splits."""
+        from dataclasses import replace
+
+        from vllm.v1.attention.backends import turboquant_attn as ta
+        from vllm.v1.kv_cache_interface import KVQuantMode
+
+        calls = []
+        manager = SimpleNamespace(get_simultaneous=lambda *a: calls.append(a))
+        monkeypatch.setattr(ta, "current_workspace_manager", lambda: manager)
+        monkeypatch.setattr(ta, "is_workspace_manager_initialized", lambda: True)
+        monkeypatch.setattr(
+            ta, "current_platform", SimpleNamespace(is_cuda=lambda: cuda)
+        )
+        spec = replace(self._fake_kv_cache_spec(), kv_quant_mode=KVQuantMode[mode])
+        factors = ta._decode_split_factors(spec.kv_quant_mode.is_turboquant)
+        assert bool(factors) == tiered
+        for max_seqs in (8, 64):
+            calls.clear()
+            cfg = self._fake_vllm_config(max_num_seqs=max_seqs)
+            ta.TurboQuantMetadataBuilder(spec, ["l0"], cfg, "cuda")
+            rows = [b * ta._decode_kv_splits(b, 4, factors) for b in range(1, 65)]
+            assert ta._max_decode_split_rows(max_seqs, 4, factors) == max(
+                rows[:max_seqs]
+            )
+            mid_o = (max(rows[:max_seqs]), 8, 1) if tiered else (max_seqs, 8, 4)
+            assert calls[0][0] == ((*mid_o, 129), torch.float32)
+
     def test_metadata_builder_skips_continuation_prefill_when_disabled(
         self, monkeypatch
     ):
@@ -782,3 +820,88 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+
+# ============================================================================
+# Decode: parallel split reduction (stage 2) and KV split tiers
+# ============================================================================
+
+
+def _tq_cache(preset, D, Hk, n, PiT, centroids, bs=16):
+    """Store n random K/V tokens on shuffled pages of a larger pool, in vLLM's
+    physical layout. Returns the cache and the block table row."""
+    from vllm.v1.attention.ops.triton_turboquant_store import (
+        triton_turboquant_store,
+    )
+
+    cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=D)
+    c = centroids.sort()[0]
+    g = torch.Generator(device="cuda").manual_seed(0)
+    k, v = torch.randn(2, n, Hk, D, device="cuda", generator=g).bfloat16()
+    pages = -(-n // bs)
+    blocks = torch.randperm(pages + 3, device="cuda", generator=g)[:pages].int()
+    cache = torch.zeros(pages + 3, Hk, bs, cfg.slot_size_aligned, dtype=torch.uint8)
+    cache = cache.cuda().transpose(1, 2)  # vLLM's physical layout
+    pos = torch.arange(n, device="cuda")
+    slots = (blocks[pos // bs] * bs + pos % bs).int()
+    tq = (cfg.key_mse_bits, cfg.key_packed_size, cfg.effective_value_quant_bits)
+    mid = (c[:-1] + c[1:]) / 2
+    triton_turboquant_store(k, v, cache, slots, PiT, mid, *tq, key_fp8=cfg.key_fp8)
+    return cache, blocks
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestDecodeSplits:
+    @pytest.mark.parametrize("splits", [1, 7, 256])
+    def test_stage2_matches_lse_merge(self, splits):
+        """Rows shorter than the split count leave some splits unwritten."""
+        from vllm.v1.attention.ops.triton_turboquant_decode import _tq_decode_stage2
+
+        seq_lens = torch.tensor([400, 1, 37], device="cuda", dtype=torch.int32)
+        mid_o = torch.randn(3, 8, splits, 129, device="cuda")
+        out, lse = torch.empty(3, 8, 128, device="cuda"), torch.empty(3, 8).cuda()
+        args = (mid_o, out, lse, seq_lens, *mid_o.stride()[:3], *out.stride()[:2], 8)
+        block_s = min(next_power_of_2(splits), 128)
+        kw = dict(NUM_KV_SPLITS=splits, HEAD_DIM=128, BLOCK_S=block_s, BLOCK_DC=32)
+        _tq_decode_stage2[(3, 8, 4)](*args, **kw)
+        for b, L in enumerate(seq_lens.tolist()):
+            m = mid_o[b, :, : sum(s * -(-L // splits) < L for s in range(splits))]
+            ref = (m[..., 128].softmax(-1)[..., None] * m[..., :128]).sum(1)
+            torch.testing.assert_close(out[b], ref)
+            torch.testing.assert_close(lse[b], m[..., 128].logsumexp(-1))
+
+    @pytest.mark.parametrize(
+        "preset,D,cases",
+        [
+            ("turboquant_k8v4", 128, ((1, 128), (16, 128), (17, 64), (33, 32))),
+            ("turboquant_4bit_nc", 256, ((1, 128), (16, 128), (32, 64), (33, 32))),
+        ],
+    )
+    def test_decode_attention_split_tiers(self, monkeypatch, preset, D, cases):
+        """_decode_attention picks the split count from the batch size, and the
+        result matches the same kernel at the base split count."""
+        from vllm.v1.attention.backends import turboquant_attn as ta
+
+        cfg = TestTurboQuantWorkspaceReservation._fake_vllm_config()
+        cfg.attention_config.tq_max_kv_splits_for_cuda_graph = 32
+        monkeypatch.setattr(ta, "get_current_vllm_config", lambda: cfg)
+        impl = ta.TurboQuantAttentionImpl(
+            8, D, D**-0.5, num_kv_heads=2, kv_cache_dtype=preset
+        )
+        layer = torch.nn.Module()
+        impl._ensure_on_device(layer, torch.device("cuda"))
+        H, cents = layer._tq_Pi, layer._tq_centroids
+        cache, blocks = _tq_cache(preset, D, 2, 309, H, cents)
+        calls, real = [], ta.triton_turboquant_decode_attention
+        spy = lambda **kw: calls.append(kw) or real(**kw)  # noqa: E731
+        monkeypatch.setattr(ta, "triton_turboquant_decode_attention", spy)
+        torch.manual_seed(0)
+        no_bufs = dict(mid_o_buf=None, output_buf=None, lse_buf=None, buf_holder=None)
+        for B, splits in cases:
+            q = torch.randn(B, 8, D, device="cuda").bfloat16()
+            sl = torch.randint(1, 310, (B,), device="cuda", dtype=torch.int32)
+            md = SimpleNamespace(block_table=blocks[None].expand(B, -1), seq_lens=sl)
+            out = impl._decode_attention(q, cache, md, H, cents, H, layer).clone()
+            assert calls[-1]["max_num_kv_splits"] == splits
+            ref = real(**{**calls[-1], **no_bufs, "max_num_kv_splits": 32})
+            torch.testing.assert_close(out, ref, atol=1e-3, rtol=2**-7)
