@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import os
 import pickle
+import tokenize
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -40,7 +41,8 @@ def read_code_files(files: Iterable[Path]) -> dict[Path, str | None]:
     contents: dict[Path, str | None] = {}
     for path in files:
         try:
-            contents[path] = path.read_text()
+            with tokenize.open(path) as f:
+                contents[path] = f.read()
         except (OSError, UnicodeDecodeError):
             # e.g. <string> from exec() or <frozen ...> modules
             if not str(path).startswith("<"):
