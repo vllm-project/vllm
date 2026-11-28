@@ -319,7 +319,9 @@ class CacheConfig:
     """Also register a Mamba checkpoint at the shared-prefix junction --
     where a sibling request was observed to resume -- instead of only at the
     prompt tail. Off by default; only takes effect with prefix caching enabled
-    and a prefix match unit smaller than the Mamba block size."""
+    and compatible fine-grained prefix matching. For up to one token of hash
+    lookahead, full attention also indexes interior prefixes, which adds CPU
+    metadata."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B. Mamba2 Triton standard decode and
     Gated DeltaNet (Qwen3.5, Qwen4Exp) use B physical rows, at most 32 for Gated

@@ -181,9 +181,20 @@ class KVCacheManager:
             enable_mamba_shared_prefix_checkpoint
             and self.coordinator.enable_partial_hash_hits
         )
+        self._index_shared_prefixes = (
+            self.mamba_shared_prefix_checkpoint
+            and num_hash_lookahead_tokens <= 1
+            and any(
+                isinstance(manager, MambaManager) and manager.prefix_caching
+                for manager in self.coordinator.single_type_managers
+            )
+        )
         if self.mamba_shared_prefix_checkpoint:
             for manager in self.coordinator.single_type_managers:
-                if isinstance(manager, MambaManager):
+                if isinstance(manager, MambaManager) or (
+                    self._index_shared_prefixes
+                    and type(manager) is FullAttentionManager
+                ):
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -372,6 +383,28 @@ class KVCacheManager:
         shared_prefix_boundary = (
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )
+        if shared_prefix_boundary and self._index_shared_prefixes:
+            # Learn only a junction every attention group can reuse.
+            assert isinstance(self.coordinator, HybridKVCacheCoordinator)
+            _, per_group_hits = self.coordinator.find_longest_cache_hit_per_group(
+                request.block_hashes, max_cache_hit_length, request.num_tokens
+            )
+            attention_boundary = min(
+                (
+                    hit
+                    for hit, group in zip(
+                        per_group_hits,
+                        self.kv_cache_config.kv_cache_groups,
+                        strict=True,
+                    )
+                    if group.prefix_cacheable
+                    and not issubclass(group.manager_cls, MambaManager)
+                ),
+                default=shared_prefix_boundary,
+            )
+            shared_prefix_boundary = min(shared_prefix_boundary, attention_boundary)
+            if shared_prefix_boundary <= num_new_computed_tokens:
+                shared_prefix_boundary = 0
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary

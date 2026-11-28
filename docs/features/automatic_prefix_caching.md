@@ -19,17 +19,20 @@ With prefix caching enabled, Mamba state is stored only on the Mamba block grid,
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - prefix caching enabled
-- `--prefix-match-unit` smaller than the Mamba block size
+- compatible fine-grained prefix matching
 
 ```bash
 vllm serve <hybrid-model> \
+    --enable-prefix-caching \
     --prefix-match-unit 64 \
     --enable-mamba-shared-prefix-checkpoint
 ```
 
-`--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. For hybrid Mamba models that is the block size itself, so no sub-block boundary exists and the flag has no effect.
+`--prefix-match-unit` sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. Choose a smaller value to learn boundaries inside Mamba blocks. With DCP, the effective full-attention block can be larger than the replicated Mamba block, so equality with the Mamba block size is also supported.
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, matches the block size of any group that requires block-aligned lookups (such as sliding-window attention), and is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates these at startup and fails if an explicit value would disable partial cache hits. Read the served block size from the startup log. 64 is a reasonable starting point.
+
+With zero or one token of hash lookahead, this option also indexes interior full-attention prefixes. A sibling can discover a junction that all attention groups can reuse and save the exact Mamba state there for later requests. Smaller match units add more CPU metadata. External Store retention follows the connector's own policy.
 
 ### Superseded Mamba state eviction
 
