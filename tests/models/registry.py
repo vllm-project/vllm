@@ -393,6 +393,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "Aleph-Alpha/Kolibri-1", min_transformers_version="5.20.0"
     ),
     "LagunaForCausalLM": _HfExamplesInfo("poolside/Laguna-XS.2"),
+    "LaraMiniForCausalLM": _HfExamplesInfo(
+        "translated/Lara-4-Mini-Base", trust_remote_code=True
+    ),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
         "LiquidAI/LFM2-8B-A1B",

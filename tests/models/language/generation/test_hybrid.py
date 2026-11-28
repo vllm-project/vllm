@@ -1180,3 +1180,86 @@ def test_zaya_cca_exports_state_at_checkpoint() -> None:
             state[slot] = plain[slot]
     for state, plain in zip(with_checkpoint, without_checkpoint):
         torch.testing.assert_close(state, plain, rtol=0, atol=0)
+
+
+@pytest.fixture(scope="module")
+def lara_mini_tiny_random(tmp_path_factory) -> str:
+    """A random tiny Lara Mini with every token mixer and a 16-token window."""
+    import torch
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("LaraMiniForCausalLM")
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+    config = AutoConfig.from_pretrained(
+        model_info.default,
+        trust_remote_code=True,
+        num_hidden_layers=5,
+        layer_types=[
+            "linear_attention",
+            "sliding_attention",
+            "linear_attention",
+            "full_attention",
+            "sliding_attention",
+        ],
+        hidden_size=256,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        num_experts=8,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        sliding_window=16,
+        initializer_range=0.2,
+    )
+    torch.manual_seed(0)
+    model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+    model = model.to(torch.bfloat16)
+    path = tmp_path_factory.mktemp("lara_mini_tiny_random")
+    model.save_pretrained(path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_info.default, trust_remote_code=True
+    )
+    tokenizer.save_pretrained(path)
+    return str(path)
+
+
+def test_lara_mini(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    lara_mini_tiny_random,
+) -> None:
+    """Lara Mini interleaves Gated DeltaNet, sliding-window RoPE and global NoPE
+    attention. Prompts past the window, prefilled in chunks and then served from
+    the prefix cache, must match Transformers."""
+    max_tokens, num_logprobs = 32, 5
+    # Hybrid models enlarge the cache block to fit the GDN state, so prompts must
+    # span whole blocks to be cached
+    prompts = [prompt * 20 for prompt in example_prompts]
+    with hf_runner(lara_mini_tiny_random) as hf_model:
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            prompts, max_tokens, num_logprobs
+        )
+
+    with vllm_runner(
+        lara_mini_tiny_random,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        enable_prefix_caching=True,
+    ) as vllm_model:
+        # The first pass prefills cold, the second hits the prefix cache
+        for _ in range(2):
+            vllm_outputs = vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens, num_logprobs
+            )
+            check_logprobs_close(
+                outputs_0_lst=hf_outputs,
+                outputs_1_lst=vllm_outputs,
+                name_0="hf",
+                name_1="vllm",
+            )
+        probe = vllm_model.llm.generate(prompts, SamplingParams(max_tokens=1))
+        assert all(output.num_cached_tokens > 0 for output in probe)
