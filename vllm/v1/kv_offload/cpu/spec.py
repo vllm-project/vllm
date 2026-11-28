@@ -85,6 +85,19 @@ class CPUOffloadingSpec(OffloadingSpec):
                 ),
                 buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
             ),
+            CPUOffloadingMetrics.CPU_HINT_ACTIONS: OffloadingCounterMetadata(
+                documentation=(
+                    "Number of CPU KV hint actions processed, labeled by "
+                    "action type and outcome."
+                ),
+                labelnames=("action_type", "outcome"),
+            ),
+            CPUOffloadingMetrics.CPU_HINT_KEYS_SKIPPED: OffloadingCounterMetadata(
+                documentation=(
+                    "Number of keys skipped by CPU retention hints because "
+                    "they were not resident."
+                ),
+            ),
         }
         store_threshold = int(extra_config.get("store_threshold", 0))
         if store_threshold >= 2:

@@ -888,6 +888,23 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
 
 
+@pytest.mark.parametrize("spec_name", ["CPUOffloadingSpec", "TieringOffloadingSpec"])
+def test_build_metric_definitions_includes_cpu_hint_counters(spec_name):
+    from vllm.v1.kv_offload.base import OffloadingCounterMetadata
+    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+
+    spec_cls = OffloadingSpecFactory.get_spec_cls({"spec_name": spec_name})
+    metrics = spec_cls.build_metric_definitions({})
+
+    actions_meta = metrics[CPUOffloadingMetrics.CPU_HINT_ACTIONS]
+    assert isinstance(actions_meta, OffloadingCounterMetadata)
+    assert actions_meta.labelnames == ("action_type", "outcome")
+
+    skipped_meta = metrics[CPUOffloadingMetrics.CPU_HINT_KEYS_SKIPPED]
+    assert isinstance(skipped_meta, OffloadingCounterMetadata)
+    assert skipped_meta.labelnames == ()
+
+
 @pytest.mark.parametrize(
     ("secondary_tiers", "spanning_group", "rejected"),
     [

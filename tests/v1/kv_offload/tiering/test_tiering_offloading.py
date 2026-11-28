@@ -2314,3 +2314,172 @@ def test_cascade_store_feeds_backpressure_only_written_bytes(tmp_path, monkeypat
     assert write_bytes == [2 * block_size, block_size, 0]
     # The store that wrote nothing contributes no latency sample.
     assert detector._completions == 2
+
+
+def test_tiering_forwards_hints_and_schedule_end_to_primary(monkeypatch):
+    from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
+    from vllm.v1.kv_offload.cpu import hints as hints_module
+    from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
+    from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
+
+    now = [100.0]
+    monkeypatch.setattr(hints_module.time, "monotonic", lambda: now[0])
+    retention_events: list[tuple[OffloadKey, bool]] = []
+
+    class _SpyLRU(LRUCachePolicy):
+        def on_retention_changed(self, key: OffloadKey, retained: bool) -> None:
+            retention_events.append((key, retained))
+            super().on_retention_changed(key, retained)
+
+    monkeypatch.setitem(
+        CachePolicyFactory._registry, "spy_lru_tiering", lambda: _SpyLRU
+    )
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=2, mmap_region=_mock_mmap_region(2), cache_policy="spy_lru_tiering"
+    )
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary, secondary_tiers=[secondary]
+    )
+    k1, k2, k3, k4 = to_keys([1, 2, 3, 4])
+    trigger = StoreTrigger.ON_COMPUTE
+    step = ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+
+    def env(msg: str, kind: str, lid: str, ttl_s: float | None = None):
+        payload: dict[str, object] = {"lease_id": lid}
+        if ttl_s is not None:
+            payload["ttl_s"] = ttl_s
+        return KvHintsEnvelope("0.1", msg, [KvHintAction("a1", kind, "1.0", payload)])
+
+    def store(keys, ctx):
+        for i, key in enumerate(keys):
+            ctx.set_offload_key_position(key, 16 * (i + 1))
+        manager.on_new_request(ctx)
+        out = manager.prepare_store(keys, ctx, trigger=trigger)
+        assert out is not None
+        if out.keys_to_store:
+            manager.complete_store(out.keys_to_store, ctx, trigger=trigger)
+            secondary.drain_jobs()
+        manager.on_request_finished(ctx)
+        manager.on_schedule_end(step)
+        return out.evicted_keys
+
+    store([k1], ReqContext("r1", kv_hints=env("m1", "cpu.retain", "L1", 30.0)))
+    store([k2], ReqContext("r2"))
+
+    # Synthetic tier-excluded request must not trigger primary release.
+    rel_env = env("m2", "cpu.release", "L1")
+    manager.on_new_request(ReqContext("syn", kv_hints=rel_env), exclude_tier_idx=0)
+    assert store([k3], ReqContext("r3")) == [k2]
+
+    # Top-level on_new_request forwards release immediately.
+    assert store([k4], ReqContext("r4", kv_hints=rel_env)) == [k1]
+
+    # on_schedule_end forwards TTL expiry to primary. k3 is a prefix hit for
+    # r5, so it is retained without becoming more recent than k4.
+    r5 = ReqContext("r5", kv_hints=env("m3", "cpu.retain", "L2", 10.0))
+    r5.set_offload_key_position(k3, 16)
+    manager.on_new_request(r5)
+    manager.on_request_finished(r5)
+    retention_events.clear()
+    now[0] += 10.0
+    manager.on_schedule_end(step)
+    assert retention_events == [(k3, False)]
+    assert store([k1], ReqContext("r6")) == [k3]
+    secondary.shutdown()
+
+
+def test_tiering_promotion_restores_lease(monkeypatch):
+    from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
+    from vllm.v1.kv_offload.cpu import hints as hints_module
+
+    monkeypatch.setattr(hints_module.time, "monotonic", lambda: 100.0)
+    trigger = StoreTrigger.ON_COMPUTE
+    step = ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+
+    def make_pair(num_chunks: int):
+        primary = CPUPrimaryTierOffloadingManager(
+            num_chunks=num_chunks, mmap_region=_mock_mmap_region(num_chunks)
+        )
+        sec = MetricsSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=primary.get_kv_memoryview(),
+            tier_type="test_metrics",
+        )
+        return TieringOffloadingManager(
+            primary_tier=primary, secondary_tiers=[sec]
+        ), sec
+
+    def env(msg: str, actions):
+        return KvHintsEnvelope("0.1", msg, actions)
+
+    # Evict retained k1, then promote it back -> retains k1 over unretained k3.
+    mgr, sec = make_pair(2)
+    k1, k2, k3 = to_keys([1, 2, 3])
+    for idx, (k, lid) in enumerate([(k1, "L1"), (k2, "L2"), (k3, "L3")]):
+        ctx = ReqContext(
+            f"r{idx}",
+            kv_hints=env(
+                f"m{idx}",
+                [
+                    KvHintAction(
+                        "a", "cpu.retain", "1.0", {"lease_id": lid, "ttl_s": 60.0}
+                    )
+                ],
+            ),
+        )
+        ctx.set_offload_key_position(k, 16)
+        mgr.on_new_request(ctx)
+        out = mgr.prepare_store([k], ctx, trigger=trigger)
+        assert out is not None
+        mgr.complete_store(out.keys_to_store, ctx, trigger=trigger)
+        mgr.on_request_finished(ctx)
+        sec.finished_jobs.extend(
+            JobResult(job_id=j.job_id, success=True) for j in sec.submitted_stores
+        )
+        sec.submitted_stores.clear()
+        mgr.on_schedule_end(step)
+
+    rel = ReqContext(
+        "rel",
+        kv_hints=env(
+            "mr",
+            [
+                KvHintAction("a1", "cpu.release", "1.0", {"lease_id": "L2"}),
+                KvHintAction("a2", "cpu.release", "1.0", {"lease_id": "L3"}),
+            ],
+        ),
+    )
+    mgr.on_new_request(rel)
+    mgr.on_request_finished(rel)
+
+    sec.lookup_result = LookupResult.HIT
+    promo = ReqContext("promo")
+    mgr.on_new_request(promo)
+    assert mgr.lookup(k1, promo) is LookupResult.HIT_PENDING
+    mgr.on_schedule_end(step)
+    sec.finished_jobs.append(
+        JobResult(job_id=sec.submitted_loads.pop().job_id, success=True)
+    )
+    mgr.on_schedule_end(step)
+    mgr.on_request_finished(promo)
+
+    evict_ctx = ReqContext("evict")
+    mgr.on_new_request(evict_ctx)
+    out = mgr.prepare_store(to_keys([4]), evict_ctx, trigger=trigger)
+    assert out is not None and out.evicted_keys == [k3]
+    mgr.complete_store(out.keys_to_store, evict_ctx, trigger=trigger)
+    mgr.on_schedule_end(step)
+    sec.finished_jobs.extend(
+        JobResult(job_id=j.job_id, success=True) for j in sec.submitted_stores
+    )
+    sec.submitted_stores.clear()
+    mgr.on_schedule_end(step)
+
+    # k1 is now older than k4, but the promotion restored its lease.
+    out = mgr.prepare_store(to_keys([5]), evict_ctx, trigger=trigger)
+    assert out is not None and out.evicted_keys == to_keys([4])

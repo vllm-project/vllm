@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
     StoreTrigger,
     get_offload_group_idx,
 )
@@ -29,6 +30,7 @@ from vllm.v1.kv_offload.cpu.common import (
     CPUOffloadingInfo,
     CPUOffloadingMetrics,
 )
+from vllm.v1.kv_offload.cpu.hints import CPUHintRetention
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -95,6 +97,8 @@ class CPUOffloadingManager(OffloadingManager):
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
         self._cache_generation = 0
+
+        self._retention = CPUHintRetention(self._policy)
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -206,6 +210,7 @@ class CPUOffloadingManager(OffloadingManager):
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         self._get_request_cache_access(req_context)
+        self._retention.on_new_request(req_context)
         return RequestOffloadingContext()
 
     @override
@@ -389,6 +394,9 @@ class CPUOffloadingManager(OffloadingManager):
             if num_chunks_to_evict > self._num_evictable_cache_chunks:
                 # Eviction will fail.
                 return None
+            # Expire elapsed leases before victim selection (e.g. after an idle
+            # period where on_schedule_end has not run yet).
+            self._retention.sweep_expired()
             # There is a still a chance for eviction failure as some of the
             # idle chunks might be in the protected list.
 
@@ -422,6 +430,7 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
         for key, chunk in zip(keys_to_store, chunks):
+            self._retention.on_key_inserted(key, chunk)
             self._policy.insert(key, chunk, req_context)
         self._num_write_pending_chunks += len(keys_to_store)
         state.inserted_keys.update(keys_to_store)
@@ -497,6 +506,11 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
+        self._finalize_request_access(req_context)
+        # After policy finalization and all of the request's prepare_store calls.
+        self._retention.on_request_finished(req_context)
+
+    def _finalize_request_access(self, req_context: ReqContext) -> None:
         state = req_context.get_state(_RequestCacheAccess)
         if (
             state is None
@@ -525,6 +539,10 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
     @override
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
+        self._retention.sweep_expired()
+
+    @override
     def reset_cache(self) -> None:
         # Clear ALL chunks unconditionally. The scheduler's _stale_job_threshold
         # guarantees that complete_load / complete_store are never called for
@@ -532,6 +550,7 @@ class CPUOffloadingManager(OffloadingManager):
         # flushes in-flight load job IDs to the workers before any new stores
         # can begin, preventing a cross-direction data race on reused offload chunk IDs.
         self._policy.clear()
+        self._retention.reset_cache()
         self._cache_generation += 1
         self._num_evictable_cache_chunks = 0
         self._num_write_pending_chunks = 0
@@ -594,4 +613,5 @@ class CPUOffloadingManager(OffloadingManager):
             )
             self.stores_skipped_in_current_batch = 0
 
+        self._retention.drain_stats(stats)
         return stats
