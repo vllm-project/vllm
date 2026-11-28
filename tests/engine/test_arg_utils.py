@@ -720,15 +720,22 @@ def test_multi_node_world_size_includes_pcp():
     assert vllm_config.parallel_config.world_size == 2
 
 
-def test_data_parallel_coordinator_timeout_flows_into_parallel_config():
+def test_data_parallel_coordinator_startup_timeout_flows_into_parallel_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(
-        ["--model", "facebook/opt-125m", "--data-parallel-coordinator-timeout", "300"]
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--data-parallel-coordinator-startup-timeout-seconds",
+            "300",
+        ]
     )
 
     config = EngineArgs.from_cli_args(args).create_engine_config()
 
-    assert config.parallel_config.data_parallel_coordinator_timeout == 300
+    assert (
+        config.parallel_config.data_parallel_coordinator_startup_timeout_seconds == 300
+    )
 
 
 def test_prefix_cache_default():

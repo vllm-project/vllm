@@ -20,7 +20,7 @@ This document focuses on online deployments (with the API server). DP + EP is al
 
 There are two distinct modes supported for online deployments - self-contained with internal load balancing, or externally per-rank process deployment and load balancing.
 
-For any online DP deployment that starts a coordinator, including non-MoE deployments using internal or hybrid load balancing, set `--data-parallel-coordinator-timeout` on rank 0 to control how long the frontend waits for the coordinator's ZMQ socket addresses. The default is 120 seconds. You can also set `data-parallel-coordinator-timeout` in the [serve YAML config](../configuration/serve_args.md).
+For any online DP deployment that starts a coordinator, including non-MoE deployments using internal or hybrid load balancing, set `--data-parallel-coordinator-startup-timeout-seconds` on rank 0 to control how long the frontend waits for the coordinator's ZMQ socket addresses. The default is 120 seconds. You can also set `data-parallel-coordinator-startup-timeout-seconds` in the [serve YAML config](../configuration/serve_args.md).
 
 With multi-node internal load balancing and the multiprocessing backend, each remote engine has 5 minutes to receive a reply after sending its initial `HELLO`. Rank 0 binds its handshake socket after the coordinator reports its addresses. The 5-minute deadline applies regardless of the coordinator timeout, so stagger remote engine startup if rank 0 needs longer to accept handshakes.
 

@@ -2740,12 +2740,14 @@ def test_data_parallel_rpc_port_rejects_invalid_ports(port: int):
         ParallelConfig(data_parallel_rpc_port=port)
 
 
-def test_data_parallel_coordinator_timeout_fits_poll_timeout():
-    config = ParallelConfig(data_parallel_coordinator_timeout=2_147_483)
-    assert config.data_parallel_coordinator_timeout == 2_147_483
+def test_data_parallel_coordinator_startup_timeout_fits_poll_timeout():
+    config = ParallelConfig(data_parallel_coordinator_startup_timeout_seconds=2_147_483)
+    assert config.data_parallel_coordinator_startup_timeout_seconds == 2_147_483
 
-    with pytest.raises(ValidationError, match="data_parallel_coordinator_timeout"):
-        ParallelConfig(data_parallel_coordinator_timeout=2_147_484)
+    with pytest.raises(
+        ValidationError, match="data_parallel_coordinator_startup_timeout_seconds"
+    ):
+        ParallelConfig(data_parallel_coordinator_startup_timeout_seconds=2_147_484)
 
 
 def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():

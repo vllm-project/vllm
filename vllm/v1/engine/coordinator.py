@@ -67,7 +67,8 @@ class DPCoordinator:
                     raise RuntimeError(
                         "DP Coordinator process failed to report ZMQ addresses "
                         f"within timeout={timeout} seconds during startup. "
-                        "Set --data-parallel-coordinator-timeout to adjust this wait."
+                        "Set --data-parallel-coordinator-startup-timeout-seconds "
+                        "to adjust this wait."
                     )
                 try:
                     return zmq_addr_pipe.recv()
@@ -126,7 +127,7 @@ class DPCoordinator:
             back_publish_address,
         ) = self._wait_for_zmq_addrs(
             parent_zmq_addr_pipe,
-            parallel_config.data_parallel_coordinator_timeout,
+            parallel_config.data_parallel_coordinator_startup_timeout_seconds,
         )
 
         self.stats_publish_address = front_publish_address
