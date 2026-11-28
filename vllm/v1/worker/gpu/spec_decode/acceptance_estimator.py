@@ -97,6 +97,8 @@ def _refit_kernel(
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     L2: tl.constexpr,
     DAMPING: tl.constexpr,
+    MAX_LOGIT_STEP: tl.constexpr,
+    MAX_LOG_ODDS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     k = tl.arange(0, BLOCK)
@@ -131,11 +133,16 @@ def _refit_kernel(
     # total sample count.
     total_n = tl.sum(n, axis=0)
     step_w *= total_n / (total_n + DAMPING)
-    # Mask out non-finite steps and steps that would drive the slope negative.
-    # A NaN check alone would let +inf through, as w + inf >= 0.
-    step_w = tl.where(
-        (tl.abs(step_w) < float("inf")) & (w + step_w >= 0.0), step_w, 0.0
-    )
+    # Mask out non-finite steps first, as the clamp below would turn ±inf into
+    # its bound.
+    step_w = tl.where(tl.abs(step_w) < float("inf"), step_w, 0.0)
+    # Bound the step so no prediction's logit moves by more than MAX_LOGIT_STEP:
+    # the slope may spend half of it on the most extreme feature. Clamping before
+    # the sign check lets a large negative step still move the slope down.
+    max_step_w = MAX_LOGIT_STEP / 2.0 / MAX_LOG_ODDS
+    step_w = tl.clamp(step_w, -max_step_w, max_step_w)
+    # Mask out steps that would drive the slope negative.
+    step_w = tl.where(w + step_w >= 0.0, step_w, 0.0)
     # Update the shared slope.
     new_w = w + step_w
 
@@ -145,6 +152,9 @@ def _refit_kernel(
     step_bias *= n / (n + DAMPING)
     # Mask out non-finite steps.
     step_bias = tl.where(tl.abs(step_bias) < float("inf"), step_bias, 0.0)
+    # The intercepts get whatever the slope left of the logit budget.
+    max_step_bias = MAX_LOGIT_STEP - tl.abs(step_w) * MAX_LOG_ODDS
+    step_bias = tl.clamp(step_bias, -max_step_bias, max_step_bias)
     # Update the per-position intercepts.
     new_bias = bias + step_bias
 
@@ -368,6 +378,12 @@ class OnlineAcceptanceEstimator:
     DAMPING_OBSERVATIONS = 50.0
     # Ridge on the Newton solve.
     L2 = 1e-3
+    # Trust region on a refit: the most any prediction's logit can move. A
+    # saturated prediction contributes a residual but no curvature, p(1-p) = 0,
+    # so without this only L2 bounds the step, and a round of them can throw the
+    # coefficients out by ~1e5. Bounds above 4 let the clamped Newton iteration
+    # 2-cycle around the optimum instead of converging.
+    MAX_LOGIT_STEP = 2.0
 
     def __init__(
         self,
@@ -490,6 +506,8 @@ class OnlineAcceptanceEstimator:
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             L2=self.L2,
             DAMPING=self.DAMPING_OBSERVATIONS,
+            MAX_LOGIT_STEP=self.MAX_LOGIT_STEP,
+            MAX_LOG_ODDS=_MAX_LOG_ODDS,
             BLOCK=triton.next_power_of_2(self.num_speculative_steps),
         )
 

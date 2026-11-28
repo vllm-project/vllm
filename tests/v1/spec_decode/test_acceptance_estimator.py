@@ -9,6 +9,8 @@ to another request -- so it is asserted here rather than left to acceptance
 metrics to hint at.
 """
 
+import math
+
 import pytest
 import torch
 
@@ -297,6 +299,48 @@ def test_refit_rejects_only_non_finite_intercept_steps(gradient: float):
     torch.testing.assert_close(estimator.intercepts[1:], expected_intercepts[1:])
 
 
+def test_refit_bounds_the_step_on_saturated_predictions():
+    """Predictions saturated at 1.0 must walk the fit back, not throw it out.
+
+    At the cold-start coefficients the extreme feature predicts sigmoid(19.8),
+    which is exactly 1.0 in fp32, so its IRLS weight p(1-p) is 0. A round of
+    such drafts contributes residuals but no curvature, leaving only L2 to bound
+    the Newton step: at 80% acceptance one round sent the intercepts to about
+    -2e5 and the next the slope to about 3e7, after which every prediction stays
+    saturated at 0 or 1.
+    """
+    device = current_platform.device_type
+    torch.manual_seed(0)
+    acceptance = 0.8
+    estimator = OnlineAcceptanceEstimator(REFIT_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    slots = torch.arange(REFIT_NUM_REQS, device=device, dtype=torch.int32)
+    features = torch.full((REFIT_NUM_REQS, NUM_STEPS), _MAX_LOG_ODDS, device=device)
+
+    for round_idx in range(20):
+        accepted = torch.rand_like(features) < acceptance
+        num_accepted = (~accepted).float().argmax(dim=1)
+        num_accepted[accepted.all(dim=1)] = NUM_STEPS
+        slope, intercepts = estimator.slope.clone(), estimator.intercepts.clone()
+        _drive_round(estimator, features, num_accepted, slots)
+        if round_idx == 0:
+            # Guards the setup: the first round must be the saturated one.
+            assert (estimator.predictions[slots.long()] == 1.0).all()
+        logit_step = (estimator.slope - slope).abs() * _MAX_LOG_ODDS + (
+            estimator.intercepts - intercepts
+        ).abs()
+        assert (logit_step <= estimator.MAX_LOGIT_STEP + 1e-4).all(), (
+            f"round {round_idx} moved a logit by {logit_step.max().item():.3g}"
+        )
+
+    # Every position accepts at the same rate, so each lands on its log-odds.
+    logits = estimator.slope * _MAX_LOG_ODDS + estimator.intercepts
+    expected = math.log(acceptance / (1.0 - acceptance))
+    torch.testing.assert_close(
+        logits, torch.full_like(logits, expected), atol=0.5, rtol=0
+    )
+
+
 def test_step_damping_scales_with_the_evidence():
     """A round moves a coefficient in proportion to the samples behind it.
 
@@ -317,7 +361,8 @@ def test_step_damping_scales_with_the_evidence():
         # The slope's information and score are accumulated as per-position
         # partials that the refit sums, so spread each total over the positions.
         estimator.info[:, 0] = 30.0 * scale / NUM_STEPS  # sum(w*margin^2)
-        estimator.grad[:, 0] = 2.0 * scale / NUM_STEPS  # sum((y - p)*margin)
+        # Small enough that the slope step stays inside MAX_LOGIT_STEP's bound.
+        estimator.grad[:, 0] = 0.5 * scale / NUM_STEPS  # sum((y - p)*margin)
         estimator.counts[:] = per_position_n * scale
         estimator._steps_since_refit = estimator.REFIT_INTERVAL - 1
         before_slope = estimator.slope.clone()
@@ -333,7 +378,7 @@ def test_step_damping_scales_with_the_evidence():
         total_n = per_position_n * scale * NUM_STEPS
         slope_delta, bias_delta = refit_with(scale)
         assert slope_delta == pytest.approx(
-            (2.0 / 30.0) * total_n / (total_n + damping), rel=1e-3
+            (0.5 / 30.0) * total_n / (total_n + damping), rel=1e-3
         )
         assert bias_delta == pytest.approx(
             0.5 * (per_position_n * scale) / (per_position_n * scale + damping),
