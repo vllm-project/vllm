@@ -3,7 +3,17 @@
 
 from vllm import envs
 
-if envs.VLLM_USE_MODELSCOPE:
+
+def is_modelscope_hub_enabled() -> bool:
+    """Use global Hub routing when target and draft do not use different sources.
+
+    With different sources, ModelConfig resolves ModelScope models to local
+    paths, leaving remote repo IDs for the original Hugging Face loaders.
+    """
+    return envs.VLLM_USE_MODELSCOPE and envs.VLLM_DRAFT_USE_MODELSCOPE is not False
+
+
+if is_modelscope_hub_enabled():
     try:
         # Patch here, before each import happens
         import modelscope
