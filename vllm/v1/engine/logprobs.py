@@ -136,7 +136,8 @@ class LogprobsProcessor:
         detokenize: bool,
     ) -> None:
         """Appends `[n, S]` engine rows, cut to the requested width, with the
-        `[n]` ranks of their sampled tokens."""
+        `[n]` ranks of their sampled tokens or the `[n, S]` ranks of every
+        slot."""
         width = token_ids.shape[1] if num_logprobs == -1 else num_logprobs + 1
         token_ids, logprobs = token_ids[:, :width], logprobs[:, :width]
         decoded = (

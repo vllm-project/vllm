@@ -783,7 +783,10 @@ class MaskedDiffusionSampler:
         assert self._topk_stash is not None
         n, CL, vocab = logits_3d.shape
         new = compute_topk_scores(
-            logits_3d.reshape(n * CL, vocab), num_logprobs, canvas_rows.reshape(-1)
+            logits_3d.reshape(n * CL, vocab),
+            num_logprobs,
+            canvas_rows.reshape(-1),
+            drop_sampled_from_topk=False,
         )
         masked_stash_write(self._topk_stash, slots, keep, new)
 
@@ -808,7 +811,10 @@ class MaskedDiffusionSampler:
         for i in wide_rows_np[converged_np[wide_rows_np]].tolist():
             k = int(valid_len_np[i])
             self._wide_logprobs[int(slots_np[i])] = compute_topk_scores(
-                logits_3d[i, :k], num_logprobs, canvas_rows[i, :k]
+                logits_3d[i, :k],
+                num_logprobs,
+                canvas_rows[i, :k],
+                drop_sampled_from_topk=False,
             )
 
     def _canvas_rows(
