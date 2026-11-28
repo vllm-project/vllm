@@ -122,6 +122,8 @@ lookup.
   and log-Mel feature extraction. After decoding, it also counts waveform
   copies using each clip's sample count. The configured multimodal item limit
   applies to waveforms and `audio_embeds`.
+- Qwen2-Audio and Qwen3-ASR estimate audio feature extraction memory for the
+  prompt before preprocessing, including when the processor cache is warm.
 - Nano Nemotron VL estimates host-side image preprocessing. The CPU resize
   path accounts for resized tiles, resize temporaries, and concatenation. It
   includes the largest full-resolution float32 source buffer when CPU

@@ -32,6 +32,13 @@ this checkpoint. For Python text-only inference, set
 
 ## Offline Inference
 
+Qwen2-Audio and Qwen3-ASR estimate audio feature extraction memory before
+processing a prompt.
+Set `VLLM_MAX_MEDIA_PREPROCESSING_BYTES` to change the per-prompt byte limit;
+`0` disables the check. The default is 715,827,880 bytes. Audio item counts
+continue to use `limit_mm_per_prompt` in `LLM` or
+`--limit-mm-per-prompt.audio` when serving.
+
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.

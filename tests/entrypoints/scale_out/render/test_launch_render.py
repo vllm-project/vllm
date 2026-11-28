@@ -11,7 +11,7 @@ from tokenizers.models import WordLevel
 from transformers import LlamaConfig, TokenizersBackend
 
 from tests.utils import RemoteLaunchRenderServer
-from vllm.multimodal.utils import encode_video_url
+from vllm.multimodal.utils import encode_audio_url, encode_video_url
 
 MODEL_NAME = "vllm/tiny-random-LlamaForCausalLM"
 
@@ -279,6 +279,43 @@ async def client(server):
 
 
 # -- Chat Completion Render --
+
+
+@pytest.mark.parametrize(
+    "model,error_text",
+    [
+        ("Qwen/Qwen3-ASR-0.6B", "Qwen3-ASR audio preprocessing exceeds"),
+        ("Qwen/Qwen2-Audio-7B-Instruct", "Qwen2-Audio preprocessing exceeds"),
+    ],
+)
+def test_chat_render_rejects_audio_preprocessing_over_budget(model, error_text):
+    audio_url = encode_audio_url(np.zeros(16000, dtype=np.float32), 16000)
+
+    with RemoteLaunchRenderServer(
+        model,
+        [],
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": "20000000"},
+    ) as srv:
+        for count, expected_status in [(1, 200), (4, 400)]:
+            response = httpx.post(
+                srv.url_for("v1/chat/completions/render"),
+                json={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "audio_url", "audio_url": {"url": audio_url}}
+                                for _ in range(count)
+                            ],
+                        }
+                    ],
+                },
+                timeout=60,
+            )
+            assert response.status_code == expected_status, response.text[:300]
+            if count == 4:
+                assert error_text in response.text
 
 
 @pytest.mark.asyncio

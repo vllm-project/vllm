@@ -33,10 +33,18 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_asr import Qwen3ASRFeatureExtractor, Qwen3ASRProcessor
 from transformers.models.whisper import WhisperFeatureExtractor
 
+from vllm import envs
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import (
+    ModalityData,
+    MultiModalDataDict,
+    MultiModalInput,
+    PromptType,
+    TokensPrompt,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -84,10 +92,13 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
     cached_encode,
 )
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
@@ -272,6 +283,71 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 class Qwen3ASRMultiModalProcessor(
     BaseMultiModalProcessor[Qwen3ASRProcessingInfo],
 ):
+    def apply(
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
+    ) -> MultiModalInput:
+        items = inputs.mm_data_items.get("audio")
+        if isinstance(items, AudioProcessorItems):
+            audios = [items.get(i) for i in range(len(items))]
+            self._validate_audio_preprocessing_budget(
+                audios, inputs.hf_processor_mm_kwargs
+            )
+        return super().apply(inputs, timing_ctx)
+
+    def _validate_audio_preprocessing_budget(
+        self, audios: list[Any], hf_kwargs: Mapping[str, object]
+    ) -> None:
+        limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+        if limit <= 0 or is_profiling_media():
+            return
+
+        extractor = self.info.get_feature_extractor(**hf_kwargs)
+        audio_kwargs = hf_kwargs.get("audio_kwargs")
+        options = audio_kwargs if isinstance(audio_kwargs, Mapping) else hf_kwargs
+        max_length = options.get("max_length")
+        pad_multiple = options.get("pad_to_multiple_of")
+        n_window = options.get("n_window", getattr(extractor, "n_window", 0))
+        max_length = max_length if isinstance(max_length, int) and max_length > 0 else 0
+        pad_multiple = (
+            pad_multiple if isinstance(pad_multiple, int) and pad_multiple > 0 else 0
+        )
+        n_window = n_window if isinstance(n_window, int) and n_window > 0 else 0
+
+        retained_bytes = 0
+        largest_temporary_bytes = 0
+        for audio in audios:
+            samples = len(audio) if audio is not None else 0
+            padded_samples = max(
+                samples,
+                extractor.n_samples,
+                getattr(extractor, "min_length", 0),
+                max_length,
+            )
+            if pad_multiple:
+                padded_samples = (
+                    (padded_samples + pad_multiple - 1) // pad_multiple * pad_multiple
+                )
+            frames = (padded_samples + extractor.hop_length - 1) // extractor.hop_length
+            mel_frames = frames
+            if n_window:
+                mel_multiple = 2 * n_window
+                mel_frames = (frames + mel_multiple - 1) // mel_multiple * mel_multiple
+            feature_bytes = mel_frames * extractor.feature_size * 4
+            # Clips are processed separately; their features remain live.
+            retained_bytes += samples * 4 + 3 * feature_bytes + mel_frames * 8
+            stft_bytes = (frames + 1) * (extractor.n_fft // 2 + 1) * 16
+            largest_temporary_bytes = max(
+                largest_temporary_bytes,
+                padded_samples * 8 + stft_bytes + feature_bytes,
+            )
+
+        if retained_bytes + largest_temporary_bytes > limit:
+            raise VLLMValidationError(
+                "Qwen3-ASR audio preprocessing exceeds "
+                f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
+                parameter="audio",
+            )
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -284,6 +360,7 @@ class Qwen3ASRMultiModalProcessor(
         if not audios:
             return BatchFeature()
         assert isinstance(audios, list)
+        self._validate_audio_preprocessing_budget(audios, hf_kwargs)
 
         if len(audios) == 1:
             return super()._call_hf_processor(hf_data, hf_kwargs)

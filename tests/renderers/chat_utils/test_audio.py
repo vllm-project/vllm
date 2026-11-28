@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import pytest
 
+from vllm import envs
 from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
 from vllm.utils.serial_utils import tensor2base64
 
@@ -12,6 +16,22 @@ from .utils import (
 )
 
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
+
+
+def test_qwen2_audio_preprocessing_budget_rejects_prompt(monkeypatch):
+    config = ModelConfig(QWEN2AUDIO_MODEL_ID, runner="generate")
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    audios = [np.zeros(16000, dtype=np.float32)] * 17
+    assert config.get_multimodal_config().get_limit_per_prompt("audio") == 999
+    items = processor.info.parse_mm_data({"audio": audios})
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", 20_000_000)
+    with pytest.raises(VLLMValidationError, match="Qwen2-Audio preprocessing exceeds"):
+        processor(
+            processor.dummy_inputs.get_dummy_text({"audio": len(audios)}),
+            mm_items=items,
+            hf_processor_mm_kwargs={},
+        )
 
 
 @pytest.fixture(scope="function")
