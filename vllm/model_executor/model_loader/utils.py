@@ -499,23 +499,60 @@ def _register_processed_tensors(
         module = modules.get(module_name)
         if module is None:
             raise RuntimeError(f"Cached tensor {name} has no matching module")
-        module._parameters.pop(leaf, None)
-        module._buffers.pop(leaf, None)
         if is_param:
             obj: torch.Tensor = (
                 tensor
                 if isinstance(tensor, nn.Parameter)
                 else nn.Parameter(tensor, requires_grad=False)
             )
-            module.register_parameter(leaf, obj)
+            placeholder = module._parameters.get(leaf)
+            if (
+                placeholder is not None
+                and placeholder is not obj
+                and placeholder.is_meta
+            ):
+                # Swap the cached tensor into the placeholder in place.
+                # Objects constructed with the model may hold references
+                # to the placeholder Parameter (e.g. MoE routers capturing
+                # gate.e_score_correction_bias); swapping keeps every
+                # holder on the same object instead of stranding them on
+                # the meta tensor. A plain param.data assignment cannot do
+                # this: it fails for meta tensors ("incompatible tensor
+                # type"). When there is no meta placeholder to preserve
+                # (e.g. post-quantization tensors absent from the meta
+                # model), fall back to registering the new object.
+                torch.utils.swap_tensors(placeholder, obj)
+                obj = placeholder
+            else:
+                module._parameters.pop(leaf, None)
+                module._buffers.pop(leaf, None)
+                module.register_parameter(leaf, obj)
         else:
             obj = tensor
+            module._parameters.pop(leaf, None)
+            module._buffers.pop(leaf, None)
             module.register_buffer(leaf, obj)
         registered[name] = obj
 
-    for name, tensor in tensors.items():
+    # Buffers before parameters: a buffer may be a view of a meta
+    # parameter (e.g. MambaMixer2.conv_weights views conv1d.weight), and
+    # swap_tensors refuses to swap a tensor while such a view is alive.
+    # Replacing the buffer first releases the view. The sort is stable,
+    # so the relative order within each kind is preserved.
+    items = sorted(
+        tensors.items(),
+        key=lambda item: manifest["tensors"][item[0]]["is_param"],
+    )
+    for name, tensor in items:
         _register(name, tensor, manifest["tensors"][name]["is_param"])
 
+    # Re-establish tied-weight aliases by registering the *same* object the
+    # canonical name resolved to, so parameter identity (and the tie) is
+    # preserved instead of allocating uninitialized memory. The canonical
+    # object already holds the cached data (swapped in place above); only
+    # re-point the alias at it. Never swap here: swapping the alias
+    # placeholder into the canonical object would move the meta tensor
+    # back into the canonical entry.
     for alias_name, canonical_name in aliases.items():
         obj = registered.get(canonical_name)
         if obj is None:
@@ -525,7 +562,16 @@ def _register_processed_tensors(
                 canonical_name,
             )
             continue
-        _register(alias_name, obj, isinstance(obj, nn.Parameter))
+        module_name, _, leaf = alias_name.rpartition(".")
+        module = modules.get(module_name)
+        if module is None:
+            raise RuntimeError(f"Cached tensor {alias_name} has no matching module")
+        module._parameters.pop(leaf, None)
+        module._buffers.pop(leaf, None)
+        if isinstance(obj, nn.Parameter):
+            module.register_parameter(leaf, obj)
+        else:
+            module.register_buffer(leaf, obj)
 
 
 def _materialize_remaining_meta_tensors(model: nn.Module, device: torch.device) -> None:
