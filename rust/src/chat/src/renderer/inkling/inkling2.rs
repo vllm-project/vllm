@@ -96,6 +96,7 @@ impl InklingChatRenderer {
                 ChatMessage::ToolResponse {
                     content,
                     tool_call_id,
+                    ..
                 } => {
                     let name = tool_call_id_to_name.get(tool_call_id).map(String::as_str);
                     self.write_inkling2_content(

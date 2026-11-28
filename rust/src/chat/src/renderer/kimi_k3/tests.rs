@@ -115,8 +115,9 @@ fn render_request(request: &crate::request::ChatRequest) -> String {
     tokenizer.decode(&token_ids, false).unwrap()
 }
 
-/// A tool result that matches no tool call, and replayed tool-call arguments
-/// that are JSON but not an object, are the request's messages' errors.
+/// A tool message nothing can name (no matching id, no non-empty `name`, and
+/// no preceding assistant tool call at its position) is the request's
+/// `messages` error.
 #[test]
 fn message_refusals_are_request_errors() {
     let renderer = KimiK3ChatRenderer::new(
@@ -124,20 +125,18 @@ fn message_refusals_are_request_errors() {
         Default::default(),
         KimiK3Variant::K3,
     );
-    let call = |arguments: &str| {
-        ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(AssistantToolCall {
-            id: "call-known".to_string(),
-            name: "lookup".to_string(),
-            arguments: arguments.to_string(),
-        })])
-    };
+    let call = ChatMessage::assistant_blocks(vec![tool_call("call-known", "lookup", "{}")]);
     for messages in [
         vec![
             ChatMessage::user("hi"),
-            call("{}"),
-            ChatMessage::tool_response("{}", "call-unknown"),
+            ChatMessage::tool_response("orphaned result", "unknown-id"),
         ],
-        vec![ChatMessage::user("hi"), call("[1]")],
+        vec![
+            ChatMessage::user("hi"),
+            call,
+            ChatMessage::tool_response("first", "rewritten-1"),
+            ChatMessage::tool_response("extra", "rewritten-2"),
+        ],
     ] {
         let request = crate::request::ChatRequest {
             messages,
@@ -149,6 +148,12 @@ fn message_refusals_are_request_errors() {
             crate::error::ErrorKind::invalid_param("messages"),
             "{error:?}"
         );
+        expect![[r#"
+            InvalidMessages {
+                message: "Tool messages need a resolvable tool name: carry a matching tool_call_id, an explicit `name`, or match a preceding assistant tool_call by order.",
+            }
+        "#]]
+        .assert_debug_eq(&error);
     }
 }
 
@@ -452,6 +457,119 @@ fn image_part(uuid: &str) -> ChatContentPart {
         detail: None,
         uuid: Some(uuid.to_string()),
     }
+}
+
+fn tool_call(id: &str, name: &str, arguments: &str) -> AssistantContentBlock {
+    AssistantContentBlock::ToolCall(AssistantToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments: arguments.to_string(),
+    })
+}
+
+/// Render a history alone: no thinking-effort preamble, no generation prompt.
+fn render_history(messages: Vec<ChatMessage>) -> String {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.messages = messages;
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), json!(false));
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    render_request(&request)
+}
+
+/// A client that rewrote `tool_call_id` (a gateway, a session compactor) can
+/// still name the tool on the message.
+#[test]
+fn unmatched_tool_call_id_falls_back_to_explicit_name() {
+    let rendered = render_history(vec![
+        ChatMessage::user("weather?"),
+        ChatMessage::tool_response_named(
+            "Sunny",
+            "compacted-call-id",
+            Some("get_weather".to_string()),
+        ),
+    ]);
+
+    expect![[r#"<|open|>message role="user"<|sep|>weather?<|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="get_weather" index="1"<|sep|>Sunny<|close|>message<|sep|><|end_of_msg|>"#]]
+        .assert_eq(&rendered);
+}
+
+fn weather_and_search_calls() -> ChatMessage {
+    ChatMessage::assistant_blocks(vec![
+        tool_call("call-a", "weather", "{}"),
+        tool_call("call-b", "search", "{}"),
+    ])
+}
+
+/// As in `build_chat_segments()`, the name on the message wins over call order.
+#[test]
+fn explicit_name_takes_precedence_over_preceding_assistant_order() {
+    let rendered = render_history(vec![
+        weather_and_search_calls(),
+        ChatMessage::tool_response_named("result-b", "rewritten-b", Some("search".to_string())),
+    ]);
+
+    expect![[r#"<|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|close|>call<|sep|><|open|>call tool="search" index="2"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="search" index="1"<|sep|>result-b<|close|>message<|sep|><|end_of_msg|>"#]]
+        .assert_eq(&rendered);
+}
+
+#[test]
+fn unmatched_tool_call_id_falls_back_to_preceding_assistant_order() {
+    let rendered = render_history(vec![
+        weather_and_search_calls(),
+        ChatMessage::tool_response("result-a", "rewritten-a"),
+        ChatMessage::tool_response("result-b", "rewritten-b"),
+    ]);
+
+    expect![[r#"<|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|close|>call<|sep|><|open|>call tool="search" index="2"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="weather" index="1"<|sep|>result-a<|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="search" index="2"<|sep|>result-b<|close|>message<|sep|><|end_of_msg|>"#]]
+        .assert_eq(&rendered);
+}
+
+/// As in `build_chat_segments()`, one unmatched id makes the whole run fall
+/// back to call order, even for the message whose id does match.
+#[test]
+fn partly_matched_tool_run_ignores_ids() {
+    let rendered = render_history(vec![
+        weather_and_search_calls(),
+        ChatMessage::tool_response("result-b", "call-b"),
+        ChatMessage::tool_response("result-a", "rewritten-a"),
+    ]);
+
+    expect![[r#"<|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|close|>call<|sep|><|open|>call tool="search" index="2"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="weather" index="1"<|sep|>result-b<|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="search" index="2"<|sep|>result-a<|close|>message<|sep|><|end_of_msg|>"#]]
+        .assert_eq(&rendered);
+}
+
+/// An empty `name` is no name: the result falls back to call order.
+#[test]
+fn empty_tool_name_counts_as_absent() {
+    let rendered = render_history(vec![
+        ChatMessage::assistant_blocks(vec![tool_call("call-a", "weather", "{}")]),
+        ChatMessage::tool_response_named("result-a", "rewritten-a", Some(String::new())),
+    ]);
+
+    expect![[r#"<|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|><|open|>message role="tool" tool="weather" index="1"<|sep|>result-a<|close|>message<|sep|><|end_of_msg|>"#]]
+        .assert_eq(&rendered);
+}
+
+/// Like malformed text, valid JSON that is not an object keeps its raw text.
+#[test]
+fn non_object_json_tool_arguments_render_as_raw_json_block() {
+    let rendered = ["[1, 2]", "123", "true", "null"]
+        .map(|raw| {
+            render_history(vec![ChatMessage::assistant_blocks(vec![tool_call(
+                "call-1", "weather", raw,
+            )])])
+        })
+        .join("\n");
+
+    expect![[r#"
+        <|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|open|>json type="object"<|sep|>[1, 2]<|close|>json<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>
+        <|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|open|>json type="object"<|sep|>123<|close|>json<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>
+        <|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|open|>json type="object"<|sep|>true<|close|>json<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>
+        <|open|>message role="assistant"<|sep|><|open|>response<|sep|><|close|>response<|sep|><|open|>tools<|sep|><|open|>call tool="weather" index="1"<|sep|><|open|>json type="object"<|sep|>null<|close|>json<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>"#]]
+        .assert_eq(&rendered);
 }
 
 #[test]

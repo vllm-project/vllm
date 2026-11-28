@@ -560,6 +560,9 @@ pub enum ChatMessage {
     Tool {
         content: MessageContent,
         tool_call_id: String,
+        /// Name of the tool that produced the result. OpenAI's schema has no
+        /// such field; clients send it, and the Python frontend keeps it too.
+        name: Option<String>,
     },
     #[serde(rename = "function")]
     Function { content: String, name: String },
