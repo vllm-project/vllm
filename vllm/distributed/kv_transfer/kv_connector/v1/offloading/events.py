@@ -187,6 +187,11 @@ class OffloadingEventsTracker:
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        # OffloadKey -> primary removals of earlier allocations that a later
+        # recorded store replaced (prepare_store() only allocates absent keys).
+        # The manager queued them before that store, so they arrive in the next
+        # take_events() batch, or never if the manager dropped them.
+        self._superseded_primary_removals: dict[OffloadKey, int] = {}
         # (medium, ownership) -> its bit in active_residencies.
         self._residency_bits: dict[tuple[Medium, str | None], int] = {
             (Medium.CPU, None): _PRIMARY_RESIDENCY_BIT
@@ -250,8 +255,17 @@ class OffloadingEventsTracker:
         if not describes_group(group_config):
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
+        self._replace_event_metadata(offload_key, meta)
+
+    def _replace_event_metadata(
+        self, offload_key: OffloadKey, meta: _OffloadEventMetadata
+    ) -> None:
         if existing := self._pending_event_metadata.get(offload_key):
             meta.active_residencies |= existing.active_residencies
+            if existing.active_residencies & _PRIMARY_RESIDENCY_BIT:
+                self._superseded_primary_removals[offload_key] = (
+                    self._superseded_primary_removals.get(offload_key, 0) + 1
+                )
         self._pending_event_metadata[offload_key] = meta
 
     def record_lookup(
@@ -360,9 +374,7 @@ class OffloadingEventsTracker:
         )
         if _is_recurrent_group(group_config):
             meta = _as_state_checkpoint(meta)
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies |= existing.active_residencies
-        self._pending_event_metadata[offload_key] = meta
+        self._replace_event_metadata(offload_key, meta)
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -391,11 +403,13 @@ class OffloadingEventsTracker:
             meta = self._pending_event_metadata.get(key)
             if meta is not None and not meta.active_residencies:
                 self._pending_event_metadata.pop(key)
+        self._superseded_primary_removals.clear()
 
     def reset(self) -> None:
         """Drop all tracked state; pending payloads are stale after a
         manager cache reset."""
         self._pending_event_metadata.clear()
+        self._superseded_primary_removals.clear()
 
     def _lookahead_tokens(
         self, all_token_ids: Sequence[int], start: int, end: int, block_size: int
@@ -589,15 +603,24 @@ class OffloadingEventsTracker:
                 ownership=event.ownership,
             )
 
+    def _release_residency(
+        self, key: OffloadKey, meta: _OffloadEventMetadata, residency_bit: int
+    ) -> None:
+        superseded = self._superseded_primary_removals.get(key, 0)
+        if residency_bit == _PRIMARY_RESIDENCY_BIT and superseded:
+            self._superseded_primary_removals[key] = superseded - 1
+        else:
+            meta.active_residencies &= ~residency_bit
+
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
         # Keep group_idx unambiguous if a manager batch spans groups.
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
-        residency_mask = ~self._residency_bits.get((event.medium, event.ownership), 0)
+        residency_bit = self._residency_bits.get((event.medium, event.ownership), 0)
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if meta is not None:
-                meta.active_residencies &= residency_mask
+                self._release_residency(key, meta, residency_bit)
             if event.metadata_only:
                 continue
             if meta is not None:
