@@ -476,6 +476,19 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         marks=[pytest.mark.core_model],
     ),
+    "dots_ocr": VitCudagraphTestConfig(
+        model="rednote-hilab/dots.ocr",
+        modalities=["image"],
+        image_prompt=(
+            "<|user|><|img|><|imgpad|><|endofimg|>"
+            "What is in this image?<|endofuser|><|assistant|>"
+        ),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [4096],
+        },
+        vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
     "gemma4": VitCudagraphTestConfig(
         model="google/gemma-4-E2B-it",
         image_prompt=(
@@ -1013,6 +1026,110 @@ def test_kimi_k3_vit_cudagraph_replay_and_threshold(
         )
     for token_budgets in results:
         assert token_budgets[-1] == 512
+
+
+def _check_dots_ocr_replay_and_threshold(worker, grids, hits, misses):
+    """Run one image batch through the real manager; compare with eager.
+
+    Args:
+        grids: grid_thw of each image in the batch.
+        hits: expected graph hits for the batch.
+        misses: expected eager fallbacks for the batch.
+
+    """
+    import torch
+
+    from vllm.utils.torch_utils import set_random_seed
+
+    runner = worker.model_runner
+    manager = (
+        runner.model_state.encoder_runner.cudagraph_manager
+        if hasattr(runner, "model_state")
+        else runner.encoder_cudagraph_manager
+    )
+    assert manager is not None and manager.is_captured()
+    model = runner.model
+    vision_config = runner.model_config.hf_config.vision_config
+    patch_dim = (
+        vision_config.num_channels
+        * vision_config.temporal_patch_size
+        * vision_config.patch_size**2
+    )
+    set_random_seed(0)
+    with torch.inference_mode():
+        num_patches = sum(t * h * w for t, h, w in grids)
+        kwargs = {
+            "pixel_values": torch.randn(
+                num_patches, patch_dim, device=runner.device, dtype=torch.bfloat16
+            ),
+            "image_grid_thw": grids,
+        }
+        before = manager.get_cumulative_stats()
+        actual = torch.cat(manager.execute(kwargs))
+        after = manager.get_cumulative_stats()
+        assert after["graph_hits"] - before["graph_hits"] == hits
+        assert after["graph_misses"] - before["graph_misses"] == misses
+        expected = model.encoder_eager_forward(kwargs)
+        assert actual.shape == expected.shape
+        assert torch.isfinite(actual).all() and expected.abs().max() > 0
+        # Two bf16 ulps at the output scale: replay runs padded GEMMs.
+        bound = 2 * expected.abs().max().item() * 2**-7
+        diff = (actual.float() - expected.float()).abs().max().item()
+        assert diff <= bound, f"max abs diff {diff} > {bound}"
+    return manager.token_budgets
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
+@pytest.mark.parametrize(
+    ("grids", "hits", "misses"),
+    [
+        pytest.param([[1, 16, 16]], 1, 0, id="fills_smallest_budget_64"),
+        pytest.param([[1, 28, 28]], 1, 0, id="padded_budget_196"),
+        pytest.param([[1, 64, 64]], 1, 0, id="fills_largest_budget_1024"),
+        pytest.param([[1, 66, 64]], 0, 1, id="above_largest_budget_1056"),
+        pytest.param([[1, 28, 28]] * 2, 2, 0, id="two_images_share_replay"),
+        pytest.param(
+            [[1, 28, 28], [1, 66, 64]], 0, 2, id="batch_over_budget_all_eager"
+        ),
+    ],
+)
+def test_dots_ocr_vit_cudagraph_replay_and_threshold(
+    grids, hits, misses, vllm_runner, monkeypatch
+):
+    """Replay matches eager, and `encoder_cudagraph_max_token_budget` sets the
+    largest captured budget: a batch within it replays once, a larger batch
+    runs eagerly."""
+    # collective_rpc below sends a `partial` function, which needs pickle
+    # fallback since msgpack can't serialize it.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = MODEL_CONFIGS["dots_ocr"]
+    with vllm_runner(
+        config.model,
+        dtype=config.dtype,
+        max_model_len=config.max_model_len,
+        max_num_seqs=config.max_num_seqs,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config={
+            "cudagraph_mm_encoder": True,
+            "encoder_cudagraph_max_token_budget": 1024,
+            "encoder_cudagraph_max_vision_items_per_batch": 2,
+        },
+        # 1 text + 1 vision layer with random weights, as for kimi_k3.
+        load_format="dummy",
+        hf_overrides=partial(dummy_hf_overrides, model_arch="DotsOCRForCausalLM"),
+        **config.vllm_runner_kwargs,
+    ) as vllm_model:
+        results = vllm_model.llm.collective_rpc(
+            partial(
+                _check_dots_ocr_replay_and_threshold,
+                grids=grids,
+                hits=hits,
+                misses=misses,
+            )
+        )
+    for token_budgets in results:
+        assert token_budgets[-1] == 1024
 
 
 @pytest.mark.core_model
