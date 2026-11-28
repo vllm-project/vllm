@@ -1897,6 +1897,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             if padded_mtp_qo_len > 0:
                 max_qo_len = padded_mtp_qo_len
+            elif max_qo_len == 0 and num_decode_tokens > 0:
+                # FULL-graph replay on a PCP rank that owns no request: plan
+                # the padding rows as qlen 1 so the persistent schedule is
+                # rebuilt instead of replaying the previous step's.
+                max_qo_len = 1
             pad_uniform_mtp = padded_mtp_qo_len > 0
 
         seq_lens_for_kernel = seq_lens_device
