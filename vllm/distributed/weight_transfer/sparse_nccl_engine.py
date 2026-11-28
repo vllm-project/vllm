@@ -297,8 +297,8 @@ class SparseNCCLTrainerWeightTransferEngine(
     def _build_worker_init_payload(cls, init_info: SparseNCCLTrainerInitInfo) -> dict:
         return build_worker_init_payload(init_info)
 
-    @classmethod
-    def _open_trainer_endpoint(cls, init_info: SparseNCCLTrainerInitInfo) -> Any:
+    @staticmethod
+    def _open_trainer_endpoint(init_info: SparseNCCLTrainerInitInfo) -> Any:
         return open_trainer_endpoint(init_info)
 
     def _current_stream(self) -> Any:
