@@ -3789,3 +3789,106 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+@pytest.mark.asyncio
+async def test_sender_listener_does_not_hol_block_ready_pulls(monkeypatch):
+    """Blocked pulls awaiting prefill readiness must not stall ready pulls."""
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "30")
+    vllm_config = _make_worker_vllm_config(
+        "kv_producer", kv_connector_extra_config={"num_workers": 2}
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch.object(mooncake_connector.httpx, "AsyncClient", _BootstrapClientStub),
+    ):
+        producer = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        assert producer is not None
+
+        producer.kv_caches_base_addr = [0x1000]
+        producer.block_len_per_layer = [4096]
+        producer.kv_block_len_per_layer = [4096]
+        producer.registered_layer_names = ["model.layers.0.self_attn"]
+        producer.registered_layer_indices = [0]
+
+        origin_sender_loop = producer.sender_loop
+        producer.sender_loop = asyncio.get_running_loop()
+
+        # Mark only the late-arriving transfer ready; the first 6 stay blocked.
+        ready_meta = SendBlockMeta(
+            p_req_id="p-ready",
+            transfer_id="xfer-ready",
+            local_block_ids=[[1]],
+            ready=asyncio.Event(),
+        )
+        ready_meta.ready.set()
+        producer.reqs_need_send["xfer-ready"] = ready_meta
+
+        listener_ready = threading.Event()
+        listener = asyncio.create_task(
+            producer._mooncake_sender_listener(listener_ready)
+        )
+        ctx = zmq.asyncio.Context()
+        dealers: list[zmq.asyncio.Socket] = []
+        try:
+            while not listener_ready.is_set():
+                await asyncio.sleep(0.01)
+
+            endpoint = f"tcp://127.0.0.1:{producer.side_channel_port}"
+            remote_regions = [
+                _region(
+                    0x2000,
+                    block_len=4096,
+                    row_offset=-1,
+                    layer_name="model.layers.0.self_attn",
+                    layer_index=0,
+                )
+            ]
+
+            with patch.object(producer, "_send_blocks", return_value=None) as mock_send:
+                # Saturate more than 2 * num_workers with unready pulls.
+                for i in range(6):
+                    dealer = ctx.socket(zmq.DEALER)
+                    dealer.connect(endpoint)
+                    dealers.append(dealer)
+                    pull = _xfer_meta(
+                        remote_regions, {f"d-slow-{i}": (f"xfer-slow-{i}", [[1]])}
+                    )
+                    await dealer.send(msgspec.msgpack.encode(pull))
+
+                # Yield so the listener drains the incoming slow pulls before
+                # the ready pull arrives.
+                for _ in range(50):
+                    if len(producer.reqs_need_send) >= 7:
+                        break
+                    await asyncio.sleep(0.01)
+
+                # Now send a ready pull; it must complete immediately without
+                # waiting behind the 6 unready pulls.
+                fast_dealer = ctx.socket(zmq.DEALER)
+                fast_dealer.connect(endpoint)
+                dealers.append(fast_dealer)
+                fast_pull = _xfer_meta(
+                    remote_regions, {"d-ready": ("xfer-ready", [[1]])}
+                )
+                await fast_dealer.send(msgspec.msgpack.encode(fast_pull))
+
+                reply = await asyncio.wait_for(fast_dealer.recv(), timeout=2.0)
+                response = msgspec.msgpack.decode(reply, type=MooncakeXferResponse)
+                assert response.status == MooncakeXferResponseStatus.FINISH
+                assert response.ok_reqs == ["d-ready"]
+                assert len(producer.reqs_need_send) == 6
+                mock_send.assert_called_once()
+        finally:
+            listener.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await listener
+            for dealer in dealers:
+                dealer.close(linger=0)
+            ctx.term()
+            producer.sender_loop = origin_sender_loop
+            producer.shutdown()
+            _stub_worker_shutdown(producer, lambda: None)

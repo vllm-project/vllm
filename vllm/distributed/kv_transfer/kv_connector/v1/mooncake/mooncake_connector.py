@@ -1399,10 +1399,6 @@ class MooncakeConnectorWorker:
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
         )
-        # Create more tasks than workers to keep the thread pool saturated.
-        # Tasks can await async events, so a surplus (2x is a robust heuristic)
-        # prevents workers from idling.
-        self.num_sender_tasks = self.num_sender_workers * 2
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
@@ -1521,8 +1517,6 @@ class MooncakeConnectorWorker:
                 "Mooncake Prefiller: use %d workers to send kvcaches",
                 self.num_sender_workers,
             )
-            # An asyncio queue to buffer incoming requests for the sender
-            self.sender_worker_queue = asyncio.Queue[tuple[bytes, bytes]]()
             self.sender_loop = asyncio.new_event_loop()
             # Background thread for processing new sending requests.
             self._sender_listener_t = threading.Thread(
@@ -1711,19 +1705,17 @@ class MooncakeConnectorWorker:
 
         await self.register_worker_with_bootstrap()
 
-        # Create async worker tasks that process items from the queue
-        sender_tasks = [
-            asyncio.create_task(self._sender_worker(sock))
-            for _ in range(self.num_sender_tasks)
-        ]
+        # Track one asyncio task per incoming pull request so requests waiting
+        # on prefill readiness cannot head-of-line block already-ready pulls.
+        # Actual RDMA send concurrency stays bounded by self._sender_executor.
+        sender_tasks: set[asyncio.Task[None]] = set()
 
         ready_event.set()
 
         try:
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
-                # Renew here, not in a sender worker: those can all be
-                # waiting for prefills, and the renewal must not wait.
+                # Renew inline so lease renewals never queue behind transfers.
                 heartbeat = self._decode_heartbeat(metadata_bytes)
                 if heartbeat is not None:
                     response = self._renew_kv_leases(heartbeat.lease_transfer_ids)
@@ -1731,16 +1723,22 @@ class MooncakeConnectorWorker:
                         (identity, self._encoder.encode(response))
                     )
                     continue
-                await self.sender_worker_queue.put((identity, metadata_bytes))
+                task = asyncio.create_task(
+                    self._handle_sender_request(sock, identity, metadata_bytes)
+                )
+                sender_tasks.add(task)
+                task.add_done_callback(sender_tasks.discard)
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake sender thread.")
         except Exception as e:
             logger.error("Error in Mooncake sender thread: %s. Exiting thread.", str(e))
         finally:
-            # Clean up worker tasks
-            for task in sender_tasks:
+            # Clean up in-flight sender tasks
+            pending_tasks = list(sender_tasks)
+            for task in pending_tasks:
                 task.cancel()
-            await asyncio.gather(*sender_tasks, return_exceptions=True)
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
             sock.close()
 
     def _decode_heartbeat(self, message: bytes) -> MooncakeLeaseHeartbeat | None:
@@ -1766,27 +1764,28 @@ class MooncakeConnectorWorker:
                 send_meta.expire_time = max(send_meta.expire_time, new_expire_time)
         return MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
 
-    async def _sender_worker(self, sock: zmq.asyncio.Socket):
-        while True:
+    async def _handle_sender_request(
+        self,
+        sock: zmq.asyncio.Socket,
+        identity: bytes,
+        metadata_bytes: bytes,
+    ) -> None:
+        try:
+            metadata = self._xfer_meta_decoder.decode(metadata_bytes)
+            await self.send_kv_to_decode(identity, sock, metadata)
+        except (asyncio.CancelledError, zmq.ContextTerminated):
+            return
+        except Exception as e:
+            logger.error("Error processing Mooncake xfer request: %s", e)
+            error_response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR, err_msg=str(e)
+            )
             try:
-                identity, metadata_bytes = await self.sender_worker_queue.get()
-                try:
-                    metadata = self._xfer_meta_decoder.decode(metadata_bytes)
-                    await self.send_kv_to_decode(identity, sock, metadata)
-                except Exception as e:
-                    logger.error("Error processing Mooncake xfer request: %s", e)
-                    error_response = MooncakeXferResponse(
-                        status=MooncakeXferResponseStatus.ERROR, err_msg=str(e)
-                    )
-                    await sock.send_multipart(
-                        (identity, self._encoder.encode(error_response))
-                    )
-                finally:
-                    self.sender_worker_queue.task_done()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Error in _sender_worker: %s", e)
+                await sock.send_multipart(
+                    (identity, self._encoder.encode(error_response))
+                )
+            except zmq.ZMQError:
+                logger.debug("ZMQ socket closed while sending Mooncake error response.")
 
     async def send_kv_to_decode(
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
