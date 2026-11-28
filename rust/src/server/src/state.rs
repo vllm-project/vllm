@@ -11,6 +11,7 @@ use tokio::runtime::Runtime;
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
+use vllm_chat::multimodal::MmProcessorCache;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
@@ -64,6 +65,9 @@ pub struct AppState {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// Frontend-side (P0 writer) shm multi-modal processor cache, cleared by
+    /// `/reset_mm_cache` alongside the engine-side cache.
+    mm_processor_cache: Option<Arc<MmProcessorCache>>,
     /// Whether the `Llm` is an [`EngineCoreLlm`] the server connected itself,
     /// so routes and services that drive its engine-core client are served.
     has_engine_core_client: bool,
@@ -99,6 +103,7 @@ impl AppState {
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
+            mm_processor_cache: None,
             has_engine_core_client: false,
             decisions: None,
         }
@@ -171,6 +176,17 @@ impl AppState {
     pub fn with_profiler(mut self, profiler: Option<String>) -> Self {
         self.profiler = profiler;
         self
+    }
+
+    /// Attach the shm multi-modal processor cache (P0 writer), when enabled.
+    pub fn with_mm_processor_cache(mut self, cache: Option<Arc<MmProcessorCache>>) -> Self {
+        self.mm_processor_cache = cache;
+        self
+    }
+
+    /// The shm multi-modal processor cache, when enabled.
+    pub(crate) fn mm_processor_cache(&self) -> Option<&Arc<MmProcessorCache>> {
+        self.mm_processor_cache.as_ref()
     }
 
     /// Attach the runtime server information snapshot used by `/server_info`.

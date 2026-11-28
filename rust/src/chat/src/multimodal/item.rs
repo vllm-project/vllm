@@ -3,7 +3,6 @@
 
 //! Shared lowering from batched preprocessor output to per-item engine kwargs.
 
-use itertools::izip;
 use llm_multimodal::{FieldLayout, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{
@@ -12,27 +11,20 @@ use vllm_engine_core_client::protocol::multimodal::{
 };
 
 use super::{PreparedItem, ResolvedMultimodalSpec, tensor};
-use crate::error::{Result, bail_multimodal, multimodal};
+use crate::error::{Result, multimodal};
 
 /// Split one batch of preprocessed tensors into engine kwargs per media item.
 pub(super) fn build_batched_items(
     spec: &ResolvedMultimodalSpec,
     preprocessed: PreprocessedEncoderInputs,
-    hashes: Vec<String>,
-    uuids: Vec<Option<String>>,
+    mm_hashes: Vec<String>,
     float_dtype: ModelDtype,
 ) -> Result<Vec<PreparedItem>> {
-    let len = hashes.len();
-    if uuids.len() != len {
-        bail_multimodal!(
-            "number of media UUIDs {} does not match number of media items {len}",
-            uuids.len()
-        );
-    }
+    let len = mm_hashes.len();
     let tensors = tensor::collect_tensors(preprocessed, spec.primary_key(), float_dtype)?;
 
     let mut items = Vec::with_capacity(len);
-    for (index, (hash, uuid)) in izip!(hashes, uuids).enumerate() {
+    for (index, mm_hash) in mm_hashes.into_iter().enumerate() {
         let mut data = MmKwargsItem::new();
         for (key, tensor) in &tensors {
             let keep_on_cpu = spec.keep_on_cpu_keys.contains(key);
@@ -77,7 +69,7 @@ pub(super) fn build_batched_items(
             );
         }
 
-        items.push(PreparedItem { data, hash, uuid });
+        items.push(PreparedItem { data, mm_hash });
     }
 
     Ok(items)

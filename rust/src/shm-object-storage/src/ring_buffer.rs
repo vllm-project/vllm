@@ -50,8 +50,9 @@ pub struct NotEnoughSpace;
 /// only in this process: readers locate a chunk by the address in its handle
 /// and check its `monotonic_id` to detect reuse after wraparound.
 pub struct SingleWriterShmRingBuffer {
-    /// Unlinks the segment when the writer drops.
-    _unlink_guard: ShmUnlinkGuard,
+    /// Unlinks the segment's name when the writer drops, unless
+    /// [`Self::unlink_name`] already did.
+    unlink_guard: Option<ShmUnlinkGuard>,
     data_buffer_size: usize,
     map: MmapMut,
     /// monotonic_id -> start address.
@@ -104,7 +105,7 @@ impl SingleWriterShmRingBuffer {
         };
 
         let mut buffer = Self {
-            _unlink_guard: unlink_guard,
+            unlink_guard: Some(unlink_guard),
             data_buffer_size,
             map,
             metadata: HashMap::new(),
@@ -116,6 +117,15 @@ impl SingleWriterShmRingBuffer {
         buffer.init_auth_secret();
         tracing::debug!(name, data_buffer_size, "created new shared memory buffer");
         Ok(buffer)
+    }
+
+    /// Remove the segment's name while keeping this mapping.
+    ///
+    /// Call once every reader has opened the segment. From then on a crash of
+    /// any process cannot leak it: the kernel frees the memory when the last
+    /// mapping goes away. No process can open the segment by name afterwards.
+    pub fn unlink_name(&mut self) {
+        self.unlink_guard.take();
     }
 
     /// Write the random handle-signing secret at the start of the segment.
@@ -393,6 +403,26 @@ mod tests {
         assert!(std::path::Path::new(&path).exists());
         drop(buffer);
         assert!(!std::path::Path::new(&path).exists());
+    }
+
+    fn shm_name_exists(name: &str) -> bool {
+        shm::open(format!("/{name}"), shm::OFlags::RDONLY, Mode::empty()).is_ok()
+    }
+
+    #[test]
+    fn unlink_name_removes_the_name_and_keeps_the_mapping() {
+        let name = unique_name();
+        let mut buffer = SingleWriterShmRingBuffer::create(1024, &name).unwrap();
+        assert!(shm_name_exists(&name));
+
+        buffer.unlink_name();
+        assert!(!shm_name_exists(&name));
+        let (address, id) = buffer.allocate_buf(16).unwrap();
+        assert_eq!(buffer.chunk_header(address).0, id);
+
+        buffer.unlink_name();
+        drop(buffer);
+        assert!(!shm_name_exists(&name));
     }
 
     #[test]

@@ -5707,6 +5707,7 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-metrics",
+ "vllm-mm-cache",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
@@ -5742,6 +5743,7 @@ dependencies = [
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
+ "vllm-mm-cache",
  "vllm-server",
  "vllm-text",
  "vllm-tracing",
@@ -5841,6 +5843,20 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+]
+
+[[package]]
+name = "vllm-mm-cache"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "rmp-serde",
+ "rmpv",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "vllm-engine-core-client",
+ "vllm-shm-object-storage",
 ]
 
 [[package]]
@@ -5959,6 +5975,7 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-metrics",
+ "vllm-mm-cache",
  "vllm-proto",
  "vllm-text",
  "vllm-tokenizer",

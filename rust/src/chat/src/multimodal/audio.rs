@@ -9,8 +9,8 @@ use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{AudioModalitySupport, MmModality, MultimodalModelInfo, PreparedMedia, item};
-use crate::error::{Result, bail_multimodal, multimodal};
+use super::{AudioModalitySupport, MmModality, MultimodalModelInfo, PreparedMedia};
+use crate::error::{Result, multimodal};
 
 /// Forward-kwargs name of the primary audio encoder input.
 pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
@@ -32,31 +32,21 @@ impl MultimodalModelInfo {
             .audio
             .as_ref()
             .ok_or_else(|| self.unsupported_modality(MmModality::Audio))?;
-        let preprocessed = self.preprocess_audios(support, &clips).await?;
-        let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
-        if replacements.len() != clips.len() {
-            bail_multimodal!(
-                "number of audio prompt replacements {} does not match number of audio clips {}",
-                replacements.len(),
-                clips.len()
-            );
-        }
 
-        let hashes = clips.iter().map(|clip| clip.hash.clone()).collect();
-        let items = item::build_batched_items(
-            &support.spec,
-            preprocessed,
-            hashes,
-            uuids,
-            ModelDtype::Float32,
-        )?;
-
-        Ok(PreparedMedia {
-            modality: Modality::Audio,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
+        let sources = super::keyed_sources(clips, uuids, |media| &media.hash);
+        self.prepare_media(
+            Modality::Audio,
+            &support.placeholder,
+            sources,
+            async |misses| {
+                let (clips, hashes): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
+                let preprocessed = self.preprocess_audios(support, &clips).await?;
+                support
+                    .spec
+                    .build_batch(&self.context, preprocessed, hashes, ModelDtype::Float32)
+            },
+        )
+        .await
     }
 
     /// Run CPU-heavy audio preprocessing in a blocking task.
@@ -84,7 +74,7 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::super::tests::from_context;
-    use super::super::{MultimodalModelContext, TokenizerResolver};
+    use super::super::{MultimodalModelContext, TokenizerResolver, item};
     use super::*;
 
     const AUDIO_PAD_ID: u32 = 151_676;
@@ -249,7 +239,6 @@ mod tests {
             &support.spec,
             preprocessed,
             vec!["<hash>".to_string()],
-            vec![None],
             ModelDtype::Float32,
         )
         .unwrap()
@@ -318,7 +307,6 @@ mod tests {
     async fn tracker_processor_and_lowering_preserve_audio_contract() {
         let info = qwen3_asr_info();
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
-        let expected_hash = llm_multimodal::hasher::hash_audio(&wav);
         let fetched = info
             .fetch_media(vec![MediaContentPart::AudioData {
                 data: wav,
@@ -338,8 +326,7 @@ mod tests {
                 .all(|token| *token == AUDIO_PAD_ID as i32)
         );
         let item = &prepared.items[0];
-        assert_eq!(item.hash, expected_hash);
-        assert_eq!(item.uuid.as_deref(), Some("audio-1"));
+        assert_eq!(item.mm_hash, "uuid:audio-1");
 
         let features = &item.data[AUDIO_PRIMARY_KEY];
         assert!(matches!(&features.field, MmField::Batched(_)));
@@ -361,7 +348,6 @@ mod tests {
     async fn inkling_tracker_and_processor_use_standard_audio_key() {
         let info = inkling_info(serde_json::json!(1024));
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
-        let expected_hash = llm_multimodal::hasher::hash_audio(&wav);
         let fetched = info
             .fetch_media(vec![MediaContentPart::AudioData {
                 data: wav,
@@ -384,8 +370,7 @@ mod tests {
                 .all(|token| *token == INKLING_AUDIO_EMBED_ID)
         );
         let item = &prepared.items[0];
-        assert_eq!(item.hash, expected_hash);
-        assert_eq!(item.uuid.as_deref(), Some("audio-1"));
+        assert_eq!(item.mm_hash, "uuid:audio-1");
 
         let features = &item.data[AUDIO_PRIMARY_KEY];
         assert!(matches!(&features.field, MmField::Flat(_)));

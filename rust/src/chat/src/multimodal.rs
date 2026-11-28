@@ -31,6 +31,7 @@ use thiserror_ext::AsReport as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
+use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 use vllm_tokenizer::parse_checkpoint_json;
@@ -40,6 +41,7 @@ use crate::renderer::{MediaPartSource, RenderedPrompt};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
+mod cache;
 mod expand;
 mod image;
 mod input;
@@ -54,6 +56,9 @@ use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
 use self::timing::MM_STAGE_TARGET;
 pub use self::timing::{mm_request_span, mm_timing_layer};
+
+/// SHM sender with the prompt replacement owned by each cached media entry.
+pub type MmProcessorCache = MmProcessorShmCache<(MmKwargsItem, Arc<PromptReplacement>)>;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -71,6 +76,9 @@ pub struct MultimodalModelInfo {
     /// Maximum number of input items allowed per prompt for each modality:
     /// the `--limit-mm-per-prompt` count, else the model's default, else 999.
     item_limits: HashMap<MmModality, usize>,
+    /// SHM multimodal processor cache (P0 sender side), enabled by
+    /// `--mm-processor-cache-type shm`.
+    mm_processor_cache: Option<Arc<MmProcessorCache>>,
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
@@ -226,6 +234,29 @@ impl ResolvedMultimodalSpec {
         Ok(self
             .raw
             .prompt_replacements_for(&context.metadata(), preprocessed, self.modality)?)
+    }
+
+    /// Lower a preprocessed image or audio batch into aligned prompt replacements and engine items.
+    fn build_batch(
+        &self,
+        context: &MultimodalModelContext,
+        preprocessed: PreprocessedEncoderInputs,
+        hashes: Vec<String>,
+        float_dtype: ModelDtype,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
+        let replacements = self.prompt_replacements_for(context, &preprocessed)?;
+        if replacements.len() != hashes.len() {
+            bail_multimodal!(
+                "number of {} prompt replacements {} does not match number of media items {}",
+                self.modality,
+                replacements.len(),
+                hashes.len()
+            );
+        }
+        Ok((
+            replacements,
+            item::build_batched_items(self, preprocessed, hashes, float_dtype)?,
+        ))
     }
 
     /// Prompt replacements given the media items' decoder-side facts (e.g.
@@ -432,16 +463,51 @@ struct PreparedMedia {
     modality: Modality,
     placeholder: ResolvedPlaceholder,
     /// One replacement per media item, in request order.
-    replacements: Vec<PromptReplacement>,
+    replacements: Vec<Arc<PromptReplacement>>,
     /// One entry per media item, aligned with `replacements`.
     items: Vec<PreparedItem>,
 }
 
+impl PreparedMedia {
+    fn from_preprocessed(
+        modality: Modality,
+        placeholder: ResolvedPlaceholder,
+        replacements: Vec<PromptReplacement>,
+        items: Vec<PreparedItem>,
+    ) -> Self {
+        Self {
+            modality,
+            placeholder,
+            replacements: replacements.into_iter().map(Arc::new).collect(),
+            items,
+        }
+    }
+}
+
 /// One media item's complete engine kwargs plus identity metadata.
+#[derive(Clone)]
 struct PreparedItem {
     data: MmKwargsItem,
-    hash: String,
-    uuid: Option<String>,
+    mm_hash: String,
+}
+
+fn keyed_sources<Source>(
+    media: Vec<Source>,
+    uuids: Vec<Option<String>>,
+    content_hash: impl Fn(&Source) -> &str,
+) -> Vec<(Source, String)> {
+    // Like Python, tag the cache key with its source, so a client
+    // `uuid` spelled like another item's content hash cannot hit
+    // that item's entries in the engine's caches.
+    izip!(media, uuids)
+        .map(|(source, uuid)| {
+            let key = match uuid {
+                Some(uuid) => format!("uuid:{uuid}"),
+                None => format!("content:{}", content_hash(&source)),
+            };
+            (source, key)
+        })
+        .collect()
 }
 
 impl MultimodalModelInfo {
@@ -643,6 +709,7 @@ impl MultimodalModelInfo {
             unserved_modalities,
             media_connector,
             item_limits,
+            mm_processor_cache: None,
         }))
     }
 
@@ -754,6 +821,15 @@ impl MultimodalModelInfo {
             placeholder: ResolvedPlaceholder::resolve(raw_spec, context, Modality::Audio)?,
             processor,
         }))
+    }
+
+    /// Attach (or detach) the SHM multimodal processor cache.
+    ///
+    /// With the cache set, repeated media skips preprocessing and ships its
+    /// shm address to the engine instead of the full tensor payload.
+    pub(crate) fn with_mm_processor_cache(mut self, cache: Option<Arc<MmProcessorCache>>) -> Self {
+        self.mm_processor_cache = cache;
+        self
     }
 
     /// Return the template-visible placeholder token for one modality, when
@@ -1192,13 +1268,6 @@ impl MultimodalModelInfo {
                 );
             }
             for (item, range) in izip!(media.items, media_ranges) {
-                // Like Python, tag the cache key with its source, so a client
-                // `uuid` spelled like another item's content hash cannot hit
-                // that item's entries in the engine's caches.
-                let cache_key = match item.uuid {
-                    Some(uuid) => format!("uuid:{uuid}"),
-                    None => format!("content:{}", item.hash),
-                };
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
                     modality: match media.modality {
@@ -1206,9 +1275,9 @@ impl MultimodalModelInfo {
                         Modality::Video => MmModality::Video,
                         Modality::Audio => MmModality::Audio,
                     },
-                    identifier: cache_key.clone(),
+                    identifier: item.mm_hash.clone(),
                     mm_position: range,
-                    mm_hash: Some(cache_key),
+                    mm_hash: Some(item.mm_hash),
                 });
             }
         }
@@ -1380,6 +1449,10 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
+    use crate::ChatRequestProcessor;
+    use crate::backend::{ChatBackend, NewChatOutputProcessorOptions};
+    use crate::output::DynChatOutputProcessor;
+    use crate::renderer::{ChatRenderer, DynChatRenderer};
 
     pub(super) const LLAMA4_IMAGE_START_ID: u32 = 200088;
     pub(super) const LLAMA4_IMAGE_END_ID: u32 = 200089;
@@ -1511,6 +1584,92 @@ mod tests {
 
     pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
         test_info("qwen3_vl", qwen3_vl_config(), qwen3_vl_tokenizer())
+    }
+
+    /// Renderer producing one `<|image_pad|>` placeholder for the request's
+    /// single image part.
+    struct PadRenderer;
+
+    impl ChatRenderer for PadRenderer {
+        fn render(&self, _request: &ChatRequest) -> Result<RenderedPrompt> {
+            Ok(RenderedPrompt {
+                prompt: Prompt::Text("a<|image_pad|>b".to_string()),
+                media_order: None,
+                effective_template_kwargs: HashMap::new(),
+            })
+        }
+    }
+
+    struct MmTestBackend {
+        info: MultimodalModelInfo,
+    }
+
+    impl ChatBackend for MmTestBackend {
+        fn chat_renderer(&self) -> DynChatRenderer {
+            Arc::new(PadRenderer)
+        }
+
+        fn multimodal_model_info(&self) -> Option<&MultimodalModelInfo> {
+            Some(&self.info)
+        }
+
+        fn new_chat_output_processor(
+            &self,
+            _request: &mut ChatRequest,
+            _options: NewChatOutputProcessorOptions<'_>,
+        ) -> Result<DynChatOutputProcessor> {
+            Err(Error::ChatTemplate(
+                "test backend has no output processor".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_for_tokenization_bypasses_mm_processor_cache() {
+        use super::cache::{TEST_PNG_BASE64, is_address_item, test_shm_cache};
+
+        let cache = test_shm_cache();
+        let info = qwen3_vl_info().with_mm_processor_cache(Some(Arc::clone(&cache)));
+        let processor = ChatRequestProcessor::new(
+            Arc::new(MmTestBackend { info }),
+            Some(ModelDtype::Float32),
+            Some(4096),
+        );
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user(vec![
+                ChatContentPart::text("describe"),
+                ChatContentPart::ImageUrl {
+                    image_url: format!("data:image/png;base64,{TEST_PNG_BASE64}"),
+                    detail: None,
+                    uuid: None,
+                },
+            ])],
+            ..ChatRequest::for_test()
+        };
+
+        let text_request = processor
+            .prepare_for_tokenization(request)
+            .await
+            .expect("tokenize preparation should succeed");
+        let Prompt::TokenIds(token_ids) = &text_request.prompt else {
+            panic!("multimodal prompts are tokenized in chat");
+        };
+        assert_eq!(token_ids[0], u32::from(b'a'));
+        assert!(
+            token_ids.len() > 3,
+            "the image placeholder should be expanded"
+        );
+        let features = text_request.mm_features.as_ref().expect("mm features");
+        assert_eq!(features.len(), 1);
+        assert!(
+            !is_address_item(features[0].data.as_ref().expect("feature data")),
+            "tokenize must send inline feature data"
+        );
+        assert_eq!(
+            cache.cached_len(),
+            0,
+            "tokenize must not put into the shm cache"
+        );
     }
 
     pub(super) const GLM53_IMAGE_ID: u32 = 154854;
@@ -1883,7 +2042,7 @@ mod tests {
             (feature.mm_position.length, pixel_values.shape[0])
         }
 
-        let info = nemotron_omni_info();
+        let info = nemotron_omni_info().with_mm_processor_cache(Some(cache::test_shm_cache()));
         // Without a budget, or with one the image fits beside the 100 text
         // tokens, it keeps its 30x40 patch grid: 300 tokens inside `<img>`.
         assert_eq!(prepare(&info, None).await, (302, 1200));

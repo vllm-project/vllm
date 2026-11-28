@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
         disable_request_id_randomization: false,
         manages_engine: false,
         profiler: None,
+        mm_processor_cache: None,
     };
 
     let bind_address = format!("127.0.0.1:{port}");

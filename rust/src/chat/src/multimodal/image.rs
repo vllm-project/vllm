@@ -10,8 +10,8 @@ use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs, VisionPrep
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{MmModality, MultimodalModelInfo, PreparedMedia, VisionModalitySupport, item};
-use crate::error::{Result, bail_multimodal, multimodal};
+use super::{MmModality, MultimodalModelInfo, PreparedMedia, VisionModalitySupport};
+use crate::error::{Result, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
 pub(super) const IMAGE_PRIMARY_KEY: &str = "pixel_values";
@@ -36,25 +36,20 @@ impl MultimodalModelInfo {
             .image
             .as_ref()
             .ok_or_else(|| self.unsupported_modality(MmModality::Image))?;
-        let preprocessed = self.preprocess_images(support, &frames, preprocessing_context).await?;
-        let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
-        if replacements.len() != frames.len() {
-            bail_multimodal!(
-                "number of image prompt replacements {} does not match number of images {}",
-                replacements.len(),
-                frames.len()
-            );
-        }
-        let hashes = frames.iter().map(|frame| frame.hash.clone()).collect();
-        let items =
-            item::build_batched_items(&support.spec, preprocessed, hashes, uuids, model_dtype)?;
 
-        Ok(PreparedMedia {
-            modality: Modality::Image,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
+        let sources = super::keyed_sources(frames, uuids, |media| &media.hash);
+        self.prepare_media(
+            Modality::Image,
+            &support.placeholder,
+            sources,
+            async |misses| {
+                let (frames, hashes): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
+                let preprocessed =
+                    self.preprocess_images(support, &frames, preprocessing_context).await?;
+                support.spec.build_batch(&self.context, preprocessed, hashes, model_dtype)
+            },
+        )
+        .await
     }
 
     /// Preprocess fetched image frames with the model's resolved vision

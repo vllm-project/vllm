@@ -6,10 +6,9 @@
 
 use std::sync::Arc;
 
-use itertools::izip;
 use llm_multimodal::{
-    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, RgbFrameRef, VideoClip,
-    VideoClipOptions,
+    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, PromptReplacement,
+    RgbFrameRef, VideoClip, VideoClipOptions,
 };
 use thiserror_ext::AsReport as _;
 use tracing::warn;
@@ -52,47 +51,51 @@ impl MultimodalModelInfo {
             .video
             .as_ref()
             .ok_or_else(|| self.unsupported_modality(MmModality::Video))?;
-        let mut replacements = Vec::with_capacity(clips.len());
-        let mut items = Vec::with_capacity(clips.len());
 
-        for (clip, uuid) in izip!(&clips, uuids) {
-            let preprocessed = self.preprocess_video_clip(support, Arc::clone(clip)).await?;
-            // Hand the replacement hook the clip's decoder-side sampling so
-            // temporal groups are stamped with the actually-sampled frames'
-            // times. A clip whose decoder reported no sampling (`None`)
-            // keeps the spec's per-grid synthetic stamps, and a spec without
-            // a media-aware hook ignores this entirely.
-            let media = [MediaItemInfo {
-                video_sampling: clip.sampling.clone(),
-            }];
-            let mut clip_replacements = support.spec.prompt_replacements_with_media(
-                &self.context,
-                &preprocessed,
-                &media,
-                &support.config,
-            )?;
-            if clip_replacements.len() != 1 {
-                bail_multimodal!(
-                    "expected exactly one prompt replacement per video clip, got {}",
-                    clip_replacements.len()
-                );
+        let sources = super::keyed_sources(clips, uuids, |clip| &clip.hash);
+        let compute = async |misses: Vec<(Arc<VideoClip>, String)>| {
+            let mut computed = Vec::with_capacity(misses.len());
+            for (clip, mm_hash) in misses {
+                computed
+                    .push(self.preprocess_video_item(support, clip, mm_hash, model_dtype).await?);
             }
-            replacements.push(clip_replacements.pop().unwrap());
-            items.push(build_video_item(
-                support,
-                preprocessed,
-                clip.hash.clone(),
-                uuid,
-                model_dtype,
-            )?);
-        }
+            Ok(computed.into_iter().unzip())
+        };
+        self.prepare_media(Modality::Video, &support.placeholder, sources, compute)
+            .await
+    }
 
-        Ok(PreparedMedia {
-            modality: Modality::Video,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
+    /// Preprocess one video clip and build its replacement and engine kwargs.
+    async fn preprocess_video_item(
+        &self,
+        support: &VisionModalitySupport,
+        clip: Arc<VideoClip>,
+        mm_hash: String,
+        model_dtype: ModelDtype,
+    ) -> Result<(PromptReplacement, PreparedItem)> {
+        let preprocessed = self.preprocess_video_clip(support, Arc::clone(&clip)).await?;
+        // Hand the replacement hook the clip's decoder-side sampling so
+        // temporal groups are stamped with the actually-sampled frames'
+        // times. A clip whose decoder reported no sampling (`None`)
+        // keeps the spec's per-grid synthetic stamps, and a spec without
+        // a media-aware hook ignores this entirely.
+        let media = [MediaItemInfo {
+            video_sampling: clip.sampling.clone(),
+        }];
+        let mut clip_replacements = support.spec.prompt_replacements_with_media(
+            &self.context,
+            &preprocessed,
+            &media,
+            &support.config,
+        )?;
+        if clip_replacements.len() != 1 {
+            bail_multimodal!(
+                "expected exactly one prompt replacement per video clip, got {}",
+                clip_replacements.len()
+            );
+        }
+        let item = build_video_item(support, preprocessed, mm_hash, model_dtype)?;
+        Ok((clip_replacements.pop().unwrap(), item))
     }
 
     /// Preprocess one decoded video clip with the model's resolved vision
@@ -171,8 +174,7 @@ impl MultimodalModelInfo {
 fn build_video_item(
     support: &VisionModalitySupport,
     preprocessed: PreprocessedEncoderInputs,
-    hash: String,
-    uuid: Option<String>,
+    mm_hash: String,
     model_dtype: ModelDtype,
 ) -> Result<PreparedItem> {
     let tensors = tensor::collect_tensors(preprocessed, support.spec.primary_key(), model_dtype)?;
@@ -220,7 +222,7 @@ fn build_video_item(
         );
     }
 
-    Ok(PreparedItem { data, hash, uuid })
+    Ok(PreparedItem { data, mm_hash })
 }
 
 #[cfg(test)]
@@ -343,7 +345,6 @@ mod tests {
             info.video.as_ref().unwrap(),
             preprocessed,
             "<hash>".to_string(),
-            None,
             ModelDtype::Float32,
         )
         .unwrap();
@@ -366,7 +367,7 @@ mod tests {
         };
         assert_eq!(grid_tensor.shape, vec![3]);
 
-        assert_eq!(item.hash, "<hash>");
+        assert_eq!(item.mm_hash, "<hash>");
     }
 
     /// GLM-5.3-Flash stamps each temporal group with the whole second of its

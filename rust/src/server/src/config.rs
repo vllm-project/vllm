@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -13,7 +14,7 @@ use educe::Educe;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::multimodal::{MmLimitPerPrompt, MmProcessorCache};
 use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
@@ -443,7 +444,8 @@ pub struct ServerConfig {
 /// How the server connects to engine-core and drives it through an
 /// [`EngineCoreLlm`](vllm_llm::EngineCoreLlm). A server built over a
 /// caller-supplied `Llm` has none of these settings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Educe, Clone, Serialize)]
+#[educe(Debug, PartialEq, Eq)]
 pub struct EngineCoreConfig {
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
@@ -485,6 +487,14 @@ pub struct EngineCoreConfig {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// Frontend-side (P0 writer) shared-memory multi-modal processor cache,
+    /// enabled by `--mm-processor-cache-type shm` in managed `serve` mode.
+    ///
+    /// Created before the managed Python engine starts; `None` disables the
+    /// shm cache and media is always sent to the engine inline.
+    #[serde(skip_serializing)]
+    #[educe(Debug(ignore), PartialEq(ignore))]
+    pub mm_processor_cache: Option<Arc<MmProcessorCache>>,
 }
 
 impl ServerConfig {

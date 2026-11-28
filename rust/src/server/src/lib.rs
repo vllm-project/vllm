@@ -147,6 +147,10 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
                 .clone()
                 .unwrap_or_default(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            mm_processor_cache: match &llm {
+                LlmSource::EngineCore(engine_core) => engine_core.mm_processor_cache.clone(),
+                LlmSource::Provided(_) => None,
+            },
             mm_processor_kwargs: config.mm_processor_kwargs.clone(),
         },
     )
@@ -205,6 +209,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         .with_decisions(decisions);
     if let Some((engine_core, server_info)) = &engine_core {
         state = (state.with_engine_core_client())
+            .with_mm_processor_cache(engine_core.mm_processor_cache.clone())
             .with_server_info(server_info.clone())
             .with_profiler(engine_core.profiler.clone())
             .with_default_mm_lora_modalities(
@@ -255,6 +260,24 @@ async fn connect_engine_core(
     .await
     .context("failed to connect to engine core")?;
     let server_info = ServerInfoSnapshot::new(config, engine_core, &client);
+
+    // The handshake is complete, so the engine world size (TP * PP) is known:
+    // teach the shm cache its reader count before serving traffic. Until this
+    // runs, all cache operations safely fall back to sending items inline.
+    if let Some(cache) = &engine_core.mm_processor_cache {
+        // A dense headless rank reports DP=1. Coordinated ranks keep the
+        // deployment DP size and their workers have no shared cache receiver.
+        let engine = client.ready_response();
+        if engine.effective_data_parallel_size == 1 {
+            let n_readers = engine.world_size as u32;
+            info!(shm_name = %cache.shm_name(), n_readers, "shm mm processor cache reader count set");
+            cache.set_n_readers(n_readers);
+        } else {
+            warn!("Sending multimodal inputs inline for coordinated data parallel ranks.");
+        }
+        // Any workers using the segment have opened it by now.
+        cache.unlink_name();
+    }
 
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(engine_core.log_stats_interval.filter(|_| !engine_core.disable_log_stats))
