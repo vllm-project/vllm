@@ -171,7 +171,7 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         }
         LlmSource::Provided(llm) => (llm, None),
     };
-    let system_fingerprint = config.fingerprint_mode.fingerprint(&llm.info().fingerprint);
+    let system_fingerprint = config.fingerprint_mode.fingerprint(llm.info().fingerprint.as_ref());
     let text = TextLlm::from_boxed(llm, text_backend)
         .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)

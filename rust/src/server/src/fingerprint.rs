@@ -26,16 +26,18 @@ pub enum FingerprintMode {
 impl FingerprintMode {
     /// Build the fingerprint of the engine that `fingerprint` describes, like
     /// Python's `build_system_fingerprint`.
-    pub(crate) fn fingerprint(&self, fingerprint: &LlmFingerprint) -> Option<String> {
+    pub(crate) fn fingerprint(&self, fingerprint: Option<&LlmFingerprint>) -> Option<String> {
         let hash8 = || {
-            (fingerprint.config_hash.as_deref())
+            fingerprint
+                .and_then(|info| info.config_hash.as_deref())
                 .map_or("nohash", |hash| hash.get(..8).unwrap_or(hash))
         };
         match self {
             Self::None => None,
             Self::Custom(value) => Some(value.clone()),
-            Self::Hash => Some(format!("vllm-{}-{}", fingerprint.vllm_version, hash8())),
+            Self::Hash => Some(format!("vllm-{}-{}", fingerprint?.vllm_version, hash8())),
             Self::Full => {
+                let fingerprint = fingerprint?;
                 let mut parts = vec![format!("vllm-{}", fingerprint.vllm_version)];
                 if fingerprint.tensor_parallel_size > 1 {
                     parts.push(format!("tp{}", fingerprint.tensor_parallel_size));
@@ -86,7 +88,7 @@ mod tests {
         ];
         let fingerprints = rows.map(|(mode, engine)| {
             let dp = engine.data_parallel_size;
-            format!("{mode:?} dp{dp}: {:?}", mode.fingerprint(&engine))
+            format!("{mode:?} dp{dp}: {:?}", mode.fingerprint(Some(&engine)))
         });
         expect![[r#"
             Full dp4: Some("vllm-0.33.0-tp2-dp4-ep-c84c7d4f")
@@ -96,5 +98,11 @@ mod tests {
             Custom("fp-1") dp4: Some("fp-1")
             None dp4: None"#]]
         .assert_eq(&fingerprints.join("\n"));
+        assert_eq!(FingerprintMode::Full.fingerprint(None), None);
+        assert_eq!(FingerprintMode::Hash.fingerprint(None), None);
+        assert_eq!(
+            FingerprintMode::Custom("fp-1".to_string()).fingerprint(None).as_deref(),
+            Some("fp-1")
+        );
     }
 }

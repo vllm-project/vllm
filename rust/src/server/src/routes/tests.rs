@@ -12693,14 +12693,14 @@ fn test_llm_info() -> LlmInfo {
         supports_lora: true,
         allow_missing_mm_embeddings: false,
         vllm_version: "test".to_string(),
-        fingerprint: LlmFingerprint {
+        fingerprint: Some(LlmFingerprint {
             vllm_version: "test".to_string(),
             config_hash: None,
             tensor_parallel_size: 1,
             pipeline_parallel_size: 1,
             data_parallel_size: 1,
             enable_expert_parallel: false,
-        },
+        }),
     }
 }
 
