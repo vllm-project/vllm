@@ -7,6 +7,7 @@ import importlib
 import itertools
 import os
 from collections.abc import Callable
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -2234,6 +2235,14 @@ def _mhc_delayed_pre_tail(
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
+# What RejectionSampler uses of aiter.ops.flydsl.rejection_sample.
+_FLYDSL_REJECTION_SAMPLER_API = (
+    "REJECTION_SAMPLE_NUM_SPEC",
+    "REJECTION_SAMPLE_VOCAB",
+    "flydsl_rejection_sample_standard",
+    "rejection_sample_standard_supported",
+)
+
 
 _AITER_SITUV2_ACT_ENV = {
     "a8w4": "AITER_SITUV2_A8W4",
@@ -2334,6 +2343,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
+        VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER: Verifies the speculative
+            steps the FlyDSL rejection sampler supports with it (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_MOE_SITUV2: SiTUv2 FlyDSL MoE activation
             dtype (a16w4 | a8w4 | a4w4).
@@ -2411,6 +2422,7 @@ class rocm_aiter_ops:
     # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
     # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
+    _FLYDSL_REJECTION_SAMPLER = envs.VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2443,6 +2455,9 @@ class rocm_aiter_ops:
         cls._FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
         cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
             envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
+        )
+        cls._FLYDSL_REJECTION_SAMPLER = (
+            envs.VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER
         )
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2 = _resolve_situv2_activation()
@@ -4192,6 +4207,50 @@ class rocm_aiter_ops:
         gate_up: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
+
+    @staticmethod
+    @functools.cache
+    def _flydsl_rejection_sampler_module() -> ModuleType | None:
+        try:
+            module = importlib.import_module("aiter.ops.flydsl.rejection_sample")
+        except Exception as e:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER is set, but the "
+                "AITER FlyDSL rejection sampler could not be imported (%s); using "
+                "the Triton rejection sampler.",
+                e,
+            )
+            return None
+        missing = [
+            name for name in _FLYDSL_REJECTION_SAMPLER_API if not hasattr(module, name)
+        ]
+        if missing:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER is set, but this "
+                "AITER's FlyDSL rejection sampler lacks %s; using the Triton "
+                "rejection sampler.",
+                ", ".join(missing),
+            )
+            return None
+        return module
+
+    @classmethod
+    def is_flydsl_rejection_sampler_enabled(cls) -> bool:
+        """VLLM_ROCM_USE_AITER and VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER
+        are both on."""
+        return cls._AITER_ENABLED and cls._FLYDSL_REJECTION_SAMPLER
+
+    @classmethod
+    @if_aiter_supported
+    def flydsl_rejection_sampler(cls) -> ModuleType | None:
+        """The `aiter.ops.flydsl.rejection_sample` module if
+        VLLM_ROCM_USE_AITER_FLYDSL_REJECTION_SAMPLER is on, this is gfx950 and
+        it imports with the API vLLM uses, else None."""
+        from vllm.platforms.rocm import on_gfx950
+
+        if not (cls.is_flydsl_rejection_sampler_enabled() and on_gfx950()):
+            return None
+        return cls._flydsl_rejection_sampler_module()
 
     @staticmethod
     @functools.cache
