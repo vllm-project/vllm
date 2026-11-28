@@ -26,10 +26,11 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 # Pad C128A topk width to this alignment. 128 covers both h_q=64 (B_TOPK=64) and
 # h_q=128 (B_TOPK=128). FlashMLA decode asserts extra_topk % B_TOPK == 0;
@@ -286,7 +287,17 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
 
 class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
 
 class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -18,7 +19,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionCGSupport, max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
     DeepseekSparseSWAMetadataBuilder,
@@ -27,6 +28,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -36,7 +38,17 @@ if TYPE_CHECKING:
 class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
     """SWA metadata for the FlashMLA decode path, which allows varlen decode."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
 
 class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):

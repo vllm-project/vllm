@@ -584,6 +584,67 @@ def test_dsv41_sparse_builders_keep_varlen_decode_graphs_only(
     assert support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
     assert support.min_cg_attn_backend == backend_name
 
+    compilation = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+    mode = compilation.resolve_cudagraph_mode_and_sizes(
+        support.min_cg_support,
+        support.min_cg_attn_backend,
+        uniform_decode_query_len=1 + num_speculative_tokens,
+    )
+    assert mode.mixed_mode() != CUDAGraphMode.FULL
+    assert mode.decode_mode() == CUDAGraphMode.FULL
+
+    decode_width = 1 + num_speculative_tokens
+    unsupported = attn_utils.get_varlen_cudagraph_unsupported_backend
+    assert unsupported(groups, config, decode_width) is None
+    assert unsupported(groups, config, decode_width + 1) == (
+        backend_name,
+        decode_width,
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "backend_name"),
+    [
+        ("vllm.models.deepseek_v4.sparse_mla", "DeepseekV4FlashMLABackend"),
+        (
+            "vllm.models.deepseek_v4.nvidia.flashinfer_sparse",
+            "DeepseekV4FlashInferMLASparseBackend",
+        ),
+        (
+            "vllm.models.deepseek_v4.nvidia.flashinfer_sparse",
+            "DeepseekSparseSWAFlashInferBackend",
+        ),
+        (
+            "vllm.models.deepseek_v4.nvidia.flashmla",
+            "DeepseekSparseSWAFlashMLABackend",
+        ),
+        ("vllm.models.deepseek_v4.compressor", "CompressorBackend"),
+    ],
+    ids=["flashmla", "flashinfer_mla", "swa_flashinfer", "swa_flashmla", "compressor"],
+)
+@pytest.mark.parametrize("num_speculative_tokens", [0, 7])
+def test_dsv4_sparse_builders_keep_varlen_decode_graphs_only(
+    module_name, backend_name, num_speculative_tokens
+):
+    """DSV4 sparse builders allow varlen decode, but not prefill graphs."""
+    backend = getattr(importlib.import_module(module_name), backend_name)
+    config: Any = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens,
+            max_num_new_slots_for_drafting=0,
+        ),
+    )
+    spec = MLAAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+    )
+    group = AttentionGroup(backend, ["target"], spec, 0)
+    group.metadata_builders = [object.__new__(backend.get_builder_cls())]
+    groups = [[group]]
+
+    support = get_attn_cg_support(groups, config)
+    assert support.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    assert support.min_cg_attn_backend == backend_name
+
     decode_width = 1 + num_speculative_tokens
     unsupported = attn_utils.get_varlen_cudagraph_unsupported_backend
     assert unsupported(groups, config, decode_width) is None
