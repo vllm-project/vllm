@@ -5,7 +5,6 @@ import multiprocessing
 import multiprocessing.connection
 import time
 import weakref
-from multiprocessing.process import BaseProcess
 
 import msgspec.msgpack
 import zmq
@@ -19,33 +18,6 @@ from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 logger = init_logger(__name__)
-
-
-def _wait_for_zmq_addrs(
-    proc: BaseProcess,
-    zmq_addr_pipe: multiprocessing.connection.Connection,
-    timeout: int,
-) -> tuple[str, str, str]:
-    try:
-        with zmq_addr_pipe:
-            ready = multiprocessing.connection.wait(
-                [zmq_addr_pipe, proc.sentinel], timeout=timeout
-            )
-            if not ready:
-                raise RuntimeError(
-                    "DP Coordinator process failed to report ZMQ addresses "
-                    f"within timeout={timeout} seconds during startup. "
-                    "Set --data-parallel-coordinator-timeout to adjust this wait."
-                )
-            try:
-                return zmq_addr_pipe.recv()
-            except EOFError:
-                raise RuntimeError(
-                    "DP Coordinator process failed during startup."
-                ) from None
-    except BaseException:
-        shutdown([proc])
-        raise
 
 
 class DPCoordinator:
@@ -80,6 +52,32 @@ class DPCoordinator:
     the engines and thus updates will only be sent to front-ends when the
     request wave / running state changes.
     """
+
+    def _wait_for_zmq_addrs(
+        self,
+        zmq_addr_pipe: multiprocessing.connection.Connection,
+        timeout: int,
+    ) -> tuple[str, str, str]:
+        try:
+            with zmq_addr_pipe:
+                ready = multiprocessing.connection.wait(
+                    [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
+                )
+                if not ready:
+                    raise RuntimeError(
+                        "DP Coordinator process failed to report ZMQ addresses "
+                        f"within timeout={timeout} seconds during startup. "
+                        "Set --data-parallel-coordinator-timeout to adjust this wait."
+                    )
+                try:
+                    return zmq_addr_pipe.recv()
+                except EOFError:
+                    raise RuntimeError(
+                        "DP Coordinator process failed during startup."
+                    ) from None
+        except BaseException:
+            shutdown([self.proc])
+            raise
 
     def __init__(
         self,
@@ -126,8 +124,7 @@ class DPCoordinator:
             front_publish_address,
             back_output_address,
             back_publish_address,
-        ) = _wait_for_zmq_addrs(
-            self.proc,
+        ) = self._wait_for_zmq_addrs(
             parent_zmq_addr_pipe,
             parallel_config.data_parallel_coordinator_timeout,
         )
