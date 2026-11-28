@@ -361,6 +361,49 @@ def test_hermes_parser_non_streaming_tool_call_between_tags(
     assert tool_call.tool_calls[0].function.arguments == '{"trigger": true}'
 
 
+def test_hermes_parser_non_streaming_preserves_trailing_content(
+    default_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Non-streaming extraction must keep text after the last tool call instead
+    of dropping it (streaming already preserves it)."""
+    parser = Hermes2ProToolParser(default_tokenizer)
+    text = (
+        "Preamble"
+        f"{parser.tool_call_start_token}"
+        '{"name": "get_weather", "arguments": {"city": "NY"}}'
+        f"{parser.tool_call_end_token}"
+        " trailing"
+    )
+    result = parser.extract_tool_calls(model_output=text, request=any_chat_request)
+
+    assert result is not None
+    assert result.tools_called
+    assert result.tool_calls[0].function.name == "get_weather"
+    assert result.tool_calls[0].function.arguments == '{"city": "NY"}'
+    assert result.content == "Preamble trailing"
+
+
+def test_hermes_parser_non_streaming_preserves_content_between_calls(
+    default_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Non-streaming extraction must keep text between consecutive tool calls."""
+    parser = Hermes2ProToolParser(default_tokenizer)
+    start, end = parser.tool_call_start_token, parser.tool_call_end_token
+    text = (
+        f"leading{start}{{\"name\": \"a\", \"arguments\": {{}}}}{end}"
+        f" mid {start}{{\"name\": \"b\", \"arguments\": {{}}}}{end}"
+        " trailing"
+    )
+    result = parser.extract_tool_calls(model_output=text, request=any_chat_request)
+
+    assert result is not None
+    assert result.tools_called
+    assert [call.function.name for call in result.tool_calls] == ["a", "b"]
+    assert result.content == "leading mid  trailing"
+
+
 def test_hermes_parser_non_streaming_tool_call_until_eos(
     hermes_parser: ToolParser,
     any_chat_request: ChatCompletionRequest,

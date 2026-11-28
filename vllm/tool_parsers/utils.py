@@ -141,6 +141,16 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
         -> 'ple'
 
     """
+    if curr.startswith(old):
+        # ``old`` is a prefix of the new text - the normal streaming case where
+        # the previously streamed argument text is exactly the prefix of the
+        # new one. Everything past that prefix is newly generated content, so
+        # return it directly. The suffix/prefix rewrite below assumes the two
+        # strings differ near their ends and mis-handles prefixes whose suffix
+        # characters collide with JSON structural delimiters, such as a value
+        # that starts with a quote or a closing bracket
+        return curr[len(old) :]
+
     suffix = find_common_suffix(curr, old)
 
     old = old[::-1].replace(suffix[::-1], "", 1)[::-1]
@@ -712,20 +722,30 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
     while index < length:
         char = text[index]
         if quote is not None:
+            qlen = len(quote)
+            if text[index:index + qlen] == quote:
+                out.append(quote)
+                last_sig = quote[-1]
+                index += qlen
+                quote = None
+                continue
             out.append(char)
             if char == "\\" and index + 1 < length:
                 out.append(text[index + 1])
                 index += 2
                 continue
-            if char == quote:
-                quote = None
             index += 1
             continue
         if char in {"'", '"'}:
-            quote = char
-            out.append(char)
-            last_sig = char
-            index += 1
+            if text[index:index + 3] == char * 3:
+                quote = char * 3
+                out.append(quote)
+                index += 3
+            else:
+                quote = char
+                out.append(char)
+                index += 1
+            last_sig = quote[-1]
             continue
         if char.isalpha() or char == "_":
             end = index

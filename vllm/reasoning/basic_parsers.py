@@ -80,11 +80,22 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """Extract the content after the end tokens."""
+        """Extract the content outside the reasoning block.
+
+        Text that precedes the start token is preserved as content, matching
+        ``extract_reasoning`` (see issue #50901).
+        """
         if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:
-            return input_ids[input_ids.index(self.end_token_id) + 1 :]
+            end_index = input_ids.index(self.end_token_id)
+            after = input_ids[end_index + 1 :]
+            if self.start_token_id in input_ids[:end_index]:
+                start_index = input_ids.index(self.start_token_id)
+                prefix = input_ids[:start_index]
+            else:
+                prefix = []
+            return prefix + after
 
     def extract_reasoning_streaming(
         self,
@@ -153,20 +164,26 @@ class BaseThinkingReasoningParser(ReasoningParser):
         Subclasses can override this method for specific behavior.
         """
         # Check if the start token is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
+        # if it is present. Preserve any text that precedes the start token as
+        # content instead of dropping it (see issue #50901).
+        content_before, start_sep, after_start = model_output.partition(
+            self.start_token
         )
+        if start_sep:
+            prefix = content_before
+            model_output = after_start
+        else:
+            prefix = ""
+            model_output = content_before
 
         # For models that may not generate start token,
         # assume the reasoning content is always at the start.
         if self.end_token not in model_output:
-            return model_output, None
+            return model_output, (prefix or None)
         else:
             reasoning, _, content = model_output.partition(self.end_token)
             # If generation stops right after end-of-think, return null content
-            final_content = content or None
+            final_content = (prefix + content) or None
             return reasoning, final_content
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
