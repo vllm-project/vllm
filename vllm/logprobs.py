@@ -177,6 +177,13 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
                     decoded_tokens[start:end],
                 )
 
+    @classmethod
+    def with_empty_positions(cls, count: int) -> "FlatLogprobs":
+        """Create a prefix of positions with no token entries."""
+        result = cls()
+        result._append(0, [], [], np.zeros(count, dtype=np.int64))
+        return result
+
     def append(self, logprobs_one_position: LogprobsOnePosition | None) -> None:
         """Appends the container with logprobs for the next position."""
         entries = logprobs_one_position or {}
@@ -546,12 +553,14 @@ PromptLogprobs = FlatLogprobs | list[LogprobsOnePosition | None]
 SampleLogprobs = FlatLogprobs | list[LogprobsOnePosition]
 
 
-def create_prompt_logprobs(flat_logprobs: bool) -> PromptLogprobs:
-    """Creates a container to store prompt logprobs for a request."""
-    logprobs: PromptLogprobs = FlatLogprobs() if flat_logprobs else []
-    # NOTE: logprob of first prompt token is None.
-    logprobs.append(None)
-    return logprobs
+def create_prompt_logprobs(
+    flat_logprobs: bool, prompt_logprob_start: int = 0
+) -> PromptLogprobs:
+    # The first prompt token and the skipped prefix have no scores.
+    count = prompt_logprob_start + 1
+    if flat_logprobs:
+        return FlatLogprobs.with_empty_positions(count)
+    return [None] * count
 
 
 def create_sample_logprobs(flat_logprobs: bool) -> SampleLogprobs:
