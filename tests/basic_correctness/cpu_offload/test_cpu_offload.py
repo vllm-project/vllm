@@ -34,7 +34,7 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
         args.append("--enforce-eager")
 
     compare_two_settings(
-        model="vllm-project/tiny-random-LlamaForCausalLM",
+        model="vllm/tiny-random-LlamaForCausalLM",
         arg1=[],
         arg2=args,
         env1=None,
@@ -87,7 +87,7 @@ def test_mrv2_weight_offloading(
 
     try:
         with vllm_runner(
-            "vllm-project/tiny-random-LlamaForCausalLM",
+            "vllm/tiny-random-LlamaForCausalLM",
             enforce_eager=True,
             gpu_memory_utilization=0.03,
             max_model_len=128,
@@ -184,7 +184,7 @@ def test_tower_weight_offloading(
 
 
 @pytest.mark.parametrize(
-    "model", ["vllm-project/tiny-random-LlamaForCausalLM", "TitanML/tiny-mixtral"]
+    "model", ["vllm/tiny-random-LlamaForCausalLM", "TitanML/tiny-mixtral"]
 )
 def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model):
     """Transformers backend decoder layers (including MoE experts) are offloaded as
@@ -277,7 +277,7 @@ PREFETCH_ARGS = [
 def test_transformers_backend_cpu_offload_outputs(offload_args, env):
     """The Transformers backend gives the same outputs with weights offloaded."""
     compare_two_settings(
-        model="vllm-project/tiny-random-LlamaForCausalLM",
+        model="vllm/tiny-random-LlamaForCausalLM",
         arg1=["--model-impl", "transformers"],
         arg2=["--model-impl", "transformers", *offload_args],
         env1=None,

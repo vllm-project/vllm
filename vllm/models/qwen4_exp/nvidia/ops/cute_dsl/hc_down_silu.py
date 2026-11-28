@@ -9,7 +9,8 @@ are never computed. Output is bf16 (ll_bf16's fp32-output bonus is given up
 to preserve the production rounding boundary).
 
 The GEMM uses an FMA backend for M <= 4 and a split-K MMA backend beyond,
-both with PDL. The model uses its Linear module above M=48.
+both with PDL. Above M=48 the model runs the SM100 tcgen05 down+inject+SiLU
+kernel (`hc_down_silu_sm100`); elsewhere it uses its Linear module.
 """
 
 import logging

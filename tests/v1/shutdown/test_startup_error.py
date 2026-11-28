@@ -18,7 +18,7 @@ from vllm.model_executor.models.transformers import TransformersForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["vllm-project/tiny-random-LlamaForCausalLM"]
+MODELS = ["vllm/tiny-random-LlamaForCausalLM"]
 
 
 def evil_method(self, *args, **kwargs):
@@ -96,8 +96,8 @@ def test_llm_startup_error(
     """
     # Skip non-Llama models since we monkeypatch TransformersForCausalLM specifically.
     # If MODELS list grows, each architecture needs its own test variant.
-    if model != "vllm-project/llama-68m":
-        pytest.skip(reason="Only test vllm-project/llama-68m")
+    if model != "vllm/llama-68m":
+        pytest.skip(reason="Only test vllm/llama-68m")
     if current_platform.device_count() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 

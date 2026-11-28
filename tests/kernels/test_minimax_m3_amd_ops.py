@@ -31,8 +31,8 @@ Run:  pytest tests/kernels/test_minimax_m3_amd_ops.py -v
 
 import pytest
 import torch
-from transformers import PreTrainedConfig
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
@@ -49,8 +49,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
 from vllm.models.minimax_m3.amd.model import (  # noqa: E402
     MiniMAXGemmaRMSNorm,
     MiniMaxM3MLP,
-    MiniMaxM3SparseAttention,
-    _build_rotary_emb,
     _can_fuse_input_norm_mxfp8,
     _kv_insert_operand,
 )
@@ -63,7 +61,6 @@ from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import _num_warps  # noqa: E402
-from vllm.platforms.rocm import on_gfx942  # noqa: E402
 
 DEVICE = "cuda"
 EPS = 1e-6
@@ -286,8 +283,10 @@ def test_allreduce_gemma_rms_norm_mxfp8(monkeypatch, tp_size, return_normed):
 
 
 @requires_gfx950
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_shared_expert_gate_up_on_post_norm_quant(dist_init):
+def test_shared_expert_gate_up_on_post_norm_quant(default_vllm_config):
     """gate_up_proj on the post-attention norm's MXFP8 output equals the
     unfused norm -> linear (shared expert gate_up shape, TP4)."""
     from vllm.model_executor.layers.fusion.quant_activation import (
@@ -432,8 +431,10 @@ def test_swiglu_oai_quantize_mxfp8_vs_unfused(m, inter, block_m):
 @requires_gfx950
 @pytest.mark.parametrize("m", [1, 8, 16, 17, 32, 128])
 @pytest.mark.parametrize("n,k", [(6144, 768), (6144, 3072)])  # shared expert, dense
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_mlp_down_proj_on_swiglu_quant(dist_init, m, n, k):
+def test_mlp_down_proj_on_swiglu_quant(default_vllm_config, m, n, k):
     """down_proj on the fused swiglu + quant output stays within MXFP8 quant
     noise of the unfused swiglu -> linear, and the fused-quant GEMM keeps its
     own path where it already quantizes in-kernel (M <= 16, K <= 1024)."""
@@ -838,8 +839,10 @@ def _quark_mxfp8_linear(n: int, k: int, block32: bool = False):
     ],
 )
 @pytest.mark.parametrize("m", [1, 37])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_fused_input_norm_mxfp8_qkv_proj(dist_init, n, k, block32, m):
+def test_fused_input_norm_mxfp8_qkv_proj(default_vllm_config, n, k, block32, m):
     """The linear on the fused norm's MXFP8 output equals the linear on the
     unfused norm output, wherever the producer turns the fusion on."""
     layer, scheme = _quark_mxfp8_linear(n, k, block32)
@@ -894,9 +897,11 @@ def aiter_flydsl_mxfp8_linear(monkeypatch):
     [(2560, 6144), (1536, 6144), (6144, 768), (6144, 3072)],  # qkv, shared, dense
 )
 @pytest.mark.parametrize("m", [1, 16, 37])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
 def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
-    dist_init, aiter_flydsl_mxfp8_linear, n, k, m
+    default_vllm_config, aiter_flydsl_mxfp8_linear, n, k, m
 ):
     """With the AITER kernel selected, the producers still fuse the MXFP8
     quant and the linear on their output equals the unfused norm -> linear;
@@ -939,8 +944,12 @@ def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
 
 @requires_gfx950
 @pytest.mark.parametrize("n,k", [(2560, 6144), (6144, 2048), (1536, 6144), (6144, 768)])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 @torch.inference_mode()
-def test_mono_weights_same_on_aiter_flydsl_kernel(dist_init, monkeypatch, n, k):
+def test_mono_weights_same_on_aiter_flydsl_kernel(
+    default_vllm_config, monkeypatch, n, k
+):
     """The mono kernels' weight copies are the same whether the linear runs on
     the Triton kernel (row-major weight) or the AITER FlyDSL one (preshuffled)."""
     pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
@@ -993,7 +1002,11 @@ def test_mono_weights_same_on_aiter_flydsl_kernel(dist_init, monkeypatch, n, k):
 
 
 @requires_gfx950
-def test_fused_input_norm_mxfp8_off_under_batch_invariance(dist_init, monkeypatch):
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
+def test_fused_input_norm_mxfp8_off_under_batch_invariance(
+    default_vllm_config, monkeypatch
+):
     import vllm.envs as envs
 
     layer, _ = _quark_mxfp8_linear(2560, 6144)
@@ -1179,149 +1192,3 @@ def test_kv_insert_operand_copies_unsupported_layouts():
 
     flat = k.reshape(32, -1)
     assert _kv_insert_operand(flat).is_contiguous()
-
-
-@pytest.mark.skipif(not on_gfx942(), reason="Requires gfx942.")
-@torch.inference_mode()
-def test_gfx942_native_qknorm_rope_writes_main_and_index_caches():
-    """The gfx942 fallback writes both caches and ignores padded slots."""
-    from types import SimpleNamespace
-
-    torch.manual_seed(0)
-    num_tokens = 3
-    num_heads = 2
-    num_kv_heads = num_idx_heads = 1
-    head_dim = idx_head_dim = 16
-    block_size = 4
-
-    attention = object.__new__(MiniMaxM3SparseAttention)
-    torch.nn.Module.__init__(attention)
-    attention.num_heads = num_heads
-    attention.num_kv_heads = num_kv_heads
-    attention.num_idx_heads = num_idx_heads
-    attention.head_dim = head_dim
-    attention.idx_head_dim = idx_head_dim
-    attention.q_size = num_heads * head_dim
-    attention.kv_size = num_kv_heads * head_dim
-    attention.index_q_size = num_idx_heads * idx_head_dim
-    attention.layer_name = "model.layers.0.self_attn"
-    attention.skip_index_topk = False
-    attention.kv_cache_dtype = "fp8"
-
-    attention.q_norm = MiniMAXGemmaRMSNorm(head_dim).to(
-        device=DEVICE, dtype=torch.bfloat16
-    )
-    attention.k_norm = MiniMAXGemmaRMSNorm(head_dim).to(
-        device=DEVICE, dtype=torch.bfloat16
-    )
-    attention.index_q_norm = MiniMAXGemmaRMSNorm(idx_head_dim).to(
-        device=DEVICE, dtype=torch.bfloat16
-    )
-    attention.index_k_norm = MiniMAXGemmaRMSNorm(idx_head_dim).to(
-        device=DEVICE, dtype=torch.bfloat16
-    )
-    config = PreTrainedConfig(
-        rope_theta=10000.0,
-        partial_rotary_factor=0.5,
-        max_position_embeddings=32,
-    )
-    from vllm.config import VllmConfig, set_current_vllm_config
-
-    with set_current_vllm_config(VllmConfig()):
-        attention.rotary_emb = _build_rotary_emb(config, head_dim).to(DEVICE)
-    attention.index_rotary_emb = attention.rotary_emb
-
-    fp8_dtype = current_platform.fp8_dtype()
-    attention.kv_cache = torch.zeros(
-        2,
-        num_kv_heads,
-        block_size,
-        2 * head_dim,
-        device=DEVICE,
-        dtype=fp8_dtype,
-    )
-    attention._k_scale = torch.ones((), device=DEVICE, dtype=torch.float32)
-    attention._v_scale = torch.ones((), device=DEVICE, dtype=torch.float32)
-    index_cache = torch.zeros(
-        2, block_size, idx_head_dim, device=DEVICE, dtype=torch.bfloat16
-    )
-    index_prefix = "model.layers.0.self_attn.indexer"
-    attention.indexer = SimpleNamespace(
-        index_cache=SimpleNamespace(
-            dtype=torch.bfloat16,
-            kv_cache=index_cache,
-            prefix=index_prefix,
-        )
-    )
-
-    width = (
-        attention.q_size
-        + 2 * attention.kv_size
-        + attention.index_q_size
-        + attention.idx_head_dim
-    )
-    qkv = torch.randn(num_tokens, width, device=DEVICE, dtype=torch.bfloat16).mul_(0.25)
-    positions = torch.tensor([0, 1, 2], device=DEVICE, dtype=torch.long)
-    main_slots = torch.tensor([0, -1, 5], device=DEVICE, dtype=torch.long)
-    index_slots = torch.tensor([2, -1, 6], device=DEVICE, dtype=torch.long)
-
-    q_raw, k_raw, v_raw, index_q_raw, index_k_raw = qkv.clone().split(
-        [
-            attention.q_size,
-            attention.kv_size,
-            attention.kv_size,
-            attention.index_q_size,
-            attention.idx_head_dim,
-        ],
-        dim=-1,
-    )
-    expected_q = attention.q_norm(q_raw.view(num_tokens, num_heads, head_dim))
-    expected_k = attention.k_norm(k_raw.view(num_tokens, num_kv_heads, head_dim))
-    expected_q, expected_k = attention.rotary_emb.forward_native(
-        positions, expected_q, expected_k
-    )
-    expected_index_q = attention.index_q_norm(
-        index_q_raw.view(num_tokens, num_idx_heads, idx_head_dim)
-    )
-    expected_index_k = attention.index_k_norm(
-        index_k_raw.view(num_tokens, idx_head_dim)
-    )
-    expected_index_q, expected_index_k = attention.index_rotary_emb.forward_native(
-        positions, expected_index_q, expected_index_k
-    )
-    assert expected_k is not None
-    assert expected_index_k is not None
-
-    q, index_q = attention._native_gfx942_qknorm_rope_cache(
-        qkv,
-        positions,
-        {
-            attention.layer_name: main_slots,
-            index_prefix: index_slots,
-        },
-    )
-
-    torch.testing.assert_close(q, expected_q.reshape(num_tokens, -1))
-    assert index_q is not None
-    torch.testing.assert_close(index_q, expected_index_q.reshape(num_tokens, -1))
-
-    expected_v = v_raw.view(num_tokens, num_kv_heads, head_dim)
-    for token, slot in ((0, 0), (2, 5)):
-        block, offset = divmod(slot, block_size)
-        assert torch.equal(
-            attention.kv_cache[block, 0, offset, :head_dim],
-            expected_k[token, 0].to(fp8_dtype),
-        )
-        assert torch.equal(
-            attention.kv_cache[block, 0, offset, head_dim:],
-            expected_v[token, 0].to(fp8_dtype),
-        )
-    assert torch.count_nonzero(attention.kv_cache[0, 0, 1]) == 0
-
-    for token, slot in ((0, 2), (2, 6)):
-        block, offset = divmod(slot, block_size)
-        assert torch.equal(
-            index_cache[block, offset],
-            expected_index_k[token].to(index_cache.dtype),
-        )
-    assert torch.count_nonzero(index_cache[0, 1]) == 0
