@@ -55,6 +55,8 @@ parser.add_argument("--packed", action="store_true")
 parser.add_argument("--packed-buffer-size-bytes", type=int, default=64 << 20)
 parser.add_argument("--store-port", type=int, default=29612)
 args = parser.parse_args()
+if args.packed_buffer_size_bytes < 16:
+    parser.error("--packed-buffer-size-bytes must be at least 16")
 
 
 def post(path: str, body: dict | None = None) -> dict:
@@ -147,18 +149,27 @@ def main() -> None:
         for n in names:
             broadcast(weights[n].contiguous())
     else:
-        # Same chunking as the worker: a chunk closes right after the tensor
-        # that pushes it past the buffer size.
-        chunk: list[torch.Tensor] = []
-        size = 0
+        # The worker's layout: tensors 16-byte aligned in one byte stream,
+        # cut every buffer size; trailing padding is not sent.
+        cap = args.packed_buffer_size_bytes // 16 * 16
+        buf = torch.empty(cap, dtype=torch.uint8, device=device)
+        used = 0  # bytes of the current chunk taken
         for n in names:
-            chunk.append(weights[n].contiguous().view(-1).view(torch.uint8))
-            size += chunk[-1].numel()
-            if size > args.packed_buffer_size_bytes:
-                broadcast(torch.cat(chunk))
-                chunk, size = [], 0
-        if chunk:
-            broadcast(torch.cat(chunk))
+            flat = weights[n].contiguous().view(-1).view(torch.uint8)
+            if flat.numel() == 0:
+                continue  # no bytes, so no padding either
+            used = (used + 15) // 16 * 16
+            start = 0
+            while start < flat.numel():
+                end = min(flat.numel(), start + cap - used)
+                buf[used : used + end - start].copy_(flat[start:end])
+                used += end - start
+                start = end
+                if (used + 15) // 16 * 16 == cap:  # full: send it
+                    broadcast(buf[:used])
+                    used = 0
+        if used:
+            broadcast(buf[:used])
     torch.accelerator.synchronize()
     update.result()
     post("/finish_weight_update", {"weight_version": None})

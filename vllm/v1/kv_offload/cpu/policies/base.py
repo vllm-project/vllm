@@ -28,16 +28,26 @@ class ChunkStatus(ctypes.Structure):
 
     ref_cnt - the current number of transfers using this chunk as a source.
         A value of -1 indicates the chunk is not yet ready to be read.
+    lease_cnt - the number of leases preferring to keep the chunk resident.
     chunk_id - index of the physical CPU buffer slot.
     """
 
-    _fields_ = [("ref_cnt", ctypes.c_int32), ("chunk_id", ctypes.c_int64)]
+    _fields_ = [
+        ("ref_cnt", ctypes.c_int32),
+        ("lease_cnt", ctypes.c_int32),
+        ("chunk_id", ctypes.c_int64),
+    ]
 
     def __init__(self, chunk_id: int):
         super().__init__()
         # initialize chunk as "not ready" (ref_cnt = -1)
         self.ref_cnt = -1
         self.chunk_id = chunk_id
+
+    @property
+    def retained(self) -> bool:
+        """Return whether this chunk has an active retention lease."""
+        return self.lease_cnt > 0
 
     @property
     def is_ready(self) -> bool:
@@ -72,26 +82,15 @@ class CachePolicy(ABC):
     def remove(self, key: OffloadKey) -> None:
         """Remove a chunk (used to clean up after a failed store)."""
 
-    @abstractmethod
-    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        """Mark chunks as recently used.
-
-        Args:
-            keys: Chunks to mark as recently used.
-            req_context: Per-request context for the request touching these chunks.
-
-        """
-
     def on_store_miss(
         self, keys: Iterable[OffloadKey], req_context: ReqContext
     ) -> None:
         """Observe store misses before their cache entries are inserted.
 
-        The default delegates to ``touch`` for compatibility with external
-        policies. Policies may override this hook when a miss has distinct
-        semantics, such as ARC adapting to a ghost-list hit.
+        Policies may override this hook when a miss has distinct semantics,
+        such as ARC adapting to a ghost-list hit.
         """
-        self.touch(keys, req_context)
+        return
 
     def on_request_access(
         self,
@@ -102,10 +101,11 @@ class CachePolicy(ABC):
 
         Keys first observed here may not yet be resident. This hook can
         maintain prefix order during a request without committing the
-        frequency access handled by ``on_request_finished``.
+        frequency access handled by `on_request_finished`.
         """
         return
 
+    @abstractmethod
     def on_request_finished(
         self,
         key_groups: Sequence[Sequence[OffloadKey]],
@@ -115,26 +115,22 @@ class CachePolicy(ABC):
     ) -> None:
         """Apply one request-scoped cache access in prefix order.
 
-        ``key_groups`` contains keys observed for each KV cache group in
-        head-to-tail order. ``insertion_only_keys`` and ``reused_keys``
+        `key_groups` contains keys observed for each KV cache group in
+        head-to-tail order. `insertion_only_keys` and `reused_keys`
         distinguish chunks only created by this request from ready chunks it
         actually reused, which matters for policies such as ARC where reuse
         changes frequency but insertion and pending observations do not.
-
-        The default forwards one touch per group, preserving compatibility
-        for experimental out-of-tree policies while moving those touches to
-        request finalization. Policies that distinguish insertion from reuse
-        can override this hook and inspect the access classifications.
         """
-        del insertion_only_keys, reused_keys
-        for keys in key_groups:
-            self.touch(keys, req_context)
 
     @abstractmethod
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
         """Evict exactly n chunks, skipping any in protected.
+
+        Built-in policies prefer eligible non-retained chunks, falling back
+        to eligible retained chunks if needed. Retention is optional for
+        external policies.
 
         Returns a list of (key, chunk) for the evicted chunks,
         or None if n evictions cannot be satisfied. The operation is atomic:
@@ -150,6 +146,10 @@ class CachePolicy(ABC):
 
         Ghost lists and adaptive state are also reset.
         """
+
+    def on_retention_changed(self, key: OffloadKey, retained: bool) -> None:
+        """Called whenever a resident chunk gains its first lease or loses its last."""
+        return
 
     def mark_evictable(self, key: OffloadKey) -> None:
         """Called when a chunk's ref_cnt transitions to 0."""

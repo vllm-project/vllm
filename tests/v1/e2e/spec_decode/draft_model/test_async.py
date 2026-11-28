@@ -14,8 +14,8 @@ SPEC_DECODE_CONFIGS = [
         id="eagle3-llama",
     ),
     pytest.param(
-        "eagle618/deepseek-v3-random",
-        "eagle618/eagle-deepseek-v3-random",
+        "vllm/deepseek-v3-random",
+        "vllm/eagle-deepseek-v3-random",
         "eagle",
         2,
         id="eagle-mla-deepseek",
@@ -59,7 +59,6 @@ def test_no_sync_with_spec_decode(
     with vllm_runner(
         model,
         block_size=None,
-        trust_remote_code=False,
         max_model_len=256,
         speculative_config={
             "method": method,

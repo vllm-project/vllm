@@ -6,7 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.v1.kv_offload.base import LoadStoreSpec
+from vllm.v1.kv_offload.base import LoadStoreSpec, OffloadKey, StoreTrigger
 
 ReqId = str
 
@@ -50,7 +50,7 @@ class TransferStats:
         return self.load.is_empty() and self.store.is_empty()
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferJob:
     """A transfer job bundling request context with transfer spec.
 
@@ -66,12 +66,37 @@ class TransferJob:
     sync: bool = False
 
 
+@dataclass(slots=True)
+class TransferJobStatus:
+    """Tracks scheduler-side state for a single transfer job."""
+
+    req_id: ReqId
+    # Number of workers still pending. Starts at num_workers,
+    # decremented as each worker reports completion. Job is done at 0.
+    pending_count: int
+    # Offload keys this job covers, in prefix order; passed to
+    # manager.complete_*().
+    keys: tuple[OffloadKey, ...]
+    is_store: bool
+    # Unlike an async load, store jobs may be created next to it.
+    is_sync_load: bool = False
+    failed: bool = False
+    # Store source blocks fenced after the request finishes.
+    deferred_fence_block_ids: list[int] | None = None
+    # Store source blocks fenced when the transfer is created.
+    fenced_block_ids: list[int] | None = None
+    # The trigger of the handler that made a store job. The scheduler sets it.
+    trigger: StoreTrigger | None = None
+
+
 @dataclass
 class OffloadingConnectorMetadata(KVConnectorMetadata):
     # Keyed by scheduler-assigned job IDs.
     load_jobs: dict[int, TransferJob]
     store_jobs: dict[int, TransferJob]
     jobs_to_flush: set[int] | None = None
+    # False until every worker reported ready under async_init.
+    offloading_enabled: bool = True
 
 
 @dataclass
@@ -87,6 +112,8 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     completed_jobs: dict[int, int] = field(default_factory=dict)
     failed_jobs: set[int] = field(default_factory=set)
     transfer_stats: TransferStats = field(default_factory=TransferStats)
+    # Ranks of workers that became ready, under async_init. Each reports once.
+    ready_ranks: set[int] = field(default_factory=set)
 
     def mark_completed(self, job_id: int, success: bool = True) -> None:
         """Record a transfer job completion from this worker."""
@@ -107,4 +134,5 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
             completed_jobs=merged,
             failed_jobs=self.failed_jobs | other.failed_jobs,
             transfer_stats=self.transfer_stats.aggregate(other.transfer_stats),
+            ready_ranks=self.ready_ranks | other.ready_ranks,
         )

@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+from concurrent.futures import Executor, Future, ThreadPoolExecutor, TimeoutError
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
@@ -44,6 +44,10 @@ _LOOKUP_TIMEOUT_S = 1.0
 # put into a full pool can fail until eviction catches up.
 _STORE_RETRIES = 2
 _STORE_RETRY_BACKOFF_S = 0.01
+
+# MORI v1.2.3 defaults to 0.9/0.7, which frees a fifth of the pool each time it
+# fills and keeps a KV cache about 80% full.
+_DEFAULT_DRAM_WATERMARKS = {"dram_high_watermark": 0.99, "dram_low_watermark": 0.97}
 
 _RANK_KEY_PATTERN = re.compile(r":tp(\d+):pcp(\d+):dcp(\d+):pp(\d+):g\d+:")
 
@@ -208,7 +212,7 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
                 response += chunk
             return msgspec.json.decode(response or b"[]")
 
-    def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
+    def lookup(self, keys: Sequence[str]) -> Sequence[bool | None]:
         unavailable: list[tuple[int, int, int, int]]
         if len(self._paths) == 1:
             rank, path = next(iter(self._paths.items()))
@@ -227,8 +231,8 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
                     )
                     else []
                 )
-                return self._lookup_result(keys, [False] * len(keys), unavailable)
-        result = [False] * len(keys)
+                return self._lookup_result(keys, [None] * len(keys), unavailable)
+        result: list[bool | None] = [False] * len(keys)
         keys_by_rank: dict[tuple[int, int, int, int], list[tuple[int, str]]] = {}
         unrouted: list[tuple[int, str]] = []
         for index, key in enumerate(keys):
@@ -248,6 +252,8 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
                     result[index] = bool(value)
             except (OSError, ValueError, IndexError):
                 unavailable.append(rank)
+                for index, _ in indexed_keys:
+                    result[index] = None
         for path in self._paths.values():
             if not unrouted:
                 break
@@ -262,11 +268,11 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
     def _lookup_result(
         self,
         keys: Sequence[str],
-        result: list[bool],
+        result: list[bool | None],
         unavailable: list[tuple[int, int, int, int]],
-    ) -> list[bool]:
+    ) -> list[bool | None]:
         missing = tuple(
-            key for key, exists in zip(keys, result, strict=True) if not exists
+            key for key, exists in zip(keys, result, strict=True) if exists is False
         )
         self.last_lookup_diagnostics = {
             "unavailable_ranks": tuple(unavailable),
@@ -320,19 +326,18 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         timeout_s: float,
         layout: KVLayoutDescriptor | None = None,
         lookup_instance: str = "",
+        serve_lookups: bool = True,
     ) -> None:
         self.client = client
         self._namespace = namespace
         self._topology = topology
         self._lookup_dir = lookup_dir
         self._lookup_instance = lookup_instance
+        self._serve_lookups = serve_lookups
         self._lookup_server: _MoriLookupServer | None = None
         self._registered_storages: set[int] = set()
         self._gpu_devices: set[int] = set()
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="umbp-embedded-transfer",
-        )
+        self._executor = self._create_executor(max_workers)
         self._job_lock = threading.Lock()
         self._futures: dict[int, Future[TransferJobState]] = {}
         self._store_deadlines: dict[int, float] = {}
@@ -340,6 +345,12 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self._timeout_s = timeout_s
         self._layout = layout
         self._load_layouts: dict[int, _BlockLoadLayout] = {}
+
+    def _create_executor(self, max_workers: int) -> Executor:
+        return ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="umbp-embedded-transfer",
+        )
 
     def register_buffers(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
@@ -369,7 +380,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 self._gpu_devices.add(device)
 
         self._register_load_layouts(kv_caches)
-        if self._lookup_server is None:
+        if self._serve_lookups and self._lookup_server is None:
             self._lookup_server = _MoriLookupServer(
                 _lookup_socket_path(
                     self._namespace,
@@ -398,6 +409,16 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 if cache is None or cache.ndim == 0:
                     break
                 stride = cache.stride(0) * cache.element_size()
+                if region.segments:
+                    if stride != region.block_stride:
+                        break
+                    for segment_offset, length in region.segments:
+                        bases.append(cache.data_ptr() + segment_offset)
+                        strides.append(stride)
+                        offsets.append(sum(sizes))
+                        sizes.append(length)
+                    counts.append(cache.shape[0])
+                    continue
                 if (
                     stride <= 0
                     or stride > region.block_stride
@@ -750,6 +771,8 @@ def _configure_dram(client_config: Any, options: dict[str, Any]) -> None:
     """Apply embedded-only host-DRAM options to MORI's client config."""
     dram = client_config.dram
     dram.capacity_bytes = options.get("capacity_bytes", 64 * 1024**3)
+    if not _DEFAULT_DRAM_WATERMARKS.keys() & options.keys():
+        options = {**_DEFAULT_DRAM_WATERMARKS, **options}
     option_fields = {
         "dram_use_shared_memory": "use_shared_memory",
         "dram_shm_name": "shm_name",

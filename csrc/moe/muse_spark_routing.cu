@@ -10,6 +10,7 @@
 #include <limits>
 #include <optional>
 
+#include "dispatch_utils.h"
 #include "torch_utils.h"
 
 namespace vllm {
@@ -67,11 +68,12 @@ struct RoutingTrait {
   static constexpr int kMaxExperts = 256;
 };
 
+template <typename Index>
 struct RoutingParams {
   const float* __restrict__ gating_output;
   const float* __restrict__ bias;
   float* __restrict__ topk_weights;
-  int32_t* __restrict__ topk_ids;
+  Index* __restrict__ topk_ids;
   const bool* __restrict__ is_padding;
   int64_t padding_stride;
   int num_tokens;
@@ -84,8 +86,9 @@ struct RoutingParams {
   float division_eps;
 };
 
-template <typename Trait, bool kUsePDL>
-__global__ void routing_kernel(const RoutingParams __grid_constant__ params) {
+template <typename Trait, bool kUsePDL, typename Index>
+__global__ void routing_kernel(
+    const RoutingParams<Index> __grid_constant__ params) {
   constexpr int kEPL = Trait::kExpertsPerLane;
   constexpr int kTopK = Trait::kTopK;
   constexpr int kGroupExperts = 4 * 32;
@@ -230,7 +233,7 @@ __global__ void routing_kernel(const RoutingParams __grid_constant__ params) {
   score_sum += params.division_eps;
   const float inv_sum_scaled = div_full(params.route_scale, score_sum);
   if (lane < kTopK) {
-    const int32_t id = out_id;
+    const Index id = out_id;
     const float weight = out_score * inv_sum_scaled;
     params.topk_ids[token * params.stride_im + lane] = id;
     params.topk_weights[token * params.stride_wm + lane] = weight;
@@ -244,8 +247,8 @@ namespace {
 using Tensor = torch::stable::Tensor;
 using ScalarType = torch::headeronly::ScalarType;
 
-template <int Warps, bool PDL>
-void launch_routing(const vllm::moe::RoutingParams& params,
+template <int Warps, bool PDL, typename Index>
+void launch_routing(const vllm::moe::RoutingParams<Index>& params,
                     cudaStream_t stream) {
   using Trait = vllm::moe::RoutingTrait<Warps>;
   cudaLaunchConfig_t config{};
@@ -259,8 +262,8 @@ void launch_routing(const vllm::moe::RoutingParams& params,
     config.attrs = &attr;
     config.numAttrs = 1;
   }
-  auto err = cudaLaunchKernelEx(&config, vllm::moe::routing_kernel<Trait, PDL>,
-                                params);
+  auto err = cudaLaunchKernelEx(
+      &config, vllm::moe::routing_kernel<Trait, PDL, Index>, params);
   STD_TORCH_CHECK(err == cudaSuccess, "Muse Spark routing launch failed: ",
                   cudaGetErrorString(err));
 }
@@ -294,9 +297,11 @@ void muse_spark_routing(Tensor& topk_weights, Tensor& topk_ids,
             output->stride(1) == 1 && output->stride(0) >= 8,
         "routing outputs must have shape [tokens, 8] with contiguous rows");
   }
-  STD_TORCH_CHECK(topk_weights.scalar_type() == ScalarType::Float &&
-                      topk_ids.scalar_type() == ScalarType::Int,
-                  "routing outputs must be FP32 weights and int32 IDs");
+  STD_TORCH_CHECK(
+      topk_weights.scalar_type() == ScalarType::Float &&
+          (topk_ids.scalar_type() == ScalarType::Int ||
+           topk_ids.scalar_type() == ScalarType::Long),
+      "routing outputs must be FP32 weights and int32 or int64 IDs");
   if (is_padding) {
     STD_TORCH_CHECK(is_padding->device() == logits.device() &&
                         is_padding->scalar_type() == ScalarType::Bool &&
@@ -308,34 +313,34 @@ void muse_spark_routing(Tensor& topk_weights, Tensor& topk_ids,
   torch::stable::accelerator::DeviceGuard guard(logits.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(logits.get_device_index());
-  vllm::moe::RoutingParams params{
-      .gating_output = static_cast<const float*>(logits.data_ptr()),
-      .bias = static_cast<const float*>(bias.data_ptr()),
-      .topk_weights = static_cast<float*>(topk_weights.data_ptr()),
-      .topk_ids = static_cast<int32_t*>(topk_ids.data_ptr()),
-      .is_padding = is_padding
-                        ? static_cast<const bool*>(is_padding->data_ptr())
-                        : nullptr,
-      .padding_stride = is_padding ? is_padding->stride(0) : 0,
-      .num_tokens = tokens,
-      .num_experts = 256,
-      .stride_gm = logits.stride(0),
-      .stride_wm = topk_weights.stride(0),
-      .stride_im = topk_ids.stride(0),
-      .router_output_multiplier = static_cast<float>(multiplier),
-      .route_scale = static_cast<float>(route_scale),
-      .division_eps = static_cast<float>(division_eps),
-  };
-  const bool pdl = get_device_prop()->major >= 9;
-  if (tokens <= 2048) {
-    if (pdl)
-      launch_routing<1, true>(params, stream);
-    else
-      launch_routing<1, false>(params, stream);
-  } else {
-    if (pdl)
-      launch_routing<4, true>(params, stream);
-    else
-      launch_routing<4, false>(params, stream);
-  }
+  VLLM_STABLE_DISPATCH_IDX_TYPES(
+      topk_ids.scalar_type(), "muse_spark_routing", [&] {
+        vllm::moe::RoutingParams<idx_t> params{
+            .gating_output = static_cast<const float*>(logits.data_ptr()),
+            .bias = static_cast<const float*>(bias.data_ptr()),
+            .topk_weights = static_cast<float*>(topk_weights.data_ptr()),
+            .topk_ids = static_cast<idx_t*>(topk_ids.data_ptr()),
+            .is_padding = is_padding
+                              ? static_cast<const bool*>(is_padding->data_ptr())
+                              : nullptr,
+            .padding_stride = is_padding ? is_padding->stride(0) : 0,
+            .num_tokens = tokens,
+            .num_experts = 256,
+            .stride_gm = logits.stride(0),
+            .stride_wm = topk_weights.stride(0),
+            .stride_im = topk_ids.stride(0),
+            .router_output_multiplier = static_cast<float>(multiplier),
+            .route_scale = static_cast<float>(route_scale),
+            .division_eps = static_cast<float>(division_eps),
+        };
+        if (tokens <= 2048) {
+          const bool pdl = get_device_prop()->major >= 9;
+          if (pdl)
+            launch_routing<1, true>(params, stream);
+          else
+            launch_routing<1, false>(params, stream);
+        } else {
+          launch_routing<4, false>(params, stream);
+        }
+      });
 }

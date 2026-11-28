@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::borrow::Cow;
+
 use axum::Json;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::{AsReport as _, Construct, Macro};
@@ -19,12 +21,26 @@ pub enum ApiError {
         message: String,
         param: Option<&'static str>,
     },
-    /// The requested model name does not match the single configured model.
-    ModelNotFound { model: String },
+    /// The requested model name is neither a served base model nor a loaded
+    /// LoRA adapter. `served_names` lists the base names, as Python does.
+    ModelNotFound {
+        model: String,
+        served_names: Vec<String>,
+    },
     /// A resource other than the model, such as a LoRA adapter, does not exist.
     NotFound { message: String },
-    /// The request body could not be parsed as valid JSON.
-    JsonParseError { message: String },
+    /// The request body could not be parsed as valid JSON; `param` names the
+    /// offending field as `body.<path>` for schema/type mismatches.
+    JsonParseError {
+        message: String,
+        param: Option<String>,
+    },
+    /// The query string could not be deserialized into the route's
+    /// parameters; `param` names the offending field as `query.<name>`.
+    InvalidQuery {
+        message: String,
+        param: Option<String>,
+    },
     /// The requested operation conflicts with current server state.
     Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
@@ -41,7 +57,7 @@ impl ApiError {
             Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
+            Self::JsonParseError { .. } | Self::InvalidQuery { .. } => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -55,16 +71,25 @@ impl ApiError {
                 message.clone(),
                 param.map(str::to_string),
             ),
-            Self::ModelNotFound { model } => (
+            Self::ModelNotFound {
+                model,
+                served_names,
+            } => (
                 "NotFoundError",
-                format!("The model `{model}` does not exist."),
+                format!(
+                    "The model `{}` does not exist. Valid aliases: {}.",
+                    truncate_echoed_model(model),
+                    served_names.join(", ")
+                ),
                 Some("model".to_string()),
             ),
             Self::NotFound { message } => ("NotFoundError", message.clone(), None),
-            // Python reports a body that fails to parse into the request
-            // model through FastAPI's validation handler, which names the
-            // HTTP status instead of an error class.
-            Self::JsonParseError { message } => ("Bad Request", message.clone(), None),
+            // Python reports a body or query that fails to parse into the
+            // request model through FastAPI's validation handler, which names
+            // the HTTP status instead of an error class.
+            Self::JsonParseError { message, param } | Self::InvalidQuery { message, param } => {
+                ("Bad Request", message.clone(), param.clone())
+            }
             // Python has no error class for 409; like its `HTTPException`
             // handler, name the status.
             Self::Conflict { message } => ("Conflict", message.clone(), None),
@@ -85,35 +110,113 @@ impl ApiError {
     }
 }
 
+/// Bound the client-supplied model name echoed in an error message to 256
+/// characters, like Python.
+fn truncate_echoed_model(model: &str) -> Cow<'_, str> {
+    const MAX_CHARS: usize = 256;
+    match model.char_indices().nth(MAX_CHARS) {
+        Some((end, _)) => Cow::Owned(format!("{}...", &model[..end])),
+        None => Cow::Borrowed(model),
+    }
+}
+
 impl From<JsonRejection> for ApiError {
     fn from(error: JsonRejection) -> Self {
-        Self::json_parse_error(error.body_text())
+        // Axum deserializes JSON bodies through `serde_path_to_error`. Report
+        // the failing path as `body.<path>` on schema/type mismatches (like
+        // FastAPI's `loc`), while keeping syntax/EOF/content-type errors unset.
+        let param = matches!(&error, JsonRejection::JsonDataError(_))
+            .then(|| serde_rejection_param::<serde_json::Error>("body", &error))
+            .flatten();
+        Self::json_parse_error(error.body_text(), param)
     }
+}
+
+impl From<QueryRejection> for ApiError {
+    fn from(error: QueryRejection) -> Self {
+        // Axum deserializes through `serde_path_to_error`; name the failing
+        // field like FastAPI's `loc`, and leave `param` unset without one.
+        let param = serde_rejection_param::<serde::de::value::Error>("query", &error);
+        Self::invalid_query(error.body_text(), param)
+    }
+}
+
+/// Extract a FastAPI-style `<prefix>.<path>` parameter name from an Axum
+/// rejection wrapping `serde_path_to_error::Error<E>`.
+///
+/// Note: because Serde buffers `#[serde(flatten)]` fields before deserializing
+/// the flattened struct, `serde_path_to_error` reports the path up to the
+/// enclosing struct (or `None` when flattened at the root).
+fn serde_rejection_param<E: std::error::Error + 'static>(
+    prefix: &str,
+    error: &(dyn std::error::Error + 'static),
+) -> Option<String> {
+    use std::fmt::Write as _;
+
+    use serde_path_to_error::Segment;
+
+    let path = std::iter::successors(Some(error), |error| error.source())
+        .find_map(|error| error.downcast_ref::<serde_path_to_error::Error<E>>())?
+        .path();
+    let mut out = String::new();
+    for segment in path {
+        match segment {
+            Segment::Map { key } => {
+                let _ = write!(out, ".{key}");
+            }
+            Segment::Seq { index } => {
+                let _ = write!(out, ".{index}");
+            }
+            // Skip Rust enum variant names and unknown placeholders so
+            // internal type names do not leak into `param`.
+            Segment::Enum { .. } | Segment::Unknown => {}
+        }
+    }
+    (!out.is_empty()).then(|| format!("{prefix}{out}"))
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status_code(), Json(self.to_error_response())).into_response()
+        let body = self.to_error_response();
+        let mut response = (self.status_code(), Json(body.clone())).into_response();
+        // For `--log-error-stack`.
+        response.extensions_mut().insert(body);
+        response
     }
 }
 
-/// Classify a text-pipeline submit failure: request validation failures are
-/// the client's fault and map to HTTP 400, mirroring the Python frontend.
+/// Classify a text-pipeline request failure, wherever it surfaces: while
+/// preparing or submitting the request, or from its output stream. Request
+/// validation failures are the client's fault and map to HTTP 400, mirroring
+/// the Python frontend. A request that cannot be taken now, such as one over a
+/// queue limit or one whose remote worker went away, maps to a retryable 503.
 /// Everything else stays an internal 500.
-pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
-    if error.is_request_validation_error() {
-        return invalid_request!(param = error.param(), "{error}");
-    }
-    server_error!("{}: {}", context, error.to_report_string())
+pub fn text_request_error(context: &'static str, error: vllm_text::Error) -> ApiError {
+    classified_error(context, error.kind(), &error)
 }
 
-/// Like [`text_submit_error`], for the chat pipeline, which wraps the text
+/// Like [`text_request_error`], for the chat pipeline, which wraps the text
 /// errors.
-pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
-    if error.is_request_validation_error() {
-        return invalid_request!(param = error.param(), "{error}");
+pub fn chat_request_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
+    classified_error(context, error.kind(), &error)
+}
+
+fn classified_error(
+    context: &'static str,
+    kind: vllm_text::ErrorKind,
+    error: &impl std::error::Error,
+) -> ApiError {
+    match kind {
+        vllm_text::ErrorKind::InvalidRequest { param } => {
+            invalid_request!(param = param, "{}", error.as_report())
+        }
+        vllm_text::ErrorKind::Unavailable => ApiError::ServiceUnavailable {
+            message: error.to_report_string(),
+        },
+        vllm_text::ErrorKind::Internal => {
+            server_error!("{}: {}", context, error.to_report_string())
+        }
     }
-    server_error!("{}: {}", context, error.to_report_string())
 }
 
 /// Classify an engine-reported request failure: a validation error (e.g. a
@@ -137,15 +240,36 @@ mod tests {
 
     use super::*;
 
+    /// The echoed model name is cut to 256 characters plus `...`, like
+    /// Python; a name of exactly 256 characters is kept whole.
+    #[test]
+    fn model_not_found_bounds_echoed_model_name() {
+        let message = |model: String| {
+            ApiError::model_not_found(model, vec!["base".to_string()])
+                .to_error_response()
+                .error
+                .message
+        };
+        let kept = "é".repeat(256);
+        assert_eq!(
+            message(kept.clone()),
+            format!("The model `{kept}` does not exist. Valid aliases: base.")
+        );
+        assert_eq!(
+            message(format!("{kept}x")),
+            format!("The model `{kept}...` does not exist. Valid aliases: base.")
+        );
+    }
+
     /// Each error class serializes like Python's `ErrorInfo`: the class name
     /// in `type` and the HTTP status as an integer `code`.
     #[test]
     fn error_response_names_error_class_and_status_code() {
         let errors = [
             ApiError::invalid_request("top_p must be in (0, 1].", Some("top_p")),
-            ApiError::model_not_found("missing"),
+            ApiError::model_not_found("missing", vec!["base".to_string(), "alias".to_string()]),
             ApiError::not_found("No adapter found for /not/an/adapter"),
-            ApiError::json_parse_error("expected value at line 1 column 1"),
+            ApiError::json_parse_error("expected value at line 1 column 1", None),
             ApiError::conflict("A profiling session is already active."),
             ApiError::server_error("Internal server error"),
             ApiError::service_unavailable("Generation is paused."),
@@ -156,7 +280,7 @@ mod tests {
             .join("\n");
         expect![[r#"
             {"error":{"message":"top_p must be in (0, 1].","type":"BadRequestError","param":"top_p","code":400}}
-            {"error":{"message":"The model `missing` does not exist.","type":"NotFoundError","param":"model","code":404}}
+            {"error":{"message":"The model `missing` does not exist. Valid aliases: base, alias.","type":"NotFoundError","param":"model","code":404}}
             {"error":{"message":"No adapter found for /not/an/adapter","type":"NotFoundError","param":null,"code":404}}
             {"error":{"message":"expected value at line 1 column 1","type":"Bad Request","param":null,"code":400}}
             {"error":{"message":"A profiling session is already active.","type":"Conflict","param":null,"code":409}}
@@ -180,7 +304,7 @@ mod tests {
         let response = errors
             .into_iter()
             .map(|error| {
-                let api_error = text_submit_error("failed to submit completion request", error);
+                let api_error = text_request_error("failed to submit completion request", error);
                 assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
                 serde_json::to_string(&api_error.to_error_response()).unwrap()
             })
@@ -192,19 +316,23 @@ mod tests {
 
     #[test]
     fn invalid_thinking_token_budget_maps_to_invalid_request() {
-        let api_error = text_submit_error(
+        let api_error = text_request_error(
             "failed to submit completion request",
             vllm_text::Error::InvalidThinkingTokenBudget,
         );
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(
+            response.error.param.as_deref(),
+            Some("thinking_token_budget")
+        );
         assert!(response.error.message.contains("thinking_token_budget"));
     }
 
     #[test]
     fn min_tokens_above_max_tokens_maps_to_invalid_request() {
-        let api_error = text_submit_error(
+        let api_error = text_request_error(
             "failed to submit completion request",
             vllm_text::Error::MinTokensExceedsMaxTokens {
                 min_tokens: 5,
@@ -214,13 +342,14 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(response.error.param, None);
         assert!(response.error.message.contains("min_tokens=5"));
         assert!(response.error.message.contains("max_tokens=4"));
     }
 
     #[test]
     fn sampling_params_validation_maps_to_invalid_request() {
-        let api_error = text_submit_error(
+        let api_error = text_request_error(
             "failed to submit completion request",
             vllm_text::Error::SamplingParams(vllm_text::SamplingParamsError::OutOfRange {
                 parameter: "top_p",
@@ -231,6 +360,7 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(response.error.param.as_deref(), Some("top_p"));
         assert!(response.error.message.contains("top_p"));
     }
 
@@ -240,7 +370,7 @@ mod tests {
             max_model_len: 8192,
             prompt_len: 9000,
         });
-        let api_error = chat_submit_error("failed to submit chat request", error);
+        let api_error = chat_request_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(
             api_error.to_error_response().error.param.as_deref(),
@@ -258,7 +388,7 @@ mod tests {
                 message: "template kwarg `thinking` must be a boolean".to_string(),
             },
         ] {
-            let api_error = chat_submit_error("failed to submit chat request", error);
+            let api_error = chat_request_error("failed to submit chat request", error);
             assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
             assert_eq!(
                 api_error.to_error_response().error.error_type,
@@ -269,36 +399,37 @@ mod tests {
 
     #[test]
     fn chat_template_throw_maps_to_invalid_request() {
-        let error = vllm_chat::Error::ChatTemplateThrown {
+        let error = vllm_chat::Error::ChatTemplateRender {
             message: "Unexpected reasoning effort high.".to_string(),
         };
-        let api_error = chat_submit_error("failed to submit chat request", error);
+        let api_error = chat_request_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
         assert_eq!(response.error.message, "Unexpected reasoning effort high.");
+        assert_eq!(response.error.param, None);
     }
 
     #[test]
     fn untrusted_request_chat_template_maps_to_invalid_request() {
-        let api_error = chat_submit_error(
+        let api_error = chat_request_error(
             "tokenize failed",
             vllm_chat::Error::UntrustedRequestChatTemplate,
         );
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.param.as_deref(), Some("chat_template"));
         assert_eq!(
-            api_error.to_error_response().error.message,
+            response.error.message,
             "Chat template is passed with request, but --trust-request-chat-template is not set. \
              Refused request with untrusted chat template."
         );
     }
 
     #[test]
-    fn chat_template_render_failure_stays_internal() {
-        let error = vllm_chat::Error::ChatTemplate(
-            "failed to render jinja template: unknown function".to_string(),
-        );
-        let api_error = chat_submit_error("failed to submit chat request", error);
+    fn chat_template_failure_stays_internal() {
+        let error = vllm_chat::Error::ChatTemplate("render task join error".to_string());
+        let api_error = chat_request_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -307,7 +438,7 @@ mod tests {
         let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds {
             request_id: "req-1".to_string(),
         });
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
     }
 
@@ -318,10 +449,11 @@ mod tests {
             requested: 1000,
             max_allowed: 20,
         });
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(response.error.param.as_deref(), Some("logprobs"));
         assert!(response.error.message.contains("logprobs"));
     }
 
@@ -334,8 +466,12 @@ mod tests {
                 max_allowed: 20,
             },
         ));
-        let api_error = chat_submit_error("failed to submit chat request", error);
+        let api_error = chat_request_error("failed to submit chat request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.param.as_deref(),
+            Some("prompt_logprobs")
+        );
     }
 
     #[test]
@@ -345,17 +481,22 @@ mod tests {
             token_ids: vec![1000],
             vocab_size: 1000,
         });
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.param.as_deref(),
+            Some("logprob_token_ids")
+        );
     }
 
     #[test]
     fn empty_allowed_token_ids_maps_to_invalid_request() {
         let error = vllm_text::Error::TokenIds(vllm_text::TokenIdsError::EmptyAllowedTokenIds);
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(response.error.param.as_deref(), Some("allowed_token_ids"));
         assert!(response.error.message.contains("allowed_token_ids"));
     }
 
@@ -365,10 +506,14 @@ mod tests {
             value: 8000,
             max_model_len: 4000,
         };
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(
+            response.error.param.as_deref(),
+            Some("truncate_prompt_tokens")
+        );
         assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
         assert!(response.error.message.contains("max_model_len = 4000"));
     }
@@ -376,20 +521,120 @@ mod tests {
     #[test]
     fn invalid_truncate_prompt_tokens_maps_to_invalid_request() {
         let error = vllm_text::Error::InvalidTruncatePromptTokens { value: -2 };
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "BadRequestError");
+        assert_eq!(
+            response.error.param.as_deref(),
+            Some("truncate_prompt_tokens")
+        );
         assert!(response.error.message.contains("-2"));
         assert!(response.error.message.contains("must be >= -1"));
     }
 
+    /// A request over a queue limit is retryable, with Python's message.
     #[test]
-    fn other_submit_errors_stay_internal() {
+    fn queue_limit_errors_map_to_service_unavailable() {
+        let errors = [
+            text_request_error(
+                "failed to submit completion request",
+                vllm_text::Error::Llm(vllm_llm::Error::QueueFull),
+            ),
+            chat_request_error(
+                "failed to submit chat request",
+                vllm_chat::Error::Text(vllm_text::Error::Llm(vllm_llm::Error::PrefillBacklogFull)),
+            ),
+        ];
+        let rendered = errors
+            .iter()
+            .map(|error| serde_json::to_string(&error.to_error_response()).unwrap())
+            .join("\n");
+        expect![[r#"
+            {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}
+            {"error":{"message":"The engine has reached its prefill token backlog limit. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&rendered);
+    }
+
+    #[test]
+    fn other_request_errors_stay_internal() {
         let error = vllm_text::Error::Tokenizer("backend exploded".to_string());
-        let api_error = text_submit_error("failed to submit completion request", error);
+        let api_error = text_request_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
         let response = api_error.to_error_response();
         assert!(response.error.message.starts_with("failed to submit completion request:"));
+    }
+
+    #[test]
+    fn json_rejection_reports_body_path_for_data_errors_only() {
+        #[derive(Debug, serde::Deserialize)]
+        #[expect(dead_code)]
+        struct Item {
+            count: u32,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        #[expect(dead_code)]
+        enum Mode {
+            Nested { limit: u32 },
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        #[expect(dead_code)]
+        struct Flattened {
+            extra: Option<u32>,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        #[expect(dead_code)]
+        struct Body {
+            required: String,
+            temperature: Option<f32>,
+            stream_interval: Option<std::num::NonZeroU32>,
+            items: Option<Vec<Item>>,
+            mode: Option<Mode>,
+            #[serde(flatten)]
+            flattened: Flattened,
+        }
+
+        let cases = [
+            (
+                r#"{"required":"ok","temperature":"hot"}"#,
+                Some("body.temperature"),
+            ),
+            (
+                r#"{"required":"ok","stream_interval":0}"#,
+                Some("body.stream_interval"),
+            ),
+            (
+                r#"{"required":"ok","items":[{"count":"bad"}]}"#,
+                Some("body.items.0.count"),
+            ),
+            (
+                r#"{"required":"ok","mode":{"Nested":{"limit":"bad"}}}"#,
+                Some("body.mode.limit"),
+            ),
+            // Root-level `#[serde(flatten)]` buffers fields in Serde before
+            // deserializing the inner struct, so no leaf path is recorded.
+            (r#"{"required":"ok","extra":"bad"}"#, None),
+            (r#"{}"#, None),
+            (r#"{"required":"ok","temperature":"#, None),
+        ];
+        for (payload, expected_param) in cases {
+            let rejection = Json::<Body>::from_bytes(payload.as_bytes()).unwrap_err();
+            let api_error = ApiError::from(rejection);
+            assert_eq!(
+                api_error.status_code(),
+                StatusCode::BAD_REQUEST,
+                "{payload}"
+            );
+            let response = api_error.to_error_response();
+            assert_eq!(response.error.error_type, "Bad Request", "{payload}");
+            assert_eq!(
+                response.error.param.as_deref(),
+                expected_param,
+                "{payload} -> {:?}",
+                response.error
+            );
+        }
     }
 }

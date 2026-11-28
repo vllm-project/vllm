@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused CUDA and Triton kernels for MuseSpark1x's top-k router."""
+"""Fused CUDA and Triton kernels for Muse Spark's top-k router."""
 
 import torch
 
@@ -71,7 +71,7 @@ def _routing_kernel(
     HAS_EPS: tl.constexpr,
     USE_PDL: tl.constexpr,
 ) -> None:
-    """One program per token; constexpr ``TOPK`` keeps the selection in registers."""
+    """One program per token; constexpr `TOPK` keeps the selection in registers."""
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
 
@@ -115,27 +115,28 @@ def _routing_kernel(
     if HAS_EPS:
         score_sum = score_sum + division_eps
     inv_sum_scaled = route_scale / score_sum
+    weights = scores * inv_sum_scaled
     if is_padding is not None:
         padding = tl.load(is_padding + token_id * is_padding_stride)
         ids = tl.where(padding, -1, ids)
-        inv_sum_scaled = tl.where(padding, 0.0, inv_sum_scaled)
+        weights = tl.where(padding, 0.0, weights)
 
     tl.store(
         topk_ids_ptr + token_id * stride_im + slots * stride_ik, ids, mask=slot_mask
     )
     tl.store(
         topk_weights_ptr + token_id * stride_wm + slots * stride_wk,
-        scores * inv_sum_scaled,
+        weights,
         mask=slot_mask,
     )
 
 
 def _padded_num_experts(num_experts: int) -> int:
-    """Next power of two >= ``num_experts``, at least 8."""
+    """Next power of two >= `num_experts`, at least 8."""
     return 1 << max(3, (num_experts - 1).bit_length())
 
 
-def fused_musespark1x_routing(
+def fused_muse_spark_routing(
     gating_output: torch.Tensor,
     bias: torch.Tensor,
     topk: int,
@@ -148,7 +149,7 @@ def fused_musespark1x_routing(
     *,
     is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run MuseSpark1x's router in one kernel.
+    """Run Muse Spark's router in one kernel.
 
     Passing both destinations keeps the call allocation-free (graph-capturable).
     """

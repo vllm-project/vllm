@@ -26,12 +26,12 @@ from vllm.v1.attention.backends.zentorch_sdpa import (
     zentorch_sdpa_attn,
 )
 from vllm.v1.attention.selector import AttentionSelectorConfig
-from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     cpu_attention_with_kv_cache,
     cpu_attn_get_scheduler_metadata,
     cpu_attn_reshape_and_cache,
@@ -839,7 +839,7 @@ def test_encoder_only_attention_ignores_default_causal(
             attn_type=AttentionType.ENCODER_ONLY,
             prefix=layer_name,
         )
-        spec = EncoderOnlyAttentionSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
@@ -1485,6 +1485,13 @@ def test_varlen_with_paged_kv_dynamic_causal(
 @pytest.mark.parametrize(
     ("seq_lens", "num_heads", "head_size", "num_blocks"),
     [
+        pytest.param(
+            [(1, 4096)] * 6,
+            (32, 4),
+            128,
+            128,
+            id="decode_final_partition_remainder",
+        ),
         pytest.param(
             [(5, 513), (1, 193), (4, 4097)],
             (32, 4),

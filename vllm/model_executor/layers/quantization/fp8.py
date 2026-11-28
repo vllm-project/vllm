@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     resolve_fp8_moe_weight_block_shape,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import expose_input_quant_key
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -47,14 +49,12 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
+    dequantize_fp8_moe_weights,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape,
     validate_fp8_block_shape_moe,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -161,7 +161,9 @@ class Fp8Config(QuantizationConfig):
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
-        store_dtype = cls.get_from_keys_or(config, ["store_dtype"], None)
+        store_dtype = cls.get_from_keys_or(
+            config, ["store_dtype", "expert_dtype"], None
+        )
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
@@ -185,9 +187,7 @@ class Fp8Config(QuantizationConfig):
                 match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedLinearMethod()
-            offline_method = Fp8LinearMethod(self)
-            offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return offline_method
+            return Fp8LinearMethod(self)
         elif isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
@@ -202,6 +202,16 @@ class Fp8Config(QuantizationConfig):
                 )
 
                 return Mxfp4MoEMethod(layer.moe_config)
+            if (
+                envs.VLLM_FP8_MOE_REQUANT == "mxfp4"
+                and self.weight_block_size is not None
+                and current_platform.is_rocm()
+            ):
+                from vllm.model_executor.layers.quantization.online.fp8_requant import (  # noqa: E501
+                    Fp8BlockExpertsAsMxfp4FusedMoE,
+                )
+
+                return Fp8BlockExpertsAsMxfp4FusedMoE(self, layer)
             return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -246,7 +256,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        self.marlin_input_dtype = None
         self.use_marlin = False
 
         if self.quant_config.use_deep_gemm is not None:
@@ -354,6 +363,9 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        if self.block_quant:
+            # Here, not after loading, so pre-processed weights also fuse.
+            expose_input_quant_key(layer, self.fp8_linear)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_weights_pre_processed():
@@ -363,20 +375,12 @@ class Fp8LinearMethod(LinearMethodBase):
             # registered that parameter.
             if not self.act_q_static and not hasattr(layer, "input_scale"):
                 layer.input_scale = None
-            # Marlin reads marlin_input_dtype in apply_weights; it lives on the
-            # method (not exported with the weights), so restore it here too.
-            if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
-                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
             return
 
         if self.use_marlin:
             if not self.block_quant:
                 # Canonicalize to (K, N) for the kernel.
                 replace_parameter(layer, "weight", layer.weight.t())
-            # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
-            # AttributeError if backend selection changes.
-            if hasattr(self.fp8_linear, "marlin_input_dtype"):
-                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
             self.fp8_linear.process_weights_after_loading(layer)
             return
 
@@ -478,6 +482,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     """
 
     supports_pre_processed_weights = True
+    accepts_quantized_input = True
 
     def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(layer.moe_config)
@@ -519,6 +524,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 activation_key = kFp8DynamicTokenSym
             else:
                 activation_key = kFp8DynamicTensorSym
+        self.weight_quant_key = weight_key
         self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
 
         # Select Fp8 MoE backend
@@ -633,6 +639,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 (intermediate_size_per_partition + block_k - 1) // block_k,
                 dtype=torch.float32,
             )
+        # The block grid the scales were allocated on, which is the refined one when
+        # the TP shard is not block aligned.
+        self.scale_block_size = [block_n, block_k] if self.block_quant else None
         w13_weight_scale = torch.nn.Parameter(w13_scale_data, requires_grad=False)
         w2_weight_scale = torch.nn.Parameter(w2_scale_data, requires_grad=False)
         # Note: name is weight_scale for tensor, weight_scale_inv for block.
@@ -688,6 +697,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            experts_cls=self.experts_cls,
         )
 
         # Replace parameters with updated versions. Note that this helper
@@ -710,6 +720,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+        )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+        self.moe_kernel.fused_experts.keep_constants(layer)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized FP8 experts, for online
+        requantization."""
+        return dequantize_fp8_moe_weights(
+            layer.w13_weight,
+            getattr(layer, f"w13_{self.weight_scale_name}"),
+            layer.w2_weight,
+            getattr(layer, f"w2_{self.weight_scale_name}"),
+            weight_key=self.weight_quant_key,
+            num_w13_shards=self.moe.w13_num_shards,
+            weight_block_size=self.scale_block_size,
+            static_input_scales=self.quant_config.activation_scheme == "static",
+            out_dtype=layer.orig_dtype,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -782,6 +811,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a2_scale=a2_scale,
             block_shape=self.moe_block_shape,
             per_act_token_quant=self.per_act_token_quant,
+            # Weight scales are per-tensor or block-wise, never per-channel, even
+            # with per-token activations (VLLM_BATCH_INVARIANT).
+            per_out_ch_quant=False,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
@@ -810,6 +842,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -827,6 +860,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            a1q_scale=x_scale,
         )
 
     def apply(

@@ -3,7 +3,6 @@
 """GPU-resident Qwen4Exp position-learning enhancement layers."""
 
 from collections.abc import Sequence
-from dataclasses import replace
 
 import torch
 from torch import nn
@@ -13,11 +12,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-from vllm.model_executor.layers.mamba.abstract import (
-    MambaBase,
-    get_mamba_prefill_checkpoint_alignment,
-    get_mamba_prefill_checkpoint_grid,
-)
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
 )
@@ -32,7 +27,6 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 from ..common.ops.ple import ple_conv, ple_gate
 from .ngram_embedding import Qwen4ExpNGramEmbedding
@@ -199,25 +193,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             num_spec=self.num_spec_tokens,
         )
 
-    def get_prefill_checkpoint_alignment(self) -> int | None:
-        return 1 if self.cache_config.mamba_cache_mode == "align" else None
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec = super().get_kv_cache_spec(vllm_config)
-        # The scheduler takes internal checkpoints only when every Mamba layer
-        # can export them.
-        if (
-            self.get_prefill_checkpoint_alignment() is None
-            or get_mamba_prefill_checkpoint_alignment(vllm_config) is None
-            or not isinstance(spec, MambaSpec)
-        ):
-            return spec
-        grid = get_mamba_prefill_checkpoint_grid(vllm_config)
-        # Offsets are multiples of the grid, so the window holds only inputs.
-        assert grid >= self.conv_state_len
-        return replace(
-            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=grid
-        )
+    def get_cache_checkpoint_alignment(self) -> int | None:
+        return 1
 
     def _short_conv_dilated_dispatch(
         self,

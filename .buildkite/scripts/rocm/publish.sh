@@ -19,8 +19,10 @@
 #
 # Optional:
 #   HUB            — Docker Hub repo for nightly images (default: vllm/vllm-openai-rocm)
+#   ALIAS_HUB      — short-name repo that also gets the mutable nightly tags as
+#                    :nightly-rocm / :nightly-<variant> (default: vllm/vllm; empty to skip)
 #   NIGHTLY        — set to 1 to push nightly Hub tags (default: 0)
-#   DOCKERHUB_USERNAME — Hub username for cleanup script (default: vllmbot)
+#   DOCKERHUB_USERNAME — Hub username for cleanup script (default: vllm)
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -33,6 +35,7 @@ COMMIT=${BUILDKITE_COMMIT:?BUILDKITE_COMMIT must be set}
 ECR=${ECR:?ECR must be set (by release-pipeline.yaml)}
 SRC=$ECR:${STACK}-${COMMIT}   # build.sh release, in the same build
 HUB=${HUB:-vllm/vllm-openai-rocm}
+ALIAS_HUB=${ALIAS_HUB-vllm/vllm}
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -159,20 +162,27 @@ EOF
     fi
 
     # --- Nightly: Docker Hub -------------------------------------------------
-    export DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME:-vllmbot}
+    export DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME:-vllm}
 
     # The default stack (rocm) owns the unqualified :nightly / :base-nightly tags.
     # All stacks own the variant-qualified :nightly-<variant> tags.
     suffixes=("-$V")
     [[ $STACK == rocm ]] && suffixes+=("")
 
+    # $ALIAS_HUB gets only the mutable tag: its families share the nightly-
+    # prefix, so the commit tags could not be pruned per family. It is tagged in
+    # the same create, as re-copying a single-arch image changes its digest.
     hub_tags=""
     for sfx in "${suffixes[@]}"; do
-      docker buildx imagetools create \
-        -t "$HUB:nightly$sfx" -t "$HUB:nightly$sfx-$COMMIT" "$IMG"
+      tags=(-t "$HUB:nightly$sfx" -t "$HUB:nightly$sfx-$COMMIT")
+      hub_tags="$hub_tags \`$HUB:nightly$sfx\` \`$HUB:nightly$sfx-$COMMIT\`"
+      if [[ -n $ALIAS_HUB ]]; then
+        tags+=(-t "$ALIAS_HUB:nightly${sfx:--rocm}")
+        hub_tags="$hub_tags \`$ALIAS_HUB:nightly${sfx:--rocm}\`"
+      fi
+      docker buildx imagetools create "${tags[@]}" "$IMG"
       docker buildx imagetools create \
         -t "$HUB:base-nightly$sfx" -t "$HUB:base-nightly$sfx-$COMMIT" "$RT"
-      hub_tags="$hub_tags \`$HUB:nightly$sfx\` \`$HUB:nightly$sfx-$COMMIT\`"
     done
 
     # Prune old nightly tags (keep last 14 builds per tag family).

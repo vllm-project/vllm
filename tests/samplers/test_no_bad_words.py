@@ -36,7 +36,7 @@ def _generate(
 
 
 class TestOneTokenBadWord:
-    MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+    MODEL = "vllm/tiny-random-LlamaForCausalLM"
 
     PROMPT = "How old are "
     TARGET_TOKEN = "mn"

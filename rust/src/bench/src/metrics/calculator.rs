@@ -3,7 +3,7 @@
 
 use crate::backends::RequestFuncOutput;
 use crate::config::GoodputConfig;
-use crate::metrics::{BenchmarkMetrics, MultiTurnMetrics};
+use crate::metrics::{BenchmarkMetrics, LatencyStats, MultiTurnMetrics};
 use crate::multi_turn::ConversationOutput;
 
 fn log_failed_requests(outputs: &[RequestFuncOutput]) {
@@ -209,9 +209,43 @@ pub fn calculate_metrics(
         max_output_tokens_per_s,
         max_concurrent_requests,
         steady_state: None,
+        client_queue_time: None,
+        e2el_including_client_queue: None,
     };
 
     (metrics, actual_output_lens)
+}
+
+/// Attach Python's client-side queueing metrics, computed over successful
+/// requests: `client_queue_time` with `--max-concurrency`, and
+/// `e2el_including_client_queue` when the request rate is also finite.
+pub fn attach_client_queue_metrics(
+    metrics: &mut BenchmarkMetrics,
+    outputs: &[RequestFuncOutput],
+    max_concurrency: Option<usize>,
+    request_rate: f64,
+    selected_percentiles: &[f64],
+) {
+    if max_concurrency.is_none() {
+        return;
+    }
+    let successful = outputs.iter().filter(|o| o.success);
+    let queue_times: Vec<f64> = successful.clone().map(|o| o.client_queue_time).collect();
+    metrics.client_queue_time = Some(latency_stats(&queue_times, selected_percentiles));
+    if request_rate.is_finite() {
+        let e2els: Vec<f64> = successful.map(|o| o.latency + o.client_queue_time).collect();
+        metrics.e2el_including_client_queue = Some(latency_stats(&e2els, selected_percentiles));
+    }
+}
+
+fn latency_stats(values_s: &[f64], selected_percentiles: &[f64]) -> LatencyStats {
+    let sorted = sort_clone(values_s);
+    LatencyStats {
+        mean_ms: mean(values_s) * 1000.0,
+        median_ms: median_sorted(&sorted) * 1000.0,
+        std_ms: std_dev(values_s) * 1000.0,
+        percentiles_ms: percentiles_from_sorted(&sorted, selected_percentiles),
+    }
 }
 
 pub(crate) fn mean(data: &[f64]) -> f64 {
@@ -372,6 +406,8 @@ pub fn calculate_embedding_metrics(
         max_output_tokens_per_s: 0.0,
         max_concurrent_requests,
         steady_state: None,
+        client_queue_time: None,
+        e2el_including_client_queue: None,
     }
 }
 
@@ -458,6 +494,41 @@ pub fn calculate_multi_turn_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Python only reports client queueing with --max-concurrency, and the
+    /// queue-inclusive E2EL only for a finite request rate.
+    #[test]
+    fn test_client_queue_metrics_gating() {
+        let outputs: Vec<RequestFuncOutput> = [(true, 0.2), (true, 0.4), (false, 9.0)]
+            .into_iter()
+            .map(|(success, client_queue_time)| RequestFuncOutput {
+                success,
+                latency: 1.0,
+                client_queue_time,
+                ..Default::default()
+            })
+            .collect();
+        let metrics = |max_concurrency, rate| {
+            let mut m =
+                calculate_metrics(&outputs, 1.0, &[50.0], true, &GoodputConfig::default()).0;
+            attach_client_queue_metrics(&mut m, &outputs, max_concurrency, rate, &[50.0]);
+            m
+        };
+
+        let m = metrics(None, 10.0);
+        assert!(m.client_queue_time.is_none() && m.e2el_including_client_queue.is_none());
+
+        let m = metrics(Some(2), f64::INFINITY);
+        let queue = m.client_queue_time.unwrap();
+        assert!(
+            (queue.mean_ms - 300.0).abs() < 1e-9,
+            "failed requests are excluded"
+        );
+        assert!(m.e2el_including_client_queue.is_none());
+
+        let m = metrics(Some(2), 10.0);
+        assert!((m.e2el_including_client_queue.unwrap().mean_ms - 1300.0).abs() < 1e-9);
+    }
 
     #[test]
     fn test_mean_empty() {

@@ -28,9 +28,13 @@ from vllm.model_executor.layers.quantization.base_config import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.layers.utils import (
+    dispatch_cpu_unquantized_gemm,
+    dispatch_unquantized_gemm,
+    maybe_use_skinny_gemm,
+)
 from vllm.model_executor.parameter import BasevLLMParameter
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import copy_weight_, set_weight_attrs
 from vllm.platforms import current_platform
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
@@ -66,9 +70,10 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu():
-            from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
-
-            dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+            # The module post-load hook prepares GEMM after tied weights load.
+            layer.cpu_linear = None
+        elif current_platform.is_cuda() and isinstance(layer, ParallelLMHead):
+            maybe_use_skinny_gemm(layer)
 
     def apply(
         self,
@@ -80,6 +85,8 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ):
             return linear_batch_invariant(x, layer.weight, bias)
+        if current_platform.is_cpu() and getattr(layer, "cpu_linear", None) is None:
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
@@ -114,7 +121,7 @@ def vocab_range_from_global_vocab_size(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class VocabParallelEmbeddingShardIndices:
     """Indices for a shard of a vocab parallel embedding."""
 
@@ -334,6 +341,12 @@ class VocabParallelEmbedding(PluggableLayer):
             )
 
         self.quant_method: QuantizeMethodBase = quant_method
+        if (
+            current_platform.is_cpu()
+            and isinstance(quant_method, UnquantizedEmbeddingMethod)
+            and not hasattr(self, "process_weights_after_loading")
+        ):
+            self.process_weights_after_loading = self._finalize_cpu_embedding
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -368,6 +381,16 @@ class VocabParallelEmbedding(PluggableLayer):
             weight_loader=self.weight_loader,
         )
         self.update_param_tp_status()
+
+    def _finalize_cpu_embedding(self) -> None:
+        if current_platform.is_cpu() and isinstance(
+            self.quant_method, UnquantizedEmbeddingMethod
+        ):
+            # Lookup needs no GEMM pack. Finalize the head after all weights load:
+            # a tied head may have no checkpoint entry of its own during reload.
+            self.cpu_linear = None
+            if isinstance(self, ParallelLMHead):
+                dispatch_cpu_unquantized_gemm(self, remove_weight=False)
 
     def update_param_tp_status(self):
         for param in self.parameters():
@@ -491,7 +514,7 @@ class VocabParallelEmbedding(PluggableLayer):
             ):
                 loaded_weight = loaded_weight.reshape(1)
             assert param.data.shape == loaded_weight.shape
-            param.data.copy_(loaded_weight)
+            copy_weight_(param.data, loaded_weight)
             return
 
         # Shard indexes for loading the weight
@@ -516,7 +539,7 @@ class VocabParallelEmbedding(PluggableLayer):
 
         # Copy the data. Select chunk corresponding to current shard.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-        param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
+        copy_weight_(param[: loaded_weight.shape[0]].data, loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 
     def forward(self, input_):

@@ -45,7 +45,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -266,38 +265,24 @@ class Llama4VisionAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        if use_data_parallel:
-            self.qkv_proj = ReplicatedLinear(
-                self.embed_dim,
-                self.q_size + 2 * self.kv_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.qkv_proj",
-            )
-            self.o_proj = ReplicatedLinear(
-                self.num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-            )
-        else:
-            self.qkv_proj = QKVParallelLinear(
-                self.embed_dim,
-                self.head_dim,
-                self.num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.qkv_proj",
-            )
-            self.o_proj = RowParallelLinear(
-                self.num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                input_is_parallel=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-            )
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.head_dim,
+            self.embed_dim,
+            bias=True,
+            input_is_parallel=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+            disable_tp=use_data_parallel,
+        )
 
         rope_parameters = {
             "rope_type": "mllama4",
@@ -574,9 +559,22 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         ds_ratio = int(round(1.0 / (vision_config.pixel_shuffle_ratio**2)))
         return (image_size // patch_size) ** 2 // ds_ratio
 
-    def get_max_num_tiles(self) -> int:
+    def get_images_kwargs(
+        self,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
+    ) -> dict[str, Any]:
         image_processor = self.get_hf_processor().image_processor
-        return image_processor.max_patches
+        merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs(
+            mm_processor_kwargs or {}
+        )
+        return {
+            "max_patches": image_processor.max_patches,
+            "resize_to_max_canvas": image_processor.resize_to_max_canvas,
+            **merged_mm_kwargs.get("images_kwargs", {}),
+        }
+
+    def get_max_num_tiles(self) -> int:
+        return self.get_images_kwargs()["max_patches"]
 
     def get_image_size_with_most_features(self) -> ImageSize:
         vision_config = self.get_hf_config().vision_config
@@ -598,8 +596,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         if not mm_data:
             return processed_data
 
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = processor.image_processor
+        images_kwargs = self.info.get_images_kwargs(hf_processor_mm_kwargs)
         vision_config = self.info.get_hf_config().vision_config
 
         if processed_data.get("pixel_values") is not None:
@@ -613,7 +610,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
 
             tile_size = vision_config.image_size
             possible_resolutions = find_supported_resolutions(
-                max_num_chunks=self.info.get_max_num_tiles(),
+                max_num_chunks=images_kwargs["max_patches"],
                 patch_size=SizeDict(height=tile_size, width=tile_size),
             )
             best_fit_sizes = []
@@ -623,7 +620,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                     get_best_fit(
                         (image.size[1], image.size[0]),
                         torch.tensor(possible_resolutions),
-                        resize_to_max_canvas=image_processor.resize_to_max_canvas,
+                        resize_to_max_canvas=images_kwargs["resize_to_max_canvas"],
                     )
                 )
             # TODO tile height/width do not necessarily need to match
@@ -957,11 +954,11 @@ class Llama4ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
-            inputs["pixel_values"],
+            values["pixel_values"],
             use_data_parallel=False,
         ).flatten(0, 1)
 
@@ -1038,30 +1035,6 @@ class Llama4ForConditionalGeneration(
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def _consolidate_qkv_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        qkv_idx_mappings = {
-            ".self_attn.q_proj": 0,
-            ".self_attn.k_proj": 1,
-            ".self_attn.v_proj": 2,
-        }
-        qkv_weights = {}
-        for name, loaded_weight in weights:
-            for weight_name, idx in qkv_idx_mappings.items():
-                if weight_name not in name:
-                    continue
-                new_name = name.replace(weight_name, ".self_attn.qkv_proj")
-                if new_name not in qkv_weights:
-                    qkv_weights[new_name] = [None] * 3
-                qkv_weights[new_name][idx] = loaded_weight
-                break
-            else:
-                yield name, loaded_weight
-        for key, weight in qkv_weights.items():
-            qkv_weight = torch.cat(weight, dim=0)
-            yield key, qkv_weight
-
     def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
         format."""
@@ -1115,13 +1088,10 @@ class Llama4ForConditionalGeneration(
         """Load non-language-model weights with stacking support."""
         updated_params = set()
 
-        if self.use_data_parallel:
-            other_weights = self._consolidate_qkv_weights(other_weights)
-
         for name, loaded_weight in other_weights:
             # Try stacked parameter mapping first
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name or self.use_data_parallel:
+                if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]

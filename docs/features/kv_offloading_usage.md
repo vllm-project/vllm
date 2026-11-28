@@ -7,12 +7,13 @@ This guide covers configuration of the [`OffloadingConnector`](disagg_prefill.md
 
 ## Overview
 
-Two specs are available, selected by the `spec_name` key in `kv_connector_extra_config`:
+Three specs are available, selected by the `spec_name` key in `kv_connector_extra_config`:
 
 - `CPUOffloadingSpec` (default): single CPU tier. Completed GPU blocks are copied into pinned host memory.
 - `TieringOffloadingSpec`: multi-tier. A CPU primary tier plus one or more secondary tiers.
+- `FSOffloadingSpec`: single file tier with direct GPU access. Blocks move between GPU memory and files without staging through host memory. See [Direct Storage Setup](#direct-storage-setup).
 
-Only the CPU primary tier has direct GPU access. Secondary tiers cannot read from or write to GPU memory; all GPU↔secondary transfers are staged through the CPU primary tier.
+Within `TieringOffloadingSpec`, only the CPU primary tier has direct GPU access. Secondary tiers cannot read from or write to GPU memory; all GPU↔secondary transfers are staged through the CPU primary tier.
 
 ```mermaid
 flowchart LR
@@ -54,6 +55,18 @@ does not query any secondary tier.
 ## Terminology: Chunks
 
 The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
+
+## Hybrid attention and recurrent models
+
+With prefix caching enabled, the CPU tier can
+restore retained prompt-tail checkpoints between full-attention block
+boundaries, including with decode context parallelism (DCP). Use
+`blocks_per_chunk: 1` and a `prefix_match_unit` supported by the model's KV
+cache groups. Under DCP, each recurrent block must divide the full-attention
+block, and the hash unit must be divisible by the DCP size.
+
+Partial-tail reuse follows the hit alignment and the EAGLE/MTP hash lookahead
+resolved by the core prefix cache.
 
 ## Single-Tier Setup (CPU Only)
 
@@ -97,21 +110,49 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+## Direct Storage Setup
+
+Set `spec_name` to `"FSOffloadingSpec"` to transfer blocks directly between GPU memory and files under `root_dir`. The worker backend is selected by `fs_backend`; the only backend is `gds`, which uses NVIDIA GPUDirect Storage (cuFile) and requires an NVIDIA GPU, `libcufile`, and a GDS-capable filesystem.
+
+```bash
+vllm serve <model> \
+  --kv-transfer-config '{
+    "kv_connector": "OffloadingConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "spec_name": "FSOffloadingSpec",
+      "fs_backend": "gds",
+      "root_dir": "/mnt/nvme/kv_cache",
+      "block_size": 64
+    }
+  }'
+```
+
+Files are named by block content hash, so blocks written by an earlier run or by another instance with the same model and parallel configuration are found by an asynchronous on-disk lookup. Set `access_mode` to `read` for an instance that only loads files written elsewhere and never writes; the default, `readwrite`, also stores the blocks it computes. Keys found on disk are remembered in an in-memory LRU index of `fs_index_size` entries so later requests skip the disk lookup; dropping a key from the index does not delete its file.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
 | --- | --- | --- | --- | --- |
-| `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier. |
-| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). |
+| `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier, or `FSOffloadingSpec` for direct storage. |
+| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). Not used by `FSOffloadingSpec`. |
+| `fs_index_size` | no | `100000` | direct storage | Number of known file keys `FSOffloadingSpec` remembers in memory. |
+| `root_dir` | yes | — | direct storage | Directory holding the block files for `FSOffloadingSpec`. |
+| `fs_backend` | no | `gds` | direct storage | Worker backend for `FSOffloadingSpec`. The only built-in backend is `gds`. |
+| `fs_backend_module_path` | no | — | direct storage | Python import path for a custom `FSOffloadingWorker` class named by `fs_backend`. Required only when `fs_backend` is not built-in (advanced). |
+| `gds_max_io_threads` | no | `32` | direct storage | Thread pool size for the `gds` backend's cuFile calls. |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |
 | `blocks_per_chunk` | no | `1` | both | Offloaded chunk size in GPU blocks; must be > 0. Alternative to `block_size` for models whose KV cache groups have different block sizes. |
 | `eviction_policy` | no | `lru` | both | Primary tier policy: built-in `lru`/`arc`, or a custom `CachePolicy` name (see [Custom Eviction Policies](#custom-eviction-policies)). |
 | `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
+| `async_init` | no | `false` | single-tier | Pre-fault and pin the CPU buffer in the background; the engine serves without offloading until every worker is ready. CUDA only. |
+| `async_init_pin_pace` | no | `2.0` | single-tier | Pause after each background pin call, as a multiple of its duration. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
+| `access_mode` | no | `readwrite` | all | Direction(s) in which this connector's managers may transfer data: `read` serves loads but never accepts stores, `write` accepts stores but never serves loads, `readwrite` does both. Applies to every built-in spec, including `FSOffloadingSpec`. Secondary tiers take their own `access_mode` field. |
 | `sync_load_budget_bytes` | no | `0` | both | Per-step budget of KV bytes (per GPU) loaded within the same step, so those requests run immediately instead of waiting a step for an async load. Hits that don't fit the remaining budget, or would leave nothing to compute, stay async. `0` disables. |
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Recurrent (Mamba / linear-attention) state groups announce state checkpoints, with `kv_cache_spec_kind` `mamba`: an offloaded chunk or partial tail holds one recurrent state, valid at its last hash, so its `BlockStored` carries that single hash, its parent hash and an empty `token_ids`. Consumers align it by hash with the attention group's blocks; a hybrid prefix is reusable only up to a boundary where every group has a residency. Sliding-window and chunked-local attention chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
@@ -195,6 +236,11 @@ context provides each key's token position through `get_offload_key_position(key
 so a policy can establish prefix ordering during insertion. Policies that do not
 use request-specific insertion ordering can accept and ignore `req_context`.
 
+Custom policies must also implement `on_request_finished`, which receives the
+request's keys per KV cache group in head-to-tail order and applies the request's
+cache access once, when it finishes. `CachePolicy` no longer has a `touch` method;
+recency updates belong in this hook.
+
 `eviction_policy` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `cache_policy_module_path` and looks up `eviction_policy` as a class name in that module — the same fallback `spec_module_path` provides for a custom `OffloadingSpec`. No import or registration call needs to run before the server starts.
 
 ### Registering a friendly short name (in-process only)
@@ -216,6 +262,14 @@ Each entry in `secondary_tiers` is a dict with a required `type` field plus tier
 The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store. Both tiers use the coarse-grained wire medium value `STORAGE`; the medium does not distinguish filesystem from object-store storage. To recover location semantics, set the optional `locality` field (`LOCAL` / `REMOTE`) on the tier entry — that field, not the medium, tells consumers whether the tier's blocks are local to the publishing vLLM instance. Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
+
+Secondary tiers, such as `fs` and `obj`, accept an optional `access_mode` field that restricts the direction of traffic:
+
+| Value | Behavior |
+| --- | --- |
+| `readwrite` | Both loads and stores (default; same behavior as omitting `access_mode`). |
+| `read` | Serves loads only. The tier is never written to except possibly at initialization for probing. Use it to consume a cache populated by another instance. |
+| `write` | Accepts stores only. Lookups always miss, so the tier never serves loads. Use it to populate a shared cache that other instances read. |
 
 ### Threading model
 
@@ -242,6 +296,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
+| `access_mode` | no | `readwrite` | `read`, `write`, or `readwrite` (see [Secondary Tiers](#secondary-tiers)). |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
 
@@ -285,6 +340,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `io_threads` | no | `4` | Number of NIXL OBJ backend I/O threads. |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
+| `access_mode` | no | `readwrite` | `read`, `write`, or `readwrite` (see [Secondary Tiers](#secondary-tiers)). |
 
 `store_config` fields:
 
@@ -296,6 +352,19 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
+| `backend_params` | no | `{}` | Additional NIXL OBJ backend parameters, passed through as strings (booleans become `true`/`false`). Use it for options such as `use_virtual_addressing`, `req_checksum`, `resp_checksum`, `accelerated` and `type`; see the [NIXL OBJ plugin README](https://github.com/ai-dynamo/nixl/blob/main/src/plugins/obj/README.md). The connection fields above and `num_threads` cannot be overridden here. |
+
+For example, to enable the accelerated (S3-over-RDMA) object-store engine of a specific vendor:
+
+```json
+{
+  "bucket": "kv",
+  "endpoint_override": "s3.example:9000",
+  "backend_params": {"accelerated": true, "type": "dell"}
+}
+```
+
+`type` selects the vendor-specific accelerated engine registered in the NIXL OBJ plugin; which values are available depends on the installed NIXL release (`dell` is the engine shipped in NIXL 1.5.2). `accelerated` without a `type` initializes an accelerated client that still transfers over plain S3 on that release.
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
@@ -313,8 +382,13 @@ Block content hashes must match across instances for peers to exchange blocks (s
 | `backends` | no | `["UCX"]` | NIXL transport backends. See [NixlConnector Usage Guide](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin) for available backends and selection guidance. |
 | `num_threads` | no | `4` | NIXL agent worker threads. Only used when `backends` is UCX-only; ignored when any non-UCX backend is requested. |
 | `unbound_store_timeout_s` | no | `60` | Seconds a producer holds stored blocks for a consumer that has not fetched them yet. Raise it for deployments whose prefills outlast the default; the blocks keep primary-tier CPU slots pinned for the whole window. Once it expires a late fetch is rejected in a single round trip, so the consumer falls back to local prefill immediately. |
+| `access_mode` | no | `readwrite` | `read`, `write`, or `readwrite`. `read` fetches blocks from peers but never stages local blocks for them; `write` stages blocks for peers but never fetches (see [Secondary Tiers](#secondary-tiers)). |
 
 The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
+
+Fetches queued while the peer handshake is pending fail locally if the request
+finishes or its load deadline expires. They do not wait for an abort
+acknowledgement, and a delayed handshake cannot send these retired fetches.
 
 A producer parks a request's blocks until the consumer's `FetchMsg` arrives; if none arrives
 within `unbound_store_timeout_s` the blocks are released so they stop pinning primary-tier
@@ -407,7 +481,11 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 6. The producer performs the **NIXL WRITE** transfer and sends **`TransferDone`** with a success status.
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
 
-In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
+A transfer completion or abort acknowledgement already received when the
+connection closes still settles its load. Disconnect suppresses messages that
+would start new work; it does not discard these buffered terminal confirmations.
+
+In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so before the initial nonempty fetch is submitted, every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. After that submission, subsequent PD-tier lookups return MISS. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ### Out-of-Tree Secondary Tiers
 
@@ -460,6 +538,32 @@ Example (OpenAI-compatible completions request):
 }
 ```
 
+## Huge pages for `SimpleCPUOffloadConnector`
+
+With `kv_offload_backend="cpu"`, set `cpu_hugepage_block_size` to `"2MB"` or
+`"1GB"` in `kv_connector_extra_config` to back the CPU KV caches with Linux
+HugeTLB pages (Linux 5.14 or newer):
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use_per_rank": 137438953472,
+    "cpu_hugepage_block_size": "1GB"
+  }
+}
+```
+
+Reserve enough pages on the host for every rank, rounding each rank's cache
+size up to a whole page. Containers also need a matching hugetlb allowance, for
+example Kubernetes `hugepages-1Gi`. If the pool or the limit is too small,
+startup fails; there is no fallback to ordinary pages.
+
+Without this key, the caches use ordinary pages, and `THP_MEM_ALLOC_ENABLE=1`
+requests transparent huge pages. In both cases, the memory follows the worker's
+NUMA policy, for example from `--numa-bind`.
+
 ## Explicit pool sizing for `SimpleCPUOffloadConnector`
 
 `SimpleCPUOffloadConnector` accepts an optional `num_cpu_blocks` in
@@ -495,6 +599,14 @@ For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
 end at an attention-chunk boundary for every chunked-local cache group. Otherwise,
 the connector keeps the GPU prefix and recomputes the remaining tokens. Requests
 with no GPU-local prefix, or with a chunk-aligned prefix, can still reuse CPU KV.
+
+## Core dumps
+
+On Linux, `SimpleCPUOffloadConnector` and `OffloadingConnector` leave their CPU
+KV caches out of core dumps (`MADV_DONTDUMP`). A crashing worker still writes a
+core file, but it no longer grows with `cpu_bytes_to_use`. The exception is the
+single-tier `OffloadingConnector` on platforms other than CUDA and XPU, where
+the CPU tier is a plain pinned tensor.
 
 ## Further Reading
 

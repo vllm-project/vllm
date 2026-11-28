@@ -8,19 +8,20 @@ use std::sync::Arc;
 
 use itertools::izip;
 use llm_multimodal::{
-    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, VideoClip, VideoClipOptions,
+    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, RgbFrameRef, VideoClip,
+    VideoClipOptions,
 };
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{
-    MmBatchedField, MmField, MmFieldElem, MmFlatField, MmKwargsItem, MmSharedField, MmSlice,
-    SliceSpec,
+    MmBatchedField, MmField, MmFieldElem, MmFlatField, MmKwargsItem, MmModality, MmSharedField,
+    MmSlice, SliceSpec,
 };
 
 use super::timing::MM_STAGE_TARGET;
 use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use crate::error::{Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary video encoder input.
 ///
@@ -47,9 +48,10 @@ impl MultimodalModelInfo {
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
-        let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Video.to_string(),
-        })?;
+        let support = self
+            .video
+            .as_ref()
+            .ok_or_else(|| self.unsupported_modality(MmModality::Video))?;
         let mut replacements = Vec::with_capacity(clips.len());
         let mut items = Vec::with_capacity(clips.len());
 
@@ -101,6 +103,7 @@ impl MultimodalModelInfo {
         clip: Arc<VideoClip>,
     ) -> Result<PreprocessedEncoderInputs> {
         let processor = Arc::clone(&support.processor);
+        let needs_frame_indices = support.spec.field_layout_for("frames_indices").is_some();
 
         tokio::task::spawn_blocking(move || {
             // Request-scoped clip facts travel per call; the checkpoint's
@@ -114,7 +117,11 @@ impl MultimodalModelInfo {
             if let Some(rgb_video) = clip.rgb_video() {
                 match rgb_video.frame_refs() {
                     Ok(frame_refs) => {
-                        match processor.preprocess_video_rgb(&frame_refs, &clip_options) {
+                        match processor.preprocess_video_rgb_sampled(
+                            &frame_refs,
+                            &clip_options,
+                            clip.sampling.as_ref(),
+                        ) {
                             Ok(preprocessed) => return Ok(preprocessed),
                             Err(error) => warn!(
                                 error = %error.as_report(),
@@ -130,7 +137,24 @@ impl MultimodalModelInfo {
             }
 
             let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            Ok(processor.preprocess_video(&frames, &clip_options)?)
+            if needs_frame_indices {
+                let frames = frames.iter().map(|frame| frame.to_rgb8()).collect::<Vec<_>>();
+                let frame_refs = frames
+                    .iter()
+                    .map(|frame| RgbFrameRef {
+                        width: frame.width(),
+                        height: frame.height(),
+                        data: frame.as_raw(),
+                    })
+                    .collect::<Vec<_>>();
+                Ok(processor.preprocess_video_rgb_sampled(
+                    &frame_refs,
+                    &clip_options,
+                    clip.sampling.as_ref(),
+                )?)
+            } else {
+                Ok(processor.preprocess_video(&frames, &clip_options)?)
+            }
         })
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
@@ -213,6 +237,7 @@ mod tests {
     };
     use super::super::{MultimodalConfigFiles, MultimodalModelInfo};
     use super::*;
+    use crate::error::Error;
 
     #[test]
     fn from_paths_resolves_video_config_from_dedicated_file_or_processor_config() {
@@ -236,6 +261,7 @@ mod tests {
                 files,
                 Arc::new(qwen3_vl_tokenizer()),
                 std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
             )
         };
 
@@ -359,8 +385,7 @@ mod tests {
             let frames = (0..8)
                 .map(|_| DynamicImage::ImageRgb8(RgbImage::from_pixel(80, 40, Rgb([128; 3]))))
                 .collect::<Vec<_>>();
-            // The tracker samples at the spec's configured default rate
-            // (the video config's `fps`: 1), so the clip carries it.
+            // Use a clip sampled at 1 fps to exercise the fallback timestamp path.
             Arc::new(
                 VideoClip::new_with_sample_fps(
                     frames,
@@ -411,5 +436,102 @@ mod tests {
         .assert_eq(&sampled_text);
         expect_test::expect!["<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>0.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>2.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>4.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>6.0 seconds"]
         .assert_eq(&fallback_text);
+    }
+
+    /// Nemotron's reference layout needs the decoder's source frame indices,
+    /// and the engine embeds the whole replacement.
+    #[tokio::test]
+    async fn nemotron_video_carries_frame_indices_and_embeds_the_whole_replacement() {
+        use llm_multimodal::types::{DecodedRgbFrame, DecodedRgbVideo};
+        use llm_multimodal::{Modality, VideoSamplingInfo, VideoSource};
+
+        use super::super::expand::expand_prompt_token_ids;
+        use super::super::tests::nemotron_omni_info;
+
+        let info = nemotron_omni_info();
+        let frame_len = 3 * 80 * 40;
+        let video = DecodedRgbVideo::new(
+            bytes::Bytes::from(vec![128; frame_len * 4]),
+            (0..4)
+                .map(|index| DecodedRgbFrame {
+                    width: 80,
+                    height: 40,
+                    offset: index * frame_len,
+                    len: frame_len,
+                })
+                .collect(),
+        );
+        let clip = VideoClip::new_rgb_with_sample_fps(
+            video,
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "<hash>".to_string(),
+            1.0,
+        )
+        .with_sampling(Some(VideoSamplingInfo {
+            source_fps: 30.0,
+            frame_indices: vec![0, 30, 60, 90],
+        }));
+        // The same clip as decoded image frames, the decoder's last fallback.
+        let image_clip = VideoClip::new_with_sample_fps(
+            clip.materialized_frames().unwrap().into_owned(),
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "<hash>".to_string(),
+            1.0,
+        )
+        .with_sampling(clip.sampling.clone());
+        let prepare = async |clip| {
+            info.prepare_videos(vec![Arc::new(clip)], vec![None], ModelDtype::Float32)
+                .await
+                .unwrap()
+        };
+        let from_images = prepare(image_clip).await;
+        let prepared = prepare(clip).await;
+        assert_eq!(
+            from_images.replacements[0].tokens,
+            prepared.replacements[0].tokens
+        );
+        assert_eq!(from_images.items[0].data, prepared.items[0].data);
+
+        let data = &prepared.items[0].data;
+        let Some(MmKwargValue::Tensor(indices)) = data["frames_indices"].data.as_ref() else {
+            panic!("frames_indices should be a tensor");
+        };
+        let indices = indices
+            .data
+            .as_raw_view()
+            .unwrap()
+            .chunks_exact(8)
+            .map(|chunk| i64::from_ne_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(indices, [0, 30, 60, 90]);
+
+        let Some(MmKwargValue::Tensor(duration)) = data["frame_duration_ms"].data.as_ref() else {
+            panic!("frame_duration_ms should be a tensor");
+        };
+        assert_eq!(
+            duration.data.as_raw_view().unwrap()[..],
+            33_i64.to_ne_bytes()
+        );
+
+        // Two tubelets of two frames, stamped with the frames' source times.
+        // An 80x40 frame gets a 22x44 patch grid, or 11x22 tokens.
+        let ids: Vec<u32> =
+            prepared.replacements[0].tokens.iter().map(|&token| token as u32).collect();
+        let text = info.context.tokenizer().decode(&ids, false).unwrap();
+        assert_eq!(text.matches("<image>").count(), 2 * 11 * 22);
+        expect_test::expect![[r#"
+            Frame 1 sampled at 0.00 seconds and frame 2 sampled at 0.99 seconds: <img></img>
+            Frame 3 sampled at 1.98 seconds and frame 4 sampled at 2.97 seconds: <img></img>"#]]
+        .assert_eq(&text.replace("<image>", ""));
+
+        let mut tokens = vec![11, 1030];
+        let ranges = expand_prompt_token_ids(&mut tokens, &[prepared]).unwrap();
+        let range = &ranges[&Modality::Video][0];
+        assert_eq!((range.offset, range.length), (1, ids.len()));
+        let mask = range.is_embed.as_ref().expect("video embedding mask");
+        let expected = ids.iter().map(|&id| u8::from(id == 1018)).collect::<Vec<_>>();
+        assert_eq!(mask.data.as_raw_view().unwrap(), expected.as_slice());
     }
 }

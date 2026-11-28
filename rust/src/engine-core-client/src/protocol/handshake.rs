@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::dtype::ModelDtype;
+use crate::protocol::request::BlockHash;
 
 /// Decoded engine startup-handshake payload sent on the handshake socket.
 ///
@@ -32,6 +35,25 @@ pub struct KvEventsConfig {
     pub hwm: u32,
     pub max_queue_size: u32,
     pub topic: String,
+}
+
+/// What the frontend needs to compute prompt block hashes itself, reported
+/// only when the engine hashes request blocks.
+///
+/// Original Python definition (`PrefixHashConfig`):
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/engine/__init__.py>
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixHashConfig {
+    /// The engine's `--prefix-caching-hash-algo`, e.g. `sha256`.
+    pub hash_algo: String,
+    /// Tokens per hashed block.
+    pub hash_block_size: u64,
+    /// Parent hash of the first block.
+    pub none_hash: BlockHash,
+    /// Tokens after each block that its hash also covers, so a block is
+    /// hashed only once they exist.
+    #[serde(default)]
+    pub num_lookahead_tokens: u64,
 }
 
 /// Post-initialization configuration sent from each engine on the input socket
@@ -108,6 +130,54 @@ pub struct EngineCoreReadyResponse {
     /// engine runs with `VLLM_SERVER_DEV_MODE` (for `/server_info`).
     #[serde(default)]
     pub vllm_config: Option<serde_json::Value>,
+    /// Set when the engine hashes request blocks and accepts prompt block
+    /// hashes from the frontend.
+    #[serde(default)]
+    pub prefix_hash_config: Option<PrefixHashConfig>,
+    /// `CacheConfig.metrics_info()` after initialization: the labels of
+    /// `vllm:cache_config_info`.
+    #[serde(default)]
+    pub cache_config_info: Option<BTreeMap<String, String>>,
+    /// `hash_config()` of the engine's initialized `VllmConfig`, the last part
+    /// of `system_fingerprint`; `None` if hashing failed.
+    #[serde(default)]
+    pub config_hash: Option<String>,
+    /// Whether expert parallelism is enabled.
+    #[serde(default)]
+    pub enable_expert_parallel: bool,
+    /// Whether the engine computes prompt logprobs. `false` under
+    /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
+    #[serde(default = "supports_prompt_logprobs_default")]
+    pub supports_prompt_logprobs: bool,
+    /// Whether the engine accepts placeholder metadata without embedding tensors.
+    #[serde(default)]
+    pub allow_missing_mm_embeddings: bool,
+    /// Encoder cache tokens a request's distinct multimodal items may need in
+    /// total. Set without chunked prefill, when they are all encoded in one
+    /// step, so a request needing more could never be scheduled.
+    #[serde(default)]
+    pub max_mm_embeds_per_request: Option<u64>,
+    /// `DeviceConfig.device_type` of this engine, e.g. `cuda` or `cpu`;
+    /// `None` from engines that predate the field.
+    #[serde(default)]
+    pub device_type: Option<String>,
+}
+
+impl EngineCoreReadyResponse {
+    /// The device name the stat log lines print before `KV cache usage`, as
+    /// Python's `LoggingStatLogger` derives it from the device type: `GPU` for
+    /// CUDA (and for engines that do not report a device), otherwise the device
+    /// type in upper case.
+    pub fn kv_cache_device(&self) -> String {
+        match self.device_type.as_deref() {
+            None | Some("cuda") => "GPU".to_string(),
+            Some(device_type) => device_type.to_uppercase(),
+        }
+    }
+}
+
+fn supports_prompt_logprobs_default() -> bool {
+    true
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

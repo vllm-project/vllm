@@ -10,6 +10,7 @@ import sys
 import threading
 
 import torch
+from torch.distributed import ProcessGroup
 
 try:
     from cuda.bindings import runtime as cudart
@@ -80,7 +81,13 @@ class IpcBuffer:
     so that every rank holds a valid device pointer to every other rank's buffer.
     """
 
-    def __init__(self, rank: int, world_size: int, size: int, process_group=None):
+    def __init__(
+        self,
+        rank: int,
+        world_size: int,
+        size: int,
+        process_group: ProcessGroup | None = None,
+    ):
         self.rank = rank
         self.world_size = world_size
         self.peer_ptrs: list[int] = [0] * world_size
@@ -170,24 +177,25 @@ def _lamport_fill_neg_zero(device_ptr: int, size_bytes: int):
 class LamportWorkspace:
     """Self-contained workspace for Lamport-based cross-GPU AllReduce.
 
-    Parameters
-    ----------
-    rank : int
-        Local rank (0-based).
-    world_size : int
-        Total number of ranks in the TP group.
-    comm_size : int
-        Size in bytes of *one* Lamport buffer slot. The total IPC allocation
-        per rank is ``3 * comm_size`` (triple-buffering). Must be large enough
-        to hold the per-slot data written by the kernel.  Use
-        ``compute_comm_size_for_minimax()`` for a safe default.
-    process_group : optional
-        ``torch.distributed`` process group for IPC handle exchange.
-        ``None`` uses the default group.
+    Args:
+        rank: Local rank (0-based).
+        world_size: Total number of ranks in the TP group.
+        comm_size: Size in bytes of *one* Lamport buffer slot. The total IPC
+            allocation per rank is `3 * comm_size` (triple-buffering). Must be large
+            enough to hold the per-slot data written by the kernel. Use
+            `compute_comm_size_for_minimax()` for a safe default.
+        process_group: `torch.distributed` process group for IPC handle exchange.
+            `None` uses the default group.
 
     """
 
-    def __init__(self, rank: int, world_size: int, comm_size: int, process_group=None):
+    def __init__(
+        self,
+        rank: int,
+        world_size: int,
+        comm_size: int,
+        process_group: ProcessGroup | None = None,
+    ):
         assert world_size >= 2, "Lamport workspace requires at least 2 ranks"
         assert comm_size > 0, "comm_size must be positive"
 
@@ -227,7 +235,7 @@ class LamportWorkspace:
     @property
     def workspace(self) -> torch.Tensor:
         """Device tensor (int64) that can be passed to the kernel
-        as ``void** workspace``."""
+        as `void** workspace`."""
         return self._workspace
 
     # ------------------------------------------------------------------
@@ -240,11 +248,11 @@ class LamportWorkspace:
         world_size: int,
         fused_qk: bool = True,
     ) -> int:
-        """Return a safe ``comm_size`` (in bytes) for MiniMaxReduceRMSKernel.
+        """Return a safe `comm_size` (in bytes) for MiniMaxReduceRMSKernel.
 
         The kernel stores per-token variance scalars in the Lamport buffer:
-          - single-matrix path: ``world_size × max_tokens × 4`` bytes per slot
-          - fused Q+K path: ``world_size × 2 × ceil(max_tokens/4) × 16`` bytes per slot
+          - single-matrix path: `world_size × max_tokens × 4` bytes per slot
+          - fused Q+K path: `world_size × 2 × ceil(max_tokens/4) × 16` bytes per slot
 
         The returned value is rounded up to 2 MiB alignment.
         """
@@ -283,24 +291,21 @@ def get_allreduce_workspace(
     world_size: int,
     comm_size: int | None = None,
     max_tokens: int = 16384,
-    process_group=None,
+    process_group: ProcessGroup | None = None,
 ) -> torch.Tensor:
     """Return a cached workspace tensor for the given (rank, world_size) pair.
 
     On first call the workspace is allocated and IPC handles are exchanged;
     subsequent calls with the same arguments return the cached tensor.
 
-    Parameters
-    ----------
-    rank, world_size : int
-        TP rank and TP size.
-    comm_size : int, optional
-        Explicit slot size in bytes.  If ``None``, computed automatically
-        from ``max_tokens`` and ``world_size`` (fused Q+K path).
-    max_tokens : int
-        Maximum number of tokens per batch (used when ``comm_size is None``).
-    process_group : optional
-        ``torch.distributed`` process group.
+    Args:
+        rank: TP rank.
+        world_size: TP size.
+        comm_size: Explicit slot size in bytes. If `None`, computed automatically
+            from `max_tokens` and `world_size` (fused Q+K path).
+        max_tokens: Maximum number of tokens per batch (used when
+            `comm_size is None`).
+        process_group: `torch.distributed` process group.
 
     """
     if comm_size is None:

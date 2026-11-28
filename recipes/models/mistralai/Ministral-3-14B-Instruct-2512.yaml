@@ -210,7 +210,6 @@ guide: |
       --load_format mistral \
       --max-num-seqs 256 \
       --max-model-len auto \
-      --gpu-memory-utilization 0.95 \
       --max-num-batched-tokens 8192 \
       --enable-auto-tool-choice \
       --tool-call-parser mistral

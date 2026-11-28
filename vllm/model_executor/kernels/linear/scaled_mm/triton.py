@@ -111,11 +111,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             if self.config.is_static_input_scheme:
                 # Fold azp into azp_adj for the per-tensor case
                 azp_adj = getattr(layer, i_zp_name) * azp_adj
-            setattr(
-                layer,
-                azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
-            )
+            replace_parameter(layer, azp_adj_name, azp_adj)
         else:
             setattr(layer, azp_adj_name, None)
 
@@ -132,27 +128,11 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             x.contiguous(), i_s, i_zp, symmetric=symmetric
         )
 
-        out = torch.ops.vllm.int8_scaled_mm_func(x_q, w_q, x_s, w_s, x.dtype, bias)
-
-        if azp_adj is not None:
-            # Asymmetric quantization: subtract the zero-point correction.
-            # D = scale_a * scale_b * (A_q @ B_q - azp * azp_adj) + bias
-            # triton_scaled_mm already computed scale_a * scale_b * (A_q @ B_q) + bias
-            # so we subtract scale_a * scale_b * azp * azp_adj
-            #
-            # x_s: [M, 1] or scalar, w_s: [N, 1] or scalar, azp_adj: [1, N]
-            # Reshape w_s from [N, 1] to [1, N] for proper broadcasting.
-            w_s_row = w_s.view(1, -1) if w_s.dim() > 0 else w_s
-            static = i_zp is not None
-            if not static and x_zp is not None:
-                # Dynamic per-token: azp is per-token, azp_adj is per-channel
-                # x_zp: [M, 1], azp_adj: [1, N]
-                out -= x_s * w_s_row * (x_zp * azp_adj).to(x.dtype)
-            else:
-                # Static per-tensor: azp already folded into azp_adj
-                out -= (x_s * w_s_row * azp_adj).to(x.dtype)
-
-        return out
+        # A static per-tensor azp is already folded into azp_adj.
+        azp = x_zp if i_zp is None else None
+        return torch.ops.vllm.int8_scaled_mm_func(
+            x_q, w_q, x_s, w_s, x.dtype, bias, azp_adj, azp
+        )
 
 
 class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -226,6 +206,8 @@ def _int8_scaled_mm_func(
     weight_scale: torch.Tensor,
     output_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
+    azp_adj: torch.Tensor | None = None,
+    azp: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return triton_scaled_mm(
         qx,
@@ -234,6 +216,8 @@ def _int8_scaled_mm_func(
         scale_b=weight_scale,
         out_dtype=output_dtype,
         bias=bias,
+        azp_adj=azp_adj,
+        azp=azp,
     )
 
 
@@ -244,6 +228,8 @@ def _int8_scaled_mm_fake(
     weight_scale: torch.Tensor,
     output_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
+    azp_adj: torch.Tensor | None = None,
+    azp: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty(
         (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device

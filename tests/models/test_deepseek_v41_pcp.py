@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from types import SimpleNamespace
+import os
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -8,11 +9,100 @@ import torch
 
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.deepseek_v41 import attention as attention_module
+from vllm.models.deepseek_v41.amd import model as amd_model_module
+from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+from vllm.models.deepseek_v41.compressor import CompressorStateCache
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
 )
 from vllm.models.deepseek_v41.nvidia import model as model_module
+from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize(
+    "cache_cls",
+    [
+        attention_module.DeepseekV4Attention,
+        attention_module.DeepseekV4IndexerCache,
+        CompressorStateCache,
+    ],
+)
+def test_cache_specs_declare_tp_replication(cache_cls):
+    cache_config = SimpleNamespace(block_size=64, cache_dtype="fp8_ds_mla")
+    state = SimpleNamespace(
+        cache_config=cache_config,
+        is_kv_source=True,
+        kv_cache_dtype="fp8_ds_mla",
+        head_dim=512,
+        kv_cache_torch_dtype=torch.uint8,
+        dtype=torch.uint8,
+        compress_ratio=2,
+        kv_page_alignment=576,
+        compressed_bytes_per_token=584,
+        sparse_logits=True,
+        rocm_mxfp4=False,
+        block_size=8,
+        state_dim=1024,
+    )
+    if cache_cls is CompressorStateCache:
+        state.dtype = torch.float32
+    elif cache_cls is attention_module.DeepseekV4Attention:
+        state.get_compressed_kv_cache_spec = MethodType(
+            cache_cls.get_compressed_kv_cache_spec, state
+        )
+    spec = cache_cls.get_kv_cache_config(
+        state, SimpleNamespace(cache_config=cache_config)
+    ).spec
+    assert spec.max_tp_shards == 1
+
+
+@pytest.mark.distributed(num_gpus=8)
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or current_platform.device_count() < 8,
+    reason="Requires eight CUDA GPUs",
+)
+@pytest.mark.parametrize("pp_size,dp_size", [(2, 1), (1, 2)], ids=["pp-pcp", "dp-pcp"])
+def test_pcp_generates_with_pipeline_or_data_parallelism(pp_size, dp_size):
+    """PCP composes with PP or DP through real-weight serving and generation."""
+    from tests.utils import RemoteOpenAIServer
+
+    model = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V4.1-Flash")
+    args = f"""
+        --language-model-only --tokenizer-mode deepseek_v41
+        --tensor-parallel-size 2 --prefill-context-parallel-size 2
+        --pipeline-parallel-size {pp_size} --data-parallel-size {dp_size}
+        --enable-expert-parallel --all2all-backend allgather_reducescatter
+        --distributed-executor-backend mp --attention-backend FLASHMLA_SPARSE_DSV41
+        --moe-backend marlin --engram-config {{"cpu_offload":true}}
+        --kv-cache-dtype fp8_ds_mla --block-size 64
+        --max-model-len 4096 --max-num-batched-tokens 512 --max-num-seqs 8
+        --enable-chunked-prefill --no-enable-prefix-caching --no-swa-bounded-replay
+        --enforce-eager --no-async-scheduling
+    """.split()
+    env: dict[str, str] = {}
+    if pp_size > 1:
+        env["VLLM_PP_LAYER_PARTITION"] = "14,26"
+    with (
+        RemoteOpenAIServer(model, args, env_dict=env, max_wait_seconds=1200) as server,
+        server.get_client(timeout=300) as client,
+    ):
+        for rank in range(dp_size):
+            response = client.completions.create(
+                model=model,
+                prompt="A lighthouse guides ships through the night. " * 129,
+                temperature=0,
+                max_tokens=8,
+                extra_body={"ignore_eos": True},
+                extra_headers=(
+                    {"X-data-parallel-rank": str(rank)} if dp_size > 1 else None
+                ),
+            )
+            assert len(response.choices) == 1
+            assert response.choices[0].finish_reason == "length"
+            assert response.choices[0].text
+            assert response.usage is not None
+            assert response.usage.completion_tokens == 8
 
 
 @pytest.mark.parametrize("pcp_size", [1, 2])
@@ -68,14 +158,16 @@ def test_replay_kv_publishes_all_pcp_owners(pcp_size, monkeypatch):
     assert gather.call_count == (2 if pcp_size > 1 else 0)
 
 
+@pytest.mark.parametrize("model_module", [model_module, amd_model_module])
 @pytest.mark.parametrize(
     "pcp_size,use_ep", [(1, False), (2, True), (2, False), (4, False)]
 )
 @pytest.mark.parametrize("use_sp", [False, True])
 def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
-    pcp_size, use_ep, use_sp, monkeypatch
+    model_module, pcp_size, use_ep, use_sp, monkeypatch
 ):
     """Embedding keeps local IDs; all decoder layers receive aligned routing IDs."""
+    is_amd = model_module is amd_model_module
     gather = Mock(side_effect=lambda ids, dim: torch.cat([ids] * pcp_size, dim=dim))
     monkeypatch.setattr(
         model_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather)
@@ -90,10 +182,18 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
     monkeypatch.setattr(
         model_module, "sp_all_gather", lambda tensor: tensor.repeat_interleave(2, dim=0)
     )
-    monkeypatch.setattr(model_module, "hc_collapse_triton", lambda hidden, mix: hidden)
+    monkeypatch.setattr(
+        torch.ops.vllm if is_amd else model_module,
+        "hc_collapse_triton",
+        lambda hidden, mix: hidden,
+    )
     embed = Mock(side_effect=lambda ids: ids[:, None].float())
     run_layers = Mock(
-        side_effect=lambda layer_ids, hidden, *args: (hidden, None, None, None, hidden)
+        side_effect=lambda layer_ids, hidden, *args: (
+            (hidden, None, None, None, hidden, [], None, False)
+            if is_amd
+            else (hidden, None, None, None, hidden)
+        )
     )
     model = SimpleNamespace(
         parallel_config=SimpleNamespace(
@@ -109,6 +209,7 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
         aux_hidden_state_layers=(),
         _mtp_hidden_buffer=None,
         _run_layers=run_layers,
+        _link_mono=lambda: None,
         _collapse=lambda hidden, *args: hidden,
         norm=lambda hidden: hidden,
     )
@@ -123,7 +224,7 @@ def test_pcp_gathers_routing_ids_once_after_local_input_preparation(
             routing_ids = routing_ids.repeat(pcp_size)
         torch.testing.assert_close(run_layers.call_args.args[3], routing_ids)
     assert gather.call_count == 2 * int(needs_gather)
-    if pcp_size == 2 and not use_ep and not use_sp:
+    if pcp_size == 2 and not use_ep and not use_sp and not is_amd:
         replay = Mock(return_value=(embed(local_ids), embed(local_ids)))
         replay.replay_batch = object()
         model.decoder_replay_layers = replay
@@ -195,3 +296,58 @@ def test_pcp_rejects_speculation_other_than_fixed_length_dspark(method, adaptive
     )
     with pytest.raises(NotImplementedError, match="fixed-length DSpark"):
         model_module.DeepseekV4Model(vllm_config=config)
+
+
+def _rocm_pcp_config():
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        quant_config=None,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        speculative_config=None,
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        kernel_config=SimpleNamespace(moe_backend="auto", monokernel=False),
+    )
+
+
+@pytest.mark.parametrize(
+    "section,field,value",
+    [
+        ("cache_config", "enable_prefix_caching", True),
+        ("kernel_config", "moe_backend", "aiter_mega_moe"),
+        ("kernel_config", "monokernel", True),
+    ],
+)
+def test_rocm_pcp_rejects_unsupported_configurations(section, field, value):
+    config = _rocm_pcp_config()
+    amd_model_module._validate_pcp_config(config)
+    setattr(getattr(config, section), field, value)
+    with pytest.raises(NotImplementedError, match="PP=DP=DCP=1"):
+        amd_model_module.DeepseekV4Model(vllm_config=config)
+
+
+def test_rocm_pcp_attention_skips_stream_overlap_path(monkeypatch):
+    """The ROCm overlap path caches the compressor latent without the PCP gather."""
+    attention = object.__new__(DeepseekV41ROCMAiterMLAAttention)
+    torch.nn.Module.__init__(attention)
+    attention.use_pcp = True
+    attention.indexer = object()
+    attention.aux_stream_list = [object()]
+    base_forward = Mock(side_effect=lambda positions, hidden, *args: hidden)
+    monkeypatch.setattr(attention_module.DeepseekV4Attention, "forward", base_forward)
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v41.amd.rocm.current_platform.enable_multi_stream_overlap",
+        lambda *args: True,
+    )
+    hidden_states = torch.ones(2, 4)
+    with override_forward_context(
+        ForwardContext(no_compile_layers={}, attn_metadata=None, slot_mapping={})
+    ):
+        assert attention(torch.arange(2), hidden_states) is hidden_states
+    base_forward.assert_called_once()

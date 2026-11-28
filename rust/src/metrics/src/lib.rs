@@ -16,12 +16,14 @@ use crate::buckets::BucketConfig;
 mod api_server;
 mod buckets;
 mod histogram;
+mod renderer;
 mod request;
 mod scheduler;
 
 pub use api_server::*;
 pub use buckets::{BucketFamily, CustomHistogramBuckets, FamilyHistogram};
 pub use histogram::Histogram;
+pub use renderer::*;
 pub use request::*;
 pub use scheduler::*;
 
@@ -29,6 +31,7 @@ pub use scheduler::*;
 // encoding counters, so all counter family registration names in this crate
 // must use the base metric name without a trailing `_total`.
 pub type U64Counter = Counter<u64, AtomicU64>;
+pub type F64Counter = Counter<f64, AtomicU64>;
 pub type U64Gauge = Gauge<u64, AtomicU64>;
 pub type F64Gauge = Gauge<f64, AtomicU64>;
 /// Histogram metric handle cloned out of a Prometheus family.
@@ -46,6 +49,7 @@ pub struct Metrics {
     pub scheduler: SchedulerMetrics,
     pub request: RequestMetrics,
     pub api_server: ApiServerMetrics,
+    pub renderer: RendererMetrics,
 }
 
 impl Metrics {
@@ -56,6 +60,7 @@ impl Metrics {
         let scheduler = SchedulerMetrics::register(&mut registry, &buckets);
         let request = RequestMetrics::register(&mut registry, &buckets);
         let api_server = ApiServerMetrics::register(&mut registry);
+        let renderer = RendererMetrics::register(&mut registry);
 
         Self {
             registry,
@@ -63,6 +68,7 @@ impl Metrics {
             scheduler,
             request,
             api_server,
+            renderer,
         }
     }
 

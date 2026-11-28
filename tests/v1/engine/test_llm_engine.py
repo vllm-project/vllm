@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from vllm import LLM
+from vllm import LLM, TokensPrompt
 from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.llm_engine import LLMEngine
@@ -25,7 +25,8 @@ DTYPE = "half"
 def test_step_invalidates_mm_processor_cache_misses():
     engine = object.__new__(LLMEngine)
     engine.should_execute_dummy_batch = False
-    engine.log_stats = False
+    engine.dp_group = None
+    engine.collect_stats = False
     engine.logger_manager = None
 
     mm_processor_cache = MagicMock()
@@ -51,6 +52,37 @@ def test_step_invalidates_mm_processor_cache_misses():
         call("missing-hash-1"),
         call("missing-hash-2"),
     ]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_executed", [True, False])
+def test_dp_step_runs_dummy_batch_when_no_forward(model_executed: bool):
+    """Each DP rank must join one forward per step (in-process DP / external
+    launcher). A step whose engine-core step ran no forward (e.g. async
+    scheduling skips requests that already reached max_tokens) must run a
+    dummy batch, or the other ranks hang in their forward's DP sync."""
+    engine = object.__new__(LLMEngine)
+    engine.should_execute_dummy_batch = False
+    engine.dp_group = MagicMock()
+    engine.external_launcher_dp = True
+    engine.collect_stats = False
+    engine.logger_manager = None
+    engine.renderer = MagicMock(mm_processor_cache=None)
+    engine.engine_core = MagicMock()
+    engine.engine_core.get_output.return_value = MagicMock(
+        outputs=[], timestamp=0.0, scheduler_stats=None
+    )
+    engine.engine_core.last_step_model_executed = model_executed
+    engine.output_processor = MagicMock()
+    engine.output_processor.process_outputs.return_value = MagicMock(
+        reqs_to_abort=[], request_outputs=[]
+    )
+
+    engine.step()
+
+    assert engine.engine_core.execute_dummy_batch.call_count == (
+        0 if model_executed else 1
+    )
 
 
 def test_duplicate_profile_start_rejected_before_engine_core_dispatch():
@@ -222,6 +254,24 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}"
             )
+
+
+def test_parallel_sampling_num_cached_tokens(vllm_runner) -> None:
+    """An `n>1` request reports prompt cache usage like an `n=1` request: a
+    child hitting blocks its sibling just wrote is not a prefix cache hit."""
+    prompt = TokensPrompt(prompt_token_ids=list(range(100, 220)))
+    params = SamplingParams(n=4, temperature=1.0, seed=0, max_tokens=1)
+    with _vllm_model(True, vllm_runner) as vllm_model:
+        llm: LLM = vllm_model.llm
+        [cold] = llm.generate(prompt, params)
+        [warm] = llm.generate(prompt, params)
+        [warm_n1] = llm.generate(prompt, SamplingParams(max_tokens=1))
+
+    assert warm_n1.num_cached_tokens is not None
+    assert warm_n1.num_cached_tokens > 0
+    assert cold.num_cached_tokens == 0
+    assert cold.num_cache_creation_tokens == warm_n1.num_cached_tokens
+    assert warm.num_cached_tokens == warm_n1.num_cached_tokens
 
 
 def test_engine_metrics(vllm_runner, example_prompts):

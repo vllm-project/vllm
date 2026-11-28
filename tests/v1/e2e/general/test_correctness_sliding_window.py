@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 from ....utils import check_answers, prep_prompts
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     sliding_window: int
     ln_range: tuple[int, int]
@@ -108,6 +108,27 @@ def test_hybrid_kv_cache_manager_output_equivalence(model, vllm_runner):
             outputs.append([response.outputs[0].text for response in responses])
 
     assert outputs[0] == outputs[1]
+
+
+def test_hybrid_sliding_window_honors_user_block_size(vllm_runner):
+    """A user-specified block size must hold for sliding-window groups too, so
+    a one-block prefix is cacheable. Guards against backends picking a larger
+    sliding-window block when the worker builds KV cache specs.
+    """
+    block_size = 16
+    prompt = {"prompt_token_ids": [101] * (block_size + 1)}
+    sampling_params = SamplingParams(max_tokens=1)
+    with vllm_runner(
+        "google/gemma-3-1b-it",
+        block_size=block_size,
+        enable_prefix_caching=True,
+        max_model_len=1024,
+        enforce_eager=True,
+    ) as runner:
+        llm = runner.get_llm()
+        llm.generate([prompt], sampling_params)
+        outputs = llm.generate([prompt], sampling_params)
+    assert outputs[0].num_cached_tokens == block_size
 
 
 def check_length(prompts: list[str], llm: LLM, sliding_window: int):

@@ -613,7 +613,7 @@ def _as_strict(tools: list[ChatCompletionToolsParam]) -> list[ChatCompletionTool
 
 def _k3_grammar(tool_choice, tools=None, *, strict: bool = True):
     """Build the K3 grammar; tools are strict by default so the typed
-    argument channel is exercised (an unset ``strict`` leaves arguments free)."""
+    argument channel is exercised (an unset `strict` leaves arguments free)."""
     tools = tools if tools is not None else _k3_tools_by_name()
     tag = get_model_structural_tag(
         model="kimi_k3",
@@ -1199,6 +1199,55 @@ def test_kimi_k3_property_ref_to_root_defs_compiles_and_accepts():
     assert _is_grammar_accept_string(grammar, body)
 
 
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [
+        ('{"limit": 1, "same": 2, "tag": "x", "alias": 3}', True),
+        ('{"limit": 1, "same": "2", "tag": "x", "alias": 3}', False),
+        ('{"limit": 1, "same": 2, "tag": 3, "alias": 3}', False),
+        ('{"root": {"config": {"limit": 1}}}', True),
+        ('{"root": {"config": {"limit": "1"}}}', False),
+    ],
+)
+def test_kimi_k3_property_tree_ref_compiles_and_constrains(value: str, accepted: bool):
+    """A `$ref` into the parameters' own property tree is enforced instead of
+    rejecting the request; `#` is the parameters root, root `$defs` refs keep
+    resolving and `#anchor` refs are not rewritten."""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "make_config",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "config": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {"$anchor": "limit", "type": "integer"},
+                                "same": {
+                                    "$ref": "#/properties/config/properties/limit"
+                                },
+                                "tag": {"$ref": "#/$defs/tag"},
+                                "alias": {"$ref": "#limit"},
+                                "root": {"$ref": "#"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "$defs": {"tag": {"type": "string"}},
+                },
+            },
+        )
+    ]
+    grammar = _k3_grammar("required", tools=tools)
+
+    body = _k3_response() + _k3_tools(
+        _k3_call("make_config", _k3_arg("config", "object", value))
+    )
+    assert _is_grammar_accept_string(grammar, body) is accepted
+
+
 def _k3_tools_with_string_enum() -> list[ChatCompletionToolsParam]:
     return [
         ChatCompletionToolsParam(
@@ -1338,7 +1387,7 @@ def test_tool_strict_level_function_pins_envelope_only(
     model: str,
     sample_tools: list[ChatCompletionToolsParam],
 ):
-    """The request's own tools stay untouched; unset ``strict`` stays free."""
+    """The request's own tools stay untouched; unset `strict` stays free."""
     tag = get_model_structural_tag(
         model=model,
         tools=sample_tools,
@@ -1386,7 +1435,7 @@ def test_tool_strict_level_function_keeps_client_strict_tools_strict(
 
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_absent_strict_is_not_pinned_next_to_a_strict_tool(model: str):
-    """A strict tool must not drag a neighbour with unset ``strict`` into
+    """A strict tool must not drag a neighbour with unset `strict` into
     schema enforcement."""
     weather = ChatCompletionToolsParam(
         type="function",
@@ -1441,7 +1490,7 @@ def test_forced_tool_choice_pins_schema_only_for_strict_tools(
     sample_tools_strict: list[ChatCompletionToolsParam],
 ):
     """Required / named always constrain the call; the argument schema
-    follows the per-tool ``strict`` (or the parameter level)."""
+    follows the per-tool `strict` (or the parameter level)."""
     free = get_model_structural_tag(
         model=model,
         tools=sample_tools,
@@ -1498,6 +1547,36 @@ def test_tool_strict_level_from_name():
         ToolStrictLevel.from_name("strict")
     with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
         ToolStrictLevel.from_name("off")
+
+
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("token_suffix", ["", ":6124c78e"])
+def test_hy_v4_preserves_whitespace_in_argument_keys(
+    sample_tools, required, token_suffix
+):
+    """Argument names must match the schema exactly, including whitespace."""
+    sample_tools[0].function.parameters = {
+        "type": "object",
+        "properties": {" count ": {"type": "integer"}},
+        "required": [" count "] if required else [],
+    }
+    tag = get_model_structural_tag(
+        "hy_v4",
+        sample_tools,
+        "required",
+        reasoning=False,
+        token_suffix=token_suffix,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        f"<tool_calls{token_suffix}><tool_call{token_suffix}>get_weather"
+        f"<arg_key{token_suffix}> count </arg_key{token_suffix}>"
+        f"<arg_value{token_suffix}>2</arg_value{token_suffix}>"
+        f"</tool_call{token_suffix}></tool_calls{token_suffix}>"
+    )
+
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, call.replace(" count ", "count"))
 
 
 # ---------------------------------------------------------------------------
@@ -2180,22 +2259,28 @@ _SINGLE_CALL_CASES = [
     (
         "mimo",
         "",
-        "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
-        "</function></tool_call>",
+        (
+            "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
+            "</function></tool_call>"
+        ),
         "",
     ),
     (
         "hermes",
         "",
-        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
-        "\n</tool_call>",
+        (
+            '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
+            "\n</tool_call>"
+        ),
         "",
     ),
     (
         "qwen3_xml",
         "",
-        "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
-        "</parameter>\n</function>\n</tool_call>",
+        (
+            "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+            "</parameter>\n</function>\n</tool_call>"
+        ),
         "",
     ),
     (

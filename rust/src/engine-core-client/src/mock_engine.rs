@@ -77,6 +77,14 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         supports_draft_weight_updates: false,
         effective_attention_block_size: None,
         vllm_config: None,
+        prefix_hash_config: None,
+        cache_config_info: None,
+        config_hash: None,
+        enable_expert_parallel: false,
+        supports_prompt_logprobs: true,
+        allow_missing_mm_embeddings: false,
+        max_mm_embeds_per_request: None,
+        device_type: None,
     }
 }
 

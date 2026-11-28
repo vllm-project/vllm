@@ -19,6 +19,11 @@ class _SpecConfig:
     def use_dspark(self) -> bool:
         return self._dspark
 
+    @property
+    def uses_separate_workspace_lane(self) -> bool:
+        # Only DSpark drafts in a separate workspace lane.
+        return self._dspark
+
 
 class _VllmConfig:
     def __init__(self, spec_config: _SpecConfig | None) -> None:
@@ -26,21 +31,19 @@ class _VllmConfig:
 
 
 @pytest.mark.parametrize(
-    ("use_v2_model_runner", "spec_config", "expected"),
+    ("spec_config", "expected"),
     [
-        (True, _SpecConfig(True), 2),
-        (False, _SpecConfig(True), 1),
-        (True, _SpecConfig(False), 1),
-        (True, None, 1),
+        (_SpecConfig(True), 2),
+        (_SpecConfig(False), 1),
+        (None, 1),
     ],
 )
 def test_workspace_lane_count_is_dspark_only(
-    use_v2_model_runner: bool,
     spec_config: _SpecConfig | None,
     expected: int,
 ) -> None:
     config = cast(VllmConfig, _VllmConfig(spec_config))
-    assert _num_workspace_lanes(config, use_v2_model_runner) == expected
+    assert _num_workspace_lanes(config) == expected
 
 
 def test_workspace_lanes_do_not_alias_and_restore_context(monkeypatch) -> None:

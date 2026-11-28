@@ -66,7 +66,10 @@ class OMPProcessManager:
 
         self._parse_omp_threads_bind_env()
 
-        assert not self.simulate_multi_node or self.auto_setup
+        assert not self.simulate_multi_node or self.auto_setup, (
+            "VLLM_CPU_SIM_MULTI_NUMA requires VLLM_CPU_OMP_THREADS_BIND=auto, "
+            f"got {envs.VLLM_CPU_OMP_THREADS_BIND!r}."
+        )
 
     @contextmanager
     def configure_omp_envs(self, rank: int, local_rank: int):
@@ -83,13 +86,17 @@ class OMPProcessManager:
             envs_dict["KMP_AFFINITY"] = (
                 f"granularity=fine,explicit,proclist=[{cpu_list_str}]"
             )
+            # KMP_BLOCKTIME and KMP_TPAUSE are defaults only: keep values the
+            # user exported, as only KMP_AFFINITY is needed for the binding.
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
             # A value of 5 masks thread underutilization.
             # Set to 1 when debugging thread utilization issues.
-            envs_dict["KMP_BLOCKTIME"] = "5"
+            if not os.environ.get("KMP_BLOCKTIME"):
+                envs_dict["KMP_BLOCKTIME"] = "5"
             # Prevents the CPU to run into low performance state
-            envs_dict["KMP_TPAUSE"] = "0"
+            if not os.environ.get("KMP_TPAUSE"):
+                envs_dict["KMP_TPAUSE"] = "0"
         elif self.use_gomp:
             # set GOMP envs
             # likes '0 1 2 ...'

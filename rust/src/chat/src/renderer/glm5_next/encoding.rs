@@ -11,8 +11,11 @@ use serde_json::{Value, json};
 use thiserror_ext::AsReport as _;
 
 use super::writer::Glm5PromptWriter;
-use crate::error::{Error, Result, bail_chat_template_thrown, chat_template_thrown};
-use crate::renderer::MediaPartSource;
+use crate::error::{
+    Error, Result, bail_chat_template_render, bail_invalid_continue_final_message,
+    chat_template_render,
+};
+use crate::renderer::{MediaPartSource, tool_call_arguments_or_empty};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode};
 use crate::{AssistantContentBlock, AssistantMessageExt};
 
@@ -95,7 +98,7 @@ fn visible_text(
 
 fn tool_definition(tool: &Value) -> Result<String> {
     let Some(fields) = tool.as_object() else {
-        bail_chat_template_thrown!("Each tool must be a JSON object");
+        bail_chat_template_render!("Each tool must be a JSON object");
     };
     let mut out = String::from("{");
     for (key, value) in fields {
@@ -124,7 +127,7 @@ fn tool_references(value: &Value) -> bool {
 
 fn reference_response(out: &mut Glm5PromptWriter<'_>, refs: &Value, tools: &[Value]) -> Result<()> {
     if tools.is_empty() {
-        bail_chat_template_thrown!("Rendering a tool_reference requires tools");
+        bail_chat_template_render!("Rendering a tool_reference requires tools");
     }
     out.control("<tool_response><tools>\n")?;
     for reference in refs.as_array().into_iter().flatten() {
@@ -158,7 +161,7 @@ fn bundled_outputs(value: &Value) -> Result<bool> {
         return Ok(false);
     }
     let Some(parts) = value.as_array() else {
-        bail_chat_template_thrown!("A tool message content must be a string or a list");
+        bail_chat_template_render!("A tool message content must be a string or a list");
     };
     Ok(parts.first().is_some_and(|part| part.get("output").is_some()))
 }
@@ -244,19 +247,19 @@ fn ordered_tool_block(
 fn tool_call(out: &mut Glm5PromptWriter<'_>, call: &Value) -> Result<()> {
     let call = call.get("function").filter(|value| truthy(value)).unwrap_or(call);
     let Some(name) = call["name"].as_str() else {
-        bail_chat_template_thrown!("Each tool_call needs a string name");
+        bail_chat_template_render!("Each tool_call needs a string name");
     };
     let parsed;
     let arguments = if let Some(raw) = call["arguments"].as_str() {
         parsed = serde_json::from_str::<Value>(raw).map_err(|error| {
-            chat_template_thrown!("Invalid tool_call arguments: {}", error.as_report())
+            chat_template_render!("Invalid tool_call arguments: {}", error.as_report())
         })?;
         &parsed
     } else {
         &call["arguments"]
     };
     let Some(arguments) = arguments.as_object() else {
-        bail_chat_template_thrown!("tool_call arguments must be a JSON object");
+        bail_chat_template_render!("tool_call arguments must be a JSON object");
     };
     out.control("<tool_call>")?;
     out.ordinary(name);
@@ -376,12 +379,12 @@ fn render_inner(
                     out.ordinary(content.trim_matches(trim));
                     let original = original.trim_matches(trim);
                     if !out.text().contains(original) {
-                        return Err(Error::ChatTemplate(format!(
+                        bail_invalid_continue_final_message!(
                             "continue_final_message is set but the final message does not appear \
                              in the prompt after applying the chat template! This can happen if \
                              the chat template deletes portions of the final message. Final \
                              message to continue: {original}"
-                        )));
+                        );
                     }
                     break;
                 }
@@ -414,7 +417,7 @@ fn render_inner(
     Ok(())
 }
 
-// TODO: Expose tool_reference and bundled outputs in ChatContentPart.
+// TODO: Expose bundled outputs in ChatContentPart.
 
 fn content(value: &ChatContent, message_index: usize) -> Value {
     match value {
@@ -430,16 +433,23 @@ fn content(value: &ChatContent, message_index: usize) -> Value {
                     ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
                         json!({"type": "audio", "message_index": message_index, "content_part_index": content_part_index})
                     }
+                    ChatContentPart::ToolReference { name } => json!({"type": "tool_reference", "name": name}),
                 })
                 .collect(),
         ),
     }
 }
 
+/// The template messages for `messages`.
+///
+/// The template has no developer role. As in the HF renderer
+/// (`hf::developer`), a leading run of system and developer messages that
+/// includes a developer message becomes one system message, and later
+/// developer messages become system messages in place. Media parts keep the
+/// indices of the message they came from.
 pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
-    messages.iter().enumerate().map(|(index, message)| match message {
-        ChatMessage::System { content: value } => json!({"role": "system", "content": content(value, index)}),
-        ChatMessage::Developer { content: value, .. } => json!({"role": "developer", "content": content(value, index)}),
+    let mut values: Vec<Value> = messages.iter().enumerate().map(|(index, message)| match message {
+        ChatMessage::System { content: value } | ChatMessage::Developer { content: value, .. } => json!({"role": "system", "content": content(value, index)}),
         ChatMessage::User { content: value } => json!({"role": "user", "content": content(value, index)}),
         ChatMessage::Custom { role, content: value } => json!({"role": role, "content": content(value, index)}),
         ChatMessage::ToolResponse { content: value, tool_call_id } => {
@@ -454,13 +464,78 @@ pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
                 }).collect::<String>());
             }
             if content.has_tool_calls() {
+                // The template needs a mapping; the request carries a string.
                 message["tool_calls"] = Value::Array(content.tool_calls().map(|call| {
-                    json!({"id": call.id, "function": {"name": call.name, "arguments": call.arguments}})
+                    let arguments = Value::Object(tool_call_arguments_or_empty(&call.arguments));
+                    json!({"id": call.id, "function": {"name": call.name, "arguments": arguments}})
                 }).collect());
             }
             message
         }
-    }).collect()
+    }).collect();
+    let leading = messages
+        .iter()
+        .take_while(|message| {
+            matches!(
+                message,
+                ChatMessage::System { .. } | ChatMessage::Developer { .. }
+            )
+        })
+        .count();
+    if messages[..leading]
+        .iter()
+        .any(|message| matches!(message, ChatMessage::Developer { .. }))
+    {
+        // Empty messages add nothing, as in `ChatContent::append`.
+        let content = messages
+            .iter()
+            .zip(values.drain(..leading))
+            .filter(|(message, _)| {
+                !matches!(
+                    message,
+                    ChatMessage::System { content } | ChatMessage::Developer { content, .. }
+                        if content.is_empty()
+                )
+            })
+            .map(|(_, mut value)| value["content"].take())
+            .reduce(append_content)
+            .unwrap_or_else(|| json!(""));
+        values.insert(0, json!({"role": "system", "content": content}));
+    }
+    values
+}
+
+/// Join non-empty `next` to non-empty `content` as `ChatContent::append`
+/// joins merged messages: text on either side of the boundary is joined with a
+/// blank line, and parts keep their order.
+fn append_content(content: Value, next: Value) -> Value {
+    const SEPARATOR: &str = "\n\n";
+    let into_parts = |value: Value| match value {
+        Value::Array(parts) => parts,
+        text => vec![json!({"type": "text", "text": text})],
+    };
+    match (content, next) {
+        (Value::String(text), Value::String(next)) => {
+            Value::String(format!("{text}{SEPARATOR}{next}"))
+        }
+        (content, next) => {
+            let mut parts = into_parts(content);
+            let mut next = into_parts(next).into_iter().peekable();
+            if let Some(last) = parts.last_mut()
+                && last["type"] == "text"
+                && let Some(first) = next.next_if(|part| part["type"] == "text")
+            {
+                let joined = format!(
+                    "{}{SEPARATOR}{}",
+                    last["text"].as_str().unwrap_or_default(),
+                    first["text"].as_str().unwrap_or_default()
+                );
+                last["text"] = Value::String(joined);
+            }
+            parts.extend(next);
+            Value::Array(parts)
+        }
+    }
 }
 
 pub(super) fn tools(tools: &[ChatTool]) -> Vec<Value> {
@@ -529,7 +604,10 @@ fn json(value: &Value) -> Result<String> {
     value
         .serialize(&mut Serializer::with_formatter(&mut bytes, PythonFormatter))
         .map_err(|error| {
-            chat_template_thrown!("GLM JSON serialization failed: {}", error.as_report())
+            Error::ChatTemplate(format!(
+                "GLM JSON serialization failed: {}",
+                error.as_report()
+            ))
         })?;
     Ok(String::from_utf8(bytes).expect("JSON serializer must write UTF-8"))
 }

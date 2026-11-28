@@ -414,10 +414,10 @@ def register_kernel(
         fake_impl: Optional meta/fake implementation for tracing.
         mutates_args: Names of arguments the kernel mutates in place.
         helion_settings: Optional Helion settings override.
-        config_picker: Required. Receives ``(args, config_keys)``
-            where each config key is a ``dict[str, Any]`` mapping
+        config_picker: Required. Receives `(args, config_keys)`
+            where each config key is a `dict[str, Any]` mapping
             parameter names to values.  Return the best-matching
-            dict, or ``None`` to fall back to the default config.
+            dict, or `None` to fall back to the default config.
 
             Example::
 
@@ -426,7 +426,7 @@ def register_kernel(
                     best = min(config_keys, key=lambda k: abs(k["size"] - x.shape[0]))
                     return best
 
-        input_generator: Optional. Returns ``dict[str, tuple]`` where
+        input_generator: Optional. Returns `dict[str, tuple]` where
             each key is a serialized config key and each value is a
             tuple of arguments to pass to the kernel.
 
