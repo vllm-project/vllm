@@ -114,10 +114,7 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--enable-per-video-kwargs-slicing` | Enable processor-side partitioning of request-level per-video kwargs. Requires compatible encoder processors and EC consumer cache hashing. Defaults to off. |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
-Request-level multimodal kwargs remain subject to the server's existing
-`--trust-request-mm-kwargs` policy. Requests without processor overrides do not
-require additional trust settings. Partitioning of server-configured per-video
-lists alone is not supported.
+Partitioning applies to request-level per-video kwargs only.
 
 When using `--enable-per-video-kwargs-slicing` with audio extracted from video,
 put per-video `fps` or `num_frames` lists inside
