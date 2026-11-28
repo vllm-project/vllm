@@ -26,6 +26,7 @@ pytestmark = pytest.mark.skipif(
         (32, 4, 8, torch.bfloat16, torch.bfloat16),
         (32, 4, 8, torch.float32, torch.float32),
         (1, 16, 64, torch.bfloat16, torch.float32),
+        (1, 8, 24, torch.bfloat16, torch.float32),
         (9, 4, 12, torch.bfloat16, torch.float32),
         (1, 4, 12, torch.bfloat16, torch.bfloat16),
     ],

@@ -478,6 +478,14 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         # Tuned on H200: with an FP32 state BV=4 is fastest at every measured shape.
         # No BF16-state tile wins everywhere on SM90, so BF16 keeps 32.
         BV = 4
+    elif (
+        K == V == 128
+        and initial_state.dtype == torch.float32
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(80, device_id=dev.index)
+    ):
+        # Tuned on A100 for FP32 state. BF16 keeps the default tile.
+        BV = 8
     num_stages = 3
     num_warps = 1
 
