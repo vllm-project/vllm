@@ -12,7 +12,7 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import torch
 
@@ -159,12 +159,16 @@ class SparseNCCLWeightTransferEngine(
         super().__init__(config, vllm_config, device, model)
         self.model_update_group: PyNcclCommunicator | None = None
 
+    def _init_process_group(self, init_info: NCCLWeightTransferInitInfo) -> Any:
+        return worker_init_process_group(init_info, self.parallel_config)
+
+    def _current_stream(self, device: torch.device) -> Any:
+        return torch.cuda.current_stream(device=device)
+
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """Initialize the NCCL process group with the trainer."""
         self.shutdown()
-        self.model_update_group = worker_init_process_group(
-            init_info, self.parallel_config
-        )
+        self.model_update_group = self._init_process_group(init_info)
         # after the group forms, so the error reaches the trainer; destroy the
         # group, so a retry starts clean
         if init_info.use_load_plan:
@@ -196,7 +200,7 @@ class SparseNCCLWeightTransferEngine(
         # ambient current device in the RPC thread.
         device = self.model_update_group.device
         with torch.accelerator.device_index(device.index):
-            stream = torch.cuda.current_stream(device=device)
+            stream = self._current_stream(device)
             for batch in update_info.batches():
                 dtypes = [
                     getattr(torch, name) for name in update_info.dtype_names[batch]
@@ -294,6 +298,13 @@ class SparseNCCLTrainerWeightTransferEngine(
     def _build_worker_init_payload(cls, init_info: SparseNCCLTrainerInitInfo) -> dict:
         return build_worker_init_payload(init_info)
 
+    @staticmethod
+    def _open_trainer_endpoint(init_info: SparseNCCLTrainerInitInfo) -> Any:
+        return open_trainer_endpoint(init_info)
+
+    def _current_stream(self) -> Any:
+        return torch.cuda.current_stream()
+
     @classmethod
     def trainer_init(
         cls,
@@ -311,7 +322,7 @@ class SparseNCCLTrainerWeightTransferEngine(
             run_trainer_rendezvous(
                 init_worker=lambda: engine.client.init_weight_transfer_engine(payload),
                 init_trainer=lambda: setattr(
-                    engine, "model_update_group", open_trainer_endpoint(init_info)
+                    engine, "model_update_group", cls._open_trainer_endpoint(init_info)
                 ),
             )
         except BaseException:
@@ -384,7 +395,7 @@ class SparseNCCLTrainerWeightTransferEngine(
                 # than broadcasting to a peer that will never receive.
                 if future.done():
                     future.result()
-                stream = torch.cuda.current_stream()
+                stream = self._current_stream()
                 for batch in update_info.batches():
                     self.model_update_group.broadcast(
                         torch.cat([patch.indices for patch in patches[batch]]),
