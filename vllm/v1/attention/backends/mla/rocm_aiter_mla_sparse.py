@@ -1094,13 +1094,14 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             )
         if self.kv_cache_dtype == "fp8_ds_mla":
             # The fp8_ds_mla branch of forward_mqa routes to aiter's Triton
-            # sparse_mla_fwd, which is validated on gfx950 only.
-            from vllm.platforms.rocm import on_gfx950
+            # sparse_mla_fwd, which reads the fp8_dsv32_mla layout on gfx950
+            # and, in gfx942's native fnuz, on gfx942.
+            from vllm.platforms.rocm import get_cdna_version
 
-            if not on_gfx950():
+            if get_cdna_version() not in (3, 4):
                 raise NotImplementedError(
                     "ROCM_AITER_MLA_SPARSE with kv_cache_dtype=fp8_ds_mla "
-                    "requires gfx950 (aiter Triton sparse_mla_fwd, "
+                    "requires gfx942 or gfx950 (aiter Triton sparse_mla_fwd, "
                     "fp8_dsv32_mla layout)."
                 )
         # Dense-MHA prefill gathers cache rows into a bf16 workspace and would
