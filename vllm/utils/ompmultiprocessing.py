@@ -63,6 +63,9 @@ class OMPProcessManager:
                 )
                 logger.warning(msg=msg)
             self.reserve_cpu_num = envs.VLLM_CPU_NUM_OF_RESERVED_CPU
+        # An explicit VLLM_CPU_NUM_OF_RESERVED_CPU setting is honored as-is;
+        # only the default reservation may be skipped on small machines.
+        self._reserved_cpu_explicit = envs.VLLM_CPU_NUM_OF_RESERVED_CPU is not None
 
         self._parse_omp_threads_bind_env()
 
@@ -297,6 +300,26 @@ class OMPProcessManager:
             -1,
         ):
             reserve_num_per_rank[i] += 1
+        # Skip the default reservation when it would leave a worker with a
+        # single CPU: on small machines the scheduler process would take
+        # half of the compute away from decode (#69464).
+        if (
+            self.reserve_cpu_num > 0
+            and not self._reserved_cpu_explicit
+            and any(
+                len(cpu_lists_of_ranks[i]) - reserve_num_per_rank[i] < 2
+                for i in range(self.local_world_size)
+            )
+        ):
+            logger.warning(
+                "Skipping CPU reservation for the scheduler process: "
+                "reserving %s CPU(s) would leave a worker with a single "
+                "CPU. All %s selected CPU(s) stay with the workers. Set "
+                "VLLM_CPU_NUM_OF_RESERVED_CPU explicitly to reserve CPUs.",
+                self.reserve_cpu_num,
+                total_cpu_num,
+            )
+            return cpu_lists_of_ranks, []
         for i in range(self.local_world_size):
             num = reserve_num_per_rank[i]
             if num > 0:

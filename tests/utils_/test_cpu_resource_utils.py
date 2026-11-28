@@ -291,6 +291,86 @@ def test_omp_manager_binds_each_dp_rank_to_its_assigned_node(monkeypatch):
     assert rank1 <= set(range(8, 16))
 
 
+def _omp_manager_for_topology(
+    monkeypatch, cpus, nodes, world_size=1, reserved_cpu=None
+):
+    """OMPProcessManager against a fake x86 topology.
+
+    `cpus` is a list of LogicalCPUInfo; `nodes` are the visible NUMA nodes.
+    `reserved_cpu` sets VLLM_CPU_NUM_OF_RESERVED_CPU explicitly.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(cru, "get_allowed_cpu_list", lambda: cpus)
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: nodes)
+    monkeypatch.setattr(
+        omp,
+        "current_platform",
+        SimpleNamespace(
+            is_cpu=lambda: True, get_cpu_architecture=lambda: CpuArchEnum.X86
+        ),
+    )
+    monkeypatch.setenv("VLLM_CPU_OMP_THREADS_BIND", "auto")
+    if reserved_cpu is None:
+        monkeypatch.delenv("VLLM_CPU_NUM_OF_RESERVED_CPU", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_CPU_NUM_OF_RESERVED_CPU", reserved_cpu)
+    monkeypatch.delenv("VLLM_CPU_SIM_MULTI_NUMA", raising=False)
+    monkeypatch.delenv(cru.DEVICE_CONTROL_ENV_VAR, raising=False)
+    parallel_config = SimpleNamespace(
+        local_world_size=world_size,
+        data_parallel_rank_local=None,
+        _api_process_count=1,
+        assigned_physical_gpu_ids=list(range(world_size)) if world_size > 1 else None,
+    )
+    return omp.OMPProcessManager(
+        SimpleNamespace(parallel_config=parallel_config, kv_transfer_config=None)
+    )
+
+
+def _smt_topology(num_physical_cores, num_nodes=1):
+    """2-way SMT x86 topology: logical CPUs 0..2N-1, siblings {2i, 2i+1}."""
+    cpus_per_node = 2 * num_physical_cores // num_nodes
+    return [
+        cru.LogicalCPUInfo(id=i, physical_core=i // 2, numa_node=i // cpus_per_node)
+        for i in range(2 * num_physical_cores)
+    ]
+
+
+def test_omp_manager_skips_reservation_when_worker_would_keep_one_core(monkeypatch):
+    """2 physical cores: reserving one for the scheduler would leave the
+    only worker with a single core, so no CPU is reserved (#69464)."""
+    manager = _omp_manager_for_topology(monkeypatch, _smt_topology(2), nodes=[0])
+    assert manager.cpu_lists == [[1, 3]]
+    assert manager.reserved_cpu_list == []
+
+
+def test_omp_manager_keeps_reservation_with_enough_cores(monkeypatch):
+    """4 physical cores: the worker keeps 3 cores after reserving one."""
+    manager = _omp_manager_for_topology(monkeypatch, _smt_topology(4), nodes=[0])
+    assert manager.cpu_lists == [[1, 3, 5]]
+    assert manager.reserved_cpu_list == [7]
+
+
+def test_omp_manager_skips_reservation_when_any_rank_would_keep_one_core(monkeypatch):
+    """TP=2 with 2 physical cores per NUMA node: each rank would be left
+    with a single core, so the reservation is skipped for both ranks."""
+    manager = _omp_manager_for_topology(
+        monkeypatch, _smt_topology(4, num_nodes=2), nodes=[0, 1], world_size=2
+    )
+    assert manager.cpu_lists == [[1, 3], [5, 7]]
+    assert manager.reserved_cpu_list == []
+
+
+def test_omp_manager_explicit_reserved_cpu_is_honored_on_small_machine(monkeypatch):
+    """An explicit VLLM_CPU_NUM_OF_RESERVED_CPU still reserves a CPU on a
+    2-core machine; only the default reservation is skipped."""
+    manager = _omp_manager_for_topology(
+        monkeypatch, _smt_topology(2), nodes=[0], reserved_cpu="1"
+    )
+    assert manager.cpu_lists == [[1]]
+    assert manager.reserved_cpu_list == [3]
+
+
 def test_omp_manager_sim_multi_numa_requires_auto_binding(monkeypatch):
     """Explicit binds with VLLM_CPU_SIM_MULTI_NUMA stop with a message, not a
     bare AssertionError."""
