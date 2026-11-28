@@ -17,7 +17,6 @@ from vllm.lora.utils import (
     parse_fine_tuned_lora_name,
 )
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
@@ -178,8 +177,17 @@ class LoRAModel:
         expected_lora_modules: set[str] | None = None,
         unsupported_lora_modules: set[str] | None = None,
         moe_ep_spec: MoEEPLoadSpec | None = None,
+        copy_lora_b: bool = False,
     ) -> "LoRAModel":
-        """Create a LoRAModel from a dictionary of tensors."""
+        """Create a LoRAModel from a dictionary of tensors.
+
+        The tensors are not pinned here. LoRAModelManager pins them once, in
+        `_create_merged_loras_inplace`, after weight packing and expert-parallel
+        slicing, so that a rank only pins the weights it keeps.
+
+        Set `copy_lora_b` for caller-owned tensors to keep the manager's
+        in-place scaling from modifying them.
+        """
         if expected_lora_modules is not None:
             cls._validate_lora_modules(
                 tensors,
@@ -189,8 +197,6 @@ class LoRAModel:
                 skip_prefixes,
                 unsupported_lora_modules,
             )
-        pin_memory = str(device) == "cpu" and PIN_MEMORY
-
         modules_to_save_names = peft_helper.modules_to_save or []
         full_parameters: dict[str, dict[str, torch.Tensor]] = {}
         loras: dict[str, LoRALayerWeights] = {}
@@ -231,13 +237,12 @@ class LoRAModel:
                         f" with the base model's vocabulary size({model_vocab_size})."
                     )
                 loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
-                if pin_memory:
-                    loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
             else:
-                loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
-
-                if pin_memory:
-                    loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
+                loras[module_name].lora_b = tensor.to(
+                    device=device,
+                    dtype=dtype,
+                    copy=copy_lora_b and loras[module_name].scaling != 1,
+                )
 
         modules_to_save = {}
         for module_name, parameters in full_parameters.items():

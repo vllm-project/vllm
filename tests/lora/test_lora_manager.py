@@ -545,6 +545,60 @@ def test_3d_moe_lora_pinned_once(count_pins):
     assert len(count_pins) == 4
 
 
+def test_from_lora_tensors_leaves_pinning_to_the_manager(count_pins, monkeypatch):
+    """Pinning at load time would pin every expert, before EP slicing."""
+    # Exercise premature pinning even on platforms without pinned memory.
+    monkeypatch.setattr("vllm.lora.lora_model.PIN_MEMORY", True, raising=False)
+    peft_helper = PEFTHelper.from_dict(
+        {"r": 4, "lora_alpha": 4, "target_modules": ["q_proj"]}
+    )
+    prefix = "base_model.model.model.layers.0.self_attn.q_proj"
+    tensors = {
+        f"{prefix}.lora_A.weight": torch.zeros(4, 8),
+        f"{prefix}.lora_B.weight": torch.zeros(8, 4),
+    }
+
+    LoRAModel.from_lora_tensors(1, tensors, peft_helper=peft_helper, device="cpu")
+
+    assert count_pins == []
+
+
+def test_reloading_caller_owned_lora_tensors_scales_once(count_pins):
+    """Registration scales each adapter without changing the caller's tensors."""
+    peft_helper = PEFTHelper(r=4, lora_alpha=8, target_modules=["q_proj"])
+    module_name = "model.layers.0.self_attn.q_proj"
+    prefix = f"base_model.model.{module_name}"
+    lora_b = torch.ones(8, 4)
+    tensors = {
+        f"{prefix}.lora_A.weight": torch.ones(4, 8),
+        f"{prefix}.lora_B.weight": lora_b,
+    }
+    manager = _bare_manager()
+
+    for lora_id in (1, 2):
+        before = len(count_pins)
+        lora_model = LoRAModel.from_lora_tensors(
+            lora_id,
+            tensors,
+            peft_helper=peft_helper,
+            device="cpu",
+            dtype=lora_b.dtype,
+            expected_lora_modules={"q_proj"},
+            copy_lora_b=True,
+        )
+        assert len(count_pins) == before
+
+        manager._create_merged_loras_inplace(lora_model)
+        assert len(count_pins) == before + 2
+        torch.testing.assert_close(lora_b, torch.ones_like(lora_b), rtol=0, atol=0)
+        torch.testing.assert_close(
+            lora_model.loras[module_name].lora_b,
+            torch.full_like(lora_b, 2),
+            rtol=0,
+            atol=0,
+        )
+
+
 @pytest.mark.parametrize("ep_size", [1, 2, 3])
 def test_dummy_3d_moe_lora_is_sized_by_global_experts(ep_size):
     global_experts, rank = 6, 4
