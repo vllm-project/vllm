@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 import regex as re
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.sampling_params import StructuredOutputsParams
-from vllm.tool_parsers.hy_v4_tool_parser import HYV4ToolParser
+from vllm.tool_parsers.hy_v4_tool_parser import HYV4ToolExtractor, HYV4ToolParser
 from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 
 
@@ -186,4 +188,66 @@ def test_whitespace_argument_state_resets_between_calls(suffix, chunking):
         [{" count ": 7, " label ": "first"}, {" count ": 9}, {" label ": "last"}],
         suffix,
         chunking,
+    )
+
+
+def _hy_v4_extractor() -> HYV4ToolExtractor:
+    vocab = {
+        "<tool_calls>": 1,
+        "</tool_calls>": 2,
+        "<tool_call>": 3,
+        "</tool_call>": 4,
+        "<arg_key>": 5,
+        "</arg_key>": 6,
+        "<arg_value>": 7,
+        "</arg_value>": 8,
+    }
+    return HYV4ToolExtractor(vocab, token_suffix="", strict=False)
+
+
+def test_regex_timeout_treated_as_no_tool_call():
+    extractor = _hy_v4_extractor()
+    model_output = "<tool_calls><tool_call>" + "c" * 100 + "</tool_calls>"
+    mock_regex = MagicMock()
+    mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(extractor, "tool_call_regex", mock_regex):
+        result = extractor.extract_tool_calls(model_output, None)
+
+    assert result["tools_called"] is False
+    assert result["tool_calls"] == []
+    assert result["content"] == model_output
+    mock_regex.findall.assert_called_once()
+    assert (
+        mock_regex.findall.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
+
+
+def test_streaming_args_regex_timeout_skips_later_deltas():
+    extractor = _hy_v4_extractor()
+    extractor._streaming_tool_name = "get_weather"
+    extractor.current_tool_id = 0
+    extractor._buffer = "<arg_key>" + "c" * 100
+    mock_regex = MagicMock()
+    mock_regex.findall.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(extractor, "func_args_regex", mock_regex):
+        first = extractor._extract_streaming_incremental(False, None, None)
+        second = extractor.extract_tool_calls_streaming(
+            "prev",
+            "prevx",
+            "x",
+            [1],
+            [1, 3],
+            [3],
+            None,
+        )
+
+    assert first is None
+    assert second is None
+    mock_regex.findall.assert_called_once()
+    assert (
+        mock_regex.findall.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
     )

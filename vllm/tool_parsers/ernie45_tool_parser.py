@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import regex as re
 
+import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -67,6 +68,7 @@ class Ernie45ToolParser(ToolParser):
         ]
 
         self._buffer = ""
+        self._stream_regex_timed_out = False
 
     def extract_tool_calls(
         self,
@@ -81,7 +83,10 @@ class Ernie45ToolParser(ToolParser):
 
         else:
             try:
-                tool_call_json_list = self.tool_call_regex.findall(model_output)
+                tool_call_json_list = self.tool_call_regex.findall(
+                    model_output,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                )
 
                 tool_calls = []
                 for tool_call_json in tool_call_json_list:
@@ -108,6 +113,18 @@ class Ernie45ToolParser(ToolParser):
                     content=content if content else None,
                 )
 
+            except TimeoutError:
+                self._stream_regex_timed_out = True
+                logger.warning(
+                    "Regex timeout occurred when matching tool call pattern."
+                )
+                logger.debug(
+                    "Regex timeout occurred when matching user input: %s",
+                    model_output,
+                )
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
             except Exception:
                 logger.exception("Error in extracting tool call from response.")
                 return ExtractedToolCallInformation(
@@ -124,6 +141,8 @@ class Ernie45ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        if self._stream_regex_timed_out:
+            return None
         self._buffer += delta_text
         cur_text = self._buffer
         start_idx = cur_text.find(self.tool_call_start_token)
