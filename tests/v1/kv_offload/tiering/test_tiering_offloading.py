@@ -2314,3 +2314,117 @@ def test_cascade_store_feeds_backpressure_only_written_bytes(tmp_path, monkeypat
     assert write_bytes == [2 * block_size, block_size, 0]
     # The store that wrote nothing contributes no latency sample.
     assert detector._completions == 2
+
+
+def test_pop_newly_promoted_req_ids_lifecycle():
+    """Completed promotions report req_id once, skip finished reqs, and clear
+    on reset_cache."""
+    mock_region = _mock_mmap_region(8)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary, secondary_tiers=[secondary]
+    )
+    keys = to_keys([1, 2, 3])
+    for key in keys:
+        secondary.chunks[key] = True
+
+    ctx_active = ReqContext(req_id="req-active")
+    ctx_finished = ReqContext(req_id="req-finished")
+    ctx_reset = ReqContext(req_id="req-reset")
+
+    end_ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+
+    # 1. Active request: promotion completion reports req_id once then clears.
+    manager.on_new_request(ctx_active)
+    assert manager.lookup(keys[0], ctx_active) is LookupResult.HIT_PENDING
+    assert manager.pop_newly_promoted_req_ids() == set()
+    manager.on_schedule_end(end_ctx)
+    assert manager.pop_newly_promoted_req_ids() == {"req-active"}
+    assert manager.pop_newly_promoted_req_ids() == set()
+    manager.on_request_finished(ctx_active)
+
+    # 2. Request finished before promotion completes is not reported.
+    manager.on_new_request(ctx_finished)
+    assert manager.lookup(keys[1], ctx_finished) is LookupResult.HIT_PENDING
+    manager.on_schedule_end(end_ctx)
+    manager.on_request_finished(ctx_finished)
+    assert manager.pop_newly_promoted_req_ids() == set()
+
+    # 3. reset_cache() clears unpopped promoted request IDs.
+    manager.on_new_request(ctx_reset)
+    assert manager.lookup(keys[2], ctx_reset) is LookupResult.HIT_PENDING
+    manager.on_schedule_end(end_ctx)
+    manager.reset_cache()
+    assert manager.pop_newly_promoted_req_ids() == set()
+
+
+def test_coalesced_shared_prefix_waiter_notified_on_promotion_complete():
+    """A second request that observes primary HIT_PENDING on an in-flight
+    promotion is also reported by pop_newly_promoted_req_ids when it lands."""
+    mock_region = _mock_mmap_region(8)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary, secondary_tiers=[secondary]
+    )
+    key = to_keys([10])[0]
+    secondary.chunks[key] = True
+    end_ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+
+    ctx1 = ReqContext(req_id="req-1")
+    ctx2 = ReqContext(req_id="req-2")
+    ctx3 = ReqContext(req_id="req-3-aborted")
+    for ctx in (ctx1, ctx2, ctx3):
+        manager.on_new_request(ctx)
+
+    # req-1 starts the promotion; req-2 and req-3 coalesce on HIT_PENDING.
+    assert manager.lookup(key, ctx1) is LookupResult.HIT_PENDING
+    assert manager.lookup(key, ctx2) is LookupResult.HIT_PENDING
+    assert manager.lookup(key, ctx3) is LookupResult.HIT_PENDING
+
+    # req-3 finishes before the promotion lands and must not be notified.
+    manager.on_request_finished(ctx3)
+    manager.on_schedule_end(end_ctx)
+
+    assert manager.pop_newly_promoted_req_ids() == {"req-1", "req-2"}
+    assert not manager._pending_promotion_waiters
+    assert not manager._req_pending_waiter_keys
+
+
+def test_tiering_on_new_request_propagates_may_load_async(monkeypatch):
+    """TieringOffloadingManager propagates may_load_async only from readable
+    secondary tiers permitted by load_tier_filter."""
+    mock_region = _mock_mmap_region(4)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
+    secondary = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="example",
+    )
+    monkeypatch.setattr(
+        secondary,
+        "on_new_request",
+        lambda _ctx: SecondaryTierRequestContext(may_load_async=True),
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary, secondary_tiers=[secondary]
+    )
+
+    ctx_allowed = ReqContext(req_id="req-allowed")
+    assert manager.on_new_request(ctx_allowed).may_load_async is True
+
+    ctx_blocked = ReqContext(req_id="req-blocked", load_tier_filter=TierFilter(()))
+    assert manager.on_new_request(ctx_blocked).may_load_async is False
+
+    secondary.access_mode = OffloadAccessMode.WRITE
+    ctx_write_only = ReqContext(req_id="req-write-only")
+    assert manager.on_new_request(ctx_write_only).may_load_async is False

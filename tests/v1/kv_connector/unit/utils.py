@@ -74,6 +74,7 @@ def create_mock_connector() -> Mock:
     connector.get_external_cache_hit_sources.side_effect = lambda request, num_tokens: (
         {CacheHitSource.EXTERNAL_UNSPECIFIED: num_tokens} if num_tokens else {}
     )
+    connector.pop_newly_promoted_req_ids.return_value = set()
     return connector
 
 
@@ -88,6 +89,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.waiting) == 0
     assert len(scheduler.kv_holding_waiting) == 0
     assert len(scheduler.async_kv_waiting) == 0
+    assert not scheduler._promoted_waiting_req_ids
     assert not scheduler.deferred_waiting
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0

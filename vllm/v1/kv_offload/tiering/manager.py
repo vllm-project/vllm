@@ -354,6 +354,14 @@ class TieringOffloadingManager(OffloadingManager):
         # (otherwise a disk or P2P hit would be mislabeled as a host hit).
         self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
 
+        # Request IDs whose secondary->primary promotion completed since the
+        # last pop_newly_promoted_req_ids() call.
+        self._newly_promoted_req_ids: set[str] = set()
+        # Local waiters that observed primary HIT_PENDING on an in-flight key,
+        # so coalesced shared-prefix requests are notified when it lands.
+        self._pending_promotion_waiters: dict[OffloadKey, set[str]] = {}
+        self._req_pending_waiter_keys: dict[str, set[OffloadKey]] = {}
+
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
             tier: _SecondaryTierFacingParent(self, tier_idx)
@@ -551,6 +559,30 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = True
         self._process_finished_jobs()
 
+    def _is_active_request(self, req_id: str) -> bool:
+        state = self._req_state.get(req_id)
+        return (req_id in self._request_load_sources or state is not None) and not (
+            state is not None and state.is_finished
+        )
+
+    def _consume_key_waiters(
+        self, keys: Collection[OffloadKey], *, notify: bool
+    ) -> None:
+        if not self._pending_promotion_waiters:
+            return
+        for key in keys:
+            waiters = self._pending_promotion_waiters.pop(key, None)
+            if not waiters:
+                continue
+            for waiter_id in waiters:
+                waiter_keys = self._req_pending_waiter_keys.get(waiter_id)
+                if waiter_keys is not None:
+                    waiter_keys.discard(key)
+                    if not waiter_keys:
+                        del self._req_pending_waiter_keys[waiter_id]
+                if notify and self._is_active_request(waiter_id):
+                    self._newly_promoted_req_ids.add(waiter_id)
+
     def _complete_promotion(
         self, job_metadata: JobMetadata, completed_job: JobResult
     ) -> None:
@@ -585,6 +617,12 @@ class TieringOffloadingManager(OffloadingManager):
                 transfer_job.req_context,
                 True,
             )
+            req_id = transfer_job.req_context.req_id
+            if self._is_active_request(req_id):
+                self._newly_promoted_req_ids.add(req_id)
+            self._consume_key_waiters(successful_keys, notify=True)
+        if failed_keys:
+            self._consume_key_waiters(failed_keys, notify=False)
         if not failed_keys:
             assert completed_job.deferred_release is None
         elif completed_job.deferred_release is not None:
@@ -765,6 +803,10 @@ class TieringOffloadingManager(OffloadingManager):
         if primary_hit is LookupResult.HIT:
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
+            if exclude_tier_idx is None:
+                req_id = req_context.req_id
+                self._pending_promotion_waiters.setdefault(key, set()).add(req_id)
+                self._req_pending_waiter_keys.setdefault(req_id, set()).add(key)
             return LookupResult.HIT_PENDING
         if self._promotions_held:
             return LookupResult.MISS
@@ -893,6 +935,18 @@ class TieringOffloadingManager(OffloadingManager):
                 tier.submit_load(job_metadata)
 
         self._pending_load_submissions.clear()
+
+    @override
+    def pop_newly_promoted_req_ids(self) -> set[str]:
+        """Return and clear request IDs whose secondary-to-primary promotion
+        completed since the last call.
+        """
+        self._maybe_process_finished_jobs()
+        if not self._newly_promoted_req_ids:
+            return set()
+        promoted = self._newly_promoted_req_ids
+        self._newly_promoted_req_ids = set()
+        return promoted
 
     @override
     def prepare_load(
@@ -1093,6 +1147,7 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.complete_store(
             keys, req_context, trigger=trigger, success=success
         )
+        self._consume_key_waiters(keys, notify=success)
 
         req_id = req_context.req_id
         state = self._req_state[req_id]
@@ -1155,6 +1210,7 @@ class TieringOffloadingManager(OffloadingManager):
         """
         state = RequestState(req_context=req_context)
         self._metrics.on_new_request(req_context)
+        may_load_async = False
         for tier_idx, tier in enumerate(self.secondary_tiers):
             if tier_idx == exclude_tier_idx:
                 continue
@@ -1167,6 +1223,12 @@ class TieringOffloadingManager(OffloadingManager):
                 if state.request_level_tiers is None:
                     state.request_level_tiers = set()
                 state.request_level_tiers.add(tier_idx)
+            if (
+                tier_ctx.may_load_async
+                and tier.access_mode.can_read
+                and req_context.load_tier_filter.allows(tier.medium, tier.locality)
+            ):
+                may_load_async = True
         self._req_state[req_context.req_id] = state
 
         policy = (
@@ -1174,7 +1236,7 @@ class TieringOffloadingManager(OffloadingManager):
             if state.request_level_tiers
             else OffloadPolicy.CHUNK_LEVEL
         )
-        return RequestOffloadingContext(policy=policy)
+        return RequestOffloadingContext(policy=policy, may_load_async=may_load_async)
 
     @override
     def on_request_finished(
@@ -1184,9 +1246,19 @@ class TieringOffloadingManager(OffloadingManager):
         exclude_tier_idx: int | None = None,
     ) -> None:
         self.primary_tier.on_request_finished(req_context)
-        state = self._req_state[req_context.req_id]
+        req_id = req_context.req_id
+        self._newly_promoted_req_ids.discard(req_id)
+        waiter_keys = self._req_pending_waiter_keys.pop(req_id, None)
+        if waiter_keys is not None:
+            for key in waiter_keys:
+                waiters = self._pending_promotion_waiters.get(key)
+                if waiters is not None:
+                    waiters.discard(req_id)
+                    if not waiters:
+                        del self._pending_promotion_waiters[key]
+        state = self._req_state[req_id]
         state.is_finished = True
-        self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
+        self._maybe_finalize_request(req_id, exclude_tier_idx)
 
     def _maybe_finalize_request(
         self,
@@ -1321,6 +1393,9 @@ class TieringOffloadingManager(OffloadingManager):
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
         self._request_load_sources.clear()
+        self._newly_promoted_req_ids.clear()
+        self._pending_promotion_waiters.clear()
+        self._req_pending_waiter_keys.clear()
         self._metrics.assert_idle()
 
         finished_req_ids = []

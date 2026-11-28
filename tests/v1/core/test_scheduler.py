@@ -9952,3 +9952,262 @@ def test_ec_eviction_published_when_no_tokens_are_scheduled():
     assert [call.args[0].events for call in publisher.publish.call_args_list] == [
         [ECRemoved(mm_hashes=["cached"], medium="GPU")]
     ]
+
+
+def _make_pop_promoted(promoted_ids: set[str]):
+    def _pop() -> set[str]:
+        res = promoted_ids.copy()
+        promoted_ids.clear()
+        return res
+
+    return _pop
+
+
+def test_promoted_waiting_request_re_admitted_ahead_of_cold_waiting(monkeypatch):
+    """A newly promoted WAITING request jumps ahead of cold WAITING requests
+    in FCFS order, while staying behind PREEMPTED requests."""
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=64,
+        block_size=16,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    assert scheduler.connector is not None
+    cold1, cold2, promoted_req = create_requests(
+        num_requests=3, num_tokens=32, block_size=16
+    )
+
+    promoted_ids: set[str] = set()
+    ready_hits: dict[str, tuple[int | None, bool]] = {
+        cold1.request_id: (0, False),
+        cold2.request_id: (0, False),
+        promoted_req.request_id: (16, True),
+    }
+    monkeypatch.setattr(
+        scheduler.connector,
+        "pop_newly_promoted_req_ids",
+        _make_pop_promoted(promoted_ids),
+    )
+    monkeypatch.setattr(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        lambda req, _n: ready_hits[req.request_id],
+    )
+
+    for req in (cold1, cold2, promoted_req):
+        scheduler.add_request(req)
+    promoted_ids.add(promoted_req.request_id)
+
+    # promoted_req should start its async KV load ahead of cold1/cold2,
+    # consuming 0 token_budget so cold1 and cold2 still schedule in the step.
+    output = scheduler.schedule()
+    assert promoted_req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert promoted_req in scheduler.kv_holding_waiting
+    assert promoted_req.request_id not in scheduler._promoted_waiting_req_ids
+    assert set(output.num_scheduled_tokens) == {cold1.request_id, cold2.request_id}
+
+    # Verify a PREEMPTED request at the head of waiting still runs ahead of a
+    # newly promoted WAITING request.
+    scheduler2 = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        block_size=16,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    assert scheduler2.connector is not None
+    preempted_req, promoted_req2 = create_requests(
+        num_requests=2, num_tokens=32, block_size=16
+    )
+    promoted_ids2: set[str] = set()
+    monkeypatch.setattr(
+        scheduler2.connector,
+        "pop_newly_promoted_req_ids",
+        _make_pop_promoted(promoted_ids2),
+    )
+    monkeypatch.setattr(
+        scheduler2.connector,
+        "get_num_new_matched_tokens",
+        lambda req, _n: (16, False) if req is promoted_req2 else (0, False),
+    )
+    scheduler2.add_request(preempted_req)
+    out_preempt = scheduler2.schedule()
+    scheduler2.update_from_output(
+        out_preempt,
+        ModelRunnerOutput(
+            req_ids=[preempted_req.request_id],
+            sampled_token_ids=[[0]],
+        ),
+    )
+    scheduler2._preempt_request(scheduler2.running.pop(), 0.0)
+    scheduler2.add_request(promoted_req2)
+    promoted_ids2.add(promoted_req2.request_id)
+
+    out2 = scheduler2.schedule()
+    assert list(out2.num_scheduled_tokens) == [preempted_req.request_id]
+    assert promoted_req2.status == RequestStatus.WAITING
+
+
+def test_promoted_waiting_request_starts_async_load_under_loads_only(monkeypatch):
+    """When token_budget is exhausted by a running cold prefill (loads_only),
+    a promoted waiting request still starts its async CPU->GPU load, and an
+    evicted miss falls back to waiting without stalling other promoted loads."""
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=32,
+        block_size=16,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    assert scheduler.connector is not None
+    running_cold, promoted_miss, promoted_hit = create_requests(
+        num_requests=3, num_tokens=64, block_size=16
+    )
+
+    promoted_ids: set[str] = set()
+    hits: dict[str, tuple[int | None, bool]] = {
+        running_cold.request_id: (0, False),
+        promoted_miss.request_id: (0, False),
+        promoted_hit.request_id: (32, True),
+    }
+    monkeypatch.setattr(
+        scheduler.connector,
+        "pop_newly_promoted_req_ids",
+        _make_pop_promoted(promoted_ids),
+    )
+    monkeypatch.setattr(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        lambda req, _n: hits[req.request_id],
+    )
+
+    # Step 1: running_cold enters self.running as an in-progress prefill chunk.
+    scheduler.add_request(running_cold)
+    out1 = scheduler.schedule()
+    assert out1.num_scheduled_tokens == {running_cold.request_id: 32}
+    assert running_cold.is_prefill_chunk
+
+    # Step 2: running_cold consumes 100% of token_budget (loads_only=True).
+    # promoted_miss lost its CPU blocks (0, False) and must fall back to
+    # self.waiting without blocking promoted_hit from starting its async load.
+    scheduler.add_request(promoted_miss)
+    scheduler.add_request(promoted_hit)
+    promoted_ids.update({promoted_miss.request_id, promoted_hit.request_id})
+
+    out2 = scheduler.schedule()
+    assert out2.num_scheduled_tokens == {running_cold.request_id: 32}
+    assert promoted_miss.status == RequestStatus.WAITING
+    assert promoted_miss in scheduler.waiting
+    assert promoted_miss.request_id not in scheduler._promoted_waiting_req_ids
+    assert promoted_hit.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert promoted_hit in scheduler.kv_holding_waiting
+    assert promoted_hit.request_id not in scheduler._promoted_waiting_req_ids
+
+
+def test_promoted_waiting_request_respects_priority_policy(monkeypatch):
+    """Under priority scheduling, a promoted request beats equal-priority cold
+    requests, but strictly higher-priority cold requests still run first."""
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        block_size=16,
+        scheduling_policy="priority",
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    assert scheduler.connector is not None
+    high_cold, eq_cold, promoted_req = create_requests(
+        num_requests=3, num_tokens=32, block_size=16
+    )
+    high_cold.priority = -1
+    eq_cold.priority = 0
+    promoted_req.priority = 0
+
+    promoted_ids: set[str] = set()
+    monkeypatch.setattr(
+        scheduler.connector,
+        "pop_newly_promoted_req_ids",
+        _make_pop_promoted(promoted_ids),
+    )
+    monkeypatch.setattr(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        lambda req, _n: (16, False) if req is promoted_req else (0, False),
+    )
+
+    for req in (eq_cold, promoted_req, high_cold):
+        scheduler.add_request(req)
+    promoted_ids.add(promoted_req.request_id)
+
+    # Strictly higher-priority high_cold runs first.
+    out1 = scheduler.schedule()
+    assert list(out1.num_scheduled_tokens) == [high_cold.request_id]
+    scheduler.finish_requests(high_cold.request_id, RequestStatus.FINISHED_ABORTED)
+
+    # Next, promoted_req beats equal-priority older eq_cold.
+    out2 = scheduler.schedule()
+    assert list(out2.num_scheduled_tokens) == [promoted_req.request_id]
+
+
+def test_promoted_waiting_requests_drain_fifo_and_start_from_arrival(monkeypatch):
+    """Under FCFS, earlier promoted requests stay ahead of later ones (FIFO),
+    and a may_load_async request arriving while token_budget==0 starts its
+    probe -> promotion -> async GPU load without waiting for running C."""
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=32,
+        block_size=16,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    scheduler.scheduler_config.max_num_inflight_kv_loads = 4
+    assert scheduler.connector is not None
+    running_cold, p2p_req, prom_old, prom_new = create_requests(
+        num_requests=4, num_tokens=96, block_size=16
+    )
+
+    promoted_ids: set[str] = set()
+    # p2p_req simulates probe (None) -> promotion ready (32, True).
+    p2p_responses = iter([(None, False), (32, True)])
+    monkeypatch.setattr(
+        scheduler.connector,
+        "pop_newly_promoted_req_ids",
+        _make_pop_promoted(promoted_ids),
+    )
+    monkeypatch.setattr(
+        scheduler.connector,
+        "may_load_async",
+        lambda req: req is p2p_req,
+    )
+    monkeypatch.setattr(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        lambda req, _n: next(p2p_responses) if req is p2p_req else (0, False),
+    )
+
+    # Step 1: running_cold starts chunk 1 (consumes full 32-token budget).
+    scheduler.add_request(running_cold)
+    scheduler.schedule()
+    assert running_cold.is_prefill_chunk
+
+    # Step 2: p2p_req arrives while running_cold already eats all token_budget.
+    # Because may_load_async(p2p_req) is True, it enters async_kv_waiting and
+    # gets probed (None, False) on Step 2 even under loads_only=True.
+    scheduler.add_request(p2p_req)
+    assert p2p_req in scheduler.async_kv_waiting
+    scheduler.schedule()
+    assert p2p_req.status == RequestStatus.WAITING
+
+    # Step 3: p2p_req promotion completes -> starts async CPU->GPU load while
+    # running_cold STILL consumes 100% of token_budget!
+    promoted_ids.add(p2p_req.request_id)
+    out3 = scheduler.schedule()
+    assert out3.num_scheduled_tokens == {running_cold.request_id: 32}
+    assert p2p_req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert p2p_req in scheduler.kv_holding_waiting
+
+    # Verify FIFO ordering among multiple promoted waiting requests.
+    scheduler.add_request(prom_old)
+    scheduler.add_request(prom_new)
+    scheduler._promote_waiting_requests({prom_old.request_id})
+    scheduler._promote_waiting_requests({prom_new.request_id})
+    assert [r.request_id for r in scheduler.async_kv_waiting] == [
+        prom_old.request_id,
+        prom_new.request_id,
+    ]
