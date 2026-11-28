@@ -773,8 +773,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     the per-item limit. An image may use up to `max_image_tokens` (4,096 by
     default), and each temporal group of a video (`temporal_patch_size`, 2
     frames) up to `max_video_frame_tokens` (144). A video's total is capped at
-    the per-group limit times the number of groups that fit in `max_model_len`,
-    up to the larger of the processor's `num_frames` (96) and
+    `max_model_len` and at the per-group limit times the number of groups in
+    the larger of the processor's `num_frames` (96) and
     `--media-io-kwargs '{"video": {"num_frames": N}}'`: 6,912 tokens with the
     defaults. Raising `num_frames` there raises the video limit; a per-request
     `media_io_kwargs` cannot raise it past the startup value. Because the cap

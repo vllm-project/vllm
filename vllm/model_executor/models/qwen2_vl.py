@@ -1132,9 +1132,6 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
     def _get_video_size_with_most_features(self) -> ImageSize:
-        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
-        if video_options and (video_options.width or video_options.height):
-            return self.get_image_size_with_most_features()
         merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs({})
         size = self._get_vision_size(
             merged_mm_kwargs.get("videos_kwargs", {}),
@@ -1199,6 +1196,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        *,
+        use_hints: bool = True,
     ) -> tuple[ImageSize, int]:
         vision_config = self.get_hf_config().vision_config
         unit = vision_config.patch_size * vision_config.spatial_merge_size
@@ -1222,16 +1221,23 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_frames = _MAX_FRAMES_PER_VIDEO
         mm_config = self.ctx.get_mm_config()
         video_options = mm_config.limit_per_prompt.get("video")
-        if mm_config.is_multimodal_pruning_enabled() or (
-            video_options and (video_options.width or video_options.height)
-        ):
+        if mm_config.is_multimodal_pruning_enabled():
             return max_size, max_size_frames
+        split_defaults = dict(self._get_video_default_size()) != dict(
+            image_processor.size
+        )
+        if (
+            video_options
+            and (video_options.width or video_options.height)
+            and (use_hints or not split_defaults)
+        ):
+            return self.get_image_size_with_most_features(), max_size_frames
         max_step_tokens = num_tokens(max_size, temporal_patch_size)
         min_step_tokens = num_tokens(ImageSize(unit, unit), temporal_patch_size)
 
         if video_options and video_options.num_frames:
             max_frames = min(max_frames, video_options.num_frames)
-        elif dict(self._get_video_default_size()) != dict(image_processor.size):
+        if split_defaults:
             merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs({})
             image_size = self.get_image_size_with_most_features(
                 max_pixels=self._get_vision_size(
@@ -1242,12 +1248,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             image_tokens = (
                 (image_size.width // unit)
                 * (image_size.height // unit)
-                * cdiv(max_frames, temporal_patch_size)
+                * cdiv(_MAX_FRAMES_PER_VIDEO, temporal_patch_size)
             )
             max_frames = max(
-                max_frames,
+                _MAX_FRAMES_PER_VIDEO,
                 cdiv(image_tokens, max_step_tokens) * temporal_patch_size,
             )
+            if use_hints and video_options and video_options.num_frames:
+                max_frames = min(max_frames, video_options.num_frames)
             video_tokens = seq_len // max(mm_counts.get("video", 0), 1)
             best = (max_size, max_size_frames)
             best_tokens = num_tokens(*best)
@@ -1288,7 +1296,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         size, num_frames = self.get_video_size_and_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts, use_hints=False
         )
         return self.get_num_video_tokens(
             image_width=size.width,

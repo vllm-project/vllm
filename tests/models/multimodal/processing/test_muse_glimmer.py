@@ -187,3 +187,34 @@ def test_frame_hint_shrinks_dummy_but_not_limit():
     assert tokens["video"] == 6912
     assert dummy["mm_placeholders"]["video"][0].get_num_embeds() == 2304
     assert processed["mm_placeholders"]["video"][0].get_num_embeds() == 6912
+
+
+@pytest.mark.parametrize(("num_frames", "dummy_tokens"), [(None, 2048), (6, 1728)])
+def test_short_context_admits_more_groups_with_fewer_tokens(
+    num_frames: int | None, dummy_tokens: int
+):
+    ctx = build_model_context(
+        MODEL_ID,
+        mm_processor_kwargs={"max_video_frame_tokens": 576},
+        model_config_kwargs={"max_model_len": 2048},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": {"count": 1, "num_frames": num_frames} if num_frames else 1,
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=2048, mm_counts={"video": 1}
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    processed = processor(
+        processor.dummy_inputs.get_dummy_text({"video": 1}),
+        mm_items=processor.info.parse_mm_data({"video": [_video(8, 448, 784)]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert tokens is not None
+    assert tokens["video"] == 2048
+    assert dummy["mm_placeholders"]["video"][0].get_num_embeds() == dummy_tokens
+    assert processed["mm_placeholders"]["video"][0].get_num_embeds() == 1792
+    assert len(processed["prompt_token_ids"]) <= 2048

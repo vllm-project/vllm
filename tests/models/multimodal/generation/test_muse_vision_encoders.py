@@ -299,6 +299,38 @@ def test_glimmer_engine_rejects_video_above_profiled_tokens(vllm_runner) -> None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_glimmer_engine_admits_video_with_more_smaller_groups(vllm_runner) -> None:
+    arch = "MuseGlimmerForConditionalGeneration"
+    model_info = HF_EXAMPLE_MODELS.get_hf_info(arch)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+    rng = np.random.default_rng(0)
+
+    with vllm_runner(
+        model_info.default,
+        load_format="dummy",
+        enforce_eager=True,
+        max_model_len=2048,
+        max_num_seqs=1,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        mm_processor_kwargs={"max_video_frame_tokens": 576},
+        hf_overrides=partial(dummy_hf_overrides, model_arch=arch),
+    ) as runner:
+        outputs = runner.llm.generate(
+            {
+                "prompt": "<|video|>Describe.",
+                "multi_modal_data": {
+                    "video": rng.integers(0, 255, (8, 448, 784, 3), dtype=np.uint8)
+                },
+            },
+            SamplingParams(temperature=0, max_tokens=4),
+        )
+
+    assert len(outputs[0].prompt_token_ids) <= 2048
+    assert len(outputs[0].outputs[0].token_ids) == 4
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_glimmer_vision_encoder_has_no_gpu_sync(
     monkeypatch, default_vllm_config, dist_init
 ) -> None:

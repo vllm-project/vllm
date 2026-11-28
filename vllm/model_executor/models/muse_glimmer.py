@@ -199,11 +199,12 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
             "image": int(mm_kwargs["images_kwargs"]["max_image_tokens"]),
             "video": int(video_kwargs["max_video_frame_tokens"]),
         }
-        num_frames = self._get_num_frames(seq_len, num_videos, video_kwargs)
-        num_groups = num_frames // int(video_kwargs["temporal_patch_size"])
+        num_groups, tokens_per_group = self._get_video_groups(
+            seq_len, num_videos, video_kwargs
+        )
         return group_tokens, {
             **group_tokens,
-            "video": num_groups * group_tokens["video"],
+            "video": num_groups * tokens_per_group,
         }
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -215,29 +216,35 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
 
     def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
-        return self._get_num_frames(seq_len, num_videos, video_kwargs)
+        num_groups, _ = self._get_video_groups(seq_len, num_videos, video_kwargs)
+        return num_groups * int(video_kwargs["temporal_patch_size"])
 
-    def _get_num_frames(
+    def _get_video_groups(
         self,
         seq_len: int,
         num_videos: int,
         video_kwargs: Mapping[str, Any],
-    ) -> int:
+        max_frames: int | None = None,
+    ) -> tuple[int, int]:
         video_processor = self.get_hf_processor().video_processor
-        mm_config = self.ctx.get_mm_config()
         temporal_patch_size = int(video_kwargs["temporal_patch_size"])
-        num_videos = max(num_videos, 1)
-        groups = max(
-            1,
-            seq_len // num_videos // int(video_kwargs["max_video_frame_tokens"]),
-        )
-        num_frames = groups * temporal_patch_size
-        media_io_kwargs = mm_config.media_io_kwargs
+        max_group_tokens = int(video_kwargs["max_video_frame_tokens"])
+        budget = max(seq_len // max(num_videos, 1), max_group_tokens)
+        max_groups = budget
+        media_io_kwargs = self.ctx.get_mm_config().media_io_kwargs
         loader_frames = int(media_io_kwargs.get("video", {}).get("num_frames", 0))
         if loader_frames >= 0:
-            max_frames = max(int(video_processor.num_frames), loader_frames)
-            num_frames = min(num_frames, round_up(max_frames, temporal_patch_size))
-        return num_frames
+            frames = max(int(video_processor.num_frames), loader_frames)
+            max_groups = round_up(frames, temporal_patch_size) // temporal_patch_size
+        if max_frames is not None:
+            max_groups = min(max_groups, -(-max_frames // temporal_patch_size))
+        return max(
+            (
+                (min(max_groups, budget // tokens), tokens)
+                for tokens in range(max_group_tokens, 0, -1)
+            ),
+            key=lambda groups_and_tokens: groups_and_tokens[0] * groups_and_tokens[1],
+        )
 
 
 class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessingInfo]):
@@ -260,10 +267,17 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
             int(image_kwargs["patch_size"]) * int(image_kwargs["merge_size"]),
             mm_options.get("image"),
         )
+        video_options = mm_options.get("video")
+        num_groups, tokens_per_group = self.info._get_video_groups(
+            seq_len,
+            mm_counts.get("video", 0),
+            video_kwargs,
+            getattr(video_options, "num_frames", None),
+        )
         video_size = _get_canvas_with_most_tokens(
-            int(video_kwargs["max_video_frame_tokens"]),
+            tokens_per_group,
             int(video_kwargs["patch_size"]) * int(video_kwargs["merge_size"]),
-            mm_options.get("video"),
+            video_options,
         )
         return {
             "image": self._get_dummy_images(
@@ -275,11 +289,9 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
             "video": self._get_dummy_videos(
                 width=video_size.width,
                 height=video_size.height,
-                num_frames=self.info._get_num_frames(
-                    seq_len, mm_counts.get("video", 0), video_kwargs
-                ),
+                num_frames=num_groups * int(video_kwargs["temporal_patch_size"]),
                 num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
+                overrides=video_options,
             ),
         }
 

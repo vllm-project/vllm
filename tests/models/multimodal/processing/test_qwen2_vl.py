@@ -611,11 +611,15 @@ def _build_qwen2_vl_with_video_size(
     monkeypatch: pytest.MonkeyPatch,
     video_longest_edge: int,
     max_model_len: int = 32768,
+    video_options: dict[str, int] | None = None,
 ):
     ctx = build_model_context(
         "Qwen/Qwen2-VL-2B-Instruct",
         model_config_kwargs={"max_model_len": max_model_len},
-        limit_mm_per_prompt={"image": 0, "video": 1},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": {"count": 1, **video_options} if video_options else 1,
+        },
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor = deepcopy(processor.info.get_hf_processor())
@@ -680,6 +684,39 @@ def test_video_budget_uses_smaller_video_processor_limit(
     assert len(video["prompt_token_ids"]) <= max_model_len
     assert _count_video_tokens(video) <= encoder_cache_size
     assert _count_video_tokens(dummy) == max_video_tokens
+
+
+@pytest.mark.parametrize(
+    ("video_options", "num_frames", "dummy_tokens"),
+    [
+        ({"width": 896, "height": 672}, 15, 5376),
+        ({"width": 896}, 15, 5005),
+        ({"num_frames": 16}, 16, 6144),
+    ],
+)
+def test_video_hints_keep_budget_of_smaller_video_processor_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    video_options: dict[str, int],
+    num_frames: int,
+    dummy_tokens: int,
+) -> None:
+    processor, max_video_tokens = _build_qwen2_vl_with_video_size(
+        monkeypatch, 768 * 28 * 28, video_options=video_options
+    )
+    _, encoder_cache_size = compute_mm_encoder_budget(
+        SchedulerConfig(
+            max_model_len=32768,
+            max_num_batched_tokens=4096,
+            is_encoder_decoder=False,
+        ),
+        {"video": max_video_tokens},
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    video = _process_video(processor, num_frames, 896, 672)
+
+    assert _count_video_tokens(video) <= encoder_cache_size
+    assert _count_video_tokens(dummy) == dummy_tokens
+    assert _count_video_tokens(dummy) <= max_video_tokens
 
 
 def test_dummy_video_frames_follow_larger_video_processor_limit(
