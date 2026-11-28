@@ -12,7 +12,14 @@ from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.model_executor.models.utils import WeightsMapper, copy_pp_buffers
+from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.common.ops.sequence_parallel import (
+    is_sequence_parallel_active,
+    sp_all_gather,
+    sp_shard,
+)
 from vllm.models.hy_v4.common.mrope import set_token_rope
+from vllm.models.hy_v4.common.sequence_parallel import IHC_SP_MIN_TOKENS
 from vllm.models.hy_v4.nvidia.hc import HYV4HCLayer
 from vllm.models.hy_v4.nvidia.model import (
     HYV4DecoderLayer,
@@ -55,20 +62,25 @@ class HYV4FlashDecoderLayer(HYV4DecoderLayer):
         self.hidden_size = config.hidden_size
         self.layer_idx = int(prefix.rsplit(".", 1)[1])
         self.enable_ihc = config.enable_ihc
-        assert not ihc_sequence_parallel
-        self.defer_reduction = False
+        self.defer_reduction = ihc_sequence_parallel and self.enable_ihc
         self.self_attn = HYV4FlashAttention(
             vllm_config,
             config,
             self.layer_idx,
             topk_indices_buffer,
             f"{prefix}.self_attn",
+            defer_reduction=self.defer_reduction,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         dense = (config.mlp_layer_types or ())[self.layer_idx] == "dense"
         mlp_cls = HYV4FlashFeedForward if dense else HYV4FlashMoE
-        self.mlp = mlp_cls(config, quant_config, f"{prefix}.mlp")
+        self.mlp = mlp_cls(
+            config,
+            quant_config,
+            f"{prefix}.mlp",
+            defer_reduction=self.defer_reduction,
+        )
         self.block_type = "feedforward" if dense else "moe"
         self.hc_attn_layer = HYV4HCLayer(
             config, self.layer_idx, prefix=f"{prefix}.hc_attn_layer"
@@ -78,10 +90,38 @@ class HYV4FlashDecoderLayer(HYV4DecoderLayer):
         )
         self.init_ihc_boundaries()
 
+    def _deferred_reduce(
+        self,
+        hidden_states: torch.Tensor,
+        sequence_parallel: bool,
+        sub_block: nn.Module,
+    ) -> torch.Tensor:
+        if not self.defer_reduction:
+            return hidden_states
+        norm = sub_block.post_reduce_norm
+        if (
+            not sequence_parallel
+            and norm is not None
+            and sub_block.fuse_post_reduce_norm
+        ):
+            return fused_allreduce_rms_norm(hidden_states, None, norm)[0]
+        hidden_states = super()._deferred_reduce(
+            hidden_states, sequence_parallel, sub_block
+        )
+        return norm(hidden_states) if norm is not None else hidden_states
+
 
 class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
     decoder_layer_cls = HYV4FlashDecoderLayer
-    supports_ihc_sequence_parallel = False
+    supports_ihc_sequence_parallel = True
+
+    def _allows_ihc_sequence_parallel(self, vllm_config: VllmConfig) -> bool:
+        # DFly and other speculative paths remain unverified; gate before
+        # construction so their original reductions and fusions are preserved.
+        return (
+            super()._allows_ihc_sequence_parallel(vllm_config)
+            and vllm_config.speculative_config is None
+        )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -152,6 +192,12 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
             layer_id - 1: index
             for index, layer_id in enumerate(self.config.engram_layer_ids)
         }
+        full_num_tokens = positions.shape[-1]
+        sequence_parallel = is_sequence_parallel_active(
+            self.ihc_sequence_parallel, full_num_tokens, IHC_SP_MIN_TOKENS
+        )
+        if sequence_parallel:
+            hidden = sp_shard(hidden)
         fused = self.uses_fused_ihc()
         carry: IHCCarry | None = None
         for index in range(self.start_layer, self.end_layer):
@@ -160,8 +206,13 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
                 if carry is not None:
                     hidden = self.layers[index - 1].hc_mlp_layer.post(*carry)
                     carry = None
+                if sequence_parallel:
+                    # Engram's hashes and head-partial reduction use global rows.
+                    hidden = sp_all_gather(hidden)[:full_num_tokens]
                 hidden = layer.hc_attn_layer.prepare_input(hidden)
                 hidden = layer.engram_layer(hidden, hashes[hash_indices[index]])
+                if sequence_parallel:
+                    hidden = sp_shard(hidden)
             if fused:
                 carry = layer.forward_ihc_fused(positions, hidden, carry)
             else:
@@ -172,12 +223,17 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
                 self.hc_head.fused_post(*carry, self.norm) if is_last_rank else None
             )
             if output is not None:
+                if sequence_parallel:
+                    output = sp_all_gather(output)[:full_num_tokens]
                 return output
             hidden = layer.hc_mlp_layer.post(*carry)
         if not is_last_rank:
             buffers = {k: v[: positions.shape[-1]] for k, v in self.pp_buffers.items()}
             return IntermediateTensors({"hidden_states": hidden.flatten(1), **buffers})
-        return self.norm(self.hc_head(hidden))
+        hidden = self.norm(self.hc_head(hidden))
+        if sequence_parallel:
+            hidden = sp_all_gather(hidden)[:full_num_tokens]
+        return hidden
 
 
 class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM, SupportsMRoPE):

@@ -40,7 +40,15 @@ class HYV4FlashAttention(HYV4MLAAttention):
     fused_qkv_a_proj: MergedColumnParallelLinear
     linear_gate: ColumnParallelLinear
 
-    def __init__(self, vllm_config, config, layer_idx, topk_indices_buffer, prefix):
+    def __init__(
+        self,
+        vllm_config,
+        config,
+        layer_idx,
+        topk_indices_buffer,
+        prefix,
+        defer_reduction: bool = False,
+    ):
         nn.Module.__init__(self)
         self.is_window_layer = config.layer_types[layer_idx] == SLIDING_ATTENTION
         self.config = deepcopy(config)
@@ -140,13 +148,15 @@ class HYV4FlashAttention(HYV4MLAAttention):
         has_post_proj_norm = config.sandwich_norm and (
             self.is_window_layer or not config.dsa_skip_attn_post_norm
         )
+        self.defer_reduction = defer_reduction
+        self.fuse_post_reduce_norm = has_post_proj_norm
         # With a post-projection norm, the all-reduce is fused into it.
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             config.hidden_size,
             bias=False,
             quant_config=quant,
-            reduce_results=not has_post_proj_norm,
+            reduce_results=not (has_post_proj_norm or defer_reduction),
             prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
@@ -196,6 +206,10 @@ class HYV4FlashAttention(HYV4MLAAttention):
             else None
         )
 
+    @property
+    def post_reduce_norm(self) -> RMSNorm | None:
+        return self.post_proj_norm
+
     def forward(self, positions, hidden_states, llama_4_scaling=None):
         q_c, kv = self.fused_qkv_a_proj(hidden_states)[0].split(
             [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
@@ -234,6 +248,6 @@ class HYV4FlashAttention(HYV4MLAAttention):
         else:
             out = fused_sigmoid_gate_mul(out, self.linear_gate(hidden_states)[0])
         out = self.o_proj(out)[0]
-        if self.post_proj_norm is None:
+        if self.defer_reduction or self.post_proj_norm is None:
             return out
         return fused_allreduce_rms_norm(out, None, self.post_proj_norm)[0]
