@@ -19,7 +19,7 @@ long_query = "What is the capital of France?" * 20
 long_doc = "The capital of France is Paris. " * 20
 
 
-@dataclass
+@dataclass(slots=True)
 class TestConfig:
     model: str
     args: list[str]
@@ -69,13 +69,8 @@ RERANK_CONFIGS = [
     ),
     # 3. bi-encoder
     TestConfig(
-        model="intfloat/multilingual-e5-small",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "512",
-            "--trust-remote-code",
-        ],
+        model="vllm/multilingual-e5-small",
+        args=["--enforce-eager", "--max-model-len", "512"],
         # This model has produced both prompt-token totals in CI/local cache;
         # keep truncation checks exact while tolerating the boundary delta.
         without_truncated_prompt_tokens=(284, 285),
@@ -86,12 +81,7 @@ RERANK_CONFIGS = [
     # 4. late-interaction
     TestConfig(
         model="answerdotai/answerai-colbert-small-v1",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "512",
-            "--trust-remote-code",
-        ],
+        args=["--enforce-eager", "--max-model-len", "512"],
         without_truncated_prompt_tokens=284,
         with_max_tokens_per_query_prompt_tokens=154,
         with_max_tokens_per_doc_prompt_tokens=154,
@@ -100,12 +90,7 @@ RERANK_CONFIGS = [
     # 5. jinaai/jina-reranker-v3
     TestConfig(
         model="jinaai/jina-reranker-v3",
-        args=[
-            "--enforce-eager",
-            "--max-model-len",
-            "1024",
-            "--trust-remote-code",
-        ],
+        args=["--enforce-eager", "--max-model-len", "1024"],
         without_truncated_prompt_tokens=567,
         with_max_tokens_per_query_prompt_tokens=308,
         with_max_tokens_per_doc_prompt_tokens=436,

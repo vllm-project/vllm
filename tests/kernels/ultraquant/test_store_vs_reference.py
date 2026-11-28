@@ -3,7 +3,7 @@
 """Tests for the Triton UltraQuant store kernel.
 
 The Triton kernel must produce bit-identical codes and scale bytes vs
-the PyTorch reference (``reference.ultraquant_encode``).
+the PyTorch reference (`reference.ultraquant_encode`).
 """
 
 from __future__ import annotations

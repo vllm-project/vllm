@@ -201,6 +201,57 @@ impl Default for SamplingParams {
     }
 }
 
+impl SamplingParams {
+    /// vLLM's neutral sampling defaults, set explicitly: temperature 1, no
+    /// top-k, top-p or min-p truncation, and no penalties, so the sampler sees
+    /// the model's own distribution.
+    ///
+    /// Unlike [`Self::default`], whose unset fields inherit the model's
+    /// generation config during lowering, these lower the same under any
+    /// generation config, as with `--generation-config vllm`.
+    pub fn neutral() -> Self {
+        Self {
+            temperature: Some(1.0),
+            top_p: Some(1.0),
+            top_k: Some(0),
+            min_p: Some(0.0),
+            frequency_penalty: Some(0.0),
+            presence_penalty: Some(0.0),
+            repetition_penalty: Some(1.0),
+            ..Self::default()
+        }
+    }
+
+    /// Validate explicit sampling-parameter invariants that do not depend on
+    /// model defaults, vocabulary size, or prompt length.
+    ///
+    /// Lowering still runs the full check after applying model defaults and
+    /// engine limits; upper layers such as `vllm-chat` may call this early to
+    /// short-circuit before expensive work like template rendering or outbound
+    /// media fetches.
+    pub fn validate(&self) -> Result<()> {
+        crate::lower::sampling::validate_explicit_sampling_params(self)?;
+        if let (Some(min_tokens), Some(max_tokens)) = (self.min_tokens, self.max_tokens)
+            && min_tokens > max_tokens
+        {
+            return Err(Error::MinTokensExceedsMaxTokens {
+                min_tokens,
+                max_tokens,
+            });
+        }
+        crate::lower::normalize_thinking_token_budget(self.thinking_token_budget)?;
+        crate::lower::validate_repetition_detection(self.repetition_detection.as_ref())?;
+        crate::lower::logprobs::validate_explicit_logprobs(
+            self.logprobs,
+            self.prompt_logprobs,
+            self.logprob_token_ids.as_deref(),
+            self.prompt_logprob_token_ids.as_deref(),
+            self.prompt_logprob_start,
+        )?;
+        Ok(())
+    }
+}
+
 /// One raw text-generation request ready to be tokenized or sent directly to
 /// the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,24 +342,19 @@ impl TextRequest {
     }
 
     /// Validate the minimum invariants before tokenization or request lowering.
+    ///
+    /// Keep prompt-independent checks shared with `vllm_chat::ChatRequest::validate`
+    /// so chat requests short-circuit before rendering and outbound media fetches.
     pub fn validate(&self) -> Result<()> {
         if matches!(&self.prompt, Prompt::TokenIds(ids) if ids.is_empty()) {
             return Err(Error::EmptyPromptTokenIds {
                 request_id: self.request_id.clone(),
             });
         }
-        if self
-            .decode_options
-            .stop_strings
-            .as_ref()
-            .is_some_and(|stops| stops.iter().any(String::is_empty))
-        {
-            return Err(Error::EmptyStopString {
-                request_id: self.request_id.clone(),
-            });
-        }
-        if self.cache_salt.as_deref().is_some_and(|salt| !is_valid_cache_salt(salt)) {
-            return Err(Error::InvalidCacheSalt);
+        self.sampling_params.validate()?;
+        self.decode_options.validate(&self.request_id)?;
+        if let Some(salt) = self.cache_salt.as_deref() {
+            validate_cache_salt(salt)?;
         }
         if self.mm_features.is_some() && self.prompt_truncation.is_some() {
             return Err(Error::TruncateUnsupportedWithMultimodal);
@@ -317,14 +363,18 @@ impl TextRequest {
     }
 }
 
-/// Whether a cache salt is safe to hand to downstream cache backends, which
-/// may use these characters as key separators or terminators. Mirrors Python's
-/// `validate_cache_salt`, which counts length in code points.
-fn is_valid_cache_salt(salt: &str) -> bool {
+/// Validate a prefix-cache salt before handing it to downstream cache
+/// backends, which may use `@`, `/`, `\`, or `\0` as key separators or
+/// terminators. Mirrors Python's `validate_cache_salt`, which counts length in
+/// code points.
+pub fn validate_cache_salt(salt: &str) -> Result<()> {
     const MAX_LEN: usize = 128;
     const FORBIDDEN: [char; 4] = ['@', '/', '\\', '\0'];
 
-    !salt.is_empty() && salt.chars().count() <= MAX_LEN && !salt.contains(FORBIDDEN)
+    if salt.is_empty() || salt.chars().count() > MAX_LEN || salt.contains(FORBIDDEN) {
+        return Err(Error::InvalidCacheSalt);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -351,7 +401,7 @@ mod tests {
             let result = request.validate();
             assert_eq!(result.is_ok(), valid, "{salt:?}");
             if let Err(err) = result {
-                assert!(err.is_request_validation_error());
+                assert!(err.kind().is_invalid_request());
             }
         }
     }
@@ -364,9 +414,27 @@ mod tests {
 
         let err = request.validate().expect_err("empty stop strings should be rejected");
 
-        assert!(err.is_request_validation_error());
+        assert!(err.kind().is_invalid_request());
         assert!(err.to_string().contains("stop strings cannot be empty"));
         assert!(err.to_string().contains("req-empty-stop"));
+    }
+
+    #[test]
+    fn validate_enforces_stop_string_limit_at_shared_chokepoint() {
+        let mut request = TextRequest::for_test();
+        request.decode_options.stop_strings =
+            Some(["one", "two", "three", "four"].into_iter().map(str::to_string).collect());
+        request.validate().expect("four stop strings should be accepted");
+
+        request.decode_options.stop_strings = Some(
+            ["one", "two", "three", "four", "five"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        let err = request.validate().expect_err("five stop strings should be rejected");
+        assert_eq!(err.kind(), crate::ErrorKind::invalid_param("stop"));
+        assert!(err.to_string().contains("Too many stop strings: 5"));
     }
 
     #[test]

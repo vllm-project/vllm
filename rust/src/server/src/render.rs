@@ -1,22 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use tonic::server::NamedService;
+use tonic::transport::Server as TonicServer;
+use tonic_health::ServingStatus;
+use tonic_health::server::health_reporter;
 use tracing::info;
+use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
     ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
     ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
 };
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
-use vllm_text::backend::hf::{HfOverrides, ModelSource};
+use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
+use crate::lora::{LoraModelResolution, check_lora_module};
+use crate::model_names::ServedModelNames;
+use crate::state::AppState;
 use crate::{
-    HttpListenerMode, TlsConfig,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
+    HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig, grpc,
     listener::{Listener, MaybeTlsListener},
     tls,
 };
@@ -30,21 +40,43 @@ pub struct RenderConfig {
     pub tokenizer: Option<ModelSource>,
     /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
     pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
+    /// Token for Hub downloads (`--hf-token`), or `None` for `HF_TOKEN` and
+    /// the stored login token.
+    pub hf_token: Option<HfToken>,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
+    /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
+    pub skip_model_name_validation: bool,
     pub host: String,
     pub port: u16,
+    /// Port for the gRPC Render service on `host`; `None` disables gRPC.
+    pub grpc_port: Option<u16>,
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
     pub tool_strict_level: Option<ToolStrictLevel>,
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    pub reasoning_effort_map: HashMap<ReasoningEffort, String>,
     pub trust_request_chat_template: bool,
     pub exclude_tools_when_tool_choice_none: bool,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
+    /// LoRA adapters whose names are accepted as the request model. Rendering
+    /// does not depend on adapter weights, so they are not loaded.
+    pub lora_modules: Vec<LoraModulePath>,
+    /// Disable multimodal preprocessing and treat the model as language-only.
+    pub language_model_only: bool,
+    /// Dtype multimodal tensors are produced in; must match the engine's.
+    /// `None` follows the model config, like vLLM's `--dtype auto`.
+    pub dtype: Option<ModelDtype>,
+    /// Maximum multimodal items per prompt for each modality.
+    pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
     pub tls: Option<TlsConfig>,
 }
 
@@ -63,14 +95,95 @@ impl RenderConfig {
     }
 }
 
+/// Resolve the model dtype from the checkpoint's config dtype the way vLLM's
+/// `--dtype auto` does on GPUs with bfloat16: float32, missing, and
+/// unrecognized config dtypes run in bfloat16.
+fn auto_model_dtype(config_dtype: Option<ModelDtype>) -> ModelDtype {
+    match config_dtype {
+        Some(ModelDtype::Float16) => ModelDtype::Float16,
+        Some(ModelDtype::BFloat16 | ModelDtype::Float32) | None => ModelDtype::BFloat16,
+    }
+}
+
 pub(crate) struct RenderState {
     pub(crate) model: String,
-    pub(crate) served_model_names: Vec<String>,
+    pub(crate) served_model_names: ServedModelNames,
     /// Unlike `text.max_model_len()` this stays `None` when unset,
     /// so model cards advertise `null` instead of the `u32::MAX`.
     pub(crate) max_model_len: Option<u32>,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
+    pub(crate) lora_modules: Vec<LoraModulePath>,
+}
+
+impl RenderState {
+    /// Served model names followed by LoRA adapter names.
+    pub(crate) fn model_names(&self) -> ServedModelNames {
+        (self.served_model_names.clone())
+            .with_adapter_names(self.lora_modules.iter().map(|module| module.name.clone()))
+    }
+}
+
+/// Chat and text processors shared by the engine-backed and render-only servers.
+pub(crate) trait RenderContext: Send + Sync + 'static {
+    fn chat_processor(&self) -> &ChatRequestProcessor;
+    fn text_processor(&self) -> &TextRequestProcessor;
+    /// Resolve the requested model against the served models and LoRA adapters.
+    fn resolve_model(
+        &self,
+        model: Option<&str>,
+    ) -> impl Future<Output = LoraModelResolution> + Send;
+}
+
+impl RenderContext for AppState {
+    fn chat_processor(&self) -> &ChatRequestProcessor {
+        self.chat.request_processor()
+    }
+
+    fn text_processor(&self) -> &TextRequestProcessor {
+        self.chat.text().request_processor()
+    }
+
+    async fn resolve_model(&self, model: Option<&str>) -> LoraModelResolution {
+        self.resolve_model_with_loras(model).await
+    }
+}
+
+impl RenderContext for RenderState {
+    fn chat_processor(&self) -> &ChatRequestProcessor {
+        &self.chat
+    }
+
+    fn text_processor(&self) -> &TextRequestProcessor {
+        &self.text
+    }
+
+    /// Accept LoRA adapter names as the model, like Python. Rendering does not
+    /// use the adapter, so no LoRA request is resolved; the adapter name is
+    /// passed through as the generate request's model.
+    async fn resolve_model(&self, _model: Option<&str>) -> LoraModelResolution {
+        LoraModelResolution {
+            model_names: self.model_names(),
+            lora_request: None,
+        }
+    }
+}
+
+/// Check `--lora-modules` the way `vllm-rs serve` does when it loads them.
+fn validate_lora_modules(
+    served_model_names: &ServedModelNames,
+    lora_modules: &[LoraModulePath],
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    for module in lora_modules {
+        let name = &module.name;
+        check_lora_module(served_model_names.base_names(), module)
+            .with_context(|| format!("invalid --lora-modules entry `{name}`"))?;
+        if !seen.insert(name) {
+            bail!("LoRA adapter `{name}` is given more than once");
+        }
+    }
+    Ok(())
 }
 
 async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
@@ -80,30 +193,53 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             revision: config.revision.clone(),
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
+            skip_tokenizer_init: config.skip_tokenizer_init,
+            hf_token: config.hf_token.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
+            override_generation_config: Default::default(),
             renderer: config.renderer,
-            language_model_only: true,
+            tool_call_parser: config.tool_call_parser.clone(),
+            reasoning_parser: config.reasoning_parser.clone(),
+            language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
             trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
-            limit_mm_per_prompt: Default::default(),
+            limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: config.mm_processor_kwargs.clone(),
         },
     )
     .await
     .context("failed to load renderer/tokenizer backends")?;
-    let served_model_names =
-        crate::effective_served_model_names(&config.model, &config.served_model_name);
+    let served_model_names = ServedModelNames::new(crate::effective_served_model_names(
+        &config.model,
+        &config.served_model_name,
+    ))
+    .with_accept_any(config.skip_model_name_validation);
+    validate_lora_modules(&served_model_names, &config.lora_modules)?;
+    // Only multimodal preprocessing reads the dtype.
+    let model_dtype = (loaded.chat_backend.multimodal_model_info().is_some()).then(|| {
+        (config.dtype).unwrap_or_else(|| auto_model_dtype(loaded.text_backend.config_dtype()))
+    });
+    if let Some(model_dtype) = model_dtype {
+        info!(
+            dtype = model_dtype.as_str(),
+            "multimodal preprocessing enabled"
+        );
+    }
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
-    let chat = ChatRequestProcessor::render_only(loaded.chat_backend)
-        .with_parser_selections(
-            config.tool_call_parser.clone(),
-            config.reasoning_parser.clone(),
-        )
+    let chat = ChatRequestProcessor::new(loaded.chat_backend, model_dtype, config.max_model_len)
         .with_tool_strict_level(config.tool_strict_level)
+        .with_reasoning_effort_map(
+            config
+                .reasoning_effort_map
+                .iter()
+                .map(|(effort, value)| (effort.as_str().to_owned(), value.clone()))
+                .collect(),
+        )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
@@ -111,6 +247,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         max_model_len: config.max_model_len,
         text,
         chat,
+        lora_modules: config.lora_modules.clone(),
     }))
 }
 
@@ -124,6 +261,13 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         .map(tls::build_server_config)
         .transpose()
         .context("invalid TLS configuration")?;
+    // gRPC reuses the HTTP TLS config plus ALPN h2.
+    let grpc_tls_config = match (config.grpc_port, &config.tls) {
+        (Some(_), Some(tls)) => {
+            Some(tls::build_grpc_server_config(tls).context("invalid gRPC TLS configuration")?)
+        }
+        _ => None,
+    };
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
@@ -145,21 +289,151 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         Some(context) => MaybeTlsListener::tls(listener, context),
         None => MaybeTlsListener::plain(listener),
     };
+    let grpc_listener = match config.grpc_port {
+        Some(port) => {
+            let mode = HttpListenerMode::BindTcp {
+                host: config.host.clone(),
+                port,
+            };
+            let listener = Listener::bind(&mode)
+                .await
+                .with_context(|| format!("failed to bind gRPC {}:{port}", config.host))?;
+            let address = listener.local_addr_display()?;
+            let listener = match grpc_tls_config {
+                Some(context) => MaybeTlsListener::tls(listener, context),
+                None => MaybeTlsListener::plain(listener),
+            };
+            Some((address, listener))
+        }
+        None => None,
+    };
     info!(
         %address,
         scheme,
         model = %config.model,
         "starting engine-free Rust render server"
     );
-    axum::serve(listener, crate::routes::render::build_router(state))
-        .with_graceful_shutdown(shutdown.cancelled_owned())
+
+    // If either protocol exits first, cancel the other one too.
+    let server_shutdown = shutdown.child_token();
+    let http_fut = async {
+        let result = axum::serve(listener, crate::routes::render::build_router(state.clone()))
+            .with_graceful_shutdown(server_shutdown.clone().cancelled_owned())
+            .await
+            .context("render server failed");
+        server_shutdown.cancel();
+        result
+    };
+    let grpc_fut = async {
+        let Some((address, grpc_listener)) = grpc_listener else {
+            return Ok(());
+        };
+        info!(%address, "starting engine-free Rust render gRPC server");
+        let result = serve_render_grpc(state.clone(), grpc_listener, server_shutdown.clone()).await;
+        server_shutdown.cancel();
+        result
+    };
+    let (http_result, grpc_result) = tokio::join!(http_fut, grpc_fut);
+    http_result.and(grpc_result)
+}
+
+/// Serve the gRPC Render service and its health service until `shutdown`.
+pub(crate) async fn serve_render_grpc(
+    state: Arc<RenderState>,
+    listener: MaybeTlsListener,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let (mut health_reporter, health_service) = health_reporter();
+    health_reporter.set_serving::<grpc::RenderGrpcService<RenderState>>().await;
+    let render_service = grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state))
+        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+    // Publish NOT_SERVING before the listener stops, then remove the
+    // services, including the overall server status `""` that tonic
+    // registers, so open health watches end and the drain can finish.
+    let stop = async move {
+        let services = [
+            <grpc::RenderGrpcService<RenderState> as NamedService>::NAME,
+            "",
+        ];
+        shutdown.cancelled().await;
+        for service in services {
+            health_reporter.set_service_status(service, ServingStatus::NotServing).await;
+        }
+        for service in services {
+            health_reporter.clear_service_status(service).await;
+        }
+    };
+    TonicServer::builder()
+        .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+        .add_service(health_service)
+        .add_service(render_service)
+        .serve_with_incoming_shutdown(listener, stop)
         .await
-        .context("render server failed")
+        .context("render gRPC server failed")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lora_modules_are_checked_like_serve() {
+        let served = ServedModelNames::new(vec!["qwen".to_string()]);
+        let modules = |specs: &[&str]| -> Vec<LoraModulePath> {
+            specs.iter().map(|spec| spec.parse().unwrap()).collect()
+        };
+        assert!(validate_lora_modules(&served, &modules(&["a=org/a", "b=org/b"])).is_ok());
+        assert!(validate_lora_modules(&served, &modules(&["qwen=org/a"])).is_err());
+        assert!(validate_lora_modules(&served, &modules(&["a=org/a", "a=org/b"])).is_err());
+    }
+
+    #[test]
+    fn auto_model_dtype_follows_config_like_vllm() {
+        for (config_dtype, expected) in [
+            (Some(ModelDtype::Float16), ModelDtype::Float16),
+            (Some(ModelDtype::BFloat16), ModelDtype::BFloat16),
+            (Some(ModelDtype::Float32), ModelDtype::BFloat16),
+            (None, ModelDtype::BFloat16),
+        ] {
+            assert_eq!(auto_model_dtype(config_dtype), expected);
+        }
+    }
+
+    fn render_config(model: &str) -> RenderConfig {
+        RenderConfig {
+            tool_strict_level: None,
+            model: model.to_string(),
+            revision: None,
+            tokenizer: None,
+            hf_config: None,
+            skip_tokenizer_init: false,
+            hf_token: None,
+            hf_overrides: Default::default(),
+            served_model_name: Vec::new(),
+            skip_model_name_validation: false,
+            host: "127.0.0.1".to_string(),
+            port: 8000,
+            grpc_port: None,
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            renderer: RendererSelection::Auto,
+            chat_template: None,
+            default_chat_template_kwargs: HashMap::new(),
+            reasoning_effort_map: HashMap::new(),
+            trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
+            chat_template_content_format: ChatTemplateContentFormatOption::Auto,
+            max_model_len: Some(128),
+            max_logprobs: None,
+            lora_modules: Vec::new(),
+            language_model_only: false,
+            dtype: None,
+            limit_mm_per_prompt: Default::default(),
+            mm_processor_kwargs: Default::default(),
+            tls: None,
+        }
+    }
 
     #[tokio::test]
     async fn serve_render_rejects_unknown_parser_before_startup() {
@@ -167,26 +441,8 @@ mod tests {
         shutdown.cancel();
         let error = serve_render(
             RenderConfig {
-                tool_strict_level: None,
-                model: "test-model".to_string(),
-                revision: None,
-                tokenizer: None,
-                hf_config: None,
-                hf_overrides: Default::default(),
-                served_model_name: Vec::new(),
-                host: "127.0.0.1".to_string(),
-                port: 8000,
-                tool_call_parser: ParserSelection::Auto,
                 reasoning_parser: ParserSelection::Explicit("typo".to_string()),
-                renderer: RendererSelection::Auto,
-                chat_template: None,
-                default_chat_template_kwargs: HashMap::new(),
-                trust_request_chat_template: false,
-                exclude_tools_when_tool_choice_none: false,
-                chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-                max_model_len: Some(128),
-                max_logprobs: None,
-                tls: None,
+                ..render_config("test-model")
             },
             shutdown,
         )
@@ -198,5 +454,43 @@ mod tests {
             report.contains("reasoning parser `typo` is not registered"),
             "{report}"
         );
+    }
+
+    #[tokio::test]
+    async fn build_state_rejects_parser_the_tokenizer_cannot_support() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            (
+                "config.json",
+                serde_json::json!({"model_type": "qwen2", "vocab_size": 2}),
+            ),
+            (
+                "tokenizer_config.json",
+                serde_json::json!({"chat_template": "{{ messages[0].content }}"}),
+            ),
+            (
+                "tokenizer.json",
+                serde_json::json!({
+                    "version": "1.0",
+                    "model": {"type": "WordLevel", "vocab": {"<unk>": 0, "hello": 1}, "unk_token": "<unk>"},
+                }),
+            ),
+        ];
+        for (name, contents) in files {
+            std::fs::write(dir.path().join(name), contents.to_string()).unwrap();
+        }
+        let model = dir.path().to_str().unwrap();
+
+        // `auto` builds no parser for this model.
+        build_state(&render_config(model)).await.unwrap();
+        let error = build_state(&RenderConfig {
+            reasoning_parser: ParserSelection::Explicit("qwen3".to_string()),
+            ..render_config(model)
+        })
+        .await
+        .err()
+        .unwrap();
+
+        expect_test::expect!["failed to load renderer/tokenizer backends: failed to initialize reasoning parser `qwen3`: tokenizer is missing reasoning delimiter token `<think>`"].assert_eq(&format!("{error:#}"));
     }
 }

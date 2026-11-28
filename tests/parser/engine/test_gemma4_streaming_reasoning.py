@@ -281,11 +281,11 @@ _OPEN_REASONING_GEN_SEQUENCE: list[tuple[int, str]] = [
 
 
 class TestGemma4PromptOpenReasoning:
-    """When ``add_generation_prompt=True`` after a final tool response with
-    ``enable_thinking=True``, the Gemma4 chat template leaves the prompt
-    ending with ``<|channel>thought\\n`` — i.e. inside an open reasoning
-    channel. Tokens generated before ``<channel|>`` must be classified as
-    ``reasoning``, not visible ``content``.
+    """When `add_generation_prompt=True` after a final tool response with
+    `enable_thinking=True`, the Gemma4 chat template leaves the prompt
+    ending with `<|channel>thought\\n` — i.e. inside an open reasoning
+    channel. Tokens generated before `<channel|>` must be classified as
+    `reasoning`, not visible `content`.
 
     Regression test for vllm-project/vllm#45834.
     """
@@ -349,8 +349,8 @@ class TestGemma4PromptOpenReasoning:
 
     def test_new_turn_prompt_unchanged(self, parser, mock_tokenizer, request_obj):
         """When the prompt does NOT end in an open reasoning channel (e.g. a
-        new turn that ends with ``<|turn>model\\n``), behaviour must match
-        the existing flow — the model itself opens ``<|channel>``.
+        new turn that ends with `<|turn>model\\n`), behaviour must match
+        the existing flow — the model itself opens `<|channel>`.
         """
         results = _stream_tokens_batched(
             parser,
@@ -387,15 +387,15 @@ _PRE_INIT_THOUGHT_GEN_SEQUENCE: list[tuple[int, str]] = [
 
 
 class TestGemma4PreInitReasoningRobustness:
-    """Tests for the ``(REASONING, THINK_START)`` no-op transition and
-    cooperating ``thought\\n`` prefix stripping.
+    """Tests for the `(REASONING, THINK_START)` no-op transition and
+    cooperating `thought\\n` prefix stripping.
 
     Covers both engine start states: a new-turn prompt (engine starts in
-    ``CONTENT`` and the model emits its own ``<|channel>`` opener) and a
-    prompt ending inside an open ``<|channel>`` block (engine
-    pre-initialised to ``REASONING``). In both cases the ``thought\\n``
-    prefix must be stripped, the ``<|channel>`` must not leak as text,
-    and the post-``<channel|>`` text must appear as content.
+    `CONTENT` and the model emits its own `<|channel>` opener) and a
+    prompt ending inside an open `<|channel>` block (engine
+    pre-initialised to `REASONING`). In both cases the `thought\\n`
+    prefix must be stripped, the `<|channel>` must not leak as text,
+    and the post-`<channel|>` text must appear as content.
     """
 
     @pytest.fixture
@@ -486,11 +486,11 @@ class TestGemma4ChannelLessOutputConsistency:
     """Streaming and non-streaming must classify channel-less output
     identically.
 
-    With ``enable_thinking=True``, a prompt that merely starts a new model
-    turn (ends with ``<|turn>model\\n``) used to pre-initialise the
-    streaming engine to ``REASONING``, so a direct answer containing no
-    channel markers was streamed entirely as ``reasoning`` while the
-    non-streaming path returned the same text as ``content``.
+    With `enable_thinking=True`, a prompt that merely starts a new model
+    turn (ends with `<|turn>model\\n`) used to pre-initialise the
+    streaming engine to `REASONING`, so a direct answer containing no
+    channel markers was streamed entirely as `reasoning` while the
+    non-streaming path returned the same text as `content`.
 
     Regression test for vllm-project/vllm#48217.
     """
@@ -1400,7 +1400,7 @@ BARE_THOUGHT_SEQUENCE.append((TOOL_CALL_END_ID, "<tool_call|>"))
 
 
 class TestBareThoughtWithoutChannelOpener:
-    """When the model omits <|channel> and starts with bare ``thought``,
+    """When the model omits <|channel> and starts with bare `thought`,
     the parser should auto-inject the channel opener so reasoning is
     captured correctly."""
 
@@ -1723,7 +1723,7 @@ def _stream_args(parser, request, chunks: list[str], finished: bool = True) -> s
 
 
 class TestGemma4ArgValueExtender:
-    """The extender streams exactly what ``_gemma4_arg_converter`` would, so
+    """The extender streams exactly what `_gemma4_arg_converter` would, so
     the converter-only path, which only differs in when it emits, must agree
     with it byte for byte on the accumulated arguments."""
 
@@ -1789,7 +1789,7 @@ class TestGemma4ArgValueExtender:
 
     @pytest.mark.parametrize("offset", range(1, len(STRING_DELIM)))
     def test_split_closing_delimiter(self, tool_call_parser, mock_request, offset):
-        """``STRING_DELIM`` is not a lexer terminal, so the extender may see
+        """`STRING_DELIM` is not a lexer terminal, so the extender may see
         the close split across deltas and must window across them."""
         head = f"<|tool_call>call:f{{a:{_D}Paris"
         tail = ",n:1}<tool_call|>"

@@ -6,7 +6,11 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use serde_with::{DefaultOnError, serde_as};
 use thiserror_ext::AsReport as _;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_tokenizer::parse_checkpoint_json;
 
 use crate::error::{Error, Result};
 use crate::normalize_top_k;
@@ -17,7 +21,7 @@ use crate::normalize_top_k;
 pub struct HfTokenizerConfig {
     #[serde(flatten)]
     pub special_tokens: HfSpecialTokens,
-    pub chat_template: Option<String>,
+    pub chat_template: Option<HfChatTemplate>,
     /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some
     /// tiktoken-based models (e.g. DeepSeek, Kimi K2) set this to a value
     /// containing "Tiktoken" which can be used as a hint for backend
@@ -26,6 +30,53 @@ pub struct HfTokenizerConfig {
     /// The Hugging Face `response_template`: a declarative description of the
     /// model's output protocol, executed by the `hf` unified parser.
     pub response_template: Option<serde_json::Value>,
+}
+
+/// The `chat_template` field of `tokenizer_config.json`: one template, or the
+/// named templates Transformers serializes as a list of `{name, template}`
+/// (e.g. `default` and `tool_use`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HfChatTemplate {
+    Single(String),
+    Named(Vec<HfNamedChatTemplate>),
+}
+
+/// One entry of a list-form `chat_template`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HfNamedChatTemplate {
+    pub name: String,
+    pub template: String,
+}
+
+impl HfChatTemplate {
+    /// The template Transformers uses when no tools are passed: the single
+    /// template, or the one named `default`.
+    pub fn default_template(&self) -> Option<&str> {
+        match self {
+            Self::Single(template) => Some(template),
+            Self::Named(_) => self.named("default"),
+        }
+    }
+
+    /// The template Transformers prefers when tools are passed: the one named
+    /// `tool_use`, if any.
+    pub fn tool_use_template(&self) -> Option<&str> {
+        self.named("tool_use")
+    }
+
+    /// Look up a named template. Transformers collects the list into a dict,
+    /// so a later entry wins over an earlier one with the same name.
+    fn named(&self, name: &str) -> Option<&str> {
+        match self {
+            Self::Single(_) => None,
+            Self::Named(templates) => templates
+                .iter()
+                .rev()
+                .find(|template| template.name == name)
+                .map(|template| template.template.as_str()),
+        }
+    }
 }
 
 /// Hugging Face named special tokens may be serialized as a string or an
@@ -97,26 +148,45 @@ impl HfSpecialTokens {
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
+#[serde_as]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
     model_type: Option<String>,
     vocab_size: Option<u32>,
+    /// Real vocabulary size when `vocab_size` is the padded embedding size
+    /// (Inkling).
+    unpadded_vocab_size: Option<u32>,
     eos_token_id: Option<OneOrManyTokenIds>,
     num_experts: Option<OneOrManyExpertCount>,
     moe_num_experts: Option<OneOrManyExpertCount>,
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
+    /// Checkpoint dtype; `torch_dtype` before transformers 4.56. An unexpected
+    /// value reads as absent rather than failing model loading.
+    #[serde_as(as = "DefaultOnError")]
+    dtype: Option<ModelDtype>,
+    #[serde_as(as = "DefaultOnError")]
+    torch_dtype: Option<ModelDtype>,
     #[serde(alias = "llm_config", alias = "thinker_config")]
     text_config: Option<Box<ModelConfig>>,
 }
 
-/// Minimal subset of `generation_config.json`.
+/// `generation_config.json`: EOS ids typed, everything else kept raw so
+/// overrides can merge over it before [`SamplingDefaults`] parses the result.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(super) struct GenerationConfig {
     pub eos_token_id: Option<OneOrManyTokenIds>,
+    #[serde(flatten)]
+    pub sampling: Map<String, Value>,
+}
+
+/// Sampling keys of a merged generation config.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct SamplingDefaults {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     #[serde(deserialize_with = "deserialize_top_k")]
@@ -126,6 +196,7 @@ pub(super) struct GenerationConfig {
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+    pub skip_special_tokens: Option<bool>,
 }
 
 /// Deserialize a generation-config `top_k` into the text sampling model.
@@ -212,10 +283,19 @@ impl ModelConfig {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
 
+    /// Return the checkpoint dtype, following the same text-config selection
+    /// as `model_type`.
+    pub fn dtype(&self) -> Option<ModelDtype> {
+        (self.dtype.or(self.torch_dtype)).or_else(|| self.text_config.as_deref()?.dtype())
+    }
+
     /// Return the effective model vocabulary size, following the same
     /// simplified text-config selection as `model_type`.
+    ///
+    /// `unpadded_vocab_size` wins over `vocab_size`, like Python's
+    /// `get_vocab_size`: rows past it pad the embedding and are not tokens.
     pub fn vocab_size(&self) -> Result<u32> {
-        if let Some(vocab_size) = self.vocab_size {
+        if let Some(vocab_size) = self.unpadded_vocab_size.or(self.vocab_size) {
             Ok(vocab_size)
         } else if let Some(text_config) = self.text_config.as_deref() {
             text_config.vocab_size()
@@ -286,9 +366,19 @@ pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
     read_json_file(path)
 }
 
-/// Load the generation-side EOS metadata if a config file is present.
+/// Load `generation_config.json`, if present.
 pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationConfig> {
     read_json_file(path)
+}
+
+/// Parse merged generation-config JSON into its sampling defaults.
+pub(super) fn parse_sampling_defaults(config: Map<String, Value>) -> Result<SamplingDefaults> {
+    serde_json::from_value(Value::Object(config)).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to parse generation config: {}",
+            error.as_report()
+        ))
+    })
 }
 
 /// Load the model-side config (`config.json`) if present.
@@ -310,7 +400,7 @@ where
             error.as_report()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
+    parse_checkpoint_json(&content).map_err(|error| {
         Error::Tokenizer(format!(
             "failed to parse {}: {}",
             path.display(),
@@ -321,7 +411,62 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationConfig, ModelConfig};
+    use super::{HfTokenizerConfig, ModelConfig, ModelDtype, SamplingDefaults};
+
+    #[test]
+    fn config_json_reads_bare_constants_as_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"time_step_limit": [0.0, Infinity], "low": -Infinity, "nan": NaN,
+                "max": {"__float__": "Infinity"}, "text": "a \"NaN\" b"}"#,
+        )
+        .unwrap();
+        let config: serde_json::Value = super::read_json_file(Some(&path)).unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "time_step_limit": [0.0, null],
+                "low": null,
+                "nan": null,
+                "max": {"__float__": "Infinity"},
+                "text": "a \"NaN\" b",
+            })
+        );
+    }
+
+    #[test]
+    fn tokenizer_config_reads_single_and_named_chat_templates() {
+        let single: HfTokenizerConfig =
+            serde_json::from_str(r#"{"chat_template":"single"}"#).unwrap();
+        let named: HfTokenizerConfig = serde_json::from_str(
+            r#"{"chat_template":[
+                {"name":"default","template":"old default"},
+                {"name":"tool_use","template":"tool use"},
+                {"name":"default","template":"default"}
+            ]}"#,
+        )
+        .unwrap();
+        let without_default: HfTokenizerConfig =
+            serde_json::from_str(r#"{"chat_template":[{"name":"rag","template":"rag"}]}"#).unwrap();
+
+        let selected = [single, named, without_default].map(|config| {
+            let template = config.chat_template.unwrap();
+            (
+                template.default_template().map(str::to_owned),
+                template.tool_use_template().map(str::to_owned),
+            )
+        });
+        assert_eq!(
+            selected,
+            [
+                (Some("single".to_string()), None),
+                (Some("default".to_string()), Some("tool use".to_string())),
+                (None, None),
+            ]
+        );
+    }
 
     #[test]
     fn generation_config_normalizes_vllm_top_k_values() {
@@ -331,13 +476,41 @@ mod tests {
             (r#"{"top_k":0}"#, None),
             (r#"{"top_k":20}"#, Some(20)),
         ] {
-            let config: GenerationConfig = serde_json::from_str(input).unwrap();
+            let config: SamplingDefaults = serde_json::from_str(input).unwrap();
             assert_eq!(config.top_k, expected, "input={input}");
         }
 
         for input in [r#"{"top_k":-2}"#, r#"{"top_k":4294967296}"#] {
-            assert!(serde_json::from_str::<GenerationConfig>(input).is_err());
+            assert!(serde_json::from_str::<SamplingDefaults>(input).is_err());
         }
+    }
+
+    #[test]
+    fn model_config_reads_checkpoint_dtype() {
+        for (config, expected) in [
+            (r#"{"dtype":"bfloat16"}"#, Some(ModelDtype::BFloat16)),
+            (r#"{"torch_dtype":"float16"}"#, Some(ModelDtype::Float16)),
+            // Both names, as written by some transformers versions.
+            (
+                r#"{"dtype":"bfloat16","torch_dtype":"bfloat16"}"#,
+                Some(ModelDtype::BFloat16),
+            ),
+            (
+                r#"{"text_config":{"torch_dtype":"float32"}}"#,
+                Some(ModelDtype::Float32),
+            ),
+            (r#"{"torch_dtype":"float8_e4m3fn"}"#, None),
+            (r#"{"torch_dtype":{"unexpected":true}}"#, None),
+            ("{}", None),
+        ] {
+            let config: ModelConfig = serde_json::from_str(config).unwrap();
+            assert_eq!(config.dtype(), expected, "{config:?}");
+        }
+        // An unexpected dtype does not fail the rest of the config.
+        let config: ModelConfig =
+            serde_json::from_str(r#"{"torch_dtype":"float8_e4m3fn","model_type":"llama"}"#)
+                .unwrap();
+        assert_eq!(config.model_type(), Some("llama"));
     }
 
     #[test]
@@ -399,6 +572,22 @@ mod tests {
         assert_eq!(config.num_experts(), 8);
         assert_eq!(config.model_type(), Some("top_level"));
         assert!(config.is_moe());
+    }
+
+    #[test]
+    fn model_config_prefers_unpadded_vocab_size() {
+        // Inkling-Small's `config.json`: `vocab_size` is the padded embedding size.
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "text_config": {
+                    "vocab_size": 201024,
+                    "unpadded_vocab_size": 200058
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.vocab_size().unwrap(), 200058);
     }
 
     #[test]

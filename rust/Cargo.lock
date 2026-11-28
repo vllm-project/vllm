@@ -1227,7 +1227,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1304,20 +1304,25 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.2.1"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8728655e193e0d08d7a95d63cf1fdb9b768d282cab0a112ecb006615bae9f067"
+checksum = "d915324fcf00aa9cade45192ffb7eb49f44a66eb9e7059914d87a2a34b58d88d"
 dependencies = [
+ "aho-corasick",
  "daachorse",
  "fancy-regex 0.17.0",
+ "fastrand",
  "icu_normalizer",
+ "libc",
  "memchr",
  "pcre2",
  "rayon",
+ "regex-syntax",
  "serde",
  "serde_json",
  "strum",
  "thiserror 2.0.18",
+ "unicode-normalization-alignments",
 ]
 
 [[package]]
@@ -2099,7 +2104,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2153,7 +2158,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2200,6 +2205,16 @@ checksum = "b49715b7073f385ba4bc528e5747d02e66cb39c6146efb66b781f131f0fb399c"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "json5"
+version = "1.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c1d229cedc4e210dd2e2a6cdc59e36ce28e7338fb69367d0d2566e26de7d599"
+dependencies = [
+ "serde",
+ "ucd-trie",
 ]
 
 [[package]]
@@ -2280,18 +2295,20 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llm-multimodal"
-version = "1.14.0"
-source = "git+https://github.com/smg-project/llm-multimodal?rev=1b6197354e498b1dfb6e2647b2c68e4d11eaf5b5#1b6197354e498b1dfb6e2647b2c68e4d11eaf5b5"
+version = "1.16.0"
+source = "git+https://github.com/smg-project/smg?rev=f23bf087be275375580718c57067d5ad5e66fc49#f23bf087be275375580718c57067d5ad5e66fc49"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
  "blake3",
+ "bytemuck",
  "bytes",
  "cc",
  "fast_image_resize",
  "futures",
  "image",
  "libloading",
+ "multiversion",
  "ndarray",
  "once_cell",
  "pkg-config",
@@ -2505,6 +2522,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memo-map"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2643,6 +2669,27 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
+
+[[package]]
+name = "multiversion"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18f07d0ab403c0c662001890da44da2500990d86e15788489cf9a94895f19e4e"
+dependencies = [
+ "multiversion-macros",
+]
+
+[[package]]
+name = "multiversion-macros"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e521b4032cf166c0d10a5d8598abd9858696612b9e2a4576ef97c7af4626bd6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 3.0.10",
+]
 
 [[package]]
 name = "native-tls"
@@ -2958,8 +3005,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 [[package]]
 name = "pcre2"
 version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e970b0fcce0c7ee6ef662744ff711f21ccd6f11b7cf03cd187a80e89797fc67"
+source = "git+https://github.com/vllm-project/rust-pcre2?rev=bb2f377c9f919c881860c210fad8375945c90d43#bb2f377c9f919c881860c210fad8375945c90d43"
 dependencies = [
  "libc",
  "log",
@@ -2969,8 +3015,7 @@ dependencies = [
 [[package]]
 name = "pcre2-sys"
 version = "0.2.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18b9073c1a2549bd409bf4a32c94d903bb1a09bf845bc306ae148897fa0760a4"
+source = "git+https://github.com/vllm-project/rust-pcre2?rev=bb2f377c9f919c881860c210fad8375945c90d43#bb2f377c9f919c881860c210fad8375945c90d43"
 dependencies = [
  "cc",
  "libc",
@@ -3790,7 +3835,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4426,7 +4471,6 @@ dependencies = [
  "lazy_static",
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
- "symphonia-codec-aac",
  "symphonia-codec-adpcm",
  "symphonia-codec-alac",
  "symphonia-codec-pcm",
@@ -4460,18 +4504,6 @@ checksum = "350f1f2f2e19ad4dd315db94304d1eb361b29af070681f94e51b8fdaad769546"
 dependencies = [
  "lazy_static",
  "log",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-aac"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1979c515a76371b186aad2feff5f23e21cbec775bf95de08bf1e3af92a2ad76"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-common",
  "symphonia-core",
 ]
 
@@ -4637,6 +4669,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ae9ccbea3a7b0b09443036490c8f34a8b1b760fd345e5c0dae0aac718faea79"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4714,7 +4757,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4937,9 +4980,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -5339,6 +5382,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
+name = "ucd-trie"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f20bdbfc9915686faa18fb5bbe8b4552778505defbf9f12289beefbc44092a6"
+
+[[package]]
 name = "unic-char-property"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5657,6 +5706,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
@@ -5676,9 +5726,12 @@ dependencies = [
  "itertools 0.14.0",
  "mimalloc",
  "native-tls",
+ "rlimit",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
+ "tempfile",
  "thiserror-ext",
  "tokio",
  "tokio-util",
@@ -5721,6 +5774,7 @@ dependencies = [
  "serde_repr",
  "serde_tuple",
  "serde_with",
+ "sha2",
  "socket2",
  "task-local",
  "tempfile",
@@ -5739,6 +5793,7 @@ name = "vllm-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "clap",
  "easy-ext",
@@ -5768,6 +5823,8 @@ dependencies = [
  "clap",
  "expect-test",
  "libc",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -5779,8 +5836,11 @@ dependencies = [
  "expect-test",
  "itertools 0.14.0",
  "prometheus-client",
+ "rmp-serde",
+ "rmpv",
  "serde",
  "serde_json",
+ "serde_with",
 ]
 
 [[package]]
@@ -5813,8 +5873,8 @@ dependencies = [
  "expect-test",
  "futures",
  "openai-protocol",
- "regex-automata",
- "regex-syntax",
+ "pcre2",
+ "regex",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -5830,7 +5890,7 @@ dependencies = [
 
 [[package]]
 name = "vllm-proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -5846,12 +5906,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-openai",
+ "async-trait",
  "asynk-strim-attr",
  "auto_enums",
  "axum",
  "base64 0.22.1",
  "bytes",
  "clap",
+ "easy-ext",
  "educe",
  "expect-test",
  "futures",
@@ -5868,7 +5930,9 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "serde",
+ "serde-json-fmt",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "serial_test",
  "sha2",
@@ -5890,7 +5954,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "validator",
  "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
@@ -5900,6 +5963,20 @@ dependencies = [
  "vllm-text",
  "vllm-tokenizer",
  "zeromq",
+]
+
+[[package]]
+name = "vllm-shm-object-storage"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "memmap2",
+ "rand 0.9.5",
+ "rustix",
+ "sha2",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tracing",
 ]
 
 [[package]]
@@ -5927,6 +6004,7 @@ dependencies = [
  "trait-set",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-tokenizer",
 ]
 
@@ -5938,6 +6016,7 @@ dependencies = [
  "criterion",
  "fastokens",
  "hf-hub",
+ "json5",
  "reqwest 0.12.28",
  "riptoken",
  "rustc-hash 1.1.0",
@@ -5958,8 +6037,15 @@ dependencies = [
 name = "vllm-tracing"
 version = "0.1.0"
 dependencies = [
+ "expect-test",
+ "indexmap 2.13.0",
+ "serde",
+ "serde-json-fmt",
+ "serde_json",
+ "serde_with",
  "time",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 
@@ -6184,7 +6270,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6456,9 +6542,9 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "xgrammar-structural-tag"
-version = "0.4.1+xgrammar.0.2.8.9778737"
+version = "0.5.0+xgrammar.0.2.9.8f9a127"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06637fe6ff753ef929b4cea2933b9432f78335255c6931dc748957122b9b492c"
+checksum = "eb1c580c3b8ce497447f7cf3a65307226a4be44c84e649b111cdf5d2b19015e4"
 dependencies = [
  "auto_impl",
  "serde",

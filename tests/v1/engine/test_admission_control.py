@@ -26,6 +26,7 @@ import pytest
 from prometheus_client import REGISTRY
 from pydantic import ValidationError
 
+from vllm.config import VllmConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
@@ -70,6 +71,7 @@ def _make_async_llm(
 ) -> AsyncLLM:
     """Create a bare AsyncLLM with just the attributes needed for scheduling."""
     llm = AsyncLLM.__new__(AsyncLLM)
+    llm.vllm_config = VllmConfig()
     llm.scheduler_config = SimpleNamespace(
         max_num_queued_reqs=max_num_queued_reqs,
         max_num_queued_tokens=max_num_queued_tokens,
@@ -139,19 +141,16 @@ def _make_request_test_llm(
     add_request_async: Callable[[EngineCoreRequest], Awaitable[None]],
 ) -> AsyncLLM:
     llm = _make_async_llm(max_num_queued_reqs=max_num_queued_reqs)
-    llm.output_processor = OutputProcessor(None, log_stats=False)
+    llm.output_processor = OutputProcessor(None, collect_stats=False)
     llm.engine_core = SimpleNamespace(
         resources=SimpleNamespace(engine_dead=False),
         add_request_async=AsyncMock(side_effect=add_request_async),
         abort_requests_async=AsyncMock(),
         shutdown=MagicMock(),
     )
-    llm.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
-    )
     llm.output_handler = None
     llm.log_requests = False
-    llm._run_output_handler = MagicMock()
+    llm._run_output_handler = MagicMock()  # type: ignore[method-assign]
     llm.input_processor = MagicMock()
     llm.input_processor.assign_request_id.side_effect = lambda request: setattr(
         request, "external_req_id", request.request_id
@@ -393,7 +392,7 @@ def test_admission_req_limit_checked_before_token_limit():
 
 @pytest.mark.parametrize("params", [SamplingParams(), PoolingParams()])
 def test_admission_params_without_explicit_n_count_as_one_slot(params):
-    """PoolingParams has no ``.n``; add_request must fall back to 1."""
+    """PoolingParams has no `.n`; add_request must fall back to 1."""
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=9)
     llm.check_admission(getattr(params, "n", 1) or 1)
 
@@ -406,18 +405,19 @@ def test_admission_params_without_explicit_n_count_as_one_slot(params):
 async def test_concurrent_single_request_admission_respects_limit():
     """Concurrent n=1 admissions cannot consume the same slot."""
     llm = _make_async_llm(max_num_queued_reqs=1)
+    output_processor: MagicMock = llm.output_processor
     request_states: dict[str, SimpleNamespace] = {}
-    llm.output_processor.get_num_unfinished_requests.side_effect = lambda: len(
+    output_processor.get_num_unfinished_requests.side_effect = lambda: len(
         request_states
     )
-    llm.output_processor.has_request.side_effect = request_states.__contains__
+    output_processor.has_request.side_effect = request_states.__contains__
 
     def add_request(request, *_args):
         request_states[request.request_id] = _make_req_state(
             len(request.prompt_token_ids)
         )
 
-    llm.output_processor.add_request.side_effect = add_request
+    output_processor.add_request.side_effect = add_request
 
     async def add_request_async(_request):
         await asyncio.sleep(0)
@@ -449,7 +449,8 @@ def test_admission_preflight_pass_then_reject_records_once():
     llm = _make_async_llm(max_num_queued_reqs=1, num_unfinished=0)
     _attach_prometheus_logger(llm)
     llm.check_admission()
-    llm.output_processor.get_num_unfinished_requests.return_value = 1
+    output_processor: MagicMock = llm.output_processor
+    output_processor.get_num_unfinished_requests.return_value = 1
     with pytest.raises(QueueOverflowError):
         llm.check_admission()
     assert _admission_rejection_count("max_num_queued_reqs") == 1

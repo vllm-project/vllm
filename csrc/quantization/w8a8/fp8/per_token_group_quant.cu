@@ -13,6 +13,7 @@
   #include <cuda_fp8.h>
 #endif
 
+#include "core/cuda_compat.h"
 #include "quantization/vectorization.cuh"
 #include "quantization/vectorization_utils.cuh"
 #include "dispatch_utils.h"
@@ -49,7 +50,7 @@ __device__ __forceinline__ float ComputeGroupScale(
   constexpr int vec_size = 16 / sizeof(T);
 
   // copy global -> shared & compute absmax
-  auto scalar_op_cache = [&] __device__(T & dst, const T& src) {
+  auto scalar_op_cache = [&] __device__(T& dst, const T& src) {
     float abs_v = fabsf(static_cast<float>(src));
     local_absmax = fmaxf(local_absmax, abs_v);
     dst = src;
@@ -85,7 +86,7 @@ __device__ __forceinline__ void QuantizeGroup(
   const float inv_y = 1.0f / y_s;
 
   // quantize shared -> global 8-bit
-  auto scalar_op_quant = [&] __device__(DST_DTYPE & dst, const T& src) {
+  auto scalar_op_quant = [&] __device__(DST_DTYPE& dst, const T& src) {
     float q = fminf(fmaxf(static_cast<float>(src) * inv_y, min_8bit), max_8bit);
     dst = DST_DTYPE(q);
   };
@@ -667,7 +668,7 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
       sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
 
   uint4 packed_out;
-#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if VLLM_FP8_CVT_X2
   if constexpr (std::is_same_v<T, c10::BFloat16> &&
                 std::is_same_v<DST_DTYPE, c10::Float8_e4m3fn> &&
                 GROUP_SIZE == 128) {

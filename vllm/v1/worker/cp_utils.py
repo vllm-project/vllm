@@ -57,63 +57,6 @@ def check_attention_cp_compatibility(
                 )
 
 
-def get_dcp_dummy_context_len(
-    dcp_world_size: int,
-    cp_kv_cache_interleave_size: int,
-    has_kv_cache_config: bool,
-    create_mixed_batch: bool,
-    is_graph_capturing: bool,
-    uniform_decode: bool,
-) -> int:
-    if (
-        dcp_world_size <= 1
-        or not has_kv_cache_config
-        or not (create_mixed_batch or (is_graph_capturing and uniform_decode))
-    ):
-        return 0
-    return dcp_world_size * cp_kv_cache_interleave_size
-
-
-def prepare_dcp_dummy_context_metadata(
-    *,
-    input_batch: Any,
-    kv_cache_config: Any,
-    query_pos: Any,
-    positions: torch.Tensor,
-    query_start_loc: Any,
-    num_reqs: int,
-    num_tokens_unpadded: int,
-    dcp_dummy_context_len: int,
-) -> None:
-    """Populate valid fake KV metadata for DCP CUDA graph warmup/capture."""
-    if dcp_dummy_context_len == 0:
-        return
-
-    # DCP graph warmup may exercise context attention, so block-table entries
-    # must point at allocated KV blocks.
-    assert kv_cache_config is not None
-    max_valid_block_id = kv_cache_config.num_blocks - 1
-    assert max_valid_block_id > 0
-    for blk_table in input_batch.block_table.block_tables:
-        block_ids = [
-            (block_idx % max_valid_block_id) + 1
-            for block_idx in range(blk_table.max_num_blocks_per_req)
-        ]
-        for req_idx in range(num_reqs):
-            blk_table.add_row(block_ids, req_idx)
-        blk_table.commit_block_table(num_reqs)
-
-    query_pos.copy_to_gpu(num_tokens_unpadded)
-    positions[:num_tokens_unpadded] = (
-        query_pos.gpu[:num_tokens_unpadded] + dcp_dummy_context_len
-    )
-    input_batch.block_table.compute_slot_mapping(
-        num_reqs,
-        query_start_loc.gpu[: num_reqs + 1],
-        positions[:num_tokens_unpadded],
-    )
-
-
 def should_skip_dcp_context_attention(context_kv_lens_cpu: torch.Tensor) -> bool:
     """Whether DCP context attention can be skipped for this batch.
 

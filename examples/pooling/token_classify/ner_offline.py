@@ -16,7 +16,6 @@ def parse_args():
         model="boltuix/NeuroBERT-NER",
         runner="pooling",
         enforce_eager=True,
-        trust_remote_code=True,
     )
     return parser.parse_args()
 
@@ -35,7 +34,7 @@ def main(args: Namespace):
     # Run inference
     outputs = llm.encode(prompts, pooling_task="token_classify")
 
-    for prompt, output in zip(prompts, outputs):
+    for _, output in zip(prompts, outputs):
         logits = output.outputs.data
         predictions = logits.argmax(dim=-1)
 

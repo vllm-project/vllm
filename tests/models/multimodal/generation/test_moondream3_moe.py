@@ -33,7 +33,7 @@ NUM_TOKENS = 3
 
 class _StubGate(torch.nn.Module):
     """Router stand-in, so the test does not depend on platform-specific
-    ``ReplicatedLinear`` weight post-processing."""
+    `ReplicatedLinear` weight post-processing."""
 
     def __init__(self, hidden_size: int, num_experts: int):
         super().__init__()
@@ -126,8 +126,8 @@ def test_fused_path_all_reduces_once(moe, all_reduce, monkeypatch):
 def test_all_reduce_failure_is_not_retried(moe, monkeypatch):
     """A failing all-reduce must propagate, not trigger a second collective.
 
-    Regression test. The all-reduce used to sit inside the ``try`` guarding
-    the fused kernel, so a ``RuntimeError`` raised by the collective itself
+    Regression test. The all-reduce used to sit inside the `try` guarding
+    the fused kernel, so a `RuntimeError` raised by the collective itself
     was caught, and this rank went on to run the fallback loop and all-reduce
     a *second* time -- two collectives on one rank against one on each of its
     peers, which desyncs the tensor-parallel group and wedges it for good.

@@ -15,6 +15,11 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
 )
 from vllm.platforms import current_platform
 
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="AITER FlyDSL GDN prefill is ROCm-only",
+)
+
 
 def _make_config(
     *,
@@ -46,6 +51,7 @@ def _resolve_on_rocm(config, *, kernels_available: bool = True, mi3xx: bool = Tr
             return_value=kernels_available,
         ),
         patch("vllm.platforms.rocm.on_mi3xx", return_value=mi3xx),
+        patch("vllm.platforms.rocm.on_gfx1151", return_value=False),
     ):
         return _resolve_gdn_prefill_backend(config)
 

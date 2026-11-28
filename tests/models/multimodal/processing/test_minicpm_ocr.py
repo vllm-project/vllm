@@ -12,15 +12,19 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
+import PIL.Image
 import pytest
 import torch
 
+from vllm.config import ModelConfig
 from vllm.model_executor.models.minicpm_ocr import (
     _OCR_IMAGE_UPSIZE_KWARGS,
+    _VIDEO_PINNED_UPSIZE_KWARGS,
     MiniCPMOcrMultiModalProcessor,
     MiniCPMOcrProcessingInfo,
 )
 from vllm.model_executor.models.minicpmv4_6 import MiniCPMV4_6MultiModalProcessor
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -50,7 +54,12 @@ class _StubImageProcessor:
     slice_mode = True
 
     def find_best_resize(
-        self, image_size, scale_resolution, patch_size, allow_upscale=False
+        self,
+        image_size,
+        scale_resolution,
+        patch_size,
+        downsample_mode,
+        allow_upscale=False,
     ):
         height, width = image_size
         if (height * width > scale_resolution * scale_resolution) or allow_upscale:
@@ -58,13 +67,19 @@ class _StubImageProcessor:
             height = int(scale_resolution / math.sqrt(aspect_ratio))
             width = int(height * aspect_ratio)
         # The OCR delta: one 2x2 merge in "4x" mode, two in "16x".
-        merge_factor = 2 if self.downsample_mode == "4x" else 4
+        merge_factor = 2 if downsample_mode == "4x" else 4
         best_width = ensure_divide(width, patch_size * merge_factor)
         best_height = ensure_divide(height, patch_size * merge_factor)
         return best_height, best_width
 
     def get_refine_size(
-        self, image_size, grid, scale_resolution, patch_size, allow_upscale=False
+        self,
+        image_size,
+        grid,
+        scale_resolution,
+        patch_size,
+        downsample_mode,
+        allow_upscale=False,
     ):
         height, width = image_size
         grid_y, grid_x = grid
@@ -74,6 +89,7 @@ class _StubImageProcessor:
             (refine_height / grid_y, refine_width / grid_x),
             scale_resolution,
             patch_size,
+            downsample_mode,
             allow_upscale=allow_upscale,
         )
         return best_height * grid_y, best_width * grid_x
@@ -167,10 +183,18 @@ def test_4x_mode_aligns_the_patch_grid_to_two_patches():
     # Upscaled to ~448 on the long side, then aligned: "4x" rounds to 28px and
     # "16x" to 56px, which lands on a different grid for the same image.
     assert info._pinned_image_processor("4x").find_best_resize(
-        (200, 300), _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=True
+        (200, 300),
+        _SCALE_RESOLUTION,
+        _PATCH_SIZE,
+        downsample_mode="4x",
+        allow_upscale=True,
     ) == (364, 560)
     assert info._pinned_image_processor("16x").find_best_resize(
-        (200, 300), _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=True
+        (200, 300),
+        _SCALE_RESOLUTION,
+        _PATCH_SIZE,
+        downsample_mode="16x",
+        allow_upscale=True,
     ) == (392, 560)
 
     # 364*560 / (14*14*4) = 260 against 392*560 / (14*14*16) = 70: the ratio is
@@ -227,7 +251,12 @@ def test_sliced_image_token_counts_match_the_transformers_divisor():
     assert grids != [0, 0]
     processor = info._pinned_image_processor("4x")
     refine = processor.get_refine_size(
-        (1120, 1680), grids, _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=True
+        (1120, 1680),
+        grids,
+        _SCALE_RESOLUTION,
+        _PATCH_SIZE,
+        downsample_mode="4x",
+        allow_upscale=True,
     )
     expected_patch = (
         (refine[0] // grids[0])
@@ -258,9 +287,6 @@ def test_placeholder_is_counted_from_target_sizes():
     """Token count mirrors `MiniCPMOcrProcessor.replace_image_token`.
 
     That method computes `target_sizes.prod(-1) // token_divisor` per patch.
-    Reproducing it here is what keeps the count right under
-    `adaptive_small_image_upsize`, whose resize target is decided from the
-    pixels and so is invisible to a size-only computation.
     """
     info = _make_info()
     # An unsliced image: one row only.
@@ -271,13 +297,7 @@ def test_placeholder_is_counted_from_target_sizes():
 
 
 def test_adaptive_upsize_changes_the_count_without_changing_the_image_size():
-    """Two tiers of the same image must yield different placeholders.
-
-    `adaptive_upsize_tier` can send a small image to `scale_resolution` or to
-    `adaptive_upsize_tiny_target_resolution`, and `ImageSize` is identical in
-    both cases. This is exactly the divergence that counting from `image_size`
-    would miss.
-    """
+    """Two tiers of the same image must yield different placeholders."""
     info = _make_info()
     image_size = ImageSize(width=80, height=80)
 
@@ -317,10 +337,7 @@ def test_placeholder_emits_the_slice_grid_from_the_geometry():
 
 
 def test_placeholder_emits_differing_tiles_one_by_one():
-    """`adaptive_tile_upsize` can leave tiles at different resolutions.
-
-    Each slice then gets its own count instead of row 1 repeated.
-    """
+    """Each slice then gets its own count instead of row 1 repeated."""
     info = _make_info()
     image_size = ImageSize(width=1680, height=1120)
     grids, _, _ = info._compute_visual_tokens(image_size, downsample_mode="4x")
@@ -353,13 +370,11 @@ def test_video_path_pins_the_upsize_defaults(monkeypatch):
     processor = _processor_with_merge({})
     processor.process_videos(
         {},
-        {"downsample_mode": "4x", "adaptive_small_image_upsize": True},
+        {"downsample_mode": "4x", "small_image_upsize": "never"},
     )
 
     assert captured["downsample_mode"] == "4x"
-    assert captured["adaptive_small_image_upsize"] is False
-    assert captured["disable_small_image_upsize"] is False
-    assert captured["adaptive_tile_upsize"] is False
+    assert captured["small_image_upsize"] == "always"
 
 
 def test_placeholder_falls_back_when_target_sizes_disagree_with_the_grid():
@@ -453,12 +468,21 @@ def test_placeholder_matches_the_transformers_formula(width, height, mode):
     # Rebuild `target_sizes` exactly as `_preprocess` records it.
     sliced = grids != [0, 0]
     source_h, source_w = processor.find_best_resize(
-        (height, width), _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=not sliced
+        (height, width),
+        _SCALE_RESOLUTION,
+        _PATCH_SIZE,
+        downsample_mode=mode,
+        allow_upscale=not sliced,
     )
     target_sizes = [[source_h // _PATCH_SIZE, source_w // _PATCH_SIZE]]
     if sliced:
         refine_h, refine_w = processor.get_refine_size(
-            (height, width), grids, _SCALE_RESOLUTION, _PATCH_SIZE, allow_upscale=True
+            (height, width),
+            grids,
+            _SCALE_RESOLUTION,
+            _PATCH_SIZE,
+            downsample_mode=mode,
+            allow_upscale=True,
         )
         patch_h, patch_w = refine_h // grids[0], refine_w // grids[1]
         target_sizes += [[patch_h // _PATCH_SIZE, patch_w // _PATCH_SIZE]] * (
@@ -500,6 +524,7 @@ def test_pixel_and_target_size_paths_agree_on_the_default_resize():
             (height, width),
             _SCALE_RESOLUTION,
             _PATCH_SIZE,
+            downsample_mode="4x",
             allow_upscale=not sliced,
         )
         target_sizes = [[source_h // _PATCH_SIZE, source_w // _PATCH_SIZE]]
@@ -509,6 +534,7 @@ def test_pixel_and_target_size_paths_agree_on_the_default_resize():
                 grids,
                 _SCALE_RESOLUTION,
                 _PATCH_SIZE,
+                downsample_mode="4x",
                 allow_upscale=True,
             )
             patch_h, patch_w = refine_h // grids[0], refine_w // grids[1]
@@ -542,11 +568,11 @@ def test_scoped_upsize_kwargs_are_promoted_to_the_flat_form():
     silently ignored.
     """
     processor = _processor_with_merge(
-        {"images_kwargs": {"adaptive_small_image_upsize": True}}
+        {"images_kwargs": {"small_image_upsize": "never"}}
     )
     promoted = processor._promote_image_upsize_kwargs({"max_slice_nums": 4})
 
-    assert promoted["adaptive_small_image_upsize"] is True
+    assert promoted["small_image_upsize"] == "never"
     assert promoted["max_slice_nums"] == 4
 
 
@@ -560,8 +586,7 @@ def test_upsize_kwargs_are_kept_out_of_the_video_path():
     processor = _processor_with_merge({})
     mm_kwargs = {
         "downsample_mode": "4x",
-        "adaptive_small_image_upsize": True,
-        "disable_small_image_upsize": True,
+        "small_image_upsize": "never",
     }
     stripped = processor._drop_image_upsize_kwargs(mm_kwargs)
 
@@ -578,19 +603,207 @@ def test_declared_upsize_kwargs_match_the_transformers_schema():
     vLLM routes a flat kwarg into a scope only when the HF processor declares
     it, so this list is what decides whether a request option is honoured.
     """
-    assert set(_OCR_IMAGE_UPSIZE_KWARGS) == {
-        "disable_small_image_upsize",
-        "adaptive_small_image_upsize",
-        "adaptive_upsize_font_px",
-        "adaptive_upsize_dense_per_kpx",
-        "adaptive_upsize_tiny_pixels",
-        "adaptive_upsize_tiny_target_resolution",
-        "adaptive_tile_upsize",
-    }
+    assert set(_OCR_IMAGE_UPSIZE_KWARGS) == {"small_image_upsize"}
+    image_processing = pytest.importorskip(
+        "transformers.models.minicpm_ocr.image_processing_minicpm_ocr"
+    )
+    declared = image_processing.MiniCPMOcrImageProcessorKwargs.__annotations__
+    assert set(_OCR_IMAGE_UPSIZE_KWARGS) <= set(declared)
+    assert set(_VIDEO_PINNED_UPSIZE_KWARGS) <= set(declared)
     # `downsample_mode` / `max_slice_nums` are inherited from 4.6 and already
     # handled there; re-promoting them here would double-apply the resolution.
     assert "downsample_mode" not in _OCR_IMAGE_UPSIZE_KWARGS
     assert "max_slice_nums" not in _OCR_IMAGE_UPSIZE_KWARGS
+
+
+def _ocr_processor(mm_processor_kwargs=None, limit_mm_per_prompt=None):
+    pytest.importorskip("transformers.models.minicpm_ocr")
+    model_config = ModelConfig(
+        "openbmb/MiniCPM-OCR-1.0",
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt=limit_mm_per_prompt or {"image": 1, "video": 1},
+    )
+    return model_config, MULTIMODAL_REGISTRY.create_processor(model_config)
+
+
+def _video_item(num_frames: int, width: int, height: int) -> tuple:
+    return (
+        np.zeros((num_frames, height, width, 3), dtype=np.uint8),
+        {
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "total_num_frames": num_frames,
+            "frames_indices": list(range(num_frames)),
+            "video_backend": "opencv",
+            "do_sample_frames": False,
+        },
+    )
+
+
+def _num_embeds(processor, modality: str, item, hf_processor_mm_kwargs=None) -> int:
+    pattern = (
+        processor.info.image_pattern
+        if modality == "image"
+        else processor.info.video_pattern
+    )
+    processed = processor(
+        pattern,
+        mm_items=processor.info.parse_mm_data({modality: [item]}),
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs or {},
+    )
+    return sum(p.get_num_embeds() for p in processed["mm_placeholders"][modality])
+
+
+@pytest.mark.parametrize("mm_processor_kwargs", [None, {"small_image_upsize": "never"}])
+@pytest.mark.parametrize(("width", "height"), [(200, 120), (1265, 1112)])
+def test_video_tokens_match_the_transformers_processor(
+    mm_processor_kwargs, width: int, height: int
+):
+    model_config, processor = _ocr_processor(
+        mm_processor_kwargs, {"image": 0, "video": 1}
+    )
+    video = _video_item(2, width, height)
+    hf_processor = processor.info.get_hf_processor()
+    reference = hf_processor(
+        text=[hf_processor.video_token],
+        videos=[video[0]],
+        videos_kwargs={"do_sample_frames": False},
+        return_tensors="pt",
+    )
+    video_token_id = hf_processor.tokenizer.convert_tokens_to_ids(
+        hf_processor.video_token
+    )
+    budget = processor.info.get_mm_max_tokens_per_item(
+        seq_len=model_config.max_model_len, mm_counts={"video": 1}
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    dummy_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
+
+    assert _num_embeds(processor, "video", video) == int(
+        (reference["input_ids"] == video_token_id).sum()
+    )
+    assert budget is not None
+    assert dummy_embeds <= budget["video"]
+
+
+@pytest.mark.parametrize("kwargs_on_init", [True, False])
+def test_scoped_small_image_upsize_matches_the_transformers_processor(
+    kwargs_on_init: bool,
+):
+    kwargs = {"images_kwargs": {"small_image_upsize": "never"}}
+    _, processor = _ocr_processor(
+        kwargs if kwargs_on_init else None, {"image": 1, "video": 0}
+    )
+    image = PIL.Image.fromarray(np.full((120, 200, 3), 255, dtype=np.uint8))
+    hf_processor = processor.info.get_hf_processor()
+    reference = hf_processor(
+        text=[hf_processor.image_token],
+        images=[image],
+        images_kwargs={"small_image_upsize": "never"},
+        return_tensors="pt",
+    )
+    image_token_id = hf_processor.tokenizer.convert_tokens_to_ids(
+        hf_processor.image_token
+    )
+
+    assert _num_embeds(
+        processor, "image", image, {} if kwargs_on_init else kwargs
+    ) == int((reference["input_ids"] == image_token_id).sum())
+
+
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [
+        None,
+        {"small_image_upsize": "adaptive"},
+        {"images_kwargs": {"small_image_upsize": "adaptive"}},
+    ],
+)
+def test_image_budget_covers_the_largest_image(mm_processor_kwargs):
+    model_config, processor = _ocr_processor(
+        mm_processor_kwargs, limit_mm_per_prompt={"image": 1, "video": 0}
+    )
+    budget = processor.info.get_mm_max_tokens_per_item(
+        seq_len=model_config.max_model_len, mm_counts={"image": 1}
+    )
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    dummy_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["image"])
+    dense_text = np.full((188, 7474, 3), 255, dtype=np.uint8)
+    for y in range(0, 184, 9):
+        for x in range(0, 7471, 8):
+            dense_text[y : y + 4, x : x + 3] = 0
+
+    assert budget is not None
+    assert dummy_embeds <= budget["image"]
+    assert budget["image"] >= _num_embeds(
+        processor, "image", PIL.Image.fromarray(dense_text)
+    )
+    dummy_pixels = dummy["mm_kwargs"].get_data()["pixel_values"]
+    for image in (PIL.Image.fromarray(dense_text), PIL.Image.new("RGB", (126, 14334))):
+        processed = processor(
+            processor.info.image_pattern,
+            mm_items=processor.info.parse_mm_data({"image": [image]}),
+            hf_processor_mm_kwargs={},
+        )
+        pixels = processed["mm_kwargs"].get_data()["pixel_values"]
+        assert dummy_pixels.shape[-4] * dummy_pixels.shape[-1] >= (
+            pixels.shape[-4] * pixels.shape[-1]
+        )
+
+
+@pytest.mark.parametrize("scale_resolution", [56, 64])
+def test_image_budget_covers_adaptive_tiny_images(scale_resolution):
+    model_config, processor = _ocr_processor(
+        {
+            "scale_resolution": scale_resolution,
+            "max_slice_nums": 1,
+            "images_kwargs": {"small_image_upsize": "adaptive"},
+        },
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    budget = processor.info.get_mm_max_tokens_per_item(
+        seq_len=model_config.max_model_len, mm_counts={"image": 1}
+    )
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    dummy_pixels = dummy["mm_kwargs"].get_data()["pixel_values"]
+
+    assert budget is not None
+    for size in ((196, 1), (1, 196)):
+        processed = processor(
+            processor.info.image_pattern,
+            mm_items=processor.info.parse_mm_data(
+                {"image": [PIL.Image.new("RGB", size)]}
+            ),
+            hf_processor_mm_kwargs={},
+        )
+        pixels = processed["mm_kwargs"].get_data()["pixel_values"]
+        num_embeds = processed["mm_placeholders"]["image"][0].get_num_embeds()
+        assert budget["image"] >= num_embeds
+        assert dummy_pixels.shape[-4] * dummy_pixels.shape[-1] >= (
+            pixels.shape[-4] * pixels.shape[-1]
+        )
+
+
+@pytest.mark.parametrize(
+    "hint", [{"width": 32, "height": 32}, {"width": 64, "height": 64}]
+)
+def test_size_hints_do_not_lower_the_adaptive_tiny_image_budget(hint):
+    model_config, processor = _ocr_processor(
+        {
+            "scale_resolution": 56,
+            "max_slice_nums": 1,
+            "images_kwargs": {"small_image_upsize": "adaptive"},
+        },
+        limit_mm_per_prompt={"image": {"count": 1, **hint}, "video": 0},
+    )
+    budget = processor.info.get_mm_max_tokens_per_item(
+        seq_len=model_config.max_model_len, mm_counts={"image": 1}
+    )
+
+    assert budget is not None
+    assert budget["image"] >= _num_embeds(
+        processor, "image", PIL.Image.new("RGB", (196, 1))
+    )
 
 
 # --------------------------------------------------------------------------

@@ -8,12 +8,11 @@ from dataclasses import dataclass
 import pytest
 
 import vllm
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelWithQuantization:
     model_path: str
     quantization: str
@@ -24,17 +23,15 @@ MODELS: list[ModelWithQuantization]
 if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
-            model_path="JunHowie/Qwen3-0.6B-GPTQ-Int4",
+            model_path="vllm/Qwen3-0.6B-GPTQ-Int4",
             quantization="gptq",
         ),
     ]
 else:
     MODELS = [
+        ModelWithQuantization(model_path="vllm/Qwen3-0.6B-AWQ", quantization="awq"),
         ModelWithQuantization(
-            model_path="Orion-zhen/Qwen3-0.6B-AWQ", quantization="awq"
-        ),
-        ModelWithQuantization(
-            model_path="JunHowie/Qwen3-0.6B-GPTQ-Int4",
+            model_path="vllm/Qwen3-0.6B-GPTQ-Int4",
             quantization="gptq",
         ),
     ]
@@ -79,9 +76,11 @@ def do_sample(
 
 
 @pytest.mark.parametrize("model", MODELS)
-def test_quant_model_lora(qwen3_meowing_lora_files, qwen3_woofing_lora_files, model):
-    llm = vllm.LLM(
-        model=model.model_path,
+def test_quant_model_lora(
+    vllm_runner, qwen3_meowing_lora_files, qwen3_woofing_lora_files, model
+):
+    with vllm_runner(
+        model.model_path,
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
@@ -89,43 +88,40 @@ def test_quant_model_lora(qwen3_meowing_lora_files, qwen3_woofing_lora_files, mo
         gpu_memory_utilization=0.2,  # avoid OOM
         quantization=model.quantization,
         enable_chunked_prefill=True,
-    )
-
-    loras = [
-        (
-            qwen3_meowing_lora_files,
-            1,
-            ["Meow Meow Meow Meow Meow"] * 2,
-        ),
-        (
-            qwen3_woofing_lora_files,
-            2,
-            ["Woof Woof Woof Woof Woof"] * 2,
-        ),
-    ]
-    max_tokens = 10
-    try:
-        base_output = do_sample(llm, None, lora_id=0, max_tokens=max_tokens)
+    ) as runner:
+        loras = [
+            (
+                qwen3_meowing_lora_files,
+                1,
+                ["Meow Meow Meow Meow Meow"] * 2,
+            ),
+            (
+                qwen3_woofing_lora_files,
+                2,
+                ["Woof Woof Woof Woof Woof"] * 2,
+            ),
+        ]
+        max_tokens = 10
+        base_output = do_sample(runner.llm, None, lora_id=0, max_tokens=max_tokens)
         for lora_path, lora_id, expected_output in loras:
             output = do_sample(
-                llm,
+                runner.llm,
                 lora_path,
                 lora_id=lora_id,
                 max_tokens=max_tokens,
             )
             assert output == expected_output
             assert output != base_output
-    finally:
-        del llm
-        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize("model", MODELS)
-def test_quant_model_tp_equality(qwen3_meowing_lora_files, num_gpus_available, model):
+def test_quant_model_tp_equality(
+    vllm_runner, qwen3_meowing_lora_files, num_gpus_available, model
+):
     if num_gpus_available < 2:
         pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
-    llm_tp1 = vllm.LLM(
-        model=model.model_path,
+    with vllm_runner(
+        model.model_path,
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
@@ -133,17 +129,13 @@ def test_quant_model_tp_equality(qwen3_meowing_lora_files, num_gpus_available, m
         gpu_memory_utilization=0.2,  # avoid OOM
         quantization=model.quantization,
         enable_chunked_prefill=True,
-    )
-    try:
+    ) as runner_tp1:
         output_tp1 = do_sample(
-            llm_tp1, qwen3_meowing_lora_files, lora_id=1, max_tokens=10
+            runner_tp1.llm, qwen3_meowing_lora_files, lora_id=1, max_tokens=10
         )
-    finally:
-        del llm_tp1
-        cleanup_dist_env_and_memory()
 
-    llm_tp2 = vllm.LLM(
-        model=model.model_path,
+    with vllm_runner(
+        model.model_path,
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
@@ -152,13 +144,9 @@ def test_quant_model_tp_equality(qwen3_meowing_lora_files, num_gpus_available, m
         gpu_memory_utilization=0.2,  # avoid OOM
         quantization=model.quantization,
         enable_chunked_prefill=True,
-    )
-    try:
+    ) as runner_tp2:
         output_tp2 = do_sample(
-            llm_tp2, qwen3_meowing_lora_files, lora_id=1, max_tokens=10
+            runner_tp2.llm, qwen3_meowing_lora_files, lora_id=1, max_tokens=10
         )
-    finally:
-        del llm_tp2
-        cleanup_dist_env_and_memory()
 
     assert output_tp1 == output_tp2

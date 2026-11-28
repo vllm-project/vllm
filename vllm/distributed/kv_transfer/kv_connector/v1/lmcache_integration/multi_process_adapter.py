@@ -31,10 +31,10 @@ def striding_block_hashes(
     """Extract chunk-level hashes from block hashes by striding.
 
     In hash-based vLLM, each vLLM block has its own hash.  LMCache chunks
-    span ``blocks_in_chunk`` consecutive blocks.  The representative hash
+    span `blocks_in_chunk` consecutive blocks.  The representative hash
     for a chunk is the hash of the **last** block in that chunk (because
     each block hash already encodes its prefix).  So we start at index
-    ``blocks_in_chunk - 1`` and stride by ``blocks_in_chunk``.
+    `blocks_in_chunk - 1` and stride by `blocks_in_chunk`.
     """
     return islice(block_hashes, blocks_in_chunk - 1, None, blocks_in_chunk)
 
@@ -78,7 +78,7 @@ def get_lmcache_chunk_size(
     return chunk_size
 
 
-@dataclass
+@dataclass(slots=True)
 class ParallelStrategy:
     use_mla: bool
     """Whether to use the MLA."""
@@ -111,7 +111,7 @@ class ParallelStrategy:
     """The pipeline parallel size."""
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadStoreOp:
     block_ids: list[int]
     """Block ids for the load/store operation"""

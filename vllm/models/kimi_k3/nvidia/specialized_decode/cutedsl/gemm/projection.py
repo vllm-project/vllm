@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Split-K projection on the FlashInfer CuTe core vendored in ``splitk.py`` (with an
+"""Split-K projection on the FlashInfer CuTe core vendored in `splitk.py` (with an
 evict_first weight TMA; policies map padded rows to (M tile, N tile, split K,
 stages); attention owns live slot masks)."""
 
@@ -43,7 +43,7 @@ def compile_projection(tactic, output_dtype, arch):
 
 
 def weight_map(weight, rows):
-    """Device TMA map of ``weight`` [N, K] (row pitch kept): box {64, rows}, SW128."""
+    """Device TMA map of `weight` [N, K] (row pitch kept): box {64, rows}, SW128."""
     types = cuda.CUtensorMapDataType
     dtype = {
         torch.bfloat16: types.CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
@@ -88,7 +88,7 @@ class PreparedProjection:
         return self
 
     def weight_map(self, rows):
-        """The kernel's extra argument: A's map for ``rows``-row tiles."""
+        """The kernel's extra argument: A's map for `rows`-row tiles."""
         if rows not in self.maps:
             self.maps[rows] = weight_map(self.weight, rows)
         return (cutlass.Int64(self.maps[rows].data_ptr()),)

@@ -12,11 +12,14 @@ With shared host storage, DP replicas instead map the same TP slice and
 prefetch only their own tokens without DP gathers.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -32,6 +35,8 @@ from vllm.config.load import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.distributed import cleanup_dist_env_and_memory, parallel_state
+from vllm.distributed.engram_pool import EngramPool, rdma, verbs
+from vllm.distributed.engram_pool.group import PeerGroup
 from vllm.distributed.parallel_state import (
     get_engram_dp_group,
     get_engram_dp_size,
@@ -54,9 +59,11 @@ from vllm.models.deepseek_v41.common.engram import (
     engram_head_shard_rank,
     gather_engram_hashes,
 )
+from vllm.models.qwen4_exp.common import ngram_embedding as ple_ops
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.vmm_driver import imex_channel_available
 
 WORLD_SIZE = 4
 DIM, BLOCK = 64, 32
@@ -69,10 +76,16 @@ def _token_counts(dp_size: int) -> tuple[tuple[int, ...], ...]:
     return ((8,) * dp_size, (7, 0, 5, 1)[:dp_size], (7,) * dp_size)
 
 
-def _full_table(rows: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _full_table(
+    rows: int, packed_fp4: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
     """The unsharded table, identical on every rank."""
     torch.manual_seed(0)
-    weight = (torch.randn(rows, DIM) * 4).to(torch.float8_e4m3fn)
+    weight = (
+        torch.randint(0, 256, (rows, DIM // 2), dtype=torch.uint8)
+        if packed_fp4
+        else (torch.randn(rows, DIM) * 4).to(torch.float8_e4m3fn)
+    )
     scale_inv = torch.randint(120, 134, (rows, DIM // BLOCK), dtype=torch.uint8)
     return weight, scale_inv
 
@@ -92,7 +105,14 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
     """Dequantized lookup against the whole table."""
     valid = ids >= 0
     safe_ids = ids.clamp_min(0).long()
-    values = torch.nn.functional.embedding(safe_ids, weight).float()
+    values = torch.nn.functional.embedding(safe_ids, weight)
+    if weight.dtype == torch.uint8:
+        nibbles = torch.stack((values & 0xF, values >> 4), dim=-1).flatten(-2).long()
+        lut = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=weight.device
+        )
+        values = torch.where(nibbles & 8 != 0, -1.0, 1.0) * lut[nibbles & 7]
+    values = values.float()
     scales = torch.nn.functional.embedding(safe_ids, scale_inv)
     scales = (scales.to(torch.int32) << 23).view(torch.float32)
     values = values.unflatten(-1, (-1, BLOCK)) * scales.unsqueeze(-1)
@@ -113,6 +133,16 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
             [0, 1, 2, 3],
         ),
         ("Qwen4ExpForCausalLM", {}, 2, None, [0, 1]),
+        # The offloaded Qwen4Exp PLE table is only shared over the group, so it
+        # exists with dp_shared_memory unless the table is spread over DP.
+        ("Qwen4ExpForCausalLM", {"dp_shared_memory": True}, 2, [0, 2], [0, 1]),
+        (
+            "Qwen4ExpForCausalLM",
+            {"dp_shared_memory": True, "embedding_across_dp": True},
+            2,
+            None,
+            [0, 1, 2, 3],
+        ),
         (
             "Qwen4ExpForCausalLM",
             {"embedding_across_dp": True},
@@ -169,7 +199,7 @@ def test_engram_group_creation_honors_model_and_options(
     assert (group is parallel_state._DP) == full_dp
 
 
-def _worker(rank: int, tp_size: int, port: int) -> None:
+def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
     torch.accelerator.set_device_index(rank)
     update_environment_variables(
         {
@@ -214,6 +244,12 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
 
         for failure in ("create", "open", "mmap", "register", "pinned", None):
             _check_shared_storage_lifetime_and_failures(failure)
+        for failure, packed_fp4 in product((None, "create", "import"), (False, True)):
+            _check_cumem_host_table(failure, packed_fp4)
+        for shm_fits in (True, False):
+            _check_ple_shared_table(shm_fits)
+        if tp_size == 1:
+            _check_pool_tables(store_dir)
 
         # GPU peer reads need NVLink P2P, which CI's L4s lack.
         p2p = current_platform.is_fully_connected(
@@ -223,10 +259,14 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
             ]
         )
         # Reuse the processes and communication groups across storage modes.
-        for (cpu_offload, dp_shared_memory), n_heads, sequence_parallel in product(
+        for (
+            cpu_offload,
+            dp_shared_memory,
+        ), n_heads, sequence_parallel, packed_fp4 in product(
             [(False, False), (True, False), (True, True)],
             [8, 7],
             [False, True] if tp_size > 1 else [False],
+            [False, True],
         ):
             _check_table(
                 vllm_config,
@@ -235,14 +275,225 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
                 n_heads,
                 sequence_parallel,
                 p2p,
+                packed_fp4,
             )
         if tp_size == 1 and p2p:
             # Without NVLink P2P, GPU tables keep the DP collectives.
-            _check_table(vllm_config, False, False, 8, False, p2p=False)
+            for packed_fp4 in (False, True):
+                _check_table(
+                    vllm_config,
+                    False,
+                    False,
+                    8,
+                    False,
+                    p2p=False,
+                    packed_fp4=packed_fp4,
+                )
         if tp_size == 1:
             _check_fp8_batch(vllm_config)
     finally:
         cleanup_dist_env_and_memory()
+
+
+def _check_pool_tables(store_dir: str):
+    """GPUs of independent engines split one table in an Engram pool and read
+    each other's rows, over every transport this machine has."""
+    modes = []
+    if current_platform.is_cuda() and imex_channel_available():
+        from cuda.bindings import driver as cu
+
+        modes.append(("nvlink", False, 4))
+        # Every rank must take the same collective path in a mixed GPU group.
+        attrs = cu.CUdevice_attribute
+        host_vmm = (
+            attrs.CU_DEVICE_ATTRIBUTE_HOST_NUMA_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED
+        )
+        if all(
+            cu.cuDeviceGetAttribute(host_vmm, device) == (cu.CUresult.CUDA_SUCCESS, 1)
+            for device in range(WORLD_SIZE)
+        ):
+            modes.append(("nvlink", True, 4))
+    if current_platform.is_cuda() and verbs.active_devices():
+        # GPUs of a node map each other's host shards; nodes of one use RDMA.
+        modes += [("rdma", False, 4), ("rdma", True, 4), ("rdma", True, 1)]
+    weight, scale = _full_table(sum(HEAD_SIZES))
+    from vllm.models.deepseek_v41.nvidia.ops.engram_pool import PoolEngramEmbedding
+
+    for transport, host, node in modes:
+        group = PeerGroup(WORLD_SIZE, f"{store_dir}/{transport}{host}{node}/store")
+        # Engines batch differently (P/D): owners size each requester's mailbox.
+        max_items = 9 * len(HEAD_SIZES) * (1 + group.rank_in_group % 2)
+        # node == 1: each GPU as its own machine, so rows move over RDMA.
+        machine = str(group.rank_in_group) if node == 1 else rdma.node_id()
+        with patch.object(rdma, "node_id", lambda machine=machine: machine):
+            pool = EngramPool(group, transport, host, max_items, 72)
+        # Independent engines can own one GPU at a nonzero CUDA ordinal.
+        device = torch.accelerator.current_device_index()
+        assigned = [current_platform.visible_device_id_to_physical_device_id(device)]
+        with (
+            torch.device("cuda"),
+            patch(
+                "vllm.platforms.interface._assigned_physical_gpu_ids",
+                assigned if transport == "nvlink" else None,
+            ),
+        ):
+            table = PoolEngramEmbedding(
+                sum(HEAD_SIZES), DIM, HEAD_SIZES, False, pool, "table"
+            )
+        assert table.dp_size == 1
+        if transport == "nvlink" and host:
+            error, handle = cu.cuMemRetainAllocationHandle(table.weight.data_ptr())
+            assert error == cu.CUresult.CUDA_SUCCESS
+            try:
+                error, prop = cu.cuMemGetAllocationPropertiesFromHandle(handle)
+                assert error == cu.CUresult.CUDA_SUCCESS
+                assert (
+                    prop.location.type
+                    == cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_HOST_NUMA
+                )
+                assert prop.location.id == current_platform.get_device_numa_node(
+                    torch.accelerator.current_device_index()
+                )
+            finally:
+                cu.cuMemRelease(handle)
+            _check_nvlink_startup_rollback(pool)
+        table.weight.weight_loader(table.weight, weight)
+        table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
+        table.process_weights_after_loading()
+        ids = _make_ids(HEAD_SIZES, 9, seed=500 + group.rank_in_group)
+        # A first fetch with no remote rows (profile runs) must not fail.
+        dead = torch.full_like(ids, -1)
+        torch.testing.assert_close(
+            table(dead), _reference(weight.cuda(), scale.cuda(), dead), atol=0, rtol=0
+        )
+        ids[0, 0] = -1
+        expected = _reference(weight.cuda(), scale.cuda(), ids)
+        torch.testing.assert_close(table(ids), expected, atol=0, rtol=0)
+        # Replays carry no host state: each one fetches the ids now in `static`.
+        static, stream = ids.clone(), torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            table(static)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            out = table(static)
+        for seed in range(3):
+            static.copy_(
+                _make_ids(HEAD_SIZES, 9, seed=600 + 8 * seed + group.rank_in_group)
+            )
+            graph.replay()
+            expected = _reference(weight.cuda(), scale.cuda(), static)
+            torch.testing.assert_close(out, expected, atol=0, rtol=0)
+        del graph
+        group.barrier()
+        pool.close()
+
+
+def _check_nvlink_startup_rollback(pool: EngramPool):
+    """A failed rank must leave no allocation handles or address reservations."""
+    from cuda.bindings import driver as cu
+
+    for failure in (
+        "cuDeviceGetAttribute",
+        "cuMemCreate",
+        "cuMemExportToShareableHandle",
+        "cuMemImportFromShareableHandle",
+        "cuMemMap",
+        "cuMemSetAccess",
+    ):
+        with ExitStack() as stack:
+            calls = {
+                name: stack.enter_context(
+                    patch.object(cu, name, wraps=getattr(cu, name))
+                )
+                for name in (
+                    "cuMemCreate",
+                    "cuMemImportFromShareableHandle",
+                    "cuMemRelease",
+                    "cuMemAddressReserve",
+                    "cuMemAddressFree",
+                )
+            }
+            if pool.group.rank_in_group == 0:
+                stack.enter_context(
+                    patch.object(cu, failure, side_effect=MemoryError(failure))
+                )
+            with pytest.raises(RuntimeError, match=f"rank 0: MemoryError: {failure}"):
+                pool.table(32, 8, "rollback")
+
+        assert (
+            calls["cuMemAddressFree"].call_count
+            == calls["cuMemAddressReserve"].call_count
+        )
+        assert calls["cuMemRelease"].call_count == (
+            calls["cuMemCreate"].call_count
+            + calls["cuMemImportFromShareableHandle"].call_count
+        )
+
+
+def test_engram_peer_group_propagates_startup_failure(tmp_path):
+    path = str(tmp_path / "peers")
+    groups = [PeerGroup(2, path) for _ in range(2)]
+
+    def run(group):
+        with (
+            pytest.raises(RuntimeError, match="rank 1: IndexError: device"),
+            group.startup_stage("Allocating table"),
+        ):
+            if group.rank_in_group == 1:
+                raise IndexError("device")
+
+    with ThreadPoolExecutor(2) as executor:
+        list(executor.map(run, groups))
+
+
+def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
+    """Engines share one config, so ranks must not collide however they race,
+    a per-job store directory need not exist, and a reused store is rejected
+    rather than joined."""
+    path = str(tmp_path / "job" / "peers")
+    with ThreadPoolExecutor(4) as pool:
+        groups = list(pool.map(lambda _: PeerGroup(4, path), range(4)))
+        gathered = list(
+            pool.map(
+                lambda group: group.all_gather(b"%d" % group.rank_in_group),
+                groups,
+            )
+        )
+    assert sorted(group.rank_in_group for group in groups) == [0, 1, 2, 3]
+    assert gathered == [[b"0", b"1", b"2", b"3"]] * 4
+    with pytest.raises(RuntimeError, match="fresh store path"):
+        PeerGroup(4, path)
+
+
+def test_engram_peer_group_names_missing_gpus(tmp_path, monkeypatch):
+    """A peer that never arrives fails startup with its rank, not a bare timeout."""
+    monkeypatch.setenv("VLLM_ENGINE_READY_TIMEOUT_S", "1")
+    group = PeerGroup(2, str(tmp_path / "peers"))
+    with pytest.raises(TimeoutError, match=r"GPUs \[1\] did not reach startup step 1"):
+        group.barrier()
+
+
+def test_engram_pool_table_rejects_reload(monkeypatch):
+    """Other engines read a table's rows at any time, so it cannot reload."""
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    pool = EngramPool.__new__(EngramPool)
+    pool.group = SimpleNamespace(barrier=lambda: None)
+    table = SimpleNamespace(_loaded=False)
+    pool.ready(table)
+    with pytest.raises(RuntimeError, match="cannot reload weights"):
+        pool.ready(table)
+
+
+def test_engram_pool_proxy_stops_on_failed_completion():
+    """A failed RDMA completion stops the proxy instead of being skipped, so
+    requesters see the failure rather than wait for the GPU timeout."""
+    from vllm.distributed.engram_pool import proxy
+
+    wc = (verbs.ibv_wc * 2)()
+    proxy._check(wc, 2, "gather")
+    wc[1].status, wc[1].qp_num = 5, 77
+    with pytest.raises(RuntimeError, match="gather failed on QP 77"):
+        proxy._check(wc, 2, "gather")
 
 
 def _check_fp8_batch(vllm_config):
@@ -356,7 +607,11 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert result.value == 0
         return result
 
+    engram_host_table = _engram_host_table()
+
     with pytest.MonkeyPatch.context() as patch:
+        # Exercise the /dev/shm path even where host-memory tables are used.
+        patch.setattr(engram_host_table, "share_host_table", lambda *args: None)
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -405,8 +660,106 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert all(not path.exists() for path in paths)
 
 
+def _engram_host_table():
+    if current_platform.is_rocm():
+        from vllm.models.deepseek_v41.amd.ops import engram_host_table
+    else:
+        from vllm.models.deepseek_v41.nvidia.ops import (
+            engram_fabric_table as engram_host_table,
+        )
+    return engram_host_table
+
+
+def _check_ple_shared_table(shm_fits):
+    """Qwen4Exp's PLE table is one /dev/shm mapping per EDP group, loaded by its
+    leader; without room in /dev/shm, every rank loads its own table."""
+    group = get_engram_dp_group()
+    with pytest.MonkeyPatch.context() as patch:
+        if not shm_fits:
+            patch.setattr(engram_ops, "_shm_shortfall", lambda num_bytes: "too small")
+        embedding = ple_ops.Qwen4ExpPLESharedHostEmbedding(
+            8,
+            DIM,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=ple_ops.Qwen4ExpPLEUnquantizedEmbeddingMethod(),
+        )
+    # Every rank offers different rows; a shared table holds the leader's.
+    offered = torch.full((8, DIM), group.rank_in_group + 1.0, dtype=torch.bfloat16)
+    embedding.weight_loader(embedding.weight, offered)
+    expected = 1.0 if shm_fits else group.rank_in_group + 1.0
+    assert embedding.weight.is_pinned()
+    assert torch.all(embedding.weight == expected)
+    group.barrier()
+
+
+def _check_cumem_host_table(failure, packed_fp4):
+    """Chunked cuMem tables read back across ranks; a failed allocation or
+    import on any rank falls back to /dev/shm on all of them."""
+    engram_host_table = _engram_host_table()
+    is_rocm = current_platform.is_rocm()
+    if is_rocm:
+        if not engram_host_table.host_memory_supported():
+            return
+    elif not engram_host_table.fabric_host_memory_supported():
+        return
+
+    group = get_engram_dp_group()
+    # Three 2 MiB chunks, the last one partial.
+    row_bytes = DIM // 2 if packed_fp4 else DIM
+    rows = 5 * (1 << 20) // row_bytes
+    with pytest.MonkeyPatch.context() as patch:
+        if is_rocm:
+            patch.setenv("VLLM_ROCM_ENGRAM_HIP_VMM", "1")
+        patch.setattr(engram_host_table, "CHUNK_BYTES", 2 << 20)
+        if failure == "create" and group.rank_in_group == 0:
+            patch.setattr(engram_host_table, "NUMA_RESERVE_FRACTION", 1.0)
+        if failure == "import" and group.rank_in_group == 1:
+            if is_rocm:
+                call = engram_host_table._call
+
+                def fail_import(name, *args):
+                    if name == "hipMemImportFromShareableHandle":
+                        raise RuntimeError(f"{name} failed: hipErrorInvalidValue")
+                    call(name, *args)
+
+                patch.setattr(engram_host_table, "_call", fail_import)
+            else:
+                patch.setattr(
+                    engram_host_table.cu,
+                    "cuMemImportFromShareableHandle",
+                    lambda *args: (
+                        engram_host_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
+                        None,
+                    ),
+                )
+        storage = engram_ops.DPSharedEngramStorage(
+            rows, DIM, BLOCK, group, packed_fp4=packed_fp4
+        )
+    assert storage.huge_pages == (failure is None)
+    table = (
+        torch.arange(rows * row_bytes)
+        .remainder(251)
+        .to(torch.uint8)
+        .view(rows, row_bytes)
+    )
+    if group.rank_in_group == 0:
+        storage.weight.view(torch.uint8).copy_(table)
+    group.barrier()
+    weight, _ = storage.get_views(storage.weight, storage.weight_scale_inv)
+    assert torch.equal(weight.view(torch.uint8).cpu(), table)
+    group.barrier()
+
+
 def _check_table(
-    vllm_config, cpu_offload, dp_shared_memory, n_heads, sequence_parallel, p2p
+    vllm_config,
+    cpu_offload,
+    dp_shared_memory,
+    n_heads,
+    sequence_parallel,
+    p2p,
+    packed_fp4,
 ):
     parallel = vllm_config.parallel_config
     dp_size, tp_size = parallel.data_parallel_size, parallel.tensor_parallel_size
@@ -442,10 +795,19 @@ def _check_table(
             engram_compressed_vocab_size=32,
             engram_pad_token_id=0,
             engram_vocab_size=HEAD_SIZES[0],
+            quantization_config={
+                "engram_embed_quant": "mxfp4" if packed_fp4 else "fp8"
+            },
         )
         with set_current_vllm_config(vllm_config):
-            weight, scale_inv = _full_table(rows)
+            weight, scale_inv = _full_table(rows, packed_fp4)
             layout = EngramLayout(config)
+            # A host budget between MXFP4 and FP8 sizes must admit only MXFP4.
+            with m.context() as memory_patch:
+                memory_patch.setattr(
+                    engram_ops, "get_available_memory", lambda: rows * DIM
+                )
+                assert engram_ops.can_share_engram_tables(layout) == packed_fp4
             # Stub configuration inputs, not Engram's initialization or execution.
             component_config = SimpleNamespace(
                 engram_config=EngramConfig(
@@ -483,13 +845,18 @@ def _check_table(
                 layer.weight_scale_inv.weight_loader(
                     layer.weight_scale_inv, loader_scale
                 )
+            # As the model loader does: peers must not read rows still loading.
+            layer.process_weights_after_loading()
             # Shared host tables and GPU peer reads look up only local tokens.
             local = layer.dp_size == 1
             assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1 and p2p)
             if dp_shared_memory:
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
-                assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+                # A dmabuf CPU mapping cannot be pinned; lookups use the GPU views.
+                if not (current_platform.is_rocm() and layer._shared_memory.huge_pages):
+                    assert layer.weight.is_pinned()
+                    assert layer.weight_scale_inv.is_pinned()
             if local:
 
                 def unexpected_collective(*args, **kwargs):
@@ -576,7 +943,8 @@ def _check_table(
 def _check_dummy_hash_model_forward(
     vllm_config, engram, head_sizes, weight, scales, dp_shared_memory
 ):
-    """A metadata-less replica joins DP sharding but skips a shared lookup."""
+    """A metadata-less replica looks up dead rows, so it joins DP sharding and
+    the memory profile sees the Engram activations."""
     from vllm.models.deepseek_v41.common.engram import NgramHashState
 
     if current_platform.is_rocm():
@@ -603,17 +971,11 @@ def _check_dummy_hash_model_forward(
         # **kwargs absorbs the decoder's keyword-only flags.
         def __call__(self, hidden, positions, input_ids, *args, **kwargs):
             hashes, keep = args[-2:]
-            if dp_shared_memory and dp_rank == 1:
-                assert hashes is None and keep is None
-                output = hidden.new_zeros(
-                    tokens, len(head_sizes), DIM, dtype=torch.bfloat16
-                )
-            else:
-                assert hashes is not None and keep is not None
-                assert bool(keep.all()) == (dp_rank != 1)
-                if dp_rank == 1:
-                    assert torch.all(hashes == engram_ops.DEAD_ID)
-                output = engram.embed(hashes[:, 0])
+            assert hashes is not None and keep is not None
+            assert bool(keep.all()) == (dp_rank != 1)
+            if dp_rank == 1:
+                assert torch.all(hashes == engram_ops.DEAD_ID)
+            output = engram.embed(hashes[:, 0])
             # Trailing None is the NVIDIA layer's previous_aux; this stub
             # captures no aux states.
             outputs = (output, hidden, hidden, hidden, hidden, None)
@@ -623,6 +985,7 @@ def _check_dummy_hash_model_forward(
     torch.nn.Module.__init__(model)
     model.parallel_config = vllm_config.parallel_config
     model.use_native_mega_moe = False
+    model.use_mega_gate = False
     model.use_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False
@@ -635,6 +998,7 @@ def _check_dummy_hash_model_forward(
     model.end_layer = 1
     model.decoder_replay_start = model.end_layer
     model.decoder_replay_layers = None
+    model.pipeline_relay = None
     model.aux_hidden_state_layers = ()
     model.mhc_post = lambda hidden, *args: hidden
     metadata = (
@@ -769,15 +1133,28 @@ def _check_prefetch_replay(
         torch.accelerator.synchronize()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("tp_size", [1, 2])
-def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch):
+def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch, tmp_path):
     """Check all storage modes with one process launch per TP/DP topology."""
     if torch.accelerator.device_count() < WORLD_SIZE:
         pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
-    mp.spawn(_worker, args=(tp_size, get_open_port()), nprocs=WORLD_SIZE)
+    mp.spawn(_worker, args=(tp_size, get_open_port(), str(tmp_path)), nprocs=WORLD_SIZE)
     cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
+def test_engram_hip_host_table_failure_clears_hip_error():
+    """A failed HIP VMM call must not fail the next torch launch, which the
+    /dev/shm fallback runs right after it."""
+    from vllm.models.deepseek_v41.amd.ops import engram_host_table
+
+    with pytest.raises(RuntimeError, match="hipMemCreate failed"):
+        engram_host_table._create_chunk(2 << 20, numa_node=1 << 20)
+    assert torch.ones(4, device="cuda").sum().item() == 4
 
 
 @pytest.mark.parametrize(
@@ -823,7 +1200,7 @@ def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch, query_fails
     )
     if query_fails:
         monkeypatch.setattr(engram_ops, "check_shm_free_space", query)
-    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM)
+    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM, row_bytes=DIM)
     assert not engram_ops.can_share_engram_tables(layout)
     assert len(broadcasts) == 1 and broadcasts[0] is not None
 

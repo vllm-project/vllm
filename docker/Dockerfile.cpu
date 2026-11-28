@@ -13,7 +13,7 @@
 #   vllm-dev: used for development
 #
 # Build arguments:
-#   PYTHON_VERSION=3.13|3.12 (default)|3.11
+#   PYTHON_VERSION=3.14 (default)|3.13|3.12|3.11
 #   VLLM_CPU_X86=false (default)|true (for cross-compilation)
 #   VLLM_CPU_ARM_BF16=false (default)|true (for cross-compilation)
 #
@@ -84,22 +84,34 @@ WORKDIR /workspace
 
 COPY --from=binutils-build /opt/binutils /opt/binutils
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
 
-# Install minimal dependencies and uv
+# The toolchain PPA is added from its pinned signing key (fingerprint
+# C8EC952E2A0E1FBDC5090F6A2C277A0A352154E5) rather than add-apt-repository,
+# which needs the Launchpad API and fails the build whenever that API is down.
+COPY docker/keys/ubuntu-toolchain-r.asc /etc/apt/keyrings/ubuntu-toolchain-r.asc
+
+# Install minimal dependencies and uv. The PPA is sometimes slow and returns
+# 503s, so its index and gcc-15 are fetched in a retry loop: --download-only
+# keeps the files that finished, so a retry fetches only the ones that failed.
+# The index is refetched only while gcc-15 is unknown, because every
+# `apt-get update` deletes the downloaded .debs (the image's docker-clean hook).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
     software-properties-common libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
-    && for i in 1 2 3; do \
-        add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
-        { echo "Attempt $i failed, retrying toolchain PPA..."; sleep 5; }; \
+    && echo "deb [signed-by=/etc/apt/keyrings/ubuntu-toolchain-r.asc] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+        > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list \
+    && for attempt in 1 2 3 4 5 6; do \
+        { apt-cache show gcc-15 >/dev/null 2>&1 || apt-get update -y -o Acquire::Retries=5; } \
+        && apt-get install -y --no-install-recommends --download-only -o Acquire::Retries=5 gcc-15 g++-15 && break; \
+        if [ "$attempt" = 6 ]; then exit 1; fi; \
+        echo "PPA download incomplete (attempt $attempt of 6); retrying in 30s"; sleep 30; \
     done \
-    && apt-get update -y \
     && apt-get install -y --no-install-recommends gcc-15 g++-15 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 10 --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -249,6 +261,9 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Relink with the exact Git-derived package version.
 FROM rust-build-cache AS rust-build
+# Few crates recompile here, far from the open-file limit, and the job count
+# also caps the thin-LTO threads: lift the cap, as docker/Dockerfile.rocm does.
+ENV CARGO_BUILD_JOBS=default
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
@@ -363,7 +378,11 @@ COPY requirements/test/cpu.txt requirements/test/cpu.txt
 # packages unavailable on aarch64 (decord, terratorch) for arm builds. Also
 # drop the generic PyPI triton pulled in transitively (via xgrammar) on x86
 # builds, so it doesn't clobber the triton-cpu wheel from requirements/cpu.txt.
-RUN case "$(uname -m)" in \
+# Join hashed requirement continuations before filtering whole entries.
+RUN awk '/\\$/ {sub(/\\$/, ""); printf "%s", $0; next} {print}' \
+        requirements/test/cpu.txt > requirements/test/cpu.txt.tmp && \
+    mv requirements/test/cpu.txt.tmp requirements/test/cpu.txt && \
+    case "$(uname -m)" in \
     aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
     x86_64) sed -i '/^triton==/d' requirements/test/cpu.txt ;; \
     esac
@@ -446,6 +465,16 @@ ADD ./tools/ ./tools/
 # ship either file, and this stage does not inherit the vllm-src tree.
 ADD ./setup.py ./setup.py
 ADD ./requirements/cpu.txt ./requirements/cpu.txt
+# tests/tools/test_dependency_pins.py runs the docs version loader against
+# the hashed CUDA test lock, and checks the hybrid test build tools are hashed.
+ADD ./docs/mkdocs/gen_files/generate_argparse.py \
+    ./docs/mkdocs/gen_files/generate_argparse.py
+ADD ./requirements/test/cuda.txt ./requirements/test/cuda.txt
+ADD ./requirements/build/hybrid-test-deps.txt ./requirements/build/hybrid-test-deps.txt
+# tests/v1/core/test_prompt_block_hash_vectors.py checks the engine against the
+# prompt block hash vectors that the Rust frontend's unit tests also use.
+ADD ./rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json \
+    ./rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -482,7 +511,7 @@ ARG PYTHON_VERSION
 LABEL ai.vllm.build.target-arch="${TARGETARCH}"
 LABEL ai.vllm.build.cpu-x86="${VLLM_CPU_X86:-false}"
 LABEL ai.vllm.build.cpu-arm-bf16="${VLLM_CPU_ARM_BF16:-false}"
-LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
+LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.14}"
 
 # Copy the examples directory (including the chat/tool templates) so it is
 # present in the released image, as the CUDA image ships it too. The vllm-test

@@ -406,7 +406,7 @@ class OpType(Enum):
             raise ValueError(f"Unrecognized optype {self}")
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkContext:
     """LoRA benchmark context."""
 
@@ -452,7 +452,7 @@ class BenchmarkContext:
         return json.dumps(desc)
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkTensors:
     """Input/Output tensors used for benchmarks."""
 

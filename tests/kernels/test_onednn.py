@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import to_int8
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.platforms import current_platform
 
 if not current_platform.is_cpu():

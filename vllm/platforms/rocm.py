@@ -4,6 +4,7 @@
 import importlib.metadata
 import os
 import platform
+import threading
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
@@ -17,6 +18,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from . import rocm_device_memory
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
@@ -219,6 +221,8 @@ _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
 _ON_GFX115X = "gfx115" in _GCN_ARCH
+_ON_GFX117X = any(arch in _GCN_ARCH for arch in ["gfx1170", "gfx1171"])
+_ON_GFX1201 = "gfx1201" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -322,6 +326,14 @@ def on_gfx1151() -> bool:
 
 def on_gfx115x() -> bool:
     return _ON_GFX115X
+
+
+def on_gfx117x() -> bool:
+    return _ON_GFX117X
+
+
+def on_gfx1201() -> bool:
+    return _ON_GFX1201
 
 
 def on_gfx12x() -> bool:
@@ -494,40 +506,6 @@ def use_rocm_custom_paged_attention(
         )
 
 
-@cache
-def flash_attn_triton_available() -> bool:
-    if not on_gfx1x():
-        return False
-    try:
-        from importlib.util import find_spec
-
-        # Locate the Triton-AMD kernels. Older ROCm/flash-attention (pre
-        # 2026-03) shipped them as the flash_attn.flash_attn_triton_amd
-        # subpackage. The main_perf migration commit 3f94643 moved them
-        # into aiter at aiter.ops.triton._triton_kernels.flash_attn_triton_amd,
-        # so accept either location.
-        def _has_spec(name: str) -> bool:
-            try:
-                return find_spec(name) is not None
-            except (ImportError, ValueError):
-                return False
-
-        if not (
-            _has_spec("flash_attn.flash_attn_triton_amd")
-            or _has_spec("aiter.ops.triton._triton_kernels.flash_attn_triton_amd")
-        ):
-            return False
-        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
-            logger.info_once(
-                "Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable "
-                "Flash Attention Triton backend on RDNA."
-            )
-            return False
-        return True
-    except ImportError:
-        return False
-
-
 def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
@@ -559,8 +537,11 @@ def _get_backend_priorities(
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-    elif rocm_aiter_ops.is_rdna_aiter_enabled():
-        backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+    if rocm_aiter_ops.is_rdna_aiter_enabled():
+        if on_rdna4():
+            backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+        else:
+            backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
     backends.append(AttentionBackendEnum.ROCM_OCTAVE)
@@ -684,9 +665,12 @@ class RocmPlatform(Platform):
         "modelopt_fp4",
         "modelopt_mxfp8",
         "modelopt_mixed",
+        "modelopt_int8",
         "fp8_per_tensor",
         "fp8_per_block",
         "fp8_per_channel",
+        "mxfp4_hadamard32",
+        "lut_b_moe",
         "online",
         "gpt_oss_mxfp4",
     ]
@@ -753,7 +737,24 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        # On gfx1201 and gfx1100, prefer TRITON_ATTN over ROCM_ATTN. An
+        # fp8_e5m2 KV cache keeps ROCM_ATTN: Attention rejects fp8_e5m2 for
+        # backends that take an fp8 query, as TRITON_ATTN does on gfx1201.
+        if (
+            (on_gfx1201() or on_gfx1100())
+            and AttentionBackendEnum.ROCM_ATTN in backend_priorities
+            and AttentionBackendEnum.TRITON_ATTN in backend_priorities
+            and attn_selector_config.kv_cache_dtype != "fp8_e5m2"
+        ):
+            # Swap the two so every other backend keeps its position.
+            rocm_idx = backend_priorities.index(AttentionBackendEnum.ROCM_ATTN)
+            triton_idx = backend_priorities.index(AttentionBackendEnum.TRITON_ATTN)
+            backend_priorities[rocm_idx], backend_priorities[triton_idx] = (
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.ROCM_ATTN,
+            )
         is_turboquant_run = _uses_turboquant(vllm_config)
+        is_ultraquant_run = _uses_ultraquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
                 invalid_reasons_i = _get_invalid_reasons(
@@ -761,6 +762,7 @@ class RocmPlatform(Platform):
                     device_capability,
                     attn_selector_config,
                     is_turboquant_run=is_turboquant_run,
+                    is_ultraquant_run=is_ultraquant_run,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -800,7 +802,7 @@ class RocmPlatform(Platform):
             except ImportError:
                 sel_invalid_reasons = ["ImportError"]
             if not sel_invalid_reasons:
-                logger.info_once(
+                logger.debug_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
                 )
@@ -900,7 +902,7 @@ class RocmPlatform(Platform):
                 valid_str,
             )
         else:
-            logger.info_once(
+            logger.debug_once(
                 "Using %s backend out of potential backends: %s.",
                 selected_backend.name,
                 valid_str,
@@ -929,7 +931,7 @@ class RocmPlatform(Platform):
                 f"Backend {backend} is not supported for vit attention. "
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
         from importlib.util import find_spec
@@ -941,29 +943,18 @@ class RocmPlatform(Platform):
             and on_cdna()
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info_once("Using AITER Flash Attention backend for ViT model.")
+            logger.debug_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
         if (
-            on_cdna()
+            (on_cdna() or on_gfx1x())
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info_once("Using Flash Attention backend for ViT model.")
+            logger.debug_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
-        if (
-            on_gfx1x()
-            and flash_attn_triton_available()
-            and (dtype == torch.float16 or dtype == torch.bfloat16)
-        ):
-            logger.info_once(
-                "Using Flash Attention (Triton backend) for ViT model on RDNA."
-            )
-            return AttentionBackendEnum.FLASH_ATTN
-
-        logger.info_once("Using Torch SDPA backend for ViT model.")
+        logger.debug_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
@@ -1074,8 +1065,9 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         try:
-            device = amdsmi_get_processor_handles()[device_id]
+            device = amdsmi_get_processor_handles()[physical_device_id]
         except AmdSmiException as error:
             logger.error("amdsmi device query failed ", exc_info=error)
             return ""
@@ -1123,17 +1115,14 @@ class RocmPlatform(Platform):
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
-        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
-            compilation_config.custom_ops.append("+quant_fp8")
+        if use_aiter_fp8_linear:
+            compilation_config.enable_custom_op_by_default("quant_fp8")
 
         # Only RMSNorm's custom op reaches rms_norm_batch_invariant. Inductor
         # lowers the native one to a reduction whose block size it picks by
         # benchmarking, so the summation order varies with the batch and run.
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and "-rms_norm" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm")
+        if envs.VLLM_BATCH_INVARIANT:
+            compilation_config.enable_custom_op_by_default("rms_norm")
 
         if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
             logger.warning_once(
@@ -1144,26 +1133,17 @@ class RocmPlatform(Platform):
             compilation_config.custom_ops.remove("-grouped_topk")
         # Ensure grouped_topk is always enabled when using AITER if
         # its not disabled by user
-        if (
-            use_aiter_fused_moe
-            and "+grouped_topk" not in compilation_config.custom_ops
-            and "-grouped_topk" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+grouped_topk")
+        if use_aiter_fused_moe:
+            compilation_config.enable_custom_op_by_default("grouped_topk")
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
-        compilation_config.custom_ops.append("+sparse_attn_indexer")
+        compilation_config.enable_custom_op_by_default("sparse_attn_indexer")
 
         # Default the gated RMSNorm custom op on for unquantized models. Quantized
         # is untested in serving.
         model_config = vllm_config.model_config
-        if (
-            model_config is not None
-            and model_config.quantization is None
-            and "+rms_norm_gated" not in compilation_config.custom_ops
-            and "-rms_norm_gated" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm_gated")
+        if model_config is not None and model_config.quantization is None:
+            compilation_config.enable_custom_op_by_default("rms_norm_gated")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -1204,6 +1184,18 @@ class RocmPlatform(Platform):
 
         _maybe_default_dsv4_mxfp4_indexer(vllm_config)
 
+        if parallel_config.all2all_backend == "mori":
+            from vllm.config.parallel import resolve_mori_all2all
+
+            resolve_mori_all2all(
+                parallel_config,
+                model_config,
+                vllm_config.kernel_config.moe_backend,
+                lsa_spans_hosts=on_gfx1250(),
+                sdma_picks_epv1=not on_gfx1250(),
+                validated_arch=on_gfx950() or on_gfx1250(),
+            )
+
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
@@ -1240,6 +1232,11 @@ class RocmPlatform(Platform):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
+
+    @classmethod
+    def free_device_memory(cls, device: torch.device | None = None) -> int:
+        free = rocm_device_memory.exact_free_memory(device)
+        return super().free_device_memory(device) if free is None else free
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
@@ -1300,6 +1297,35 @@ class RocmPlatform(Platform):
             torch.cuda.is_current_stream_capturing()
             or not isinstance(attn_metadata, dict)
         )
+
+    @classmethod
+    def prepare_ubatch_streams(
+        cls,
+        device: torch.device,
+        streams: tuple[torch.cuda.Stream, ...],
+        num_threads: int,
+    ) -> None:
+        """Fill torch's hipBLASLt handle pool for the microbatch threads.
+
+        hipblasLtCreate clears a new handle's Stream-K flags with a null-stream
+        hipMemset that can land after a GEMM on the comm stream has started, and
+        the GEMM then never finishes. Microbatch threads are new every step and
+        take their per-stream handles from the pool."""
+        # TODO: remove once hipblasLtCreate no longer issues a null-stream memset.
+        a = torch.zeros((64, 64), dtype=torch.bfloat16, device=device)
+
+        def touch() -> None:
+            torch.accelerator.set_device_index(device.index)
+            for stream in streams:
+                with torch.cuda.stream(stream):
+                    torch.mm(a, a, out_dtype=torch.float32)
+
+        threads = [threading.Thread(target=touch) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        torch.accelerator.synchronize(device)
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
@@ -1405,6 +1431,7 @@ class RocmPlatform(Platform):
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.config.kernel import IrOpPriorityConfig
 
@@ -1422,18 +1449,30 @@ class RocmPlatform(Platform):
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
-            and not on_rdna4()
             and not on_gfx90a()  # AITER not built for gfx90a, rmsnorm -> SEGV.
         ):
             rms_norm = ["aiter"] + default
         else:
             rms_norm = default
 
+        rotary_embedding_query_only = default
+        rotary_embedding = default
+        if cc.uses_rope_kernel():
+            rotary_embedding_query_only = [
+                "vllm_c",
+                *(p for p in default if p != "vllm_c"),
+            ]
+            rotary_embedding = rotary_embedding_query_only
+            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
+                rotary_embedding = ["aiter", *rotary_embedding]
+
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
             gelu_and_mul_sparse=["native"],
+            rotary_embedding=rotary_embedding,
+            rotary_embedding_query_only=rotary_embedding_query_only,
         )
 
     @classmethod

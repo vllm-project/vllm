@@ -338,9 +338,7 @@ class EagleMiniCPMForCausalLM(
         self.cache_config = cache_config
         self.quant_config = quant_config
 
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
 
         self.model = self._init_model(
             vllm_config=vllm_config,

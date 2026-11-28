@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton RMSNorm for MuseSpark1x, optionally fused with the gated residual add."""
+"""Triton RMSNorm for Muse Spark, optionally fused with the gated residual add."""
 
 import torch
 
@@ -13,13 +13,13 @@ try:
 except (ImportError, AttributeError):  # pragma: no cover - optional FlashInfer API
     postnorm_gated_residual = None
 
-    def supports_gated_residual_rmsnorm(*_args: object) -> bool:
+    def supports_gated_residual_rmsnorm(*_args: object, **_kwargs: object) -> bool:
         return False
 
 
 @triton.jit
 def _fast2sum(a, b):
-    """Fast2Sum: ``a + b == s + e`` exactly; requires ``|a| >= |b|``."""
+    """Fast2Sum: `a + b == s + e` exactly; requires `|a| >= |b|`."""
     s = a + b
     z = s - a
     return s, b - z
@@ -27,7 +27,7 @@ def _fast2sum(a, b):
 
 @triton.jit
 def _effective_weight(w_ptr, d, dm, gain_center):
-    """``weight + gain_center`` in fp32; the norm rounds only at its store."""
+    """`weight + gain_center` in fp32; the norm rounds only at its store."""
     return tl.load(w_ptr + d, mask=dm, other=0.0).to(tl.float32) + gain_center
 
 
@@ -46,7 +46,7 @@ def _blend_and_store(
     GATE_STREAM: tl.constexpr,
     PER_CHANNEL: tl.constexpr,
 ):
-    """Store ``alpha * stream + beta * y``; ``y`` stays fp32 (one rounding fewer)."""
+    """Store `alpha * stream + beta * y`; `y` stays fp32 (one rounding fewer)."""
     stream = tl.load(s_ptr + idx, mask=mask, other=0.0).to(tl.float32)
 
     if PER_CHANNEL:
@@ -90,9 +90,9 @@ def _rmsnorm_fwd_kernel(
     bD: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
-    """RMSNorm over the last dim of ``[T, D]``; fp32 math, the store rounds once.
+    """RMSNorm over the last dim of `[T, D]`; fp32 math, the store rounds once.
 
-    ``KAHAN`` uses compensated fp32 instead of fp64 for the cross-tile sum
+    `KAHAN` uses compensated fp32 instead of fp64 for the cross-tile sum
     (Blackwell runs fp64 at 1/64 rate).
     """
     if USE_PDL:
@@ -221,7 +221,7 @@ def fused_rmsnorm_fwd(
 ) -> torch.Tensor:
     """RMSNorm with a gain-centred weight, applied before or after the norm.
 
-    With ``residual_stream`` it returns ``alpha * residual_stream + beta * norm(x)``.
+    With `residual_stream` it returns `alpha * residual_stream + beta * norm(x)`.
     """
     input_shape = x.shape
     x = x.reshape(-1, x.shape[-1])
@@ -280,7 +280,12 @@ def fused_rmsnorm_fwd(
         and beta.numel() == D
         and ((w is None and not input_scale) or (w is not None and input_scale))
         and (w is None or w.dtype == torch.bfloat16)
-        and supports_gated_residual_rmsnorm(x, residual_stream, w, alpha, beta)
+        # Cake's PDL programs read `branch` before griddepcontrol.wait and can
+        # emit NaN; use CuTe until https://github.com/flashinfer-ai/flashinfer/issues/9343
+        # is fixed.
+        and supports_gated_residual_rmsnorm(
+            x, residual_stream, w, alpha, beta, backend="cute"
+        )
     ):
         return postnorm_gated_residual(
             x,
@@ -290,6 +295,7 @@ def fused_rmsnorm_fwd(
             beta,
             eps,
             gain_center,
+            backend="cute",
         ).view(input_shape)
 
     if out is None:
@@ -434,7 +440,7 @@ def supports_norm_residual_norm(
     branch: torch.Tensor,
     stream: torch.Tensor,
 ) -> bool:
-    """Whether :func:`fused_norm_residual_norm_fwd` can serve this boundary."""
+    """Whether `fused_norm_residual_norm_fwd` can serve this boundary."""
     if not (branch.is_cuda and stream.is_cuda):
         return False
     if branch.shape != stream.shape or branch.ndim < 2:
@@ -469,7 +475,7 @@ def fused_norm_residual_norm_fwd(
         new_stream = alpha * stream + beta * post_norm(branch)
         out = pre_norm(new_stream)
 
-    Only the sum-of-squares order differs from two ``fused_rmsnorm_fwd`` calls;
+    Only the sum-of-squares order differs from two `fused_rmsnorm_fwd` calls;
     vs fp64 at D=8192, 9e-6 of the bf16 outputs differ by one ulp.
     """
     input_shape = branch.shape

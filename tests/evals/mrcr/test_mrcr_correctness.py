@@ -30,7 +30,7 @@ def test_mrcr_correctness(config_filename):
     cfg = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
     server_args = shlex.split(cfg.get("server_args", ""))
-    server_args += ["--trust-remote-code", "--disable-uvicorn-access-log"]
+    server_args.append("--disable-uvicorn-access-log")
 
     print(
         f"MRCR eval for {cfg['model_name']} (threshold {cfg['match_ratio_threshold']})"

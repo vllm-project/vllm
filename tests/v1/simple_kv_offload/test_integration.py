@@ -6,12 +6,20 @@ import time
 
 import pytest
 import torch
-from transformers import Llama4ForCausalLM, Llama4TextConfig
+from transformers import (
+    Gemma3ForCausalLM,
+    Gemma3TextConfig,
+    Llama4ForCausalLM,
+    Llama4TextConfig,
+)
 
 from tests.models.utils import check_logprobs_close
 from vllm import LLM, SamplingParams, TokensPrompt, envs
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, ParallelConfig
 from vllm.platforms import current_platform
+from vllm.utils import numa_utils
+from vllm.v1.metrics.reader import Counter
+from vllm.v1.simple_kv_offload.metrics import MetricName
 
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
@@ -113,7 +121,81 @@ def test_chunked_local_partial_gpu_hit(vllm_runner, tmp_path, monkeypatch):
         assert mixed_hit.num_cached_tokens == 16
 
 
-def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int) -> LLM:
+def test_hybrid_cpu_hit_is_requeued_after_it_finishes(vllm_runner, tmp_path):
+    """A request that hits its CPU prefix requeues the blocks the hit needs,
+    full attention and the last sliding window, when it finishes, after the
+    blocks another request stored while it ran."""
+    config = Gemma3TextConfig(
+        vocab_size=512,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        max_position_embeddings=256,
+        sliding_window=32,
+        layer_types=["full_attention", "sliding_attention"],
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(1234)
+        Gemma3ForCausalLM(config).save_pretrained(tmp_path)
+
+    def prompt(seed: int, num_blocks: int) -> TokensPrompt:
+        tokens = [3 + (seed * 101 + i * 37) % 500 for i in range(num_blocks * 16 + 1)]
+        return TokensPrompt(prompt_token_ids=tokens)
+
+    def params(max_tokens: int) -> SamplingParams:
+        return SamplingParams(
+            temperature=0, max_tokens=max_tokens, ignore_eos=True, detokenize=False
+        )
+
+    with vllm_runner(
+        str(tmp_path),
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        max_num_seqs=2,
+        block_size=16,
+        num_gpu_blocks_override=64,
+        enable_prefix_caching=True,
+        attention_config={"backend": "TRITON_ATTN"},
+        disable_hybrid_kv_cache_manager=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector",
+            kv_role="kv_both",
+            # 15 usable blocks; the null block takes one.
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": 16 << 20,
+                "num_cpu_blocks": 16,
+            },
+        ),
+    ) as runner:
+        llm = runner.get_llm()
+
+        def cached_tokens(prompts, params) -> list[int | None]:
+            outputs = llm.generate(prompts, params, use_tqdm=False)
+            # Drop the GPU prefix cache once the CPU stores land.
+            deadline = time.monotonic() + 30
+            while not llm.reset_prefix_cache():
+                assert time.monotonic() < deadline, "CPU stores did not finish"
+                time.sleep(0.05)
+            return [o.num_cached_tokens for o in outputs]
+
+        # 8 full-attention blocks and the last 2-block window go to CPU.
+        assert cached_tokens(prompt(0, 8), params(1)) == [0]
+        # Prompt 0 hits CPU and decodes, short of a new full block, while
+        # prompt 1 stores 3 + 2 blocks and fills the CPU tier.
+        outputs = cached_tokens([prompt(0, 8), prompt(1, 3)], [params(15), params(1)])
+        assert outputs == [128, 0]
+        # Prompt 2 evicts 5 blocks, those of prompt 1.
+        assert cached_tokens(prompt(2, 3), params(1)) == [0]
+        assert cached_tokens(prompt(0, 8), params(1)) == [128]
+
+
+def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int, **llm_kwargs) -> LLM:
     kv_transfer_config = KVTransferConfig(
         kv_connector="SimpleCPUOffloadConnector",
         kv_role="kv_both",
@@ -122,12 +204,18 @@ def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int) -> LLM:
             "lazy_offload": lazy,
         },
     )
+    llm_kwargs = (
+        dict(
+            kv_cache_memory_bytes=40 << 30,  # 40 GiB
+            disable_hybrid_kv_cache_manager=False,
+            enable_prefix_caching=True,
+        )
+        | llm_kwargs
+    )
     return LLM(
         model=model,
-        kv_cache_memory_bytes=40 << 30,  # 40 GiB
-        disable_hybrid_kv_cache_manager=False,
-        enable_prefix_caching=True,
         kv_transfer_config=kv_transfer_config,
+        **llm_kwargs,
     )
 
 
@@ -229,6 +317,90 @@ def _latency_test(llm: LLM, lazy: bool = False):
     assert num_times_cpu_better >= 0.8 * num_tests, (
         f"CPU hit only faster {num_times_cpu_better}/{num_tests} times"
     )
+
+
+def _assert_worker_auto_numa(worker):
+    import subprocess
+    from pathlib import Path
+
+    import psutil
+
+    from vllm.utils.cpu_resource_utils import parse_id_list
+
+    parallel_config = worker.parallel_config
+    assert parallel_config.numa_bind and parallel_config._numa_bind_auto
+    gpu_index = parallel_config.get_local_gpu_index(worker.local_rank)
+    node = parallel_config.numa_bind_nodes[gpu_index]
+    node_cpus = parse_id_list(
+        Path(f"/sys/devices/system/node/node{node}/cpulist").read_text().strip()
+    )
+    cpus = set(psutil.Process().cpu_affinity())
+    assert cpus and cpus <= set(node_cpus)
+    result = subprocess.run(
+        ["numactl", "--show"], check=True, capture_output=True, text=True, timeout=10
+    )
+    policy = dict(line.split(":", 1) for line in result.stdout.splitlines())
+    assert policy["policy"].strip() == "preferred"
+    assert policy["preferred node"].strip() == str(node)
+    return {"node": node, "cpus": sorted(cpus), "policy": "preferred"}
+
+
+@pytest.mark.slow_test
+def test_simple_cpu_offload_with_auto_numa(monkeypatch, enable_pickle):
+    """Soft-bound NVIDIA workers must store and restore KV, not silently recompute."""
+    if not current_platform.is_cuda():
+        pytest.skip("Automatic NUMA KV-offload smoke test requires NVIDIA")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    preflight = ParallelConfig(distributed_executor_backend="mp")
+    preflight._numa_bind_auto = True
+    if not numa_utils._can_auto_bind(preflight, local_rank=0) or not (
+        numa_utils._probe_numactl_args(
+            numa_utils._get_numactl_worker_args(preflight, local_rank=0)
+        )
+    ):
+        pytest.skip("Host cannot engage automatic NUMA memory preference")
+
+    model = "Qwen/Qwen3-0.6B"
+    llm = _make_llm(
+        model,
+        False,
+        256 << 20,
+        kv_cache_memory_bytes=128 << 20,
+        max_model_len=1024,
+        distributed_executor_backend="mp",
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+
+    def loaded_blocks(llm: LLM):
+        return sum(
+            metric.value
+            for metric in llm.get_metrics()
+            if isinstance(metric, Counter)
+            and metric.name == MetricName.LOAD_BLOCKS.removesuffix("_total")
+            and metric.labels.get("model_name") == model
+        )
+
+    try:
+        states = llm.collective_rpc(_assert_worker_auto_numa, timeout=30)
+        print(f"NUMA worker state: {states}")
+        sampling_params = SamplingParams(max_tokens=8, temperature=0)
+        prompt = "hi " * 256 + "Let's count to ten. One, two, three, "
+        cold = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+        llm.generate(prompt, sampling_params, use_tqdm=False)
+        deadline = time.monotonic() + 30
+        while not llm.reset_prefix_cache(reset_connector=False):
+            assert time.monotonic() < deadline, "CPU offload did not drain"
+            llm.generate("0", sampling_params, use_tqdm=False)
+        loaded_before = loaded_blocks(llm)
+        restored = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+        loaded = loaded_blocks(llm) - loaded_before
+        assert loaded > 0
+        assert restored.outputs[0].token_ids == cold.outputs[0].token_ids
+        print(f"KV offload blocks restored={loaded}; tokens match")
+    finally:
+        del llm
 
 
 @pytest.mark.optional

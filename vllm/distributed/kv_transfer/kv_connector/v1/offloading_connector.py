@@ -13,7 +13,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -62,7 +65,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return tuple(
             group_id
             for group_id, group in enumerate(self._kv_cache_config.kv_cache_groups)
-            if group.kv_cache_spec.prefix_cacheable and group_id not in offloaded
+            if group.prefix_cacheable and group_id not in offloaded
         )
 
     @property
@@ -142,6 +145,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids)
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        results = super().get_transfer_results(finished_req_ids)
+        assert self.connector_worker is not None
+        results.failed_recving = self.connector_worker.take_failed_recving()
+        return results
+
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         if self.connector_worker is not None:
             return self.connector_worker.build_connector_worker_meta()
@@ -164,7 +175,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def _max_loadable_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> int | None:
-        """How far past ``num_computed_tokens`` a load may reach, if bounded.
+        """How far past `num_computed_tokens` a load may reach, if bounded.
 
         Bounded by the deepest prefix the groups this connector does not
         offload already hold, since nothing refills them beyond it.

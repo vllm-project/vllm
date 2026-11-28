@@ -40,7 +40,7 @@ class LLFp32WDotprod:
 
     :note: K is handled as vectorized main/tail loops plus scalar remainder.
 
-    :compile-key: ``(M, K, bs, epb, act_dtype)`` selects the token count,
+    :compile-key: `(M, K, bs, epb, act_dtype)` selects the token count,
         hidden size, CTA thread/K-stripe width, experts per CTA, and activation
         input type.
     """
@@ -327,18 +327,18 @@ class LLFp32WDotprod:
         stream: CUstream,
     ):
         """Execute the dot-product GEMM operation in steps:
-        - Launch one CTA per small output-column tile with ``bs`` threads.
+        - Launch one CTA per small output-column tile with `bs` threads.
         - Keep one FP32 accumulator per token/expert in each thread.
         - Traverse K with vectorized main/tail, scalar, and ragged-tail loops
           from the precomputed K decomposition.
         - Reduce each token accumulator first within the warp, then across
-          warps through shared memory, and store ``C[:, n]``.
+          warps through shared memory, and store `C[:, n]`.
 
-        :param gA: Input tensor A with shape ``[M, K]``.
+        :param gA: Input tensor A with shape `[M, K]`.
         :type gA: cute.Tensor
-        :param gB: Input tensor B with shape ``[N, K]``.
+        :param gB: Input tensor B with shape `[N, K]`.
         :type gB: cute.Tensor
-        :param gC: Output tensor C with shape ``[M, N]``.
+        :param gC: Output tensor C with shape `[M, N]`.
         :type gC: cute.Tensor
         :param N_dim: Output column count used for the launch grid.
         :type N_dim: cutlass.Int32
@@ -449,9 +449,3 @@ class LLFp32WDotprod:
 
         if const_expr(self.use_pdl):
             cute.arch.griddepcontrol_launch_dependents()
-
-
-def make_host_fp32w(
-    k_val: int, bs: int = 128, token_groups: int = 1, epb: int = 1, m: int = 1
-):
-    return LLFp32WDotprod(m=m, k=k_val, bs=bs, token_groups=token_groups, epb=epb)
