@@ -4,7 +4,13 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from vllm.config import SpeculativeConfig
-from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
+from vllm.v1.engine import (
+    EngineCoreEvent,
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.iteration_workload import (
     QueuedWorkload,
@@ -461,3 +467,57 @@ def test_engine_core_watermarking_overrides_frontend_flag(frontend, reported):
         lora_name=None,
     )
     assert req_stats.is_watermarked == (frontend if reported is None else reported)
+
+
+def _observe(stats, req_stats, ts, is_prefilling, *events):
+    stats.update_from_output(
+        EngineCoreOutput(
+            request_id="r",
+            new_token_ids=[1],
+            events=[EngineCoreEvent(t, e_ts) for t, e_ts in events] or None,
+        ),
+        engine_core_timestamp=ts,
+        is_prefilling=is_prefilling,
+        req_stats=req_stats,
+        lora_states=LoRARequestStates(),
+        lora_name=None,
+    )
+
+
+def test_streaming_input_intervals_use_last_input():
+    """Each streaming input re-queues the session; intervals follow the last one."""
+    queued, scheduled = EngineCoreEventType.QUEUED, EngineCoreEventType.SCHEDULED
+    stats, req_stats = IterationStats(), RequestStateStats()
+    # First input: queued at 100, scheduled at 101, tokens at 102 and 104.
+    _observe(stats, req_stats, 102.0, True, (queued, 100.0), (scheduled, 101.0))
+    _observe(stats, req_stats, 104.0, False)
+    # Second input: queued at 200, scheduled at 205, tokens at 206 and 207.
+    _observe(stats, req_stats, 206.0, True, (queued, 200.0), (scheduled, 205.0))
+    _observe(stats, req_stats, 207.0, False)
+    stats.update_from_finished_request(FinishReason.STOP, "r", 10, None, req_stats)
+
+    finished = stats.finished_requests[0]
+    assert finished.queued_time == pytest.approx(5.0)
+    assert finished.prefill_time == pytest.approx(1.0)
+    assert finished.inference_time == pytest.approx(2.0)
+    assert finished.decode_time == pytest.approx(1.0)
+
+
+def test_preemption_keeps_first_scheduled_ts():
+    """A preempted request is not re-queued, so its interval spans the preemption."""
+    stats, req_stats = IterationStats(), RequestStateStats()
+    _observe(
+        stats,
+        req_stats,
+        103.0,
+        True,
+        (EngineCoreEventType.QUEUED, 100.0),
+        (EngineCoreEventType.SCHEDULED, 101.0),
+        (EngineCoreEventType.PREEMPTED, 102.0),
+        (EngineCoreEventType.SCHEDULED, 102.5),
+    )
+    stats.update_from_finished_request(FinishReason.STOP, "r", 10, None, req_stats)
+
+    finished = stats.finished_requests[0]
+    assert finished.queued_time == pytest.approx(1.0)
+    assert finished.prefill_time == pytest.approx(2.0)

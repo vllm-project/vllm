@@ -600,7 +600,11 @@ class IterationStats:
 
         for event in events:
             if event.type == EngineCoreEventType.QUEUED:
+                # A streaming-input session is re-queued for each new input.
+                # Restart the interval so it pairs with this input's SCHEDULED
+                # event, like arrival_time and first_token_ts already do.
                 req_stats.queued_ts = event.timestamp
+                req_stats.scheduled_ts = 0.0
                 lora_states.request_waiting(req_id, lora_name)
             elif event.type == EngineCoreEventType.SCHEDULED:
                 if req_stats.scheduled_ts == 0.0:  # ignore preemptions
@@ -621,7 +625,8 @@ class IterationStats:
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
-        # Queued interval is from first QUEUED event to first SCHEDULED
+        # Queued interval is from the last QUEUED event to the first SCHEDULED
+        # event after it (for streaming input, the last input)
         queued_time = req_stats.scheduled_ts - req_stats.queued_ts
 
         # Prefill interval is from first SCHEDULED to first NEW_TOKEN
