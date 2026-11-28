@@ -14,6 +14,8 @@ from vllm.entrypoints.generate.base.protocol import (
     resolve_return_mm_kwargs_alias,
 )
 
+_INT64_MAX = 2**63 - 1
+
 
 class AnthropicError(BaseModel):
     """Error structure for Anthropic API."""
@@ -283,7 +285,7 @@ class AnthropicMessagesRequest(BaseModel):
     temperature: float | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
-    top_k: int | None = None
+    top_k: int | None = Field(None, ge=-1, le=_INT64_MAX)
     top_p: float | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
