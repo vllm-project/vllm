@@ -5,7 +5,10 @@
 Complements the strict Flex/FP32 invariance checks in test_async_scheduling.py.
 """
 
+import copy
+import functools
 import os
+from contextlib import ExitStack
 from dataclasses import replace
 from typing import Any
 
@@ -239,8 +242,13 @@ def run_tests(
     # Per-request budgets also reject systematic errors below the scalar bounds.
     tolerance = AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25)
     # These short CPU reductions cost more to distribute across a thread pool.
-    with set_default_torch_num_threads(1), hf_runner(model) as hf:
+    with set_default_torch_num_threads(1), hf_runner(model) as hf, ExitStack() as stack:
         hf.model.eval()
+        # The reference rounds in the model dtype too. An FP32 copy, built on
+        # first use, rescores the requests the reference rejects.
+        exact = functools.cache(lambda: copy.deepcopy(hf.model).float())
+        # Pass or fail, drop it before the runner releases its GPU memory.
+        stack.callback(exact.cache_clear)
         for config, batches, _ in outputs:
             assert len(batches) == len(test_sampling_params)
             for baseline_batch, batch, overrides in zip(
@@ -267,6 +275,7 @@ def run_tests(
                         params,
                         tolerance,
                         context,
+                        exact,
                     )
                 print(f"ACCURACY PASSED: config=[{config}], params={overrides}")
 
@@ -528,6 +537,50 @@ def test_accuracy_checks_reject_systematic_sub_bound_errors():
     check_accuracy_budget(
         [torch.tensor([0.03, 0.07])], [0.125, 0.125], tolerance, "control variation"
     )
+
+
+def test_logprob_check_allows_only_measured_reference_rounding():
+    tolerance = AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25)
+    reference = torch.tensor([3.0, 2.0, -2.0]).log_softmax(-1)
+    exact = reference - 0.3
+
+    def check(*witnesses, below=0.6):
+        scores = {i: Logprob(float(reference[i]) - below, i + 1) for i in (0, 1)}
+        stacked = torch.stack(witnesses) if witnesses else None
+        return check_logprobs(scores, reference, 0, 2, tolerance, "scores", stacked)
+
+    # 0.6 from the reference, but 0.3 from FP32, which the reference misses by 0.3.
+    # The returned errors feed the request budget and stay relative to the reference.
+    assert check(exact).tolist() == pytest.approx([0.6, 0.6])
+    # Any recomputation of the reference that far from FP32 allows as much.
+    check(reference, reference + 0.3)
+    for witnesses in [(), (reference,), (reference + 0.2,), (reference, reference)]:
+        with pytest.raises(AssertionError, match="error="):
+            check(*witnesses)
+    # A score the reference accepts passes wherever FP32 lies.
+    check(reference + 0.3, below=0.45)
+
+
+def test_greedy_check_allows_only_fp32_near_ties():
+    tolerance = AccuracyTolerance(logprob_atol=0.5, greedy_atol=0.25)
+    logits = torch.tensor([3.0, 2.6, -2.0])
+
+    def choose(*witnesses):
+        stacked = torch.stack(witnesses) if witnesses else None
+        return check_greedy_token(logits, 1, tolerance, "choice", stacked)
+
+    # The reference puts token 1 0.4 below the best; FP32 puts it 0.1 below.
+    near_tie = torch.tensor([3.0, 2.9, -2.0])
+    assert choose(near_tie) == pytest.approx(0.4)
+    # Only FP32 excuses a choice, and only within the unchanged bound: the
+    # reference calling it a near-tie at another batch size does not.
+    near_miss = torch.tensor([3.0, 2.7, -2.0])
+    for witnesses in [(), (logits,), (near_miss,), (logits, near_tie)]:
+        with pytest.raises(AssertionError, match="logit gap"):
+            choose(*witnesses)
+    # Everything the reference accepts on its own still passes.
+    reference_only = torch.tensor([3.0, 2.8, -2.0])
+    check_greedy_token(reference_only, 1, tolerance, "choice", torch.stack([logits]))
 
 
 def _divergence_request(
