@@ -81,16 +81,6 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
                 "and carry no e_proj/h_proj/enorm/hnorm/hc_head weights. Use "
                 "speculative method 'dspark' instead of 'mtp'."
             )
-        if (
-            spec.num_speculative_tokens > 1
-            and spec.draft_model_config.hf_config.model_type
-            not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
-        ):
-            logger.warning(
-                "Enabling num_speculative_tokens > 1 will run "
-                "multiple times of forward on same MTP layer"
-                ",which may result in lower acceptance rate"
-            )
 
     @classmethod
     def resolve_num_speculative_tokens(cls, spec: "SpeculativeConfig") -> None:
@@ -100,6 +90,21 @@ class MTPSpeculatorConfig(EagleSpeculatorConfig):
         ):
             raise ValueError("Parse 3.5 has only one trained MTP step")
         super().resolve_num_speculative_tokens(spec)
+        # Checked after the base class defaults an omitted value. Draft step i
+        # runs MTP module i % num_mtp_modules, so extra steps reuse modules
+        # trained for earlier positions.
+        num_modules = spec.num_mtp_modules()
+        num_spec_tokens = spec.num_speculative_tokens
+        if num_spec_tokens is not None and num_spec_tokens > num_modules:
+            logger.warning(
+                "MTP drafts %d tokens per step with %d MTP module(s) loaded, "
+                "so draft steps beyond step %d reuse modules trained for "
+                "earlier positions, which may lower acceptance. Tune "
+                "num_speculative_tokens on end-to-end latency or throughput.",
+                num_spec_tokens,
+                num_modules,
+                num_modules,
+            )
 
     @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
