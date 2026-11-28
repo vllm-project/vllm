@@ -1035,3 +1035,68 @@ def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
     assert numa_utils._is_auto_numa_available(
         verbose=False, require_unbound_process=True
     ) is (affinity == [3, 2, 1, 0])
+
+
+class _StopBeforeWorkerStart(Exception):
+    pass
+
+
+def _worker_start_mode(monkeypatch, vllm_config):
+    """Run MultiprocExecutor._init_executor up to its choice of worker start
+    mode and return (concurrent, numa_bind seen by that choice).
+
+    It stops at the start-mode branch by raising _StopBeforeWorkerStart. If
+    _init_executor starts using an executor attribute this helper does not set
+    before that branch, the test fails loudly with an AttributeError instead."""
+    from vllm.v1.executor import multiproc_executor
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+    parallel_config = vllm_config.parallel_config
+    parallel_config.world_size = parallel_config.local_world_size
+    parallel_config.node_rank_within_dp = 1  # headless: no broadcast queue
+    monkeypatch.setattr(
+        multiproc_executor, "set_multiprocessing_worker_envs", lambda n: None
+    )
+    seen = {}
+    real_check = MultiprocExecutor._can_start_workers_concurrently
+
+    def check(self, inherited_fds):
+        seen["numa_bind"] = self.parallel_config.numa_bind
+        seen["concurrent"] = real_check(self, inherited_fds)
+        raise _StopBeforeWorkerStart
+
+    monkeypatch.setattr(MultiprocExecutor, "_can_start_workers_concurrently", check)
+    executor = object.__new__(MultiprocExecutor)
+    executor.vllm_config = vllm_config
+    executor.parallel_config = parallel_config
+    with pytest.raises(_StopBeforeWorkerStart):
+        executor._init_executor()
+    return seen["concurrent"], seen["numa_bind"]
+
+
+def test_auto_numa_bind_disables_concurrent_worker_start(monkeypatch):
+    """With automatic binding (numa_bind=None), the executor must resolve it
+    before choosing concurrent worker start: each worker's configure_subprocess
+    swaps the process-wide multiprocessing executable, so threads would race
+    (#67851)."""
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0, 0, 1, 1], visible_gpus=4)
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cpu", lambda: False)
+    vllm_config = _make_config(numa_bind=None, tensor_parallel_size=4)
+
+    concurrent, numa_bind = _worker_start_mode(monkeypatch, vllm_config)
+
+    assert numa_bind is True
+    assert not concurrent
+    assert vllm_config.parallel_config._numa_bind_auto is True
+
+
+def test_unavailable_auto_numa_keeps_concurrent_worker_start(monkeypatch):
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setattr("shutil.which", lambda name: None)  # no numactl
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cpu", lambda: False)
+    vllm_config = _make_config(numa_bind=None, tensor_parallel_size=4)
+
+    concurrent, numa_bind = _worker_start_mode(monkeypatch, vllm_config)
+
+    assert numa_bind is False
+    assert concurrent
