@@ -120,6 +120,9 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    triton_filter_and_convert_dcp_index,
+)
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
     split_prefill_chunks,
@@ -2703,6 +2706,90 @@ def test_sparse_mla_index_group_falls_back_for_prefill_sized_batch(monkeypatch):
     torch.testing.assert_close(follower_result, leader_result)
 
 
+@pytest.mark.parametrize("num_tokens", [5, 12], ids=["group_workspace", "fallback"])
+@pytest.mark.parametrize("interleave", [1, 4])
+@pytest.mark.parametrize("dcp_size", [2, 4])
+def test_sparse_mla_index_group_dcp_shard_matches_per_layer_filter(
+    monkeypatch, dcp_size, interleave, num_tokens
+):
+    """Under DCP every layer of an index group gets exactly the per-layer
+    `triton_filter_and_convert_dcp_index` result (rank-local slots compacted to
+    the front, valid counts), while the group converts once (the leader) when
+    the rows fit its workspace and per layer otherwise (prefill-sized batch)."""
+    device = torch.device(DEVICE_TYPE)
+    num_layers, topk, block_size, block_stride_rows = 3, 256, 64, 80
+    max_blocks, num_reqs, max_decode_rows = 8, 3, 8
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    global_len = max_blocks * block_size * dcp_size
+    logical = torch.randint(0, global_len, (num_tokens, topk), generator=gen)
+    logical[logical % 7 == 0] = -1  # interior -1 padding from the indexer
+    logical[1] = -1  # a row with no candidates at all
+    logical[2, : topk // 2] = logical[2, 0]  # duplicate-heavy row
+    logical = logical.to(torch.int32).to(device)
+    block_table = (
+        torch.randperm(num_reqs * max_blocks, generator=gen)
+        .view(num_reqs, max_blocks)
+        .to(torch.int32)
+        .to(device)
+    )
+    req_id_per_token = torch.randint(
+        0, num_reqs, (num_tokens,), generator=gen, dtype=torch.int32
+    ).to(device)
+    metadata = SimpleNamespace(
+        block_table=block_table,
+        block_size=block_size,
+        req_id_per_token=req_id_per_token,
+        cp_kv_cache_interleave_size=interleave,
+    )
+    calls = 0
+    convert = index_group_module.triton_convert_req_index_to_global_index
+
+    def convert_spy(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return convert(*args, **kwargs)
+
+    monkeypatch.setattr(
+        index_group_module, "triton_convert_req_index_to_global_index", convert_spy
+    )
+    for dcp_rank in range(dcp_size):
+        expected_indices, expected_counts = triton_filter_and_convert_dcp_index(
+            req_id_per_token,
+            block_table,
+            logical,
+            dcp_size=dcp_size,
+            dcp_rank=dcp_rank,
+            cp_kv_cache_interleave_size=interleave,
+            BLOCK_SIZE=block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
+            NUM_TOPK_TOKENS=topk,
+            return_valid_counts=True,
+        )
+        builder = SparseMLAIndexGroupBuilder(logical, max_decode_rows=max_decode_rows)
+        layers = [builder.register_layer(i == 0) for i in range(num_layers)]
+        group = layers[0][0]
+        assert all(g is group for g, _ in layers)
+        calls = 0
+        group.set_logical_topk_ready(0)
+        results = [
+            group.convert_logical_to_physical_topk(
+                layer_index,
+                logical,
+                metadata,
+                block_stride_rows=block_stride_rows,
+                return_valid_counts=True,
+                dcp_size=dcp_size,
+                dcp_rank=dcp_rank,
+            )
+            for _, layer_index in layers
+        ]
+        torch.accelerator.synchronize()
+        assert calls == (1 if num_tokens <= max_decode_rows else num_layers)
+        for indices, counts in results:
+            assert torch.equal(indices, expected_indices)
+            assert torch.equal(counts, expected_counts)
+
+
 def test_sparse_mla_index_groups_own_distinct_physical_buffers():
     logical = torch.empty((8, 128), dtype=torch.int32, device=DEVICE_TYPE)
     builder = SparseMLAIndexGroupBuilder(logical, max_decode_rows=2)
@@ -4859,7 +4946,8 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group(monkeypatch):
 
 
 def test_sparse_mqa_plain_lane_wiring(monkeypatch):
-    """Under DCP the plain lane converts with the DCP filter at the flat stride."""
+    """Under DCP the plain lane takes the index group's once-per-group
+    conversion with this rank's DCP shard, at the flat stride."""
     import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
 
     num_tokens, topk_tokens, block_size, head_dim = 3, 8, 4, 6
@@ -4884,15 +4972,19 @@ def test_sparse_mqa_plain_lane_wiring(monkeypatch):
     impl.index_group_index = 0
     impl.dcp_world_size = 2
     impl.dcp_rank = 1
-    convert_topk = MagicMock()
-    monkeypatch.setattr(impl, "_convert_logical_to_physical_topk", convert_topk)
+    convert_topk = impl.index_group.convert_logical_to_physical_topk
+    convert_topk.return_value = (None, None)
     forward_mqa_kernel = MagicMock(return_value=(q, None))
     monkeypatch.setattr(impl, "_forward_mqa_kernel", forward_mqa_kernel)
 
     impl.forward_mqa(q, kv_cache, metadata, None)
 
-    convert_topk.assert_not_called()
-    assert index_filter.call_args.kwargs["BLOCK_STRIDE_ROWS"] == 8
+    index_filter.assert_not_called()
+    convert_topk.assert_called_once()
+    kwargs = convert_topk.call_args.kwargs
+    assert kwargs["block_stride_rows"] == 8
+    assert kwargs["return_valid_counts"] is True
+    assert (kwargs["dcp_size"], kwargs["dcp_rank"]) == (2, 1)
     forward_mqa_kernel.assert_called_once()
 
 
@@ -5280,17 +5372,18 @@ def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode):
         dcp_world_size=dcp,
         need_to_return_lse_for_decode=True,
     )
-    convert_topk = MagicMock()
+    # Under DCP the index group filters this rank's shard once per group.
+    convert_topk = MagicMock(return_value=(inputs.topk_indices, inputs.valid_counts))
     monkeypatch.setattr(impl, "_convert_logical_to_physical_topk", convert_topk)
-    dcp_filter = MagicMock(return_value=(inputs.topk_indices, inputs.valid_counts))
+    dcp_filter = MagicMock()
     monkeypatch.setattr(sparse_mla, "triton_filter_and_convert_dcp_index", dcp_filter)
     inputs.metadata.num_decode_tokens = num_tokens if is_decode else 1
 
     with torch.inference_mode():
         out, lse = impl.forward_mqa(q, inputs.kv_cache, inputs.metadata, None)
 
-    dcp_filter.assert_called_once()
-    convert_topk.assert_not_called()
+    convert_topk.assert_called_once()
+    dcp_filter.assert_not_called()
     assert out.shape == (num_tokens, kernel_heads, 512)
     if is_decode:
         (fa4,) = calls.fa4

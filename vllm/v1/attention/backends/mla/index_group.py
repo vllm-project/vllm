@@ -93,12 +93,40 @@ class SparseMLAIndexGroup:
         *,
         block_stride_rows: int | None,
         return_valid_counts: bool,
+        dcp_size: int = 1,
+        dcp_rank: int = 0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Convert one index result once for all layers in this group."""
+        """Convert one index result once for all layers in this group.
+
+        Under DCP (`dcp_size > 1`) the conversion also keeps only this rank's
+        shard and compacts it to the front of each row, exactly as
+        `triton_filter_and_convert_dcp_index` (same kernel and compile key).
+        The shard depends only on the group's shared inputs (logical top-k,
+        block table, request ids, DCP rank and interleave), so every layer of
+        the group reuses the leader's result.
+        """
+        req_id_per_token = attn_metadata.req_id_per_token[
+            : logical_topk_indices.shape[0]
+        ]
+        if dcp_size > 1:
+            return self._convert_once(
+                layer_index,
+                logical_topk_indices,
+                req_id_per_token,
+                attn_metadata.block_table,
+                attn_metadata.block_size,
+                block_stride_rows=block_stride_rows,
+                return_valid_counts=return_valid_counts,
+                dcp_size=dcp_size,
+                dcp_rank=dcp_rank,
+                cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
+            )
+        # Without DCP, keep the plain call: a model may install its own
+        # `_convert_once` (glm5next kpool) that takes no DCP arguments.
         return self._convert_once(
             layer_index,
             logical_topk_indices,
-            attn_metadata.req_id_per_token[: logical_topk_indices.shape[0]],
+            req_id_per_token,
             attn_metadata.block_table,
             attn_metadata.block_size,
             block_stride_rows=block_stride_rows,
@@ -116,7 +144,16 @@ class SparseMLAIndexGroup:
         block_stride_rows: int | None,
         return_valid_counts: bool,
         idx_mapping: torch.Tensor | None = None,
+        dcp_size: int = 1,
+        dcp_rank: int = 0,
+        cp_kv_cache_interleave_size: int = 1,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if dcp_size > 1:
+            # The DCP shard leaves interior gaps; only the compacting
+            # (valid-counting) conversion gives the sparse kernels a prefix.
+            assert return_valid_counts
+            assert idx_mapping is None
+            assert block_size % cp_kv_cache_interleave_size == 0
         num_tokens = logical_topk_indices.shape[0]
         if num_tokens > self.physical_topk_indices.shape[0]:
             return triton_convert_req_index_to_global_index(
@@ -128,6 +165,9 @@ class SparseMLAIndexGroup:
                 NUM_TOPK_TOKENS=logical_topk_indices.shape[1],
                 return_valid_counts=return_valid_counts,
                 idx_mapping=idx_mapping,
+                dcp_size=dcp_size,
+                dcp_rank=dcp_rank,
+                cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
             )
 
         physical_topk_indices = self.physical_topk_indices[:num_tokens]
@@ -152,6 +192,9 @@ class SparseMLAIndexGroup:
                         valid_topk_counts if return_valid_counts else None
                     ),
                     idx_mapping=idx_mapping,
+                    dcp_size=dcp_size,
+                    dcp_rank=dcp_rank,
+                    cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
                 )
                 self.physical_topk_ready.record(self.side_stream)
         compute_stream.wait_event(self.physical_topk_ready)
@@ -227,7 +270,10 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         *,
         block_stride_rows: int | None,
         return_valid_counts: bool,
+        dcp_size: int = 1,
+        dcp_rank: int = 0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert dcp_size == 1, "HiSparse does not support DCP"
         cache = self.cache(layer_index)
         num_tokens = logical_topk_indices.shape[0]
         req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]

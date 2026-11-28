@@ -1051,13 +1051,14 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         group = self.index_group
         assert group is not None
-        assert self.dcp_world_size == 1
         return group.convert_logical_to_physical_topk(
             self.index_group_index,
             logical_topk_indices,
             attn_metadata,
             block_stride_rows=block_stride_rows,
             return_valid_counts=return_valid_counts,
+            dcp_size=self.dcp_world_size,
+            dcp_rank=self.dcp_rank if self.dcp_world_size > 1 else 0,
         )
 
     def forward_mqa(
@@ -1076,22 +1077,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         index_group = self.index_group
         if not isinstance(index_group, HiSparseMLAIndexGroup):
             _, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
-            if self.dcp_world_size > 1 and not attn_metadata.kv_gathered:
-                physical_topk, valid_counts = triton_filter_and_convert_dcp_index(
-                    attn_metadata.req_id_per_token[:num_tokens],
-                    attn_metadata.block_table,
-                    topk,
-                    dcp_size=self.dcp_world_size,
-                    dcp_rank=self.dcp_rank,
-                    cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
-                    BLOCK_SIZE=block_size,
-                    BLOCK_STRIDE_ROWS=block_stride_rows,
-                    NUM_TOPK_TOKENS=topk.shape[1],
-                    return_valid_counts=True,
-                )
             # A mixed ShardQ step's decode tokens take the index group's
             # conversion, so its token-sharded ones convert here.
-            elif (
+            if (
                 topk_start
                 or attn_metadata.kv_gathered
                 or (
@@ -1103,16 +1091,37 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                     )
                 )
             ):
-                physical_topk, valid_counts = triton_convert_req_index_to_global_index(
-                    attn_metadata.req_id_per_token[:num_tokens],
-                    attn_metadata.block_table,
-                    topk,
-                    BLOCK_SIZE=block_size,
-                    BLOCK_STRIDE_ROWS=block_stride_rows,
-                    NUM_TOPK_TOKENS=topk.shape[1],
-                    return_valid_counts=True,
-                )
+                if self.dcp_world_size > 1 and not attn_metadata.kv_gathered:
+                    physical_topk, valid_counts = triton_filter_and_convert_dcp_index(
+                        attn_metadata.req_id_per_token[:num_tokens],
+                        attn_metadata.block_table,
+                        topk,
+                        dcp_size=self.dcp_world_size,
+                        dcp_rank=self.dcp_rank,
+                        cp_kv_cache_interleave_size=(
+                            attn_metadata.cp_kv_cache_interleave_size
+                        ),
+                        BLOCK_SIZE=block_size,
+                        BLOCK_STRIDE_ROWS=block_stride_rows,
+                        NUM_TOPK_TOKENS=topk.shape[1],
+                        return_valid_counts=True,
+                    )
+                else:
+                    physical_topk, valid_counts = (
+                        triton_convert_req_index_to_global_index(
+                            attn_metadata.req_id_per_token[:num_tokens],
+                            attn_metadata.block_table,
+                            topk,
+                            BLOCK_SIZE=block_size,
+                            BLOCK_STRIDE_ROWS=block_stride_rows,
+                            NUM_TOPK_TOKENS=topk.shape[1],
+                            return_valid_counts=True,
+                        )
+                    )
             else:
+                # Under DCP the group leader filters this rank's shard once and
+                # the group's other layers reuse it (see
+                # SparseMLAIndexGroup.convert_logical_to_physical_topk).
                 physical_topk, valid_counts = self._convert_logical_to_physical_topk(
                     topk,
                     attn_metadata,
