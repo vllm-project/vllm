@@ -651,6 +651,8 @@ class FlexibleArgumentParser(ArgumentParser):
             raise ex
 
         for key, value in config.items():
+            if value is None:
+                continue
             if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)

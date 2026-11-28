@@ -450,6 +450,26 @@ def test_load_config_file(tmp_path):
     os.remove(str(config_file_path))
 
 
+def test_load_config_file_ignores_null_values(tmp_path):
+    """YAML null values leave the corresponding CLI options unset."""
+    config_file_path = tmp_path / "null_config.yaml"
+    config_file_path.write_text(
+        "model: Qwen/Qwen3-0.6B\ntokenizer: null\nserved-model-name: null\n"
+    )
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--config")
+    parser.add_argument("--model")
+    parser.add_argument("--tokenizer", default="default-tokenizer")
+    parser.add_argument("--served-model-name", default="default-name")
+
+    args = parser.parse_args(["--config", str(config_file_path)])
+
+    assert args.model == "Qwen/Qwen3-0.6B"
+    assert args.tokenizer == "default-tokenizer"
+    assert args.served_model_name == "default-name"
+
+
 def test_load_config_file_false_store_true_dropped(tmp_path):
     """False values for store_true flags are silently dropped (correct)."""
     config_data = {
@@ -498,6 +518,7 @@ def test_nested_config_end_to_end(tmp_path):
     config_data = {
         "compilation-config": {
             "mode": 3,
+            "optional": None,
             "pass_config": {"fuse_allreduce_rms": True},
         },
     }
@@ -511,6 +532,7 @@ def test_nested_config_end_to_end(tmp_path):
 
     assert args.compilation_config == {
         "mode": 3,
+        "optional": None,
         "pass_config": {"fuse_allreduce_rms": True},
     }
 
