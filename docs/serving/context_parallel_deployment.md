@@ -34,6 +34,38 @@ This configuration requires PP=DP=DCP=1 and does not support microbatching,
 speculative decoding, KV transfer, prefix caching, MegaMoE, or the ROCm
 monokernel. TP and PCP multiply, so TP=2 with PCP=2 requires four GPUs.
 
+### Overlapping the KV all-gather under DCP
+
+Under DCP (`decode_context_parallel_size > 1`), each rank stores one DCP shard
+of the KV cache, so MLA prefill layers all-gather historical context shards
+before attention. `--dcp-kv-prefetch` moves these historical KV gathers off the
+main stream onto dedicated zero-SM hardware copy-engine and auxiliary upconvert
+streams over PyTorch symmetric memory, pulling peers in a conflict-free
+staggered ring order and pipelining copy-engine DMA transfers with receiver
+upconversion:
+
+- **Dense MLA (`MLAAttention`) under TP + DCP (and PCP + DCP)**: overlaps
+  chunked-context KV gathers across both chunks and layers (starting layer 0
+  chunk 0 ahead of new-token projections and suffix attention) for BF16/FP16,
+  `fp8_ds_mla`, and FP8 KV caches, including multi-request and multi-chunk
+  batches.
+- **Sparse MLA (`FlashMLASparseImpl`) under PCP + DCP** with `fp8_ds_mla`:
+  transfers raw 656 B FP8 cache rows, upconverts on the receiver, and stages
+  the current chunk's new rows locally (layer 0 keeps the serial all-gather).
+
+It acts in eager mode and under piecewise/breakable CUDA graphs, requires
+symmetric memory across the DCP group, and falls back to the serial all-gather
+for ineligible steps:
+
+```bash
+# TP + DCP (Dense MLA)
+vllm serve <dense-mla-model> -tp 4 -dcp 4 --dcp-kv-prefetch
+
+# PCP + DCP (Sparse MLA)
+vllm serve <sparse-mla-model> -tp 1 -pcp 4 -dcp 4 --enable-expert-parallel \
+    --dcp-kv-prefetch
+```
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

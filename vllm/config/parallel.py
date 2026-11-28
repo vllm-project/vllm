@@ -582,6 +582,28 @@ class ParallelConfig:
     in the group.
     """
 
+    dcp_kv_prefetch: bool = False
+    """Under DCP prefill (`decode_context_parallel_size > 1`), prefetch
+    historical KV shards from the other DCP ranks with the hardware copy engines
+    over symmetric memory while the main stream computes attention and layer
+    projections, instead of all-gathering serially before attention.
+
+    Supports both:
+    - **Dense MLA (`MLAAttention`) under TP + DCP (and PCP + DCP)**: overlaps
+      chunked-context KV gathers across chunks and layers (including layer 0
+      chunk 0 with new-token projections and suffix attention) for unquantized
+      BF16/FP16, `fp8_ds_mla`, and FP8 KV caches, across single- and
+      multi-request batches.
+    - **Sparse MLA (`FlashMLASparseImpl`) under PCP + DCP** with `fp8_ds_mla`:
+      transfers raw 656 B FP8 cache rows in <=16 MiB chunks, upconverts on the
+      receiver, and stages the current chunk's new rows locally (layer 0 keeps
+      the serial all-gather). Under pure TP + DCP (`PCP = 1`), sparse MLA
+      attends local shards directly without a KV gather.
+
+    Requires symmetric memory across the DCP group and a single micro-batch;
+    acts in eager mode and under piecewise/breakable CUDA graphs, falling back
+    to the serial all-gather whenever a step is not eligible."""
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP.
     Store interleave_size tokens on dcp_rank i, then store next
@@ -768,6 +790,11 @@ class ParallelConfig:
                 "axis, or span the full TP x PCP axis. "
                 f"Got TP={tp}, PCP={pcp}, DCP={dcp}; valid DCP sizes are "
                 f"{sorted({1, pcp, tp * pcp})}."
+            )
+        if self.dcp_kv_prefetch and dcp == 1:
+            raise ValueError(
+                "dcp_kv_prefetch requires decode_context_parallel_size > 1, "
+                f"got DCP={dcp}."
             )
 
         return self
