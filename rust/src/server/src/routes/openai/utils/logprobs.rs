@@ -39,6 +39,7 @@ pub fn decoded_logprobs_to_openai(
         top_logprobs.push(Some(position_top_logprobs_map(
             position,
             return_tokens_as_token_ids,
+            None,
         )));
     }
 
@@ -51,7 +52,7 @@ pub fn decoded_logprobs_to_openai(
 }
 
 /// Convert decoded prompt logprobs into the OpenAI completions `logprobs`
-/// shape.
+/// shape, keeping the first `top_logprobs_limit` candidates per position.
 ///
 /// The first prompt token is included with `None` logprob metadata, matching
 /// Python vLLM's echoed completions behavior.
@@ -59,6 +60,7 @@ pub fn decoded_prompt_logprobs_to_openai(
     prompt_logprobs: &DecodedPromptLogprobs,
     initial_text_offset: u32,
     return_tokens_as_token_ids: bool,
+    top_logprobs_limit: Option<usize>,
 ) -> Result<LogProbs, ApiError> {
     let mut text_offset = Vec::with_capacity(prompt_logprobs.scored_positions.len() + 1);
     let mut token_logprobs = Vec::with_capacity(prompt_logprobs.scored_positions.len() + 1);
@@ -90,6 +92,7 @@ pub fn decoded_prompt_logprobs_to_openai(
         top_logprobs.push(Some(position_top_logprobs_map(
             position,
             return_tokens_as_token_ids,
+            top_logprobs_limit,
         )));
     }
 
@@ -215,18 +218,23 @@ fn format_token(entry: &DecodedTokenLogprob, as_token_id: bool) -> String {
     }
 }
 
-/// A sampled token repeated among the top-k candidates, or several tokens
-/// decoding to the same string (byte fragments of one multi-byte character),
-/// share one entry. The entry stays where its first candidate is, so the token
-/// at this position, which the engine row puts first, keeps the first entry.
-/// It holds the highest logprob of its candidates; on a tie the earlier one
-/// stays, as in the Python frontend.
+/// Keeps the first `limit` distinct token IDs, like Python slicing its dict
+/// keyed by token ID, so a sampled or prompt token repeated among the top-k
+/// candidates counts once. Tokens decoding to the same string (byte fragments
+/// of one multi-byte character) then share one entry. The entry stays where
+/// its first candidate is, so the token at this position, which the engine row
+/// puts first, keeps the first entry. It holds the highest logprob of its
+/// candidates; on a tie the earlier one stays, as in the Python frontend.
 fn position_top_logprobs_map(
     position: &DecodedPositionLogprobs,
     return_tokens_as_token_ids: bool,
+    limit: Option<usize>,
 ) -> IndexMap<String, f32> {
     let mut map = IndexMap::with_capacity(position.entries.len());
-    for entry in &position.entries {
+    for entry in (position.entries.iter())
+        .unique_by(|entry| entry.token_id)
+        .take(limit.unwrap_or(usize::MAX))
+    {
         let logprob = clamp_logprob(entry.logprob);
         let kept = map.entry(format_token(entry, return_tokens_as_token_ids)).or_insert(logprob);
         *kept = kept.max(logprob);
@@ -444,7 +452,7 @@ mod tests {
             scored_positions: colliding_logprobs().positions,
         };
 
-        let logprobs = decoded_prompt_logprobs_to_openai(&prompt_logprobs, 0, false).unwrap();
+        let logprobs = decoded_prompt_logprobs_to_openai(&prompt_logprobs, 0, false, None).unwrap();
         expect_test::expect![[r#"[null,{"":-0.1,"D":-3.0}]"#]]
             .assert_eq(&serde_json::to_string(&logprobs.top_logprobs).unwrap());
     }
