@@ -19,8 +19,6 @@ from vllm.v1.kv_offload.cpu.policies.base import (
 class _RunningT1Keys:
     """T1 chunks used by a request that has not finished, by position."""
 
-    owner: object
-    cache_generation: int
     # Ascending (token position, key) of the request's chunks still in T1.
     entries: list[tuple[int, OffloadKey]] = field(default_factory=list)
 
@@ -73,7 +71,8 @@ class ARCCachePolicy(CachePolicy):
         self.b2: OrderedDict[OffloadKey, None] = OrderedDict()
         # T1 chunk of an unfinished request -> (its request, token position).
         self._running: dict[OffloadKey, tuple[_RunningT1Keys, int]] = {}
-        self._cache_generation = 0
+        # Unfinished requests' T1 chunks, by req_id.
+        self._running_by_request: dict[str, _RunningT1Keys] = {}
 
     def _release_running(self, key: OffloadKey) -> None:
         """Forget that a chunk belongs to a running request."""
@@ -84,14 +83,10 @@ class ARCCachePolicy(CachePolicy):
         del state.entries[bisect.bisect_left(state.entries, (position, key))]
 
     def _get_running_keys(self, req_context: ReqContext) -> _RunningT1Keys:
-        state = req_context.get_state(_RunningT1Keys)
-        if (
-            state is None
-            or state.owner is not self
-            or state.cache_generation != self._cache_generation
-        ):
-            state = _RunningT1Keys(self, self._cache_generation)
-            req_context.set_state(state)
+        state = self._running_by_request.get(req_context.req_id)
+        if state is None:
+            state = _RunningT1Keys()
+            self._running_by_request[req_context.req_id] = state
         return state
 
     @override
@@ -170,15 +165,10 @@ class ARCCachePolicy(CachePolicy):
         reused_keys: set[OffloadKey],
         req_context: ReqContext,
     ) -> None:
-        state = req_context.get_state(_RunningT1Keys)
-        if (
-            state is not None
-            and state.owner is self
-            and state.cache_generation == self._cache_generation
-        ):
+        state = self._running_by_request.pop(req_context.req_id, None)
+        if state is not None:
             for _, key in state.entries:
                 del self._running[key]
-            state.entries.clear()
 
         for key in reversed(order_request_keys(key_groups, req_context)):
             if key in insertion_only_keys:
@@ -206,7 +196,7 @@ class ARCCachePolicy(CachePolicy):
         self.b2.clear()
         self.target_t1_size = 0.0
         self._running.clear()
-        self._cache_generation += 1
+        self._running_by_request.clear()
 
     @override
     def evict(

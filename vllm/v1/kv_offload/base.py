@@ -108,9 +108,9 @@ class ReqContext:
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
     load_tier_filter: TierFilter = TierFilter.ALL
-    # Per-request scratch space keyed by value type, so a tier can parse
-    # kv_transfer_params and kv_hints once (in on_new_request) and read the
-    # result back on later calls for the same request.
+    # Per-request scratch space keyed by value type, used by the offloading
+    # connector. Managers and tiers keep their per-request state keyed by
+    # req_id instead.
     _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
     # End-token position for each key in this request. The scheduler records
     # these positions so managers can recover prefix order even when store
