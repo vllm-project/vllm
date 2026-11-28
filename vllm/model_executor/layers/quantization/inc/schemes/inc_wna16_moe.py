@@ -30,6 +30,9 @@ logger = init_logger(__name__)
 
 
 class INCARKWNA16MoEMethod(MoeWNA16Method):
+    kernel_name = "WNA16"
+    log_message = "Using ARK XPU WNA16 MoE kernel."
+
     def __init__(
         self,
         quant_config: MoeWNA16Config,
@@ -37,7 +40,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
     ) -> None:
         if quant_config.weight_bits != 4 or quant_config.has_zp:
             raise NotImplementedError(
-                "ARK WNA16 MoE only supports symmetric int4 W4A16 for now."
+                f"ARK {self.kernel_name} MoE only supports symmetric int4 for now."
             )
 
         super().__init__(quant_config, moe)
@@ -46,15 +49,11 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
 
         is_available, error_str, ark, _ = get_ark_state()
         xpu_lib = getattr(ark, "xpu_lib", None) if ark is not None else None
-        has_moe_kernel = (
-            is_available
-            and ark is not None
-            and hasattr(ark, "MoeSymmetricGemm")
-            and xpu_lib is not None
-        )
-        if not has_moe_kernel:
-            reason = error_str or "ARK MoE kernels are unavailable."
-            raise ImportError(f"Failed to initialize ARK WNA16 MoE. {reason}")
+        if not self._has_ark_moe_kernel(is_available, ark, xpu_lib):
+            reason = error_str or f"ARK {self.kernel_name} MoE kernels are unavailable."
+            raise ImportError(
+                f"Failed to initialize ARK {self.kernel_name} MoE. {reason}"
+            )
 
         assert ark is not None
         self.ark = ark
@@ -77,36 +76,25 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         self.w13_moe = None
         self.w2_moe = None
 
-        logger.info_once("Using ARK XPU WNA16 MoE kernel.")
+        logger.info_once(self.log_message)
 
-    def process_weights_after_loading(self, layer) -> None:
-        # ARK int4 MoE with asym=False expects signed nibbles [-8, 7].
-        # Loaded GPTQ weights are unsigned nibbles [0, 15], so flip the sign
-        # bit of each nibble, equivalent to q - 8 in 4-bit two's-complement.
-        w13_qweight = torch.bitwise_xor(
-            layer.w13_qweight.detach().contiguous(),
-            0x88,
-        )
-        w2_qweight = torch.bitwise_xor(
-            layer.w2_qweight.detach().contiguous(),
-            0x88,
+    def _has_ark_moe_kernel(self, is_available, ark, xpu_lib) -> bool:
+        return (
+            is_available
+            and ark is not None
+            and xpu_lib is not None
+            and hasattr(ark, "MoeSymmetricGemm")
         )
 
-        replace_parameter(layer, "w13_qweight", w13_qweight)
-        replace_parameter(layer, "w2_qweight", w2_qweight)
-        replace_parameter(layer, "w13_scales", layer.w13_scales.detach().contiguous())
-        replace_parameter(layer, "w2_scales", layer.w2_scales.detach().contiguous())
-
-        layer.w13_weight = layer.w13_qweight
-        layer.w2_weight = layer.w2_qweight
-        num_local_experts = layer.w13_weight.shape[0]
+    def _setup_common_moe_state(self, layer) -> None:
+        num_local_experts = layer.w13_qweight.shape[0]
         self.local_num_experts = num_local_experts
         self.global_num_experts = layer.global_num_experts
         self.expert_map = layer.expert_map
         self.rows_per_expert = torch.empty(
             (num_local_experts,),
             dtype=torch.int32,
-            device=layer.w13_weight.device,
+            device=layer.w13_qweight.device,
         )
         self.unpermuted_row_to_permuted_row = None
         self.router_weight_ones = None
@@ -127,10 +115,33 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
                 gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             ),
         )
-        self.inter_size = layer.w13_weight.shape[-2] // 2
+        self.inter_size = layer.w13_qweight.shape[-2] // 2
         self.inter_size_scale = 1 if layer.activation.is_gated else 2
         self.remap_hidden_states_op = torch.ops._moe_C.remap_hidden_states
         self.moe_gather_op = torch.ops._moe_C.moe_gather
+
+    def process_weights_after_loading(self, layer) -> None:
+        self._setup_common_moe_state(layer)
+
+        # ARK int4 MoE with asym=False expects signed nibbles [-8, 7].
+        # Loaded GPTQ weights are unsigned nibbles [0, 15], so flip the sign
+        # bit of each nibble, equivalent to q - 8 in 4-bit two's-complement.
+        w13_qweight = torch.bitwise_xor(
+            layer.w13_qweight.detach().contiguous(),
+            0x88,
+        )
+        w2_qweight = torch.bitwise_xor(
+            layer.w2_qweight.detach().contiguous(),
+            0x88,
+        )
+
+        replace_parameter(layer, "w13_qweight", w13_qweight)
+        replace_parameter(layer, "w2_qweight", w2_qweight)
+        replace_parameter(layer, "w13_scales", layer.w13_scales.detach().contiguous())
+        replace_parameter(layer, "w2_scales", layer.w2_scales.detach().contiguous())
+
+        layer.w13_weight = layer.w13_qweight
+        layer.w2_weight = layer.w2_qweight
 
         self.w13_moe = self.ark.MoeSymmetricGemm.prepare(
             layer.w13_weight,
@@ -233,6 +244,34 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             topk_weights.device,
         )
 
+    def _check_moe_weights_loaded(self) -> None:
+        assert self.w13_moe is not None
+        assert self.w2_moe is not None
+
+    def _apply_w13_moe(
+        self,
+        x: torch.Tensor,
+        rows_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.w13_moe is not None
+        return self.w13_moe.apply(
+            x,
+            rows_per_expert,
+            phase="auto",
+        )
+
+    def _apply_w2_moe(
+        self,
+        x: torch.Tensor,
+        rows_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.w2_moe is not None
+        return self.w2_moe.apply(
+            x,
+            rows_per_expert,
+            phase="auto",
+        )
+
     def apply(
         self,
         layer,
@@ -264,8 +303,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         assert self.global_num_experts is not None
         assert self.remap_hidden_states_op is not None
         assert self.moe_gather_op is not None
-        assert self.w13_moe is not None
-        assert self.w2_moe is not None
+        self._check_moe_weights_loaded()
         assert self.activation is not None
 
         remapped_hidden_states = torch.empty(
@@ -291,10 +329,9 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             local_experts_num=self.local_num_experts,
         )
 
-        gemm1_output = self.w13_moe.apply(
+        gemm1_output = self._apply_w13_moe(
             remapped_hidden_states,
             rows_per_expert,
-            phase="auto",
         )
 
         act_output = gemm1_output.new_empty(
@@ -308,10 +345,9 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             activation_config=self.activation_config,
         )
 
-        gemm2_output = self.w2_moe.apply(
+        gemm2_output = self._apply_w2_moe(
             act_output,
             rows_per_expert,
-            phase="auto",
         )
 
         self.moe_gather_op(
