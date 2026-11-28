@@ -438,7 +438,10 @@ def test_rocm_backend_sliding_window_includes_boundary_token(
     sliding_window: int | None, query_len: int
 ) -> None:
     """A window of W must include the current token and W - 1 preceding tokens."""
-    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+    from vllm.v1.attention.backends.rocm_attn import (
+        RocmAttentionImpl,
+        RocmAttentionMetadata,
+    )
     from vllm.v1.attention.ops.paged_attn import PagedAttention
 
     device, dtype = "cuda:0", torch.float16
@@ -451,13 +454,16 @@ def test_rocm_backend_sliding_window_includes_boundary_token(
     _, value_cache = PagedAttention.split_kv_cache(kv_cache, 1, head_size)
     value_cache[..., :seq_len] = value.permute(1, 2, 0)
     scale = torch.tensor(1.0, device=device)
-    metadata = SimpleNamespace(
+    metadata = RocmAttentionMetadata(
         num_actual_tokens=query_len,
         query_start_loc=torch.tensor([0, query_len], dtype=torch.int32, device=device),
         seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
         max_query_len=query_len,
         max_seq_len=seq_len,
         block_table=torch.zeros(1, 1, dtype=torch.int32, device=device),
+        slot_mapping=torch.arange(
+            seq_len - query_len, seq_len, dtype=torch.int64, device=device
+        ),
         causal=True,
     )
     impl = RocmAttentionImpl(

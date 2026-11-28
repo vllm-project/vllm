@@ -68,6 +68,7 @@ class RocmAttentionMetadata:
 
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
+    is_lbhnc: bool = False
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
@@ -83,6 +84,11 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.block_size = kv_cache_spec.block_size
+        cache_config = vllm_config.cache_config
+        self.is_lbhnc = (
+            cache_config.kv_cache_layout is not None
+            and cache_config.get_resolved_kv_cache_layout() is KVCacheLayout.LBHNC
+        )
 
         model_config = vllm_config.model_config
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -130,6 +136,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             causal=common_attn_metadata.causal,
+            is_lbhnc=self.is_lbhnc,
         )
         return attn_metadata
 
@@ -248,10 +255,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        # The native HIP kernels hardcode group-contiguous block addressing, so
-        # they need the K and V groups to span all blocks (H outermost within the layer)
-        # The Triton fallbacks are stride-aware, so block-interior LBHNC is also
-        # supported, just without the native kernels.
+        # Prefer LHBNC for the native cache writer. LBHNC uses the Triton writer.
         return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC)
 
     @staticmethod
@@ -472,6 +476,7 @@ class RocmAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             use_interleaved_v_cache=self._use_interleaved_v_cache,
             causal=attn_metadata.causal,
+            is_dense_lbhnc=attn_metadata.is_lbhnc and kv_cache.is_contiguous(),
         )
 
         return output

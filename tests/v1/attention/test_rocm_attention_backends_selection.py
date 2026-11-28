@@ -105,6 +105,42 @@ def test_aiter_unified_attention_uses_dedicated_metadata_builder():
     )
 
 
+def test_mixed_kv_cache_uses_hip_decode(vllm_runner, monkeypatch):
+    from vllm import SamplingParams
+    from vllm.platforms.rocm import on_cdna
+
+    if not on_cdna():
+        pytest.skip("Requires CDNA paged attention")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "0")
+    with (
+        vllm_runner(
+            "Qwen/Qwen2.5-7B-Instruct",
+            hf_overrides={"num_hidden_layers": 2},
+            load_format="dummy",
+            dtype="bfloat16",
+            attention_backend="ROCM_ATTN",
+            kv_cache_dtype="fp8",
+            kv_cache_dtype_skip_layers=["0"],
+            enforce_eager=True,
+            max_model_len=128,
+            max_num_seqs=1,
+            kv_cache_memory_bytes=32 << 20,
+        ) as runner,
+        torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU], record_shapes=True
+        ) as profile,
+    ):
+        runner.generate([[42] * 40], SamplingParams(max_tokens=2, ignore_eos=True))
+
+    # K's innermost dimension holds 16 bytes in both the BF16 and FP8 layers.
+    assert {
+        event.input_shapes[5][-1]
+        for event in profile.events()
+        if event.name == "_rocm_C::paged_attention" and event.input_shapes[4][0] == 1
+    } == {8, 16}
+
+
 def test_rocm_backends_do_not_support_mm_prefix():
     """Regression test: ROCm backends must not claim mm_prefix support.
 

@@ -25,12 +25,7 @@ def has_native_kv_cache_layout(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
 ) -> bool:
-    """Return whether KV cache blocks can use the native ROCm pairing.
-
-    The native reshape_and_cache writer assumes packed blocks. If cache update
-    needs reshape_and_cache_flash for a stride-padded hybrid layout, decode
-    should use the matching Triton path too.
-    """
+    """Check for packed blocks required by the native ROCm cache writer."""
     return (
         key_cache.stride(0) == key_cache.shape[1:].numel()
         and value_cache.stride(0) == value_cache.shape[1:].numel()
@@ -320,6 +315,7 @@ def chunked_prefill_paged_decode(
     is_block_table_ptr: bool = False,
     use_interleaved_v_cache: bool = False,
     causal: bool = True,
+    is_dense_lbhnc: bool = False,
 ):
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
@@ -388,7 +384,7 @@ def chunked_prefill_paged_decode(
 
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
 
-    from vllm.platforms.rocm import on_rdna, use_rocm_custom_paged_attention
+    from vllm.platforms.rocm import on_cdna, on_rdna, use_rocm_custom_paged_attention
 
     use_custom = use_rocm_custom_paged_attention(
         query.dtype,
@@ -401,12 +397,19 @@ def chunked_prefill_paged_decode(
         alibi_slopes,
         sinks,
     )
-    has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-    # Force Triton for non-standard blocks like Qwen3's 544 and for
-    # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
-    # during cache update, so keep decode on the matching stride-aware path.
+    # The CDNA reader takes the block stride, so it can read dense LBHNC
+    # pages written by the Triton cache writer.
+    can_read_lbhnc = (
+        is_dense_lbhnc
+        and on_cdna()
+        and kv_cache_dtype in ("auto", "fp8", "fp8_e4m3")
+        and not use_interleaved_v_cache
+        and not is_block_table_ptr
+    )
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2 or not has_native_layout:
+    if not is_pow2 or not (
+        can_read_lbhnc or has_native_kv_cache_layout(key_cache, value_cache)
+    ):
         use_custom = False
 
     if use_custom:
