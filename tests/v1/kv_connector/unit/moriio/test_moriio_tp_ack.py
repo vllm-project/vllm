@@ -297,6 +297,7 @@ def test_worker_reports_unexpected_heartbeat_exit(exit_kind):
     worker._pending_unmapped_acks = []
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
+    worker._completed_notification_owners = {}
     worker._heartbeat = MoRIIOHeartbeat("tcp://127.0.0.1:1", {"type": "P"}, 0.02)
     process = worker._heartbeat._process
     metadata = SimpleNamespace(transfer_id_to_request_id={})
@@ -799,6 +800,7 @@ def _consumer_worker(events: list[str], mode: MoRIIOMode) -> MoRIIOConnectorWork
     worker._eager_handshake_all_dp_ranks = lambda metadata: None  # type: ignore[method-assign]
     worker._read_blocks_for_req = lambda req_id, meta: events.append(f"read:{req_id}")  # type: ignore[method-assign]
     worker._await_reads_issued_this_step = lambda: None  # type: ignore[method-assign]
+    worker._pop_done_transfers = set  # type: ignore[method-assign]
     return worker
 
 
