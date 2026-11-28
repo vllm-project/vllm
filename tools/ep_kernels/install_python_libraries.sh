@@ -199,6 +199,17 @@ do_build() {
             echo "ERROR: Failed to apply DeepEP GIN barrier data-visibility patch; aborting build." >&2
             exit 1
         fi
+
+        # CUDA 13.5 cuobjdump emits FUNC/ENTRY instead of STT_FUNC/STO_ENTRY.
+        if [[ "$deepep_head" != a56d6156febcd9976e55adc85b5155bfac9f28f8 ]]; then
+            echo "WARNING: Skipping DeepEP CUDA symbol-parser patch: HEAD is $deepep_head, expected a56d6156febcd9976e55adc85b5155bfac9f28f8." >&2
+        elif patch --batch --force --reverse --dry-run -p1 \
+            < "${PATCHES_DIR}/deepep-cuda135-symbol-parser.patch" > /dev/null 2>&1; then
+            echo "DeepEP CUDA symbol-parser patch is already applied."
+        elif ! patch --batch -p1 < "${PATCHES_DIR}/deepep-cuda135-symbol-parser.patch"; then
+            echo "ERROR: Failed to apply DeepEP CUDA symbol-parser patch; aborting build." >&2
+            exit 1
+        fi
     fi
 
     # DeepEP CUDA 13 patch

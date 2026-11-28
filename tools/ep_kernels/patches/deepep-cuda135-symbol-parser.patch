@@ -1,0 +1,19 @@
+diff --git a/csrc/jit/kernel_runtime.hpp b/csrc/jit/kernel_runtime.hpp
+index e610959..a32e7af 100644
+--- a/csrc/jit/kernel_runtime.hpp
++++ b/csrc/jit/kernel_runtime.hpp
+@@ -34,7 +34,13 @@ public:
+         std::istringstream iss(symbols);
+         std::vector<std::string> symbol_names;
+         for (std::string line; std::getline(iss, line); ) {
+-            if (line.find("STT_FUNC") == 0 and line.find("STO_ENTRY") != std::string::npos and
++            std::istringstream fields(line);
++            std::string symbol_type, field;
++            fields >> symbol_type;
++            bool is_entry = false;
++            while (fields >> field)
++                is_entry = is_entry or field == "STO_ENTRY" or field == "ENTRY";
++            if ((symbol_type == "STT_FUNC" or symbol_type == "FUNC") and is_entry and
+                 std::none_of(illegal_names.begin(), illegal_names.end(),
+                 [&](const auto name) { return line.find(name) != std::string::npos; })) {
+                 const auto last_space = line.rfind(' ');
