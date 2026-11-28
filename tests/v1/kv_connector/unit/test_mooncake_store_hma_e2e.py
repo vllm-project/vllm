@@ -52,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroup,
     KVCacheLayerConfig,
     KVCacheSpec,
     KVCacheTensor,
@@ -59,6 +60,11 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.utils import allocate_kv_cache
+
+
+def _event_groups(coord) -> list[tuple[int, KVCacheGroup]]:
+    """Pair each Store group with the cache group id its events name."""
+    return [(group_id, group) for group_id, group in enumerate(coord.kv_cache_groups)]
 
 
 class _DictStore:
@@ -266,6 +272,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         kv_role=worker.kv_role,
         ready_event=ready,
         enable_kv_event=False,
+        event_groups=_event_groups(worker.coord),
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
@@ -734,6 +741,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=_event_groups(coord),
     )
 
     # The surrounding metadata may describe a longer resumed replay, but the
@@ -752,7 +760,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         boundary_puts=[BoundaryPut(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
+    send._offload_handoff(_resolve_partial_tail(send, req))
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -815,6 +823,7 @@ def test_offload_syncs_event_before_put():
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=_event_groups(coord),
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(3)]
@@ -898,6 +907,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=_event_groups(coord),
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(3)]  # 3 hash units = 12 tok
@@ -913,7 +923,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         boundary_puts=[BoundaryPut(1, mamba_cow_block, 8)],
     )
 
-    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
+    send._offload_handoff(_resolve_partial_tail(send, req))
 
     # FA (block 4): full blocks ending at 4 and 8, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under
@@ -994,6 +1004,7 @@ def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=_event_groups(worker.coord),
     )
 
     # Keep checkpoint 8 while moving the prompt beyond its lookahead window.
@@ -1011,7 +1022,7 @@ def test_worker_lookup_hits_sub_block_partial_tail(num_lookahead):
         completed_token_len=prompt_len,
         boundary_puts=[BoundaryPut(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
+    send_thread._offload_handoff(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 
@@ -1104,6 +1115,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
         group_participates=[True, True],
+        event_groups=_event_groups(worker.coord),
     )
 
     # Persist a hash-aligned tail within the 16-token physical block.
@@ -1118,7 +1130,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         completed_token_len=12,
         boundary_puts=[BoundaryPut(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
+    send_thread._offload_handoff(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 
@@ -1208,6 +1220,7 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
         ready_event=threading.Event(),
         enable_kv_event=False,
         group_participates=[True],
+        event_groups=_event_groups(worker.coord),
     )
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
     save_req = ReqMeta(
@@ -1474,6 +1487,7 @@ def test_selective_lease_with_partial_hash_hits(monkeypatch):
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
+        event_groups=_event_groups(worker.coord),
     )
     # A 12-token prompt leaves a resend-safe sub-block checkpoint at 8.
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
@@ -1487,7 +1501,7 @@ def test_selective_lease_with_partial_hash_hits(monkeypatch):
         completed_token_len=12,
         boundary_puts=[BoundaryPut(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
+    send_thread._offload_handoff(_resolve_partial_tail(send_thread, req))
     store.lease_calls.clear()
 
     assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
