@@ -284,3 +284,29 @@ def test_root_path_unguarded_route_still_accessible():
 
     resp = client.get("/health")
     assert resp.status_code == 200, "/health should not require auth"
+
+
+@pytest.mark.parametrize(
+    ("method", "path_template"),
+    [("POST", "/adapters"), ("DELETE", "/adapters/{adapter_name}")],
+)
+def test_sagemaker_lora_aliases_require_auth(method: str, path_template: str):
+    """The SageMaker LoRA aliases load and unload adapters, like
+    /v1/load_lora_adapter and /v1/unload_lora_adapter, so they need the key."""
+    app = _create_app_with_mock_routes([(path_template, [method])])
+    client = TestClient(app)
+    test_path = generate_test_path(path_template)
+
+    assert client.request(method, test_path).status_code == 401
+    assert (
+        client.request(
+            method, test_path, headers={"Authorization": "Bearer wrong"}
+        ).status_code
+        == 401
+    )
+    assert (
+        client.request(
+            method, test_path, headers={"Authorization": "Bearer valid-token"}
+        ).status_code
+        == 200
+    )
