@@ -13,6 +13,14 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+## Audio and Video File Formats
+
+Pass audio and video files to the Python media loaders via HTTP URLs, base64
+data URLs, or allowed local files. The loaders check for and reject FFmpeg
+concat scripts, HLS playlists (`#EXTM3U`), SDP stream descriptions, and XML
+manifests. Upload the media file directly.
+Enabling `--allowed-local-media-path` does not enable these reference formats.
+
 ## GLM-5.3-Flash
 
 `zai-org/GLM-5.3-Flash` (`Glm5NextForConditionalGeneration`) requires the
@@ -892,7 +900,10 @@ backends are supported:
 
 The two CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
 choose which FFmpeg version is used while `opencv` relies on whichever
-FFmpeg build it was linked against.
+FFmpeg build it was linked against. The `torchcodec` video backend requires
+TorchCodec 0.17 or newer for its decoder-level restriction on opening
+additional resources. The other video backends rely on the reference-format
+checks described above.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 
@@ -1213,7 +1224,7 @@ Then, you can use the OpenAI client as follows:
         base_url=openai_api_base,
     )
 
-    # Any format supported by soundfile/PyAV is supported
+    # Use a self-contained audio format supported by soundfile/PyAV.
     audio_url = AudioAsset("winning_call").url
     audio_base64 = encode_base64_content_from_url(audio_url)
 
@@ -1314,11 +1325,14 @@ vllm serve mistralai/Voxtral-Mini-3B-2507 \
     decoded waveform matches the soundfile reference length.
 
 !!! note
-    `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other
-    platforms (e.g. ROCm, TPU) `auto` falls back to the soundfile → PyAV
-    chain unless you install it manually. torchcodec also links against a
-    system FFmpeg installation; if FFmpeg is missing, `auto` falls back the
-    same way.
+    The TorchCodec audio backend requires TorchCodec 0.17 or newer and a
+    system FFmpeg installation. CUDA, CPU and XPU builds include TorchCodec.
+    On other platforms (e.g. ROCm, TPU), install it separately to use this
+    backend. If the required dependencies are unavailable, `auto` falls
+    back to soundfile and then PyAV.
+
+    Audio inputs must be self-contained. The FFmpeg-backed audio decoders
+    reject secondary network and file opens through FFmpeg's I/O layer.
 
 ### Embedding Inputs
 

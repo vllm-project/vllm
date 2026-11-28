@@ -20,6 +20,7 @@ from vllm.assets.video import (
     video_to_ndarrays,
     video_to_pil_images_list,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
 from vllm.multimodal.media.base import MediaDecodedBudget
 from vllm.multimodal.video import (
@@ -69,6 +70,18 @@ def _write_opencv_test_video(tmp_path: Path, side: int, num_frames: int) -> byte
     video_path = f"{tmp_path}/budget_video.mp4"
     create_video_from_image(image_path, video_path, num_frames=num_frames)
     return Path(video_path).read_bytes()
+
+
+def test_torchcodec_video_requires_decoder_io_isolation(tmp_path, monkeypatch):
+    torchcodec = pytest.importorskip("torchcodec", minversion="0.17")
+    data = _write_opencv_test_video(tmp_path, side=32, num_frames=2)
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    frames, _ = loader.load_bytes(data, num_frames=1, backend="torchcodec")
+    assert frames.shape == (1, 32, 32, 3)
+
+    monkeypatch.setattr(torchcodec, "__version__", "0.16.0")
+    with pytest.raises(VLLMValidationError, match="requires torchcodec >= 0.17"):
+        loader.load_bytes(data, num_frames=1, backend="torchcodec")
 
 
 @pytest.mark.skip_global_cleanup
@@ -188,6 +201,23 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
         with pytest.raises(AssertionError, match="bad fps"):
             videoio = VideoMediaIO(imageio, num_frames=10, fps=2.0)
             _ = videoio.load_bytes(b"test")
+
+
+@pytest.mark.parametrize("entry_point", ["bytes", "base64", "file", "loader"])
+def test_video_reference_script_rejected(tmp_path, entry_point):
+    data = b"ffconcat version 1.0\nfile 'private.avi'\n"
+    video_io = VideoMediaIO(ImageMediaIO())
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        if entry_point == "bytes":
+            video_io.load_bytes(data)
+        elif entry_point == "base64":
+            video_io.load_base64("video/mp4", pybase64.b64encode(data).decode())
+        elif entry_point == "file":
+            path = tmp_path / "video.mp4"
+            path.write_bytes(data)
+            video_io.load_file(path)
+        else:
+            VIDEO_LOADER_REGISTRY.load("opencv").load_bytes(data)
 
 
 @pytest.mark.parametrize("is_color", [True, False])

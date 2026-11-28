@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
+from io import BufferedReader, BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +16,7 @@ from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
     load_audio,
+    load_audio_pyav,
     load_audio_soundfile,
     load_audio_torchcodec,
 )
@@ -73,6 +74,22 @@ def test_audio_media_io_load_file(audio_assets: AudioTestAssets):
     out = audio_io.load_file(path)
     assert isinstance(out[0], np.ndarray)
     assert out[1] == 16000
+
+
+@pytest.mark.parametrize("loader", [load_audio, load_audio_pyav, load_audio_torchcodec])
+@pytest.mark.parametrize("source_type", ["buffer", "file"])
+def test_audio_reference_script_rejected(tmp_path, monkeypatch, loader, source_type):
+    """A valid local WAV must not be readable through a concat script."""
+    monkeypatch.chdir(tmp_path)
+    sf.write("private.wav", np.zeros(800, dtype=np.float32), 8000)
+    data = b"ffconcat version 1.0\nfile 'private.wav'\n"
+    if source_type == "buffer":
+        source = BytesIO(data)
+    else:
+        source = tmp_path / "audio.wav"
+        source.write_bytes(data)
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        loader(source, sr=None)
 
 
 def test_audio_media_io_encode_base64(dummy_audio):
@@ -344,7 +361,7 @@ def test_load_audio_threads_max_decode_bytes():
 def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
     """Every explicit backend must decode to the same samples as `auto`."""
     if backend == "torchcodec":
-        pytest.importorskip("torchcodec")
+        pytest.importorskip("torchcodec", minversion="0.17")
     ref_audio, ref_sr = load_audio(BytesIO(dummy_audio_bytes), sr=None)
     audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend=backend)
     assert sr == ref_sr
@@ -362,6 +379,60 @@ def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
     np.testing.assert_allclose(ref_audio[:n], audio[:n], atol=1e-4)
 
 
+@pytest.mark.parametrize("loader", [load_audio_pyav, load_audio_torchcodec])
+def test_ffmpeg_audio_stream_and_path_decode_identically(
+    tmp_path, dummy_audio_bytes, loader
+):
+    if loader is load_audio_torchcodec:
+        pytest.importorskip("torchcodec", minversion="0.17")
+    path = tmp_path / "audio.ogg"
+    path.write_bytes(dummy_audio_bytes)
+    with BytesIO(dummy_audio_bytes) as source:
+        buffer_audio, buffer_rate = loader(source, sr=None)
+        assert not source.closed
+
+    file_audio, file_rate = loader(path, sr=None)
+    assert file_rate == buffer_rate
+    np.testing.assert_array_equal(file_audio, buffer_audio)
+
+
+def test_pyav_audio_decoder_forbids_secondary_io(tmp_path):
+    path = tmp_path / "audio.wav"
+    sf.write(path, np.zeros(800, dtype=np.float32), 8000)
+
+    with patch.object(
+        audio_module.av, "open", wraps=audio_module.av.open
+    ) as open_audio:
+        samples, sample_rate = load_audio_pyav(path, sr=None)
+
+    assert samples.size == 800
+    assert sample_rate == 8000
+    source = open_audio.call_args.args[0]
+    assert isinstance(source, BufferedReader)
+    assert source.closed
+    options = open_audio.call_args.kwargs
+    assert options["container_options"]["protocol_whitelist"] == ""
+    with pytest.raises(ValueError, match="Audio must be self-contained"):
+        options["io_open"]("secondary", 0, {})
+
+
+def test_torchcodec_audio_uses_isolated_file_like_input(tmp_path):
+    pytest.importorskip("torchcodec", minversion="0.17")
+    path = tmp_path / "audio.wav"
+    sf.write(path, np.zeros(800, dtype=np.float32), 8000)
+
+    with patch.object(
+        audio_module, "AudioDecoder", wraps=audio_module.AudioDecoder
+    ) as open_audio:
+        samples, sample_rate = load_audio_torchcodec(path, sr=None)
+
+    assert samples.size == 800
+    assert sample_rate == 8000
+    source = open_audio.call_args.args[0]
+    assert isinstance(source, BufferedReader)
+    assert source.closed
+
+
 def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
     """Default decoding must not append Vorbis padding to the speech waveform."""
     expected, expected_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
@@ -373,7 +444,7 @@ def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
 def test_load_audio_torchcodec_preserves_vorbis_length(dummy_audio_bytes):
     """Torchcodec must trim Vorbis trailing padding even on FFmpeg < 5.0,
     matching the soundfile reference exactly."""
-    pytest.importorskip("torchcodec")
+    pytest.importorskip("torchcodec", minversion="0.17")
     expected, expected_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
     audio, sr = load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
     assert sr == expected_sr
@@ -440,7 +511,7 @@ def test_audio_media_io_audio_backend_kwarg(dummy_audio_bytes):
 
 def test_torchcodec_max_duration_rejected(dummy_audio_bytes):
     """The decompression-bomb duration guard must hold for torchcodec too."""
-    pytest.importorskip("torchcodec")
+    pytest.importorskip("torchcodec", minversion="0.17")
     with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
         load_audio_torchcodec(
             BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001
@@ -449,7 +520,7 @@ def test_torchcodec_max_duration_rejected(dummy_audio_bytes):
 
 def test_torchcodec_max_decode_bytes_rejected(dummy_audio_bytes):
     """The decompression-bomb memory guard must hold for torchcodec too."""
-    pytest.importorskip("torchcodec")
+    pytest.importorskip("torchcodec", minversion="0.17")
     audio, _ = load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
     with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
         load_audio_torchcodec(

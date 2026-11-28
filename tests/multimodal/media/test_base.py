@@ -1,17 +1,97 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pickle
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+from vllm.multimodal import media_utils
 from vllm.multimodal.media import MediaWithBytes
+from vllm.multimodal.media_utils import validate_media_bytes, validate_media_source
 
 pytestmark = pytest.mark.cpu_test
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 assert ASSETS_DIR.exists()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"ffconcat version 1.0\nfile 'private.avi'\n",
+        b"\xef\xbb\xbf#EXTM3U\n#EXT-X-TARGETDURATION:1\nprivate.ts\n",
+        b" \xef\xbb\xbf#EXTM3U\nprivate.ts\n",
+        b"v=0\r\nc=IN IP4 127.0.0.1\r\nm=video 1234 RTP/AVP 96\r\n",
+        b"s=session\nc=IN IP6 ::1\n",
+        b"<?xml version='1.0'?><MPD></MPD>",
+        b"<MPD></MPD>",
+        "<MPD></MPD>".encode("utf-16"),
+    ],
+)
+@pytest.mark.parametrize("source_type", ["bytes", "buffer", "file"])
+def test_media_reference_descriptions_rejected(tmp_path, data, source_type):
+    """Reference formats must fail before a decoder can open another resource."""
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        if source_type == "bytes":
+            validate_media_bytes(data)
+        elif source_type == "buffer":
+            validate_media_source(BytesIO(data))
+        else:
+            path = tmp_path / "media"
+            path.write_bytes(data)
+            validate_media_source(path)
+
+
+def test_binary_media_metadata_is_not_a_reference_description(tmp_path):
+    data = b"RIFF\x00\x00\x00\x00WAVE\nc=IN IP4 127.0.0.1\n"
+    path = tmp_path / "media.wav"
+    path.write_bytes(data)
+    validate_media_bytes(data)
+    validate_media_source(path)
+    source = BytesIO(data)
+    source.seek(8)
+    validate_media_source(source)
+    assert source.tell() == 8
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b" " * 17 + b"\xef\xbb\xbf" + b" " * 19 + b"#EXTM3U\n",
+        b"session name\r" + b"c=IN IP4 ",
+        b"\xef\xbb\xbf  c=IN IP6 ",
+    ],
+)
+def test_media_file_recognizes_signatures_at_read_boundaries(
+    tmp_path, monkeypatch, data
+):
+    path = tmp_path / "media"
+    path.write_bytes(data)
+    monkeypatch.setattr(media_utils, "_HEADER_READ_BYTES", 8)
+
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        validate_media_source(path)
+
+
+def test_media_file_stops_scanning_after_first_nul(monkeypatch):
+    read_cap = 8
+    prefix = b"padding " * 128
+    source = BytesIO(prefix + b"\x00#EXTM3U\n" + b"suffix" * 64)
+    monkeypatch.setattr(media_utils, "_HEADER_READ_BYTES", read_cap)
+
+    media_utils._validate_media_file(source)
+
+    assert source.tell() == len(prefix) + read_cap
+
+
+def test_media_file_chunk_edge_is_not_a_line_boundary(tmp_path, monkeypatch):
+    path = tmp_path / "media"
+    path.write_bytes(b"padding c=IN IP4 more\nc=IN IP4suffix")
+    monkeypatch.setattr(media_utils, "_HEADER_READ_BYTES", 8)
+
+    validate_media_source(path)
 
 
 def test_media_with_bytes_pickle_roundtrip():

@@ -2,18 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Callable
+from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
 import numpy.typing as npt
 import pybase64
 import torch
+from packaging.version import InvalidVersion, Version
 
 import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.multimodal.audio import resample_audio_pyav
+from vllm.multimodal.media_utils import validate_media_source
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import MiB_bytes
@@ -39,11 +43,12 @@ except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
 try:
+    from torchcodec import __version__ as _torchcodec_version
     from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError, OSError) as exc:
-    # torchcodec may fail to import when it is not installed (ImportError),
-    # the system ffmpeg is missing (RuntimeError), or its native library
-    # cannot be loaded (OSError).
+
+    if Version(_torchcodec_version) < Version("0.17.0"):
+        raise ImportError("torchcodec >= 0.17 is required for isolated audio input")
+except (ImportError, InvalidVersion, RuntimeError, OSError) as exc:
     AudioDecoder = None  # type: ignore[assignment]
     _torchcodec_import_exc: BaseException | None = exc
 else:
@@ -71,7 +76,7 @@ AUDIO_BACKENDS = ("auto", "soundfile", "pyav", "torchcodec")
 # `load_audio(backend="auto")` falls back to the soundfile → PyAV chain.
 _TORCHCODEC_UNAVAILABLE_MSG = (
     "torchcodec audio backend is unavailable (requires the torchcodec "
-    "package and a system ffmpeg installation)"
+    "package >= 0.17 and a system ffmpeg installation)"
 )
 
 # Slack on the torchcodec decode window when enforcing `max_duration_s`, so an
@@ -108,6 +113,12 @@ def _normalize_decode_limits(
     return max_duration_s, max_decode_bytes
 
 
+def _deny_audio_resource_open(
+    _url: str, _flags: int, _options: dict[str, str]
+) -> BinaryIO:
+    raise ValueError("Audio must be self-contained.")
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
@@ -139,19 +150,28 @@ def load_audio_pyav(
         NumPy array and *sample_rate* is the native sample rate in Hz.
 
     """
+    validate_media_source(path)
     max_duration_s, max_decode_bytes = _normalize_decode_limits(
         max_duration_s, max_decode_bytes
     )
 
-    try:
-        container = av.open(path)
-    except av.error.FFmpegError as e:
-        raise ValueError(
-            "Invalid or corrupted audio data. Ensure the input is a valid "
-            "audio or video file (e.g. a complete WAV, MP3, or MP4)."
-        ) from e
+    with ExitStack() as stack:
+        source = (
+            path if isinstance(path, BytesIO) else stack.enter_context(open(path, "rb"))
+        )
+        try:
+            # The primary input uses custom I/O. FFmpeg must not open any
+            # further protocols or files on behalf of the demuxer.
+            container = stack.enter_context(
+                av.open(
+                    source,
+                    container_options={"protocol_whitelist": ""},
+                    io_open=_deny_audio_resource_open,
+                )
+            )
+        except av.error.FFmpegError as e:
+            raise ValueError(_CORRUPT_AUDIO_MSG) from e
 
-    with container:
         if not container.streams.audio:
             raise ValueError("No audio stream found.")
         stream = container.streams.audio[0]
@@ -322,6 +342,7 @@ def load_audio_torchcodec(
         sample rate in Hz.
 
     """
+    validate_media_source(path)
     max_duration_s, max_decode_bytes = _normalize_decode_limits(
         max_duration_s, max_decode_bytes
     )
@@ -334,10 +355,26 @@ def load_audio_torchcodec(
         raise ValueError(f"torchcodec requires an integer sample rate, got {sr}")
     sample_rate = int(sr) if sr is not None else None
 
+    with ExitStack() as stack:
+        source = (
+            path if isinstance(path, BytesIO) else stack.enter_context(open(path, "rb"))
+        )
+        return _decode_audio_torchcodec(
+            source, sample_rate, mono, max_duration_s, max_decode_bytes
+        )
+
+
+def _decode_audio_torchcodec(
+    source: BinaryIO,
+    sample_rate: int | None,
+    mono: bool,
+    max_duration_s: float | None,
+    max_decode_bytes: int | None,
+) -> tuple[npt.NDArray, float]:
     # Opening the source and reading container metadata both touch untrusted
-    # input; torchcodec signals corrupt/unsupported data with RuntimeError.
+    # input. TorchCodec 0.17+ blocks nested protocols on its file-like path.
     try:
-        decoder = AudioDecoder(path, sample_rate=sample_rate)
+        decoder = AudioDecoder(source, sample_rate=sample_rate)
         metadata = decoder.metadata
     except RuntimeError as e:
         # torchcodec loads its ffmpeg-backed core lazily at construction, so
@@ -355,7 +392,9 @@ def load_audio_torchcodec(
         est_duration_s = metadata.duration_seconds
         # Estimate at the *output* rate: when `sr` is set torchcodec
         # resamples to it during decode.
-        est_sample_rate = sr if sr is not None else metadata.sample_rate
+        est_sample_rate = (
+            sample_rate if sample_rate is not None else metadata.sample_rate
+        )
         est_num_channels = metadata.num_channels
         if (
             est_duration_s is not None
@@ -480,6 +519,7 @@ def load_audio(
             backend with no fallback.
 
     """
+    validate_media_source(path)
     backend = backend or "auto"
     if backend not in AUDIO_BACKENDS:
         raise ValueError(

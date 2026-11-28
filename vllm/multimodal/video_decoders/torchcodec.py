@@ -6,7 +6,9 @@ from typing import Literal
 import numpy as np
 import numpy.typing as npt
 import torch
+from packaging.version import Version
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule, check_torchcodec_available
@@ -26,6 +28,7 @@ except (ImportError, RuntimeError):
     )
 
 logger = init_logger(__name__)
+_MIN_ISOLATED_TORCHCODEC_VERSION = Version("0.17.0")
 
 
 def decode_torchcodec(
@@ -38,7 +41,6 @@ def decode_torchcodec(
     seek_mode: Literal["exact", "approximate"] = "exact",
     device: str = "cpu",
 ) -> tuple[npt.NDArray | torch.Tensor, VideoSourceMetadata, list[int], list[int]]:
-    check_torchcodec_available()
     decoder = TorchCodecVideoBackendMixin.make_torchcodec_decoder(
         data,
         num_ffmpeg_threads=num_ffmpeg_threads,
@@ -77,6 +79,15 @@ class TorchCodecVideoBackendMixin:
         seek_mode: Literal["exact", "approximate"] = "exact",
         device: str = "cpu",
     ) -> "VideoDecoder":
+        check_torchcodec_available()
+        from torchcodec import __version__
+
+        if Version(__version__) < _MIN_ISOLATED_TORCHCODEC_VERSION:
+            raise VLLMValidationError(
+                "The TorchCodec video backend requires torchcodec >= 0.17 "
+                "to decode media without opening additional resources."
+            )
+
         torch_device = torch.device(device)
         if torch_device.type == "cuda" and not current_platform.is_cuda():
             raise ValueError(
@@ -88,8 +99,8 @@ class TorchCodecVideoBackendMixin:
                 f"torchcodec video decoding only supports 'cpu' and 'cuda' "
                 f"devices, got {device!r}."
             )
-        # NHWC matches the (num_frames, H, W, 3) uint8 RGB layout the rest
-        # of the pipeline expects, avoiding a transpose.
+        # TorchCodec 0.17+ blocks nested protocols on custom I/O (bytes).
+        # NHWC matches the (num_frames, H, W, 3) layout the pipeline expects.
         return VideoDecoder(
             data,
             dimension_order="NHWC",
