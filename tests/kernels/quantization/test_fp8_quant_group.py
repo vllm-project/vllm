@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import (
     QuantFP8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 
@@ -208,3 +209,26 @@ def test_quantfp8_group_edge_cases(default_vllm_config, seed: int) -> None:
     assert (scales_zero_ue8m0 >= _FP8_MIN_SCALING_FACTOR).all(), (
         "Clamped scales were not larger than or equal to _FP8_MIN_SCALING_FACTOR."
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA FP8 quantization")
+@pytest.mark.parametrize("use_ue8m0", [True, False])
+@torch.inference_mode()
+def test_quantfp8_group_nan_input_matches_cuda(
+    default_vllm_config, use_ue8m0: bool
+) -> None:
+    # Rows padded for CUDA graphs can hold stale memory. The CUDA kernel skips
+    # NaN when it takes the group absmax; the native path must too, because
+    # DeepGEMM traps on a NaN scale when it packs scales to UE8M0.
+    set_random_seed(42)
+    x = torch.randn((16, 256), dtype=torch.bfloat16, device="cuda") * 8
+    x[3, 5] = float("nan")
+    quant_op = QuantFP8(
+        static=False,
+        group_shape=GroupShape(1, 64),
+        column_major_scales=False,
+        use_ue8m0=use_ue8m0,
+    )
+    _, scales_native = quant_op.forward_native(x.clone())
+    _, scales_cuda = quant_op.forward_cuda(x.clone())
+    torch.testing.assert_close(scales_native, scales_cuda, rtol=2e-7, atol=2e-8)
