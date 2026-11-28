@@ -1166,6 +1166,47 @@ def _rocm_aiter_triton_per_tensor_fp8_gemm_fake(
     return torch.empty(m, n, dtype=out_dtype, device=A.device)
 
 
+def _rocm_aiter_triton_per_token_fp8_gemm_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    out_dtype: torch.dtype,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None,
+    max_m: int,
+) -> torch.Tensor:
+    # B is the [N, K] weight. Checked inside the op so torch.compile does not
+    # specialize on M.
+    if bias is None and A.shape[0] <= max_m:
+        from aiter.ops.triton.gemm.basic.gemm_a8w8_per_token_scale import (
+            gemm_a8w8_per_token_scale,
+        )
+
+        return gemm_a8w8_per_token_scale(
+            A, B, As.reshape(-1, 1), Bs.reshape(-1, 1), dtype=out_dtype
+        )
+    return torch._scaled_mm(
+        A,
+        B.t(),
+        out_dtype=out_dtype,
+        scale_a=As.reshape(-1, 1),
+        scale_b=Bs.reshape(1, -1),
+        bias=bias,
+    )
+
+
+def _rocm_aiter_triton_per_token_fp8_gemm_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    out_dtype: torch.dtype,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None,
+    max_m: int,
+) -> torch.Tensor:
+    return torch.empty(A.shape[0], B.shape[0], dtype=out_dtype, device=A.device)
+
+
 def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -3535,6 +3576,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_triton_per_token_fp8_gemm",
+                op_func=_rocm_aiter_triton_per_token_fp8_gemm_impl,
+                fake_impl=_rocm_aiter_triton_per_token_fp8_gemm_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle",
                 op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl,
                 fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_fake,
@@ -3914,6 +3961,20 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_triton_per_tensor_fp8_gemm(
             A, B, out_dtype, As, Bs, bias, x_scale_vec, w_scale_vec, max_m
+        )
+
+    @staticmethod
+    def triton_per_token_fp8_gemm(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        max_m: int,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_triton_per_token_fp8_gemm(
+            A, B, out_dtype, As, Bs, bias, max_m
         )
 
     @staticmethod
@@ -5065,6 +5126,23 @@ class rocm_aiter_ops:
                 _triton_gemm_config_is_tuned("GEMM-A8W8", n, k, M=m) for m in probes
             )
         except (AssertionError, ImportError):
+            return False
+
+    @staticmethod
+    @functools.cache
+    def is_triton_gemm_a8w8_per_token_tuned(n: int, k: int, max_m: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        # Probe every M_LEQ bucket from 8 up to max_m.
+        probes = [8]
+        while probes[-1] < max_m:
+            probes.append(probes[-1] * 2)
+        try:
+            return all(
+                _triton_gemm_config_is_tuned("GEMM-A8W8_PER_TOKEN_SCALE", n, k, M=m)
+                for m in probes
+            )
+        except (AssertionError, ImportError, KeyError):
             return False
 
     @staticmethod
