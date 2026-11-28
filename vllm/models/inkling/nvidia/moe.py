@@ -42,6 +42,8 @@ from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
+from ..common.weight_loading import load_expert_scales
+
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import (
         RoutedExperts,
@@ -572,28 +574,13 @@ class InklingMoE(nn.Module):
 
         param = getattr(experts, key)
         slots = self._local_expert_slots()
-        gids = sorted(slots)
-        lids = [slots[g] for g in gids]
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
 
         if key.endswith(("_scale_2", "_global_scale")):
-            # Per-expert scalars, vectorized over the local experts. The
-            # fused w13 params carry one slot per gate/up half. A single
-            # checkpoint value is shared by both halves.
-            vals = weight[gids].float().reshape(len(gids), -1)
-            target_width = math.prod(param.shape[1:])
-            if vals.shape[1] == 1:
-                vals = vals.expand(-1, target_width)
-            elif vals.shape[1] != target_width:
-                raise ValueError(
-                    f"cannot load {tuple(weight.shape)} into {tuple(param.shape)}"
-                )
-            param.data[lids] = vals.reshape(len(gids), *param.shape[1:]).to(
-                param.device
-            )
+            load_expert_scales(param, weight, slots)
         elif key == "w2_weight_scale" and weight.shape[-1] == 1:
             # Per-output-channel scales are replicated across TP ranks.
-            param.data[lids] = weight[gids].to(device=param.device, dtype=param.dtype)
+            load_expert_scales(param, weight, slots)
         elif key.startswith("w13"):
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form
