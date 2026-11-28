@@ -883,28 +883,24 @@ def test_numa_bind_args():
     assert EngineArgs.from_cli_args(args=args).numa_bind is False
 
 
-def test_ir_op_priority():
-    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+def test_ir_op_priority_flag_removed():
+    """The top-level --ir-op-priority option is gone; KernelConfig still works."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--ir-op-priority.rms_norm", "vllm_c"])
+    with pytest.raises(TypeError):
+        EngineArgs(ir_op_priority={"rms_norm": ["vllm_c"]})
 
-    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
-    cfg1 = EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
-    cfg2 = EngineArgs(
-        kernel_config=KernelConfig(ir_op_priority=ir_op_priority)
-    ).create_engine_config()
-    assert cfg1.kernel_config.ir_op_priority == cfg2.kernel_config.ir_op_priority
-
-    with pytest.raises(ValueError, match="rms_norm"):
-        _ = EngineArgs(
-            ir_op_priority=ir_op_priority,
-            kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
-        ).create_engine_config()
+    args = parser.parse_args(["--kernel-config.ir_op_priority.rms_norm", "vllm_c"])
+    cfg = EngineArgs.from_cli_args(args).create_engine_config()
+    assert cfg.kernel_config.ir_op_priority.rms_norm[0] == "vllm_c"
 
 
 def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
     """Setting ir_op_priority warns users because vLLM IR is being removed."""
     from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
 
-    msg = "ir_op_priority (--ir-op-priority) is deprecated"
+    msg = "KernelConfig.ir_op_priority is deprecated"
 
     # Platform defaults fill ir_op_priority; copying the config must not warn.
     cfg = EngineArgs().create_engine_config()
@@ -912,10 +908,6 @@ def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
     assert msg not in caplog_vllm.text
 
     ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
-    EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
-    assert msg in caplog_vllm.text
-
-    caplog_vllm.clear()
     kernel_config = KernelConfig(ir_op_priority=ir_op_priority)
     EngineArgs(kernel_config=kernel_config).create_engine_config()
     assert msg in caplog_vllm.text

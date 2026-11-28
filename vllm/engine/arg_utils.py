@@ -81,7 +81,6 @@ from vllm.config.cache import (
 from vllm.config.device import Device
 from vllm.config.kernel import (
     PASSTHROUGH_ALL2ALL_BACKEND,
-    IrOpPriorityConfig,
     LinearBackend,
     MoEBackend,
     SparseIndexerTopkBackend,
@@ -456,8 +455,9 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
 
 
 _IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
-    "ir_op_priority (--ir-op-priority) is deprecated because vLLM IR is being "
-    "removed. It will be removed in v0.34.0."
+    "KernelConfig.ir_op_priority is deprecated because vLLM IR is being "
+    "removed, and it will be removed together with vLLM IR. The top-level "
+    "--ir-op-priority option has already been removed."
 )
 
 
@@ -500,7 +500,6 @@ class EngineArgs:
     max_cudagraph_capture_size: int | None = get_field(
         CompilationConfig, "max_cudagraph_capture_size"
     )
-    ir_op_priority: IrOpPriorityConfig = get_field(KernelConfig, "ir_op_priority")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -909,9 +908,6 @@ class EngineArgs:
             self.fault_tolerance_config = FaultToleranceConfig(
                 **self.fault_tolerance_config
             )
-        if isinstance(self.ir_op_priority, dict):
-            self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
-
         if isinstance(self.watchdog_config, dict):
             self.watchdog_config = WatchdogConfig(**self.watchdog_config)
 
@@ -1862,7 +1858,6 @@ class EngineArgs:
             title="KernelConfig",
             description=KernelConfig.__doc__,
         )
-        kernel_group.add_argument("--ir-op-priority", **kernel_kwargs["ir_op_priority"])
         kernel_group.add_argument(
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
@@ -2854,21 +2849,8 @@ class EngineArgs:
         if self.sparse_indexer_topk_backend != "auto":
             kernel_config.sparse_indexer_topk_backend = self.sparse_indexer_topk_backend
 
-        # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
-        for op_name, op_priority in asdict(self.ir_op_priority).items():
-            # Empty means unset
-            if not op_priority:
-                continue
-
-            # Priority cannot be set 2x for the same op
-            if getattr(kernel_config.ir_op_priority, op_name):
-                raise ValueError(
-                    f"Op priority for {op_name} specified via both ir_op_priority "
-                    f"and KernelConfig.ir_op_priority, only one allowed at a time."
-                )
-
-            # Set the attribute
-            setattr(kernel_config.ir_op_priority, op_name, op_priority)
+        # Platform defaults are applied later, so anything set here came from
+        # the user.
         if any(asdict(kernel_config.ir_op_priority).values()):
             logger.warning_once(_IR_OP_PRIORITY_DEPRECATION_MESSAGE)
 
