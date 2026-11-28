@@ -44,6 +44,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
     rocm_sparse_decode_bf16_num_splits,
 )
+from vllm.v1.attention.ops.shardq import gather_full_sinks_
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -1034,6 +1035,7 @@ def reference_mla_sparse_prefill(
 
 class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
     supports_dcp = True
+    supports_shardq: ClassVar[bool] = True
     can_return_lse_for_decode = True
     use_aiter_sparse_mla = False
 
@@ -1070,6 +1072,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             if not sinks.is_contiguous():
                 raise ValueError("ROCm AITER MLA sinks must be contiguous")
         self.sinks: torch.Tensor | None = sinks
+        self._sinks_full: torch.Tensor | None = None
         super().__init__(
             num_heads,
             head_size,
@@ -1161,9 +1164,15 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             )
             self.use_shardq = False
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        super().process_weights_after_loading(act_dtype)
+        if self.sinks is None or not self.use_shardq:
+            return
+        self._sinks_full = gather_full_sinks_(self.sinks, self._sinks_full)
+
     def _attn_sink(self, q: torch.Tensor) -> torch.Tensor | None:
         """Returns the sinks for the heads of `q`."""
-        return self.sinks
+        return self.sinks if q.shape[1] == self.num_heads else self._sinks_full
 
     def _aiter_sparse_mla_unsupported_reason(
         self, vllm_config: VllmConfig

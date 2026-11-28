@@ -15,6 +15,7 @@ from transformers import AutoModelForCausalLM, DeepseekV32Config
 from tests.models.utils import check_logprobs_close
 from vllm import SamplingParams
 from vllm.outputs import CompletionOutput
+from vllm.platforms import current_platform
 
 
 @pytest.fixture(scope="module")
@@ -341,4 +342,62 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
         outputs_1_lst=[(list(r.token_ids), "", r.logprobs) for r in outputs[1]],
         name_0="Below SP threshold",
         name_1="Above SP threshold",
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse MLA path")
+def test_rocm_shardq_matches_head_sharded_prefill(
+    vllm_runner, shardq_checkpoint, monkeypatch
+):
+    """ROCM_AITER_MLA_SPARSE token-sharded prefill matches head-sharded TP."""
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950() or torch.accelerator.device_count() < 2:
+        pytest.skip("needs two gfx950 GPUs for the AITER Triton sparse MLA kernel")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "1")
+    prompts = [
+        {"prompt_token_ids": [2 + i % 997 for i in range(n)]} for n in (1537, 17, 3)
+    ]
+    sampling = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True, logprobs=16)
+    outputs = []
+    for use_shardq in (False, True):
+        with vllm_runner(
+            shardq_checkpoint,
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            all2all_backend="allgather_reducescatter",
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            enforce_eager=True,
+            max_model_len=2048,
+            max_num_batched_tokens=2048,
+            max_num_seqs=4,
+            block_size=64,
+            attention_config={
+                "backend": "ROCM_AITER_MLA_SPARSE",
+                "sparse_mla_shard_q": use_shardq,
+                "sparse_mla_shard_q_min_tokens": 64,
+            },
+            gpu_memory_utilization=0.1,
+        ) as runner:
+            enabled = runner.llm.collective_rpc(
+                lambda worker: (
+                    worker.model_runner.model.model.layers[0].self_attn.use_shardq
+                )
+            )
+            assert enabled == [use_shardq] * 2
+            result = runner.llm.generate(prompts, sampling, use_tqdm=False)
+            outputs.append(
+                [
+                    (list(r.outputs[0].token_ids), "", r.outputs[0].logprobs)
+                    for r in result
+                ]
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="head-sharded",
+        name_1="ShardQ",
     )

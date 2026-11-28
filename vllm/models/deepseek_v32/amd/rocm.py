@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
+from vllm.v1.attention.ops.shardq import shard_q, unshard_out
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 
@@ -340,9 +341,21 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
+        shardq = attn_metadata.shardq
+        mqa_metadata = attn_metadata
+        if shardq is not None:
+            decode_q, q_for_attn = shard_q(q_for_attn, shardq)
+            decode_out = None
+            if decode_q.shape[0]:
+                decode_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                    decode_q, kv_cache, attn_metadata, self
+                )
+            mqa_metadata = shardq.attn_metadata
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
-            q_for_attn, kv_cache, attn_metadata, self
+            q_for_attn, kv_cache, mqa_metadata, self
         )
+        if shardq is not None:
+            attn_out = unshard_out(attn_out, shardq, decode_out)
 
         self._compute_uv_out(attn_out, output, num_actual)
         if self.use_pcp and num_actual < output.shape[0]:
