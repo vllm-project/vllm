@@ -38,6 +38,7 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import is_sm107_device
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -59,6 +60,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
+    _use_a16,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -1071,14 +1073,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
         )
 
+        # NaN marks a scale the checkpoint does not provide; see
+        # _check_and_fill_expert_scales.
         w13_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            data=torch.full(
+                (num_experts, w13_num_shards), float("nan"), dtype=torch.float32
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
 
         w2_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(num_experts, dtype=torch.float32),
+            data=torch.full((num_experts,), float("nan"), dtype=torch.float32),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
@@ -1091,9 +1097,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             global_num_experts if self.use_global_sf else num_experts
         )
         w13_input_scale = PerTensorScaleParameter(
-            data=torch.empty(
-                global_sf_num_experts,
-                w13_num_shards,
+            data=torch.full(
+                (global_sf_num_experts, w13_num_shards),
+                float("nan"),
                 dtype=torch.float32,
             ),
             weight_loader=weight_loader,
@@ -1101,7 +1107,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
-            data=torch.empty(global_sf_num_experts, dtype=torch.float32),
+            data=torch.full(
+                (global_sf_num_experts,), float("nan"), dtype=torch.float32
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
@@ -1116,6 +1124,74 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             (w2_input_scale, 1e-2),
         ):
             set_weight_attrs(param, {"dummy_weight_value": value})
+
+    def _reads_input_scales(self) -> bool:
+        """Whether the backend's kernels quantize activations with the
+        checkpoint's input scales (`uses_input_scales`, set after conversion,
+        only says whether the layer keeps them). Weight-only kernels do not,
+        FLASHINFER_B12X never reads a1_gscale and sets a2_gscale to 1.0,
+        FLASHINFER_MOE_EP_CUTEDSL quantizes activations dynamically except on
+        SM107, where the layer's largest input scale sets its epilogue, and
+        per-token activation replaces them with 1.0."""
+        if self.per_token_activation or _use_a16(self.nvfp4_backend, self.use_a16):
+            return False
+        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
+            return is_sm107_device()
+        return self.nvfp4_backend not in (
+            NvFp4MoeBackend.HUMMING,
+            NvFp4MoeBackend.MARLIN,
+            NvFp4MoeBackend.FLASHINFER_B12X,
+        )
+
+    def _check_and_fill_expert_scales(self, layer: RoutedExperts) -> None:
+        """Reject missing weight scales; fill missing activation scales.
+
+        The scales start as NaN (zero after a layerwise reload), so one the
+        checkpoint does not provide stays NaN (or zero). Calibration can leave
+        an expert without an input scale (no tokens were routed to it), so a
+        missing or non-positive one takes the largest calibrated value of the
+        same tensor before any backend reduces the scales or hands them to a
+        kernel. Expert ids are the tensor's rows: local ids, or global ids for
+        input scales shared across EP ranks.
+        """
+        for name in ("w13_weight_scale_2", "w2_weight_scale_2"):
+            scale = getattr(layer, name).data
+            ok = (scale.isfinite() & (scale > 0)).reshape(scale.shape[0], -1)
+            bad = ~ok.all(dim=-1)
+            if bad.any():
+                raise ValueError(
+                    f"ModelOpt NVFP4 MoE checkpoint has no positive '{name}' in "
+                    f"layer '{layer.layer_name}' for expert ids "
+                    f"{bad.nonzero(as_tuple=True)[0].tolist()}."
+                )
+        if not self._reads_input_scales():
+            return
+        filled = []
+        for name in ("w13_input_scale", "w2_input_scale"):
+            scale = getattr(layer, name).data
+            bad = ~(scale.isfinite() & (scale > 0))
+            if not bad.any():
+                continue
+            if bad.all():
+                raise ValueError(
+                    f"ModelOpt NVFP4 MoE checkpoint has no calibrated '{name}' in "
+                    f"layer '{layer.layer_name}', which the "
+                    f"{self.nvfp4_backend.value} backend needs."
+                )
+            fill = scale[~bad].max()
+            experts = bad.reshape(scale.shape[0], -1).any(dim=-1)
+            scale[bad] = fill
+            filled.append(
+                f"'{name}' of expert ids "
+                f"{experts.nonzero(as_tuple=True)[0].tolist()} set to {fill.item():.6g}"
+            )
+        if filled:
+            logger.warning(
+                "ModelOpt NVFP4 MoE layer '%s' has experts without a calibrated "
+                "activation scale; using the layer's largest one: %s.",
+                layer.layer_name,
+                "; ".join(filled),
+            )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
@@ -1135,6 +1211,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.per_token_activation:
             layer.w13_input_scale.data.fill_(1.0)
             layer.w2_input_scale.data.fill_(1.0)
+
+        self._check_and_fill_expert_scales(layer)
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(

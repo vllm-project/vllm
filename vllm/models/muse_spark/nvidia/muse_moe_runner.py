@@ -640,6 +640,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         )
 
     def process_weights_after_loading(self, layer: "MuseSparkRoutedExperts") -> None:
+        self._check_and_fill_expert_scales(layer)
         if self.use_route_major:
             self._process_hopper_marlin_weights(layer)
             _attach_post_expert_finalize(self)
