@@ -30,7 +30,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems, VideoProcessorItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     PromptReplacement,
@@ -185,6 +185,12 @@ class BailingMoeV3VLProcessingInfo(Qwen2VLProcessingInfo):
             "image": self.get_max_image_tokens(),
             "video": self.get_max_video_tokens(seq_len, mm_counts),
         }
+
+    def _get_video_size_with_most_features(self) -> ImageSize:
+        return self.get_image_size_with_most_features()
+
+    def _get_video_default_size(self) -> Mapping[str, int]:
+        return self.get_image_processor().size
 
 
 class BailingMoeV3VLDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):

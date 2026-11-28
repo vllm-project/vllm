@@ -10,6 +10,7 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.config import SchedulerConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.qwen2_vl import Qwen2VLProcessingInfo
@@ -18,6 +19,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.multimodal.processing.context import InputProcessingContext
 from vllm.platforms import current_platform
+from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
@@ -203,8 +205,12 @@ def test_get_vision_info_reads_merged_modality_scope(
         spatial_merge_size=2,
         temporal_patch_size=2,
     )
+    video_size = {"shortest_edge": 64, "longest_edge": 2048}
     ctx = SimpleNamespace(
-        get_hf_config=lambda *_: SimpleNamespace(vision_config=vision_config)
+        get_hf_config=lambda *_: SimpleNamespace(vision_config=vision_config),
+        get_hf_processor=lambda *_, **__: SimpleNamespace(
+            video_processor=SimpleNamespace(size=video_size)
+        ),
     )
     info = Qwen2VLProcessingInfo(ctx)
     merged = {
@@ -217,13 +223,13 @@ def test_get_vision_info_reads_merged_modality_scope(
         lambda _: merged,
     )
 
-    seen: list[dict[str, object]] = []
+    seen: list[tuple[dict[str, object], dict[str, object] | None]] = []
 
     def get_size(
         mm_kwargs: dict[str, object],
         default_size: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        seen.append(mm_kwargs)
+        seen.append((mm_kwargs, default_size))
         return dict(default_size or {})
 
     monkeypatch.setattr(info, "_get_vision_size", get_size)
@@ -239,7 +245,8 @@ def test_get_vision_info_reads_merged_modality_scope(
         modality=modality,
     )
 
-    assert seen == [merged[scope]]
+    default_size = image_processor.size if modality == "image" else video_size
+    assert seen == [(merged[scope], default_size)]
 
 
 def test_jina_vl_processing_order() -> None:
@@ -451,6 +458,13 @@ def test_max_video_tokens_fills_context(
     assert dummy_video_tokens == max_video_tokens
 
 
+_SCOPED_HALF_VIDEO_SIZE = {
+    "videos_kwargs": {
+        "size": {"shortest_edge": 56 * 56, "longest_edge": 8192 * 28 * 28}
+    }
+}
+
+
 def _count_video_tokens(processor_inputs) -> int:
     return sum(
         placeholder.get_num_embeds()
@@ -462,6 +476,49 @@ def test_dummy_video_follows_size_hint() -> None:
     width, height, num_frames = 1400, 2800, 2
     ctx = build_model_context(
         "Qwen/Qwen2.5-VL-3B-Instruct",
+        model_config_kwargs={"max_model_len": 40000},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": {
+                "count": 1,
+                "width": width,
+                "height": height,
+                "num_frames": num_frames,
+            },
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    processed = processor(
+        "<|vision_start|><|video_pad|><|vision_end|>",
+        mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert _count_video_tokens(
+        processor.get_dummy_mm_inputs({"video": 1})
+    ) == _count_video_tokens(processed)
+
+
+@pytest.mark.parametrize(("width", "height"), [(448, 1792), (1792, 448)])
+def test_dummy_video_follows_size_hint_with_scoped_video_size(
+    width: int, height: int
+) -> None:
+    num_frames = 2
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        mm_processor_kwargs={
+            "videos_kwargs": {"size": {"shortest_edge": 3136, "longest_edge": 802816}}
+        },
         model_config_kwargs={"max_model_len": 40000},
         limit_mm_per_prompt={
             "image": 0,
@@ -526,6 +583,192 @@ def test_max_video_tokens_matches_dummy_video(
         _count_video_tokens(processor.get_dummy_mm_inputs({"video": 1}))
         == max_video_tokens
     )
+
+
+def test_max_video_tokens_reads_scoped_video_size() -> None:
+    size = _SCOPED_HALF_VIDEO_SIZE["videos_kwargs"]["size"]
+
+    def video_tokens(mm_processor_kwargs: dict[str, object]) -> tuple[int, int]:
+        ctx = build_model_context(
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            mm_processor_kwargs=mm_processor_kwargs,
+            limit_mm_per_prompt={"image": 0, "video": 1},
+        )
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+        max_tokens = processor.info.get_mm_max_tokens_per_item(
+            ctx.model_config.max_model_len, {"video": 1}
+        )
+        assert max_tokens is not None
+        dummy = processor.get_dummy_mm_inputs({"video": 1})
+        return max_tokens["video"], _count_video_tokens(dummy)
+
+    assert video_tokens({"videos_kwargs": {"size": size}}) == video_tokens(
+        {"size": size}
+    )
+
+
+def _build_qwen2_vl_with_video_size(
+    monkeypatch: pytest.MonkeyPatch,
+    video_longest_edge: int,
+    max_model_len: int = 32768,
+    video_options: dict[str, int] | None = None,
+):
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        model_config_kwargs={"max_model_len": max_model_len},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": {"count": 1, **video_options} if video_options else 1,
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = deepcopy(processor.info.get_hf_processor())
+    default_size = hf_processor.video_processor.size
+    assert default_size is not None
+    hf_processor.video_processor.size = {
+        "shortest_edge": default_size["shortest_edge"],
+        "longest_edge": video_longest_edge,
+    }
+    monkeypatch.setattr(
+        processor.info, "get_hf_processor", lambda **kwargs: hf_processor
+    )
+    max_tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=max_model_len, mm_counts={"video": 1}
+    )
+    assert max_tokens is not None
+    return processor, max_tokens["video"]
+
+
+def _process_video(processor, num_frames: int, width: int, height: int):
+    video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    return processor(
+        "<|vision_start|><|video_pad|><|vision_end|>",
+        mm_items=processor.info.parse_mm_data({"video": [(video, metadata)]}),
+        hf_processor_mm_kwargs={},
+    )
+
+
+@pytest.mark.parametrize(
+    ("max_model_len", "num_frames", "width", "height"),
+    [(32768, 15, 896, 672), (8193, 26, 840, 588)],
+)
+def test_video_budget_uses_smaller_video_processor_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    max_model_len: int,
+    num_frames: int,
+    width: int,
+    height: int,
+) -> None:
+    processor, max_video_tokens = _build_qwen2_vl_with_video_size(
+        monkeypatch, 768 * 28 * 28, max_model_len
+    )
+    _, encoder_cache_size = compute_mm_encoder_budget(
+        SchedulerConfig(
+            max_model_len=max_model_len,
+            max_num_batched_tokens=4096,
+            is_encoder_decoder=False,
+        ),
+        {"video": max_video_tokens},
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    video = _process_video(processor, num_frames, width, height)
+
+    assert len(video["prompt_token_ids"]) <= max_model_len
+    assert _count_video_tokens(video) <= encoder_cache_size
+    assert _count_video_tokens(dummy) == max_video_tokens
+
+
+@pytest.mark.parametrize(
+    ("video_options", "num_frames", "dummy_tokens"),
+    [
+        ({"width": 896, "height": 672}, 15, 5376),
+        ({"width": 896}, 15, 5005),
+        ({"num_frames": 16}, 16, 6144),
+    ],
+)
+def test_video_hints_keep_split_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    video_options: dict[str, int],
+    num_frames: int,
+    dummy_tokens: int,
+) -> None:
+    processor, max_video_tokens = _build_qwen2_vl_with_video_size(
+        monkeypatch, 768 * 28 * 28, video_options=video_options
+    )
+    _, encoder_cache_size = compute_mm_encoder_budget(
+        SchedulerConfig(
+            max_model_len=32768,
+            max_num_batched_tokens=4096,
+            is_encoder_decoder=False,
+        ),
+        {"video": max_video_tokens},
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    video = _process_video(processor, num_frames, 896, 672)
+
+    assert _count_video_tokens(video) <= encoder_cache_size
+    assert _count_video_tokens(dummy) == dummy_tokens
+    assert _count_video_tokens(dummy) <= max_video_tokens
+
+
+def test_size_hints_keep_scoped_budget() -> None:
+    ctx = build_model_context(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        mm_processor_kwargs={
+            "videos_kwargs": {
+                "size": {"shortest_edge": 3136, "longest_edge": 768 * 28 * 28}
+            }
+        },
+        model_config_kwargs={"max_model_len": 1500},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": {"count": 1, "width": 896, "height": 672},
+        },
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    max_tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=1500, mm_counts={"video": 1}
+    )
+    assert max_tokens is not None
+    _, encoder_cache_size = compute_mm_encoder_budget(
+        SchedulerConfig(
+            max_model_len=1500,
+            max_num_batched_tokens=1024,
+            is_encoder_decoder=False,
+        ),
+        {"video": max_tokens["video"]},
+    )
+    video = _process_video(processor, 4, 840, 672)
+
+    assert len(video["prompt_token_ids"]) <= 1500
+    assert _count_video_tokens(video) <= encoder_cache_size
+
+
+def test_dummy_video_frames_follow_larger_video_processor_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor, max_video_tokens = _build_qwen2_vl_with_video_size(
+        monkeypatch, 32768 * 28 * 28
+    )
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    video = _process_video(processor, 2, 7168, 3584)
+
+    def frame_patches(processor_inputs) -> int:
+        grid = processor_inputs["mm_kwargs"].get_data()["video_grid_thw"]
+        _, grid_height, grid_width = grid[0].tolist()
+        return grid_height * grid_width
+
+    assert _count_video_tokens(video) <= max_video_tokens
+    assert _count_video_tokens(dummy) == max_video_tokens
+    assert frame_patches(dummy) >= frame_patches(video)
 
 
 def test_max_video_tokens_with_pruning_keeps_full_size_frames() -> None:

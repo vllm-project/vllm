@@ -775,6 +775,19 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     vision-less checkpoints run as a text-only model. Speculative decoding uses the
     `meta-models/Muse-Glimmer-30B-assistant` checkpoint, which vLLM serves through
     its [DFlash](../features/speculative_decoding/README.md) path.
+    Preprocessing rejects an image or video that needs more vision tokens than
+    the per-item limit. An image may use up to `max_image_tokens` (4,096 by
+    default), and each temporal group of a video (`temporal_patch_size`, 2
+    frames) up to `max_video_frame_tokens` (144). A video's total is capped at
+    `max_model_len` and at the per-group limit times the number of groups in
+    the larger of the processor's `num_frames` (96) and
+    `--media-io-kwargs '{"video": {"num_frames": N}}'`: 6,912 tokens with the
+    defaults. Raising `num_frames` there raises the video limit; a per-request
+    `media_io_kwargs` cannot raise it past the startup value. Because the cap
+    counts tokens, a longer low-resolution video that uses fewer tokens per
+    group can still fit. Profiling hints in `--limit-mm-per-prompt` (such as
+    `num_frames`) only shrink the startup dummy, as for other models; they do
+    not lower this limit.
 
 !!! note
     Both Nemotron Nano architecture names and `NemotronH_Omni_Reasoning_V3` map to
