@@ -284,3 +284,33 @@ def test_byte_fallback_context_spans_rows_and_batches(prompt, flat_logprobs, spl
         ["é", "u"],
         ["n", "u", ""],
     ]
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+@pytest.mark.parametrize("prefix", [[], [3, 4, 5, 6, 7]])
+def test_unscored_prompt_ids_complete_first_scored_character(flat_logprobs, prefix):
+    # The prompt ends in 'é' (11 then 12). Its first byte has no score,
+    # either because it starts the prompt or because the caller skipped it.
+    ids = [*prefix, 11, 12, 8]
+    request = SimpleNamespace(
+        prompt_token_ids=ids,
+        sampling_params=SamplingParams(
+            prompt_logprobs=1,
+            prompt_logprob_start=len(prefix),
+            flat_logprobs=flat_logprobs,
+        ),
+    )
+    processor = LogprobsProcessor.from_new_request(_ByteFallbackTokenizer(), request)
+    processor._update_prompt_logprobs(
+        LogprobsTensors(
+            torch.tensor([[12, 5], [8, 12]]),
+            torch.tensor([[-1.0, -2.0], [-0.5, -1.5]]),
+            torch.tensor([1, 1]),
+        )
+    )
+    rows = processor.pop_prompt_logprobs()
+    assert not any(rows[: len(prefix) + 1])
+    assert rows[-2][12].decoded_token == "é"
+    assert rows[-2][5].decoded_token == "f"
+    assert rows[-2][12].logprob == -1.0
+    assert rows[-1][12].decoded_token == ""
