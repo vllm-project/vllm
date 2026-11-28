@@ -10,6 +10,7 @@ import textwrap
 from contextlib import nullcontext
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
+from fnmatch import fnmatch
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -4341,6 +4342,51 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
     assert mock_pull_files.call_args_list[0][0][0] == model_url
     # Second call: tokenizer URI with ignore_pattern
     assert mock_pull_files.call_args_list[1][0][0] == tokenizer_url
+
+
+def test_s3_url_same_model_and_tokenizer_pulls_once(monkeypatch, tmp_path):
+    """Non-weight files are fetched from object storage in a single pull."""
+    monkeypatch.setenv("VLLM_ASSETS_CACHE", str(tmp_path / "cache"))
+    s3_url = "s3://bucket/model/"
+    store = {
+        f"{s3_url}{name}": name
+        for name in (
+            "config.json",
+            "tokenizer.json",
+            "tokenizer.model",
+            "merges.txt",
+            "modeling_custom.py",
+            "model.safetensors",
+        )
+    }
+    pulls = []
+
+    def fake_pull_files(model_path, dst, allow_pattern=None, ignore_pattern=None):
+        pulls.append(model_path)
+        for key, content in store.items():
+            if allow_pattern and not any(fnmatch(key, p) for p in allow_pattern):
+                continue
+            if ignore_pattern and any(fnmatch(key, p) for p in ignore_pattern):
+                continue
+            (Path(dst) / key.removeprefix(model_path)).write_text(content)
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.runai_utils.runai_pull_files", fake_pull_files
+    )
+
+    config = MockConfig(model=s3_url, tokenizer=s3_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config, s3_url, s3_url)
+
+    assert pulls == [s3_url]
+    assert config.model_weights == s3_url
+    assert config.tokenizer == config.model
+    assert sorted(os.listdir(config.model)) == [
+        "config.json",
+        "merges.txt",
+        "modeling_custom.py",
+        "tokenizer.json",
+        "tokenizer.model",
+    ]
 
 
 @pytest.mark.parametrize(

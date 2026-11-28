@@ -1304,9 +1304,11 @@ class ModelConfig:
 
         if is_runai_obj_uri(model):
             object_storage_model = ObjectStorageModel(url=model)
-            object_storage_model.pull_files(
-                model, allow_pattern=["*.model", "*.py", "*.json"]
-            )
+            # A shared tokenizer pulls all non-weight files below
+            if model != tokenizer:
+                object_storage_model.pull_files(
+                    model, allow_pattern=["*.model", "*.py", "*.json"]
+                )
             self.model_weights = model
             self.model = object_storage_model.dir
 
