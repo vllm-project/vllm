@@ -26,6 +26,7 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -1397,6 +1398,9 @@ class Qwen2_5_VLForConditionalGeneration(
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
+        # EVS disables encoder CUDA graphs and can make a batch larger than
+        # its retained-token budget.
+        self.allow_mm_lora_buffer_growth = self.is_multimodal_pruning_enabled
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen2_5_VisionTransformer(
@@ -1940,8 +1944,15 @@ class Qwen2_5_VLForConditionalGeneration(
         mm_kwargs: MultiModalKwargsItem | None,
         num_mm_embeds: int,
     ) -> tuple[int, int | None]:
-        del modality, mm_kwargs
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-        return num_mm_embeds * merge_size**2, num_mm_embeds
+        merge_area = self.config.vision_config.spatial_merge_size**2
+        if (
+            modality == "video"
+            and self.is_multimodal_pruning_enabled
+            and mm_kwargs is not None
+            and "pixel_values_videos" in mm_kwargs
+        ):
+            # The tower and merger run before pruning.
+            grid_thw = mm_kwargs["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            num_mm_embeds = math.prod(grid_thw.tolist()) // merge_area
+        return num_mm_embeds * merge_area, num_mm_embeds
