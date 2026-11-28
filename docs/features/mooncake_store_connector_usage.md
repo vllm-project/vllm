@@ -359,6 +359,38 @@ booleans, negatives, strings, and floats, are ignored with a warning.
 - **kv_consumer**: For instances that load KV caches from the pool.
 - **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
+### KV Load Failure Policy
+
+`kv_load_failure_policy` in `--kv-transfer-config` controls what happens when a
+block that lookup reported as present cannot be loaded, for example when a
+store node fails during the transfer or a disk read fails. Allowed values:
+
+- **fail** (default): Finish the request immediately with an error finish
+  reason. The client may receive an empty or incomplete response.
+- **recompute**: Reschedule the request so vLLM computes the failed blocks
+  locally and the request continues.
+
+For MooncakeStoreConnector used as a shared prefix cache, including the
+[Disk Offloading](#disk-offloading) setup, `"recompute"` is the recommended
+setting. The default `"fail"` is aimed at prefill/decode disaggregation, where
+recomputing on a decode-optimized instance can add tail latency. See also the
+NIXL connector
+[KV Load Failure Policy](nixl_connector_usage.md#kv-load-failure-policy)
+notes for disaggregated prefilling.
+
+Example for a store-backed prefix cache:
+
+```bash
+MOONCAKE_CONFIG_PATH=mooncake_config.json \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute"}'
+```
+
+Mooncake RPC timeouts (`MC_RPC_CONNECT_TIMEOUT_MS`, `MC_RPC_TIMEOUT_MS`) limit
+how long a request waits for a failed store node. Those variables are read by
+the Mooncake engine, not by vLLM. See the
+[Mooncake Store deployment guide](https://kvcache-ai.github.io/Mooncake/deployment/mooncake-store-deployment-guide.html).
+
 ### Lookup timeout and circuit breaker
 
 Prefix lookups (blocking, async, and arrival-time prefetch) wait at most
@@ -622,3 +654,4 @@ PYTHONHASHSEED=<shared-value> vllm serve ...
 Set `kv_load_failure_policy="recompute"` in the KV transfer configuration to
 recompute failed remote loads locally. The existing `"fail"` policy terminates
 affected requests. Transfer completion is reported after synchronous SDK return.
+See [KV Load Failure Policy](#kv-load-failure-policy) for details.
