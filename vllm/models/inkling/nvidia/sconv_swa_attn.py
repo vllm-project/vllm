@@ -118,6 +118,11 @@ class InklingSconvBackend(AttentionBackend):
     def get_builder_cls() -> type[InklingSconvMetadataBuilder]:
         return InklingSconvMetadataBuilder
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Each token reads causal short-conv taps strictly from its own window.
+        return True
+
 
 class InklingConvState(nn.Module, AttentionLayerBase):
     """Per-decoder-layer owner emitting one sliding-window conv-state spec."""

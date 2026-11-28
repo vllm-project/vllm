@@ -5,6 +5,8 @@ reference `linear` with fp32 accumulation in ordered 1024-wide K groups."""
 
 import torch
 
+import vllm.envs as envs
+from vllm.model_executor.determinism.batch_invariant import matmul_persistent
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import is_flashinfer_autotuning
@@ -23,6 +25,9 @@ def linear(
 ) -> torch.Tensor:
     """bf16 `x @ weight.T` with fp32 accumulation (into `out` if given,
     batches over LOW_M_MAX_TOKENS only)."""
+    if envs.VLLM_BATCH_INVARIANT:
+        res = batch_invariant_linear(x, weight)
+        return res if out is None else out.copy_(res)
     if out is not None:
         assert x.shape[0] > LOW_M_MAX_TOKENS
         return torch.mm(x, weight.t(), out=out)
@@ -302,3 +307,26 @@ def linear_k_groups(
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
     return out
+
+
+def batch_invariant_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Batch-invariant `x @ weight.T (+ bias)` via vLLM's persistent matmul."""
+    dtype = out_dtype or x.dtype
+    if weight.ndim == 3:
+        out = torch.stack(
+            [
+                matmul_persistent(x[s], weight[s].t(), out_dtype=dtype)
+                for s in range(x.shape[0])
+            ]
+        )
+    else:
+        flat = x.reshape(-1, x.shape[-1])
+        out = matmul_persistent(flat, weight.t(), out_dtype=dtype).view(
+            *x.shape[:-1], weight.shape[0]
+        )
+    return out if bias is None else out + bias.to(dtype)

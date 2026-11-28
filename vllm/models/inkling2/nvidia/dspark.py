@@ -11,6 +11,7 @@ from typing import cast
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -47,7 +48,7 @@ from .ops.dspark import (
     rope_,
     silu_and_mul,
 )
-from .ops.linear import linear
+from .ops.linear import batch_invariant_linear, linear
 
 
 class _RMSNorm(nn.Module):
@@ -368,9 +369,14 @@ class Inkling2MarkovHead(nn.Module):
         hidden = hidden.view(num_reqs, -1, width).transpose(0, 1)
         inputs = torch.cat([hidden, f_rnn.expand_as(hidden)], dim=-1)
         weight = self.rnn_proj.weight[:, 2 * self.markov_rank :]
-        out = torch.addmm(
-            self.rnn_bias, inputs.flatten(0, 1), weight.T, out_dtype=torch.float32
-        )
+        if envs.VLLM_BATCH_INVARIANT:
+            out = batch_invariant_linear(
+                inputs.flatten(0, 1), weight, self.rnn_bias, torch.float32
+            )
+        else:
+            out = torch.addmm(
+                self.rnn_bias, inputs.flatten(0, 1), weight.T, out_dtype=torch.float32
+            )
         return out.view(hidden.shape[0], num_reqs, -1)
 
     def step(
@@ -380,6 +386,12 @@ class Inkling2MarkovHead(nn.Module):
         assert self.fold_weight is not None and self.fold_bias is not None
         inputs = torch.cat([state, self.markov_w1(prev_tokens)], dim=-1)
         weight = self.rnn_proj.weight[:, : 2 * self.markov_rank]
+        if envs.VLLM_BATCH_INVARIANT:
+            raw = batch_invariant_linear(inputs, weight, context, torch.float32)
+            state, latent = markov_gate(raw, state)
+            return state, batch_invariant_linear(
+                latent, self.fold_weight, self.fold_bias
+            )
         raw = torch.addmm(context, inputs, weight.T, out_dtype=torch.float32)
         state, latent = markov_gate(raw, state)
         return state, torch.addmm(self.fold_bias, latent, self.fold_weight.T)
