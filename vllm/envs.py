@@ -232,6 +232,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2: bool = False
     VLLM_USE_LOCALITY_DOMAINS: bool = False
     VLLM_MOE_LOCALIZE_BACKFILL: bool = False
     VLLM_FLASHINFER_CUTEDSL_MOE_LOCALIZE_MEMSET_OVERLAP: bool = True
@@ -1798,6 +1799,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
+    ),
+    # Enable per-routed-token dynamic quantization of the post-activation GEMM2
+    # input for FlashInfer TRTLLM NVFP4 MoE. Default off; GEMM1 keeps the
+    # checkpoint-static input scale. The GEMM2 checkpoint input scale is ignored.
+    "VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MOE_NVFP4_DYNAMIC_GEMM2", "0"))
     ),
     # Split Rubin NVFP4 MoE across locality domains. Requires cuda-bindings >= 13.4,
     # a PyTorch build with torch.cuda.execute_on_streams, and FlashInfer with
