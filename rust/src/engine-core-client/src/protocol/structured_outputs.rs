@@ -181,7 +181,12 @@ impl StructuredOutputsParams {
                 })?;
                 nesting::check_json_schema(&schema)
             }
-            StructuredOutputConstraint::Json(schema) => nesting::check_json_schema(schema),
+            StructuredOutputConstraint::Json(schema @ Value::Object(_)) => {
+                nesting::check_json_schema(schema)
+            }
+            StructuredOutputConstraint::Json(_) => Err(Error::InvalidStructuredOutputsParams {
+                message: "JSON schema must be an object or a JSON-encoded string".to_string(),
+            }),
             StructuredOutputConstraint::Choice(choice) if choice.is_empty() => {
                 Err(Error::InvalidStructuredOutputsParams {
                     message: "structured_outputs.choice cannot be empty".to_string(),
@@ -440,6 +445,25 @@ mod tests {
             .validate()
             .unwrap_err();
         assert!(error.to_string().contains("Invalid JSON grammar specification."));
+    }
+
+    #[test]
+    fn engine_params_reject_json_constraints_with_unsupported_types() {
+        for schema in [
+            Value::Null,
+            Value::from(false),
+            Value::from(0),
+            Value::Array(vec![]),
+        ] {
+            let params = StructuredOutputsParams::json(schema);
+            let error =
+                EngineCoreStructuredOutputsParams::new(params, StructuredOutputBackend::Xgrammar)
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::InvalidStructuredOutputsParams { .. }
+            ));
+        }
     }
 
     #[test]
