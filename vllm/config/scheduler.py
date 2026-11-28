@@ -249,6 +249,24 @@ class SchedulerConfig:
     already-admitted prompt, so a long prompt can take up to N times as many
     steps to finish prefilling."""
 
+    prefill_hold_ms: float = Field(default=0.0, ge=0.0)
+    """Time-bounded prefill hold, in milliseconds. While requests are decoding,
+    newly arrived requests stay waiting until the oldest of them has waited this
+    long, so requests that arrive close together are prefilled in one larger
+    step instead of interrupting every decode step. 0 (the default) disables
+    the hold.
+
+    Trades time to first token (raised by at most the hold) for lower
+    inter-token latency. Chunks of an already-admitted prompt and requests
+    holding KV for a disaggregated transfer are never held. 50 with
+    `prefill_hold_min_reqs` 8 is a reasonable starting point; larger values
+    can raise time to first token sharply."""
+
+    prefill_hold_min_reqs: int = Field(default=0, ge=0)
+    """Apply `prefill_hold_ms` only while at least this many requests are in
+    the engine (running plus waiting, including those loading KV). At low load
+    the hold only adds latency. 0 (the default) applies the hold at any load."""
+
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting
     requests, those whose prefix is already in the KV cache are admitted ahead
@@ -364,6 +382,8 @@ class SchedulerConfig:
             "scheduler_reserve_full_isl",
             "watermark",
             "prefill_schedule_interval",
+            "prefill_hold_ms",
+            "prefill_hold_min_reqs",
             "async_scheduling",
             "stream_interval",
         }

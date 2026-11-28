@@ -429,6 +429,17 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # Time-bounded prefill hold, see the WAITING loop in schedule().
+        self.prefill_hold_s = self.scheduler_config.prefill_hold_ms / 1e3
+        self.prefill_hold_min_reqs = self.scheduler_config.prefill_hold_min_reqs
+        if self.prefill_hold_s > 0:
+            logger.info_once(
+                "Prefill hold: while decodes run, new requests wait until the "
+                "oldest has waited %.0f ms (--prefill-hold-ms), with at least "
+                "%d requests in the engine (--prefill-hold-min-reqs).",
+                self.prefill_hold_s * 1e3,
+                self.prefill_hold_min_reqs,
+            )
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -1066,8 +1077,28 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        # Prefill hold (--prefill-hold-ms): while decodes run, leave new
+        # requests waiting until the oldest has waited the hold time, so
+        # requests that arrive close together share one large prefill step
+        # instead of being prefilled one or two per step. In-flight prefill
+        # chunks and KV-holding requests are not held, and the extra TTFT is
+        # bounded by the hold time.
+        hold_new_prefills = (
+            self.prefill_hold_s > 0
+            and len(self.waiting) > 0
+            and num_eligible_reqs >= self.prefill_hold_min_reqs
+            and not self.kv_holding_waiting
+            and any(not r.is_prefill_chunk for r in self.running)
+            and time.time() - min(r.arrival_time for r in self.waiting)
+            < self.prefill_hold_s
+        )
+
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
+        if (
+            not preempted_reqs
+            and not hold_new_prefills
+            and self._pause_state != PauseState.PAUSED_ALL
+        ):
             if self.cache_aware_window and not defer_prefills:
                 self._reorder_waiting_by_cached_prefix()
 

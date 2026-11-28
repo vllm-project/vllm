@@ -1737,6 +1737,58 @@ def test_cache_aware_admission_requires_fcfs_and_prefix_caching(kwargs: dict):
     assert scheduler.cache_aware_window == 0
 
 
+def _decode_one(scheduler, output, req_ids: list[str]) -> None:
+    """Feed back one sampled token per request, so they keep decoding."""
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(req_ids=req_ids, sampled_token_ids=[[0] for _ in req_ids]),
+    )
+
+
+def _decoding_scheduler(hold_ms: float, min_reqs: int = 0):
+    """A scheduler with the prefill hold on and one request in decode."""
+    scheduler = create_scheduler(
+        prefill_hold_ms=hold_ms, prefill_hold_min_reqs=min_reqs
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=100, req_ids=["run0"]
+    )
+    scheduler.add_request(request)
+    _decode_one(scheduler, scheduler.schedule(), ["run0"])
+    assert len(scheduler.running) == 1
+    return scheduler
+
+
+def test_prefill_hold_batches_arrivals_until_hold_time():
+    """New requests wait while a request decodes; arrivals during the hold are
+    prefilled together once the oldest has waited the hold time."""
+    scheduler = _decoding_scheduler(hold_ms=10_000)
+    reqs = create_requests(num_requests=3, num_tokens=8, req_ids=["a", "b", "c"])
+    for req in reqs:
+        scheduler.add_request(req)
+        output = scheduler.schedule()
+        assert not {"a", "b", "c"} & output.num_scheduled_tokens.keys()
+        assert "run0" in output.num_scheduled_tokens
+        _decode_one(scheduler, output, ["run0"])
+
+    reqs[0].arrival_time -= 10.0
+    output = scheduler.schedule()
+    assert {"a", "b", "c", "run0"} <= output.num_scheduled_tokens.keys()
+
+
+@pytest.mark.parametrize("decoding, min_reqs", [(False, 0), (True, 3)])
+def test_prefill_hold_not_applied(decoding: bool, min_reqs: int):
+    """No hold without a running decode, or below prefill_hold_min_reqs
+    requests in the engine."""
+    if decoding:
+        scheduler = _decoding_scheduler(hold_ms=10_000, min_reqs=min_reqs)
+    else:
+        scheduler = create_scheduler(prefill_hold_ms=10_000)
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+    assert "new0" in scheduler.schedule().num_scheduled_tokens
+
+
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-
