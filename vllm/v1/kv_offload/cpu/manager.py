@@ -485,13 +485,21 @@ class CPUOffloadingManager(OffloadingManager):
             )
 
         if stored_keys and self.events is not None:
+            positions = [
+                pos
+                for key in stored_keys
+                if (pos := req_context.get_offload_key_position(key)) is not None
+            ]
             self.events.append(
                 OffloadingEvent(
                     keys=stored_keys,
                     medium=self.medium,
                     removed=False,
                     removal_expected=True,
-                    req_context=req_context,
+                    req_id=req_context.req_id,
+                    positions=(
+                        positions if len(positions) == len(stored_keys) else None
+                    ),
                 )
             )
 

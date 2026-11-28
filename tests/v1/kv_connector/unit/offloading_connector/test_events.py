@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import pickle
 import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 import torch
 
@@ -175,6 +177,8 @@ def _stored_event(
     locality: Locality | None = None,
     ownership: str | None = None,
     removal_expected: bool = False,
+    req_id: str | None = None,
+    positions: list[int] | None = None,
 ) -> OffloadingEvent:
     return OffloadingEvent(
         keys=keys,
@@ -183,6 +187,8 @@ def _stored_event(
         locality=locality,
         ownership=ownership,
         removal_expected=removal_expected,
+        req_id=req_id,
+        positions=positions,
     )
 
 
@@ -358,12 +364,10 @@ def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
         block_hashes=block_hashes,
     )
     group_config = _group_config(block_size=4, blocks_per_chunk=2)
-    context = ReqContext(req_id=request.request_id)
     key = make_offload_key(block_hashes[1], group_config.group_idx)
-    context.set_offload_key_position(key, 8)
     tracker = _tracker()
     tracker.num_hash_lookahead_tokens = 5
-    tracker.on_new_request(context, request, (group_config,))
+    tracker.on_new_request(request, (group_config,))
     if record_snapshot:
         tracker.record_store(request, group_config, 0, key)
         # Reuse the existing snapshot instead of rebuilding from the request.
@@ -380,7 +384,8 @@ def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
                 medium=Medium.CPU,
                 removed=False,
                 removal_expected=True,
-                req_context=context,
+                req_id="request",
+                positions=[8],
             )
         ]
     )
@@ -414,16 +419,18 @@ def test_mamba_store_uses_request_context():
     group_config = _group_config(
         group_idx=1, block_size=8, tokens_per_hash=4, mamba=True
     )
-    context = ReqContext(req_id=request.request_id)
     key = make_offload_key(block_hashes[3], group_config.group_idx)
-    context.set_offload_key_position(key, 16)
     tracker = _tracker()
-    tracker.on_new_request(context, request, (group_config,))
+    tracker.on_new_request(request, (group_config,))
 
     [stored] = tracker.take_events(
         [
             OffloadingEvent(
-                keys=[key], medium=Medium.CPU, removed=False, req_context=context
+                keys=[key],
+                medium=Medium.CPU,
+                removed=False,
+                req_id="request",
+                positions=[16],
             )
         ]
     )
@@ -432,6 +439,228 @@ def test_mamba_store_uses_request_context():
     assert stored.parent_block_hash == _wire_hash(block_hashes[1])
     assert stored.token_ids == []
     assert stored.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+
+
+def _real_request(
+    req_id: str,
+    token_ids: list[int],
+    block_hashes: list[BlockHash],
+) -> Request:
+    return Request(
+        request_id=req_id,
+        prompt_token_ids=token_ids,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+
+
+def test_retired_request_context_survives_until_pruned():
+    block_hashes = [_hash(i) for i in range(4)]
+    request = _real_request("req", list(range(1, 17)), block_hashes)
+    group_config = _group_config(block_size=4, blocks_per_chunk=2)
+    key0 = make_offload_key(block_hashes[1], group_config.group_idx)
+    key1 = make_offload_key(block_hashes[3], group_config.group_idx)
+    tracker = _tracker()
+    tracker.on_new_request(request, (group_config,))
+    tracker.on_request_removed("req")
+
+    [stored] = tracker.take_events(
+        [_stored_event([key0], Medium.STORAGE, req_id="req", positions=[8])]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.token_ids == list(range(1, 9))
+
+    tracker.prune_retired_requests()
+    [placeholder] = tracker.take_events(
+        [_stored_event([key1], Medium.STORAGE, req_id="req", positions=[16])]
+    )
+    assert isinstance(placeholder, BlockStored)
+    assert placeholder.block_size == 0
+    assert placeholder.token_ids == []
+
+
+def test_reused_req_id_clears_prior_retirement():
+    group_config = _group_config(block_size=4, blocks_per_chunk=1)
+    tracker = _tracker()
+    tracker.on_new_request(
+        _real_request("req", [1, 2, 3, 4], [_hash(0)]), (group_config,)
+    )
+    tracker.on_request_removed("req")
+    tracker.on_new_request(
+        _real_request("req", [11, 12, 13, 14], [_hash(1)]), (group_config,)
+    )
+    tracker.prune_retired_requests()
+
+    key = make_offload_key(_hash(1), group_config.group_idx)
+    [stored] = tracker.take_events([_stored_event([key], req_id="req", positions=[4])])
+    assert isinstance(stored, BlockStored)
+    assert stored.token_ids == [11, 12, 13, 14]
+
+
+def test_stale_event_after_reused_req_id_falls_back_to_placeholder():
+    group_config = _group_config(block_size=4, blocks_per_chunk=1)
+    old_key = make_offload_key(_hash(1), group_config.group_idx)
+    tracker = _tracker()
+    tracker.on_new_request(
+        _real_request("req", list(range(1, 9)), [_hash(0), _hash(1)]),
+        (group_config,),
+    )
+    tracker.on_request_removed("req")
+
+    # Reuse req_id with a shorter prompt: stale event at pos 8 must not crash.
+    tracker.on_new_request(
+        _real_request("req", [11, 12, 13, 14], [_hash(10)]),
+        (group_config,),
+    )
+    [shorter] = tracker.take_events(
+        [_stored_event([old_key], Medium.STORAGE, req_id="req", positions=[8])]
+    )
+    assert isinstance(shorter, BlockStored)
+    assert shorter.block_size == 0
+    assert shorter.token_ids == []
+
+    # Reuse req_id with a different prompt of equal length: hash mismatch must
+    # not publish the new request's tokens under the old key.
+    tracker.on_new_request(
+        _real_request("req", list(range(21, 29)), [_hash(20), _hash(21)]),
+        (group_config,),
+    )
+    [mismatched] = tracker.take_events(
+        [_stored_event([old_key], Medium.STORAGE, req_id="req", positions=[8])]
+    )
+    assert isinstance(mismatched, BlockStored)
+    assert mismatched.block_size == 0
+    assert mismatched.token_ids == []
+
+    # Non-positive position falls back to placeholder instead of asserting,
+    # even when the last block hash matches block_hashes[-1].
+    tail_key = make_offload_key(_hash(21), group_config.group_idx)
+    [zero_pos] = tracker.take_events(
+        [_stored_event([tail_key], Medium.STORAGE, req_id="req", positions=[0])]
+    )
+    assert isinstance(zero_pos, BlockStored)
+    assert zero_pos.block_size == 0
+    assert zero_pos.token_ids == []
+
+
+def test_retired_request_cap_applies_after_the_drain():
+    group_config = _group_config(block_size=4, blocks_per_chunk=1)
+    tracker = OffloadingEventsTracker(
+        OffloadingKVEventsConfig(
+            enable_kv_cache_events=True, self_describing_kv_events=True
+        ),
+        max_retired_request_contexts=1,
+    )
+    names = ("active", "old", "new")
+    for i, name in enumerate(names):
+        req = _real_request(name, [i * 10 + j for j in range(4)], [_hash(i)])
+        tracker.on_new_request(req, (group_config,))
+    tracker.on_request_removed("old")
+    tracker.on_request_removed("new")
+
+    def drain() -> list[BlockStored]:
+        events = tracker.take_events(
+            [
+                _stored_event(
+                    [make_offload_key(_hash(i), group_config.group_idx)],
+                    Medium.STORAGE,
+                    req_id=name,
+                    positions=[4],
+                )
+                for i, name in enumerate(names)
+            ]
+        )
+        return [event for event in events if isinstance(event, BlockStored)]
+
+    # Both removed contexts exceed the cap but still describe this drain.
+    active_ev, old_ev, new_ev = drain()
+    assert active_ev.token_ids == [0, 1, 2, 3]
+    assert old_ev.token_ids == [10, 11, 12, 13]
+    assert new_ev.token_ids == [20, 21, 22, 23]
+
+    active_ev, old_ev, new_ev = drain()
+    assert active_ev.token_ids == [0, 1, 2, 3]
+    assert old_ev.block_size == 0
+    assert new_ev.token_ids == [20, 21, 22, 23]
+
+
+def test_reset_keeps_request_contexts_for_post_reset_drain():
+    group_config = _group_config(block_size=4, blocks_per_chunk=1)
+    tracker = _tracker()
+    tracker.on_new_request(
+        _real_request("active", [1, 2, 3, 4], [_hash(0)]), (group_config,)
+    )
+    tracker.on_new_request(
+        _real_request("done", [5, 6, 7, 8], [_hash(1)]), (group_config,)
+    )
+    tracker.on_request_removed("done")
+    tracker.reset()
+
+    active_ev, done_ev = list(
+        tracker.take_events(
+            [
+                _stored_event(
+                    [make_offload_key(_hash(0), group_config.group_idx)],
+                    req_id="active",
+                    positions=[4],
+                ),
+                _stored_event(
+                    [make_offload_key(_hash(1), group_config.group_idx)],
+                    Medium.STORAGE,
+                    req_id="done",
+                    positions=[4],
+                ),
+            ]
+        )
+    )
+    assert isinstance(active_ev, BlockStored)
+    assert isinstance(done_ev, BlockStored)
+    assert active_ev.token_ids == [1, 2, 3, 4]
+    assert done_ev.token_ids == [5, 6, 7, 8]
+
+    tracker.prune_retired_requests()
+    [after_prune] = list(
+        tracker.take_events(
+            [
+                _stored_event(
+                    [make_offload_key(_hash(1), group_config.group_idx)],
+                    Medium.STORAGE,
+                    req_id="done",
+                    positions=[4],
+                )
+            ]
+        )
+    )
+    assert isinstance(after_prune, BlockStored)
+    assert after_prune.block_size == 0
+
+
+def test_offloading_event_serializes_with_pickle_and_msgpack():
+    event = OffloadingEvent(
+        keys=[make_offload_key(_hash(0), 0), make_offload_key(_hash(1), 0)],
+        medium=Medium.STORAGE,
+        removed=False,
+        locality=Locality.REMOTE,
+        ownership="fs",
+        removal_expected=True,
+        req_id="req-1",
+        positions=[16, 32],
+    )
+    assert pickle.loads(pickle.dumps(event)) == event
+    encoded = msgspec.msgpack.encode(event)
+    assert msgspec.msgpack.decode(encoded, type=OffloadingEvent) == event
+
+
+def test_offloading_event_positions_mismatch_rejected():
+    tracker = _tracker()
+    event = _stored_event(
+        [make_offload_key(_hash(0), 0), make_offload_key(_hash(1), 0)],
+        req_id="req",
+        positions=[4],
+    )
+    with pytest.raises(AssertionError, match="positions"):
+        list(tracker.take_events([event]))
 
 
 def test_take_events_publishes_routable_block_stored():

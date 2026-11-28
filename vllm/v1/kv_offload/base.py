@@ -224,8 +224,9 @@ class OffloadingEvent:
     removal_expected: bool = False
     # Failed allocations release metadata without announcing a public eviction.
     metadata_only: bool = False
-    # Originating request context for a stored event.
-    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
+    # Originating request ID and per-key end-token positions for stored events.
+    req_id: str | None = None
+    positions: list[int] | None = None
 
 
 """
