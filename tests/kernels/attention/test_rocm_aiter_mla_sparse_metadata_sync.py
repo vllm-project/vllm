@@ -715,6 +715,7 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
         paged_kv_indices=torch.zeros(8, dtype=torch.int32),
         block_size=1,
         topk_tokens=4,
+        topk_start=0,
     )
     query = torch.zeros(2, 4, 576, dtype=torch.bfloat16)
     captured = {}
@@ -764,6 +765,7 @@ def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache
         paged_kv_indices=torch.zeros(8, dtype=torch.int32),
         block_size=1,
         topk_tokens=4,
+        topk_start=0,
     )
     query = torch.zeros(2, 4, 576, dtype=torch.bfloat16)
     kv_cache = torch.zeros(1, 1, 576, dtype=torch.uint8)

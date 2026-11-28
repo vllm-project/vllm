@@ -4,12 +4,13 @@
 
 Reuses the NVIDIA layer and only drops the CUDA-only `FLASHMLA_SPARSE` sink
 fallback, so the learnable sink is applied only by a selected backend that
-supports `attn_sink`.
+supports `attn_sink`. `ROCM_AITER_MLA_SPARSE` binds the HY V4 ShardQ subclass.
 """
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.models.hy_v4.amd.aiter_mla_sparse import HYV4ShardQAiterMLASparseBackend
 from vllm.models.hy_v4.nvidia.attention import (
     HYV4MLAAttention as _HYV4MLAAttention,
 )
@@ -18,6 +19,9 @@ from vllm.models.hy_v4.nvidia.attention import (
     sparse_layer_ids,
 )
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
+)
 from vllm.v1.attention.selector import get_attn_backend
 
 logger = init_logger(__name__)
@@ -59,6 +63,9 @@ class HYV4MLAAttention(_HYV4MLAAttention):
             return None
 
         if selected_cls.supports_sink():
+            # Exact match: other ROCm sparse MLA subclasses keep their own impl.
+            if selected_cls is ROCMAiterMLASparseBackend:
+                return HYV4ShardQAiterMLASparseBackend
             return selected_cls
 
         logger.warning_once(

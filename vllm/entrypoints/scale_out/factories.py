@@ -83,6 +83,8 @@ def init_scale_out_state(
         enable_log_outputs=args.enable_log_outputs,
         enable_force_include_usage=args.enable_force_include_usage,
         force_no_detokenize=args.tokens_only,
+        # `vllm run-batch` args have no `--mm-tensor-refs-config`.
+        mm_tensor_refs_config=getattr(args, "mm_tensor_refs_config", None),
     )
 
 

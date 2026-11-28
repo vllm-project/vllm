@@ -5,6 +5,7 @@ import importlib.util
 import math
 import threading
 from collections import OrderedDict
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -15,9 +16,12 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    create_kv_cache_views,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from ..utils import make_moriio_writer
 
@@ -279,6 +283,169 @@ def test_supported_layouts_compute_expected_geometry_and_offsets(
         )
         == expected_offsets
     )
+
+
+@pytest.mark.parametrize("kernel_block_size", [16, 32, 64])
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBHNC, KVCacheLayout.LBNHC])
+@pytest.mark.parametrize("padding", [0, 128])
+@pytest.mark.parametrize("shuffle_layout", ["0", "1"])
+def test_packed_kernel_blocks_transfer_complete_manager_blocks(
+    kernel_block_size, layout, padding, shuffle_layout, monkeypatch
+):
+    """Transfer the last manager block without losing a kernel page or overrunning."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
+
+    spec = AttentionSpec(
+        block_size=64,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    try:
+        with monkeypatch.context() as env:
+            env.setenv("VLLM_ROCM_USE_AITER", "1")
+            env.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", shuffle_layout)
+            rocm_aiter_ops.refresh_env_variables()
+            spec = AiterFlashAttentionBackend.customize_spec(spec)
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+    spec = replace(spec, page_size_padded=spec.page_size_bytes + padding)
+    ratio = spec.block_size // kernel_block_size
+    offset = 64
+    # The final kernel page's trailing padding is outside the allocation.
+    size = offset + 3 * spec.page_size_bytes - padding // ratio
+    placement = KVCacheTensor(
+        size=size,
+        layers=["layer"],
+        layer_stride=3 * spec.page_size_bytes,
+        block_stride=spec.page_size_bytes,
+        offset=offset,
+    )
+    src = torch.arange(size, dtype=torch.int32).remainder(251).to(torch.uint8)
+    dst = torch.full_like(src, 255)
+    source, target = [
+        create_kv_cache_views(raw, spec, 3, layout, placement, kernel_block_size)[0]
+        for raw in (src, dst)
+    ]
+    specs = {"layer": spec}
+    geometry = moriio_layout.get_layer_transfer_geometry("layer", source, specs)
+    assert geometry.num_blocks == 3
+    regions = moriio_layout.iter_layer_registration_regions("layer", source, specs)
+    assert len(regions) == 1
+    assert regions[0][1] == size - offset
+    local, remote, sizes = moriio_layout.compute_block_transfer_offsets(
+        "layer", source, specs, [2], [1], remote_num_blocks=3
+    )
+    for start, end, length in zip(local, remote, sizes):
+        assert start + length <= regions[0][1]
+        assert end + length <= regions[0][1]
+        dst[offset + end : offset + end + length].copy_(
+            src[offset + start : offset + start + length]
+        )
+    assert torch.equal(
+        target[ratio : 2 * ratio].view(torch.uint8),
+        source[2 * ratio : 3 * ratio].view(torch.uint8),
+    )
+    assert torch.all(dst[: offset + spec.page_size_bytes] == 255)
+    assert torch.all(dst[offset + 2 * spec.page_size_bytes :] == 255)
+    with pytest.raises(ValueError, match="local block id 3"):
+        moriio_layout.compute_block_transfer_offsets(
+            "layer", source, specs, [3], [0], remote_num_blocks=3
+        )
+
+
+@pytest.mark.parametrize("block_size", [16, 32])
+@pytest.mark.parametrize("local_blocks,remote_blocks", [(1, 3), (3, 1), (3, 5)])
+def test_shuffled_planes_transfer_last_block_between_different_pool_sizes(
+    block_size, local_blocks, remote_blocks
+):
+    """Each K/V plane has its own pool-size-dependent base address."""
+    spec = AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        num_head_slots=2,
+        state_content_bytes=8 * 128 * 2,
+    )
+    offset = 64
+    buffers, views = [], []
+    for num_blocks in (local_blocks, remote_blocks):
+        size = offset + num_blocks * spec.page_size_bytes
+        raw = torch.full((size,), 255, dtype=torch.uint8)
+        placement = KVCacheTensor(
+            size=size,
+            layers=["layer"],
+            layer_stride=num_blocks * spec.page_size_bytes,
+            block_stride=spec.page_size_bytes // 2,
+            offset=offset,
+        )
+        buffers.append(raw)
+        views.append(
+            create_kv_cache_views(
+                raw, spec, num_blocks, KVCacheLayout.LHBNC, placement
+            )[0]
+        )
+    src, dst = buffers
+    source, target = views
+    src.copy_(
+        torch.arange(src.numel(), dtype=torch.int32).remainder(251).to(torch.uint8)
+    )
+    specs = {"layer": spec}
+    for view, raw in zip(views, buffers):
+        with pytest.raises(ValueError, match="packed K/V planes"):
+            moriio_layout.get_layer_head_layout("layer", view, specs)
+        [(region, length)] = moriio_layout.iter_layer_registration_regions(
+            "layer", view, specs
+        )
+        assert region.data_ptr() == view.data_ptr()
+        assert length == raw.numel() - offset
+    local, remote, sizes = moriio_layout.compute_block_transfer_offsets(
+        "layer",
+        source,
+        specs,
+        [local_blocks - 1],
+        [remote_blocks - 1],
+        remote_num_blocks=remote_blocks,
+    )
+    assert len(sizes) == 2
+    assert sum(sizes) == spec.page_size_bytes
+    for start, end, length in zip(local, remote, sizes):
+        assert offset + start + length <= src.numel()
+        assert offset + end + length <= dst.numel()
+        dst[offset + end : offset + end + length].copy_(
+            src[offset + start : offset + start + length]
+        )
+    assert torch.equal(target[-1].view(torch.uint8), source[-1].view(torch.uint8))
+    assert torch.all(target[:-1].view(torch.uint8) == 255)
+    assert torch.all(dst[:offset] == 255)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (5, 2, 32, 8),
+        (6, 2, 24, 8),
+        (6, 3, 32, 8),
+        (6, 2, 32, 7),
+        (6, 2, 0, 8),
+        (0, 2, 32, 8),
+        (6, 2, 128, 8),
+    ],
+)
+def test_packed_kernel_blocks_reject_incomplete_or_mismatched_pages(shape):
+    cache = torch.empty(shape, dtype=torch.bfloat16)
+    spec = _full_spec(block_size=64, num_kv_heads=2, head_size=4)
+    with pytest.raises(ValueError):
+        moriio_layout.get_layer_transfer_geometry("layer", cache, {"layer": spec})
+
+
+def test_packed_kernel_blocks_reject_overlapping_manager_spans():
+    cache = torch.empty((2, 6, 32, 8), dtype=torch.bfloat16).permute(1, 0, 2, 3)
+    spec = _full_spec(block_size=64, num_kv_heads=2, head_size=4)
+    with pytest.raises(ValueError):
+        moriio_layout.get_layer_transfer_geometry("layer", cache, {"layer": spec})
 
 
 def test_kernel_block_layout_without_spec_dimensions_rejects_ambiguous_axes():

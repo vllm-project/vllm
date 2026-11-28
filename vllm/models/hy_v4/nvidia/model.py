@@ -31,7 +31,6 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
-import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -67,6 +66,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.hy_v4.common.mrope import set_token_rope
+from vllm.models.hy_v4.common.sequence_parallel import (
+    IHC_SP_MIN_TOKENS,
+    ihc_sequence_parallel_enabled,
+)
 from vllm.models.hy_v4.weight_utils import (
     HYV4_MLP_MAPPER,
     HYV4_PACKED_MODULES_MAPPING,
@@ -85,9 +88,6 @@ from .hc import HYV4HCHeadLayer, HYV4HCLayer, IHCBoundary
 from .moe import HYV4FeedForward, HYV4MoEFused
 
 logger = init_logger(__name__)
-
-# Smallest step that shards the iHC rows; shorter ones keep them replicated.
-_IHC_SP_MIN_TOKENS = 1024
 
 
 def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
@@ -346,26 +346,14 @@ class HYV4Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.enable_ihc = getattr(config, "enable_ihc", False)
-        speculative_config = vllm_config.speculative_config
-        self.ihc_sequence_parallel = (
-            self.enable_ihc
-            and self.supports_ihc_sequence_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and parallel_config.data_parallel_size == 1
-            and parallel_config.pipeline_parallel_size == 1
-            and parallel_config.prefill_context_parallel_size == 1
-            and parallel_config.decode_context_parallel_size == 1
-            and parallel_config.all2all_backend != "passthrough"
-            and vllm_config.lora_config is None
-            and not envs.VLLM_BATCH_INVARIANT
-            and (
-                speculative_config is None
-                or not speculative_config.uses_aux_hidden_states
-            )
+        self.ihc_sequence_parallel = ihc_sequence_parallel_enabled(
+            vllm_config, self.supports_ihc_sequence_parallel
         )
 
+        # The DFly drafter on the last stage embeds through the target table.
         if get_pp_group().is_first_rank or (
-            self.config.tie_word_embeddings and get_pp_group().is_last_rank
+            (self.config.tie_word_embeddings or self.dfly_enabled)
+            and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -498,7 +486,7 @@ class HYV4Model(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         full_num_tokens = positions.shape[-1]
         use_ihc_sequence_parallel = is_sequence_parallel_active(
-            self.ihc_sequence_parallel, full_num_tokens, _IHC_SP_MIN_TOKENS
+            self.ihc_sequence_parallel, full_num_tokens, IHC_SP_MIN_TOKENS
         )
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:

@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniCPM-V 4.6 model (MiniCPMV4_6ForConditionalGeneration)."""
 
-from collections.abc import Iterable, Mapping
+import math
+from collections.abc import Collection, Iterable, Mapping
+from functools import cached_property
 from typing import Any
 
 import numpy as np
@@ -55,6 +57,7 @@ from .interfaces import (
     _require_is_multimodal,
 )
 from .minicpmv import (
+    _MAX_FRAMES_PER_VIDEO,
     MiniCPMVDummyInputsBuilder,
     MiniCPMVImageEmbeddingInputs,
     MiniCPMVImageEmbeddingItems,
@@ -160,6 +163,26 @@ def _select_vision_items(
         pixel_values=pixel_values,
         tgt_sizes=torch.cat(tgt_sizes, dim=0),
         num_slices=torch.tensor(sizes),
+    )
+
+
+_MAX_ASPECT_RATIO = {"image": 200, "video": 50}
+
+
+def _check_aspect_ratio(size: ImageSize, modality: str) -> None:
+    max_ratio = _MAX_ASPECT_RATIO[modality]
+    if max(size) > max_ratio * min(size):
+        raise ValueError(
+            f"absolute aspect ratio must not exceed {max_ratio}, "
+            f"got {max(size) / min(size)}"
+        )
+
+
+def _fit_aspect_ratio(size: ImageSize, modality: str) -> ImageSize:
+    max_ratio = _MAX_ASPECT_RATIO[modality]
+    return ImageSize(
+        width=min(size.width, max_ratio * size.height),
+        height=min(size.height, max_ratio * size.width),
     )
 
 
@@ -282,6 +305,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         num_frames: int,
         downsample_mode: str | None = None,
         video_idx: int = 0,
+        max_slice_nums: int | None = None,
     ) -> str:
         # Match transformers v5.7+ MiniCPMV4_6Processor video formatting:
         #   <image_id>{video_idx}</image_id>(<image>VIDEO*src</image>
@@ -293,9 +317,11 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # garbage descriptions.
         info = self.info
         assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        if max_slice_nums is None:
+            max_slice_nums = info.get_video_max_slice_num()
         grids, source_tokens, patch_tokens = info._compute_visual_tokens(
             image_size,
-            max_slice_nums=info.get_video_max_slice_num(),
+            max_slice_nums=max_slice_nums,
             downsample_mode=downsample_mode,
         )
         tokenizer = info.get_tokenizer()
@@ -329,6 +355,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
 
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
             return {}
+        assert isinstance(parsed_images, ImageProcessorItems)
 
         # transformers v5.7+ MiniCPMV4_6ImageProcessor returns
         # `pixel_values` (1, C, P, sum_W) where all slices are fused along W
@@ -347,7 +374,8 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             image_proc_kwargs["max_slice_nums"] = image_max_slice
         per_image_pixel_values: list[torch.Tensor] = []
         per_image_tgt_sizes: list[torch.Tensor] = []
-        for image in parsed_images:
+        for image_idx, image in enumerate(parsed_images):
+            _check_aspect_ratio(parsed_images.get_image_size(image_idx), "image")
             ip_out = image_processor([image], **image_proc_kwargs)
             pv = ip_out["pixel_values"]  # (1, C, P, sum_W)
             ts = ip_out["target_sizes"]  # (n_slices, 2)
@@ -409,7 +437,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # a single 4D tensor (sum_slices, C, P, L_max_video).
         image_processor = self.info.get_image_processor()
         patch_size = image_processor.patch_size
-        video_max_slice = self.info.get_video_max_slice_num()
+        video_max_slice = self._resolve_max_slice_nums(mm_kwargs, modality="video")
+        if video_max_slice is None:
+            video_max_slice = self.info.get_video_max_slice_num()
         video_ds_mode = self._resolve_downsample_mode(mm_kwargs, modality="video")
         video_mm_kwargs = {
             **_flat_processor_kwargs(mm_kwargs, video_ds_mode),
@@ -444,6 +474,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                         _, h, w = frame.shape
                 else:
                     raise TypeError(f"Unsupported frame type: {type(frame)}")
+                _check_aspect_ratio(ImageSize(w, h), "video")
                 frame_sizes.append(torch.tensor([w, h], dtype=torch.long, device="cpu"))
 
                 ip_out = image_processor([frame], **video_mm_kwargs)
@@ -507,6 +538,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             hf_processor_mm_kwargs, modality="video"
         )
         image_max_slice = self._resolve_max_slice_nums(hf_processor_mm_kwargs)
+        video_max_slice = self._resolve_max_slice_nums(
+            hf_processor_mm_kwargs, modality="video"
+        )
 
         placeholders = [
             ("image", self.info.image_pattern),
@@ -574,6 +608,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                                 num_frames,
                                 downsample_mode=video_ds_mode,
                                 video_idx=item_idx,
+                                max_slice_nums=video_max_slice,
                             ),
                             add_special_tokens=False,
                         ),
@@ -594,6 +629,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                         num_frames,
                         downsample_mode=video_ds_mode,
                         video_idx=item_idx,
+                        max_slice_nums=video_max_slice,
                     ),
                     add_special_tokens=False,
                 ),
@@ -698,6 +734,296 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             return getattr(config.slice_config, "max_slice_nums", 9)
         return getattr(config, "max_slice_nums", 9)
 
+    def get_max_image_tokens(self) -> int:
+        return max(self._image_sizes_by_tokens | self._hinted_image_sizes_by_tokens)
+
+    def get_max_video_frame_tokens(self) -> int:
+        return max(self._video_sizes_by_tokens | self._hinted_video_sizes_by_tokens)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        largest = max(
+            self._get_unhinted_dummy_sizes("image"),
+            key=lambda size: (
+                self._get_padded_tokens(size, "image"),
+                self._get_frame_tokens(size, "image"),
+            ),
+        )
+        if self._fits_size_hint("image", largest):
+            return largest
+        canvas = super().get_image_size_with_most_features()
+        if self._hint_keeps_canvas("image", canvas):
+            return canvas
+        sizes = self._hinted_image_sizes_by_tokens
+        return sizes[max(sizes)]
+
+    def get_video_frame_size_with_most_features(self) -> ImageSize:
+        canvas = super().get_video_frame_size_with_most_features()
+        if self._hint_keeps_canvas("video", canvas):
+            return canvas
+        sizes = self._hinted_video_sizes_by_tokens
+        return sizes[max(sizes)]
+
+    def get_video_size_and_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> tuple[ImageSize, int]:
+        num_videos = max(mm_counts.get("video", 0), 1)
+        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
+        max_tokens = seq_len // num_videos
+        max_frames = getattr(video_options, "num_frames", None) or max_tokens
+        largest = self._get_video_size_and_frames(
+            max_tokens,
+            max_frames,
+            self._get_unhinted_dummy_sizes("video"),
+            padded=True,
+        )
+        if self._fits_size_hint("video", largest[0]):
+            return largest
+        hinted = self._get_video_size_and_frames(
+            max_tokens,
+            max_frames,
+            self._hinted_video_sizes_by_tokens.values(),
+            padded=True,
+        )
+        canvas = super().get_video_frame_size_with_most_features()
+        if not self._hint_keeps_canvas("video", canvas):
+            return hinted
+        kept = self._get_video_size_and_frames(
+            seq_len // num_videos, _MAX_FRAMES_PER_VIDEO, [canvas]
+        )
+
+        def profiled_cost(candidate: tuple[ImageSize, int]) -> tuple[int, int]:
+            size = self._clip_to_size_hint("video", candidate[0])
+            num_frames = min(candidate[1], max_frames)
+            return (
+                num_frames * self._get_padded_tokens(size, "video"),
+                num_frames * self._get_frame_tokens(size, "video"),
+            )
+
+        return max(kept, hinted, key=profiled_cost)
+
+    def get_extra_profiled_modalities(
+        self, modalities: Collection[str]
+    ) -> Collection[str]:
+        return modalities
+
+    def get_dummy_seq_len(
+        self,
+        seq_len: int,
+        max_encoder_tokens: int | None = None,
+    ) -> int:
+        if max_encoder_tokens is None:
+            max_encoder_tokens = self.get_max_video_tokens(seq_len, {"video": 1})
+        return min(seq_len, max_encoder_tokens)
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        size, num_frames = self._get_video_size_and_frames(
+            seq_len // max(mm_counts.get("video", 0), 1),
+            _MAX_FRAMES_PER_VIDEO,
+            (self._video_sizes_by_tokens | self._hinted_video_sizes_by_tokens).values(),
+        )
+        return num_frames * self._get_frame_tokens(size, "video")
+
+    def _get_video_size_and_frames(
+        self,
+        max_tokens: int,
+        max_frames: int,
+        sizes: Iterable[ImageSize],
+        padded: bool = False,
+    ) -> tuple[ImageSize, int]:
+        def num_frames(size: ImageSize) -> int:
+            frame_tokens = self._get_frame_tokens(size, "video")
+            return max(min(max_tokens // frame_tokens, max_frames), 1)
+
+        def key(size: ImageSize) -> tuple[int, int, int]:
+            frame_tokens = self._get_frame_tokens(size, "video")
+            padded_tokens = self._get_padded_tokens(size, "video") if padded else 0
+            return (
+                num_frames(size) * padded_tokens,
+                num_frames(size) * frame_tokens,
+                frame_tokens,
+            )
+
+        size = max(sizes, key=key)
+        return size, num_frames(size)
+
+    def _get_frame_tokens(self, size: ImageSize, modality: str) -> int:
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs(modality)
+        return self.get_num_image_tokens(
+            size, max_slice_nums=max_slice_nums, downsample_mode=downsample_mode
+        )
+
+    def _get_padded_tokens(self, size: ImageSize, modality: str) -> int:
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs(modality)
+        grids, source_tokens, patch_tokens = self._compute_visual_tokens(
+            size, max_slice_nums, downsample_mode=downsample_mode
+        )
+        return (1 + grids[0] * grids[1]) * max(source_tokens, patch_tokens)
+
+    def _get_thin_sizes(self, modality: str) -> list[ImageSize]:
+        max_slice_nums, _ = self._get_slicing_kwargs(modality)
+        max_ratio = _MAX_ASPECT_RATIO[modality]
+        scale_resolution = self.get_image_processor().scale_resolution
+        area = scale_resolution * scale_resolution
+        scale = math.isqrt(max(max_slice_nums - 1, 0)) + 1
+        return [
+            size
+            for height in range(
+                max(math.floor(scale_resolution / math.sqrt(max_ratio)), 1),
+                scale_resolution + 1,
+            )
+            for size in (
+                ImageSize(width=area // height * scale, height=height * scale),
+                ImageSize(width=height * scale, height=area // height * scale),
+            )
+            if max(size) <= max_ratio * min(size)
+        ]
+
+    def _get_unhinted_dummy_sizes(self, modality: str) -> list[ImageSize]:
+        sizes = (
+            self._image_sizes_by_tokens
+            if modality == "image"
+            else self._video_sizes_by_tokens
+        )
+        return [*sizes.values(), *self._get_thin_sizes(modality)]
+
+    def _fits_size_hint(self, modality: str, size: ImageSize) -> bool:
+        max_width, max_height = self._get_size_hint(modality)
+        return size.width <= (max_width or size.width) and size.height <= (
+            max_height or size.height
+        )
+
+    def _get_slicing_kwargs(self, modality: str) -> tuple[int, str]:
+        merged = self._merge_and_resolve_mm_processor_kwargs({})
+        max_slice_nums = _scoped_mm_kwarg(merged, modality, "max_slice_nums")
+        if max_slice_nums is None:
+            max_slice_nums = (
+                self.get_image_processor().max_slice_nums
+                if modality == "image"
+                else self.get_video_max_slice_num()
+            )
+        downsample_mode = _scoped_mm_kwarg(merged, modality, "downsample_mode")
+        return int(max_slice_nums), self._get_downsample_mode(
+            None if downsample_mode is None else str(downsample_mode)
+        )
+
+    @cached_property
+    def _image_sizes_by_tokens(self) -> dict[int, ImageSize]:
+        return self._get_sizes_by_tokens("image", within_hint=False)
+
+    @cached_property
+    def _video_sizes_by_tokens(self) -> dict[int, ImageSize]:
+        return self._get_sizes_by_tokens(
+            "video",
+            super().get_video_frame_size_with_most_features(),
+            within_hint=False,
+        )
+
+    @cached_property
+    def _hinted_image_sizes_by_tokens(self) -> dict[int, ImageSize]:
+        if self._get_size_hint("image") == (None, None):
+            return self._image_sizes_by_tokens
+        return self._get_sizes_by_tokens(
+            "image", super().get_image_size_with_most_features(), within_hint=True
+        )
+
+    @cached_property
+    def _hinted_video_sizes_by_tokens(self) -> dict[int, ImageSize]:
+        if self._get_size_hint("video") == (None, None):
+            return self._video_sizes_by_tokens
+        return self._get_sizes_by_tokens(
+            "video",
+            super().get_video_frame_size_with_most_features(),
+            within_hint=True,
+        )
+
+    def _get_size_hint(self, modality: str) -> tuple[int | None, int | None]:
+        options = self.ctx.get_mm_config().limit_per_prompt.get(modality)
+        return getattr(options, "width", None), getattr(options, "height", None)
+
+    def _clip_to_size_hint(self, modality: str, size: ImageSize) -> ImageSize:
+        width, height = self._get_size_hint(modality)
+        return ImageSize(
+            width=min(size.width, width or size.width),
+            height=min(size.height, height or size.height),
+        )
+
+    def _hint_keeps_canvas(self, modality: str, canvas: ImageSize) -> bool:
+        if self._get_size_hint(modality) == (None, None):
+            return False
+        clipped = self._clip_to_size_hint(modality, canvas)
+        return _fit_aspect_ratio(clipped, modality) == clipped
+
+    def _get_sizes_by_tokens(
+        self, modality: str, *extra_sizes: ImageSize, within_hint: bool
+    ) -> dict[int, ImageSize]:
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs(modality)
+        max_ratio = _MAX_ASPECT_RATIO[modality]
+        max_width, max_height = (
+            self._get_size_hint(modality) if within_hint else (None, None)
+        )
+        image_processor = self.get_image_processor()
+        scale_resolution = image_processor.scale_resolution
+        area = scale_resolution * scale_resolution
+        heights = range(
+            max(math.ceil(scale_resolution / math.sqrt(max_ratio)), 1),
+            min(math.floor(scale_resolution * math.sqrt(max_ratio)), area) + 1,
+        )
+        slice_counts = (
+            range(1, max(max_slice_nums, 1) + 1)
+            if modality == "video"
+            else sorted({max(max_slice_nums - 1, 1), max_slice_nums})
+        )
+        sizes = [
+            ImageSize(width=num_slices // rows * (area // height), height=rows * height)
+            for num_slices in slice_counts
+            for rows in range(1, num_slices + 1)
+            if num_slices % rows == 0
+            for height in heights
+        ]
+        if max_width or max_height:
+            sizes += [ImageSize(width=size.height, height=size.width) for size in sizes]
+            sizes += [
+                size
+                for short in range(1, 9)
+                for long in range(short, max_ratio * short + 1)
+                for size in (ImageSize(long, short), ImageSize(short, long))
+            ]
+        if max_width and max_height:
+            extra_sizes = (ImageSize(width=max_width, height=max_height), *extra_sizes)
+        fitted_sizes = dict.fromkeys(
+            _fit_aspect_ratio(
+                ImageSize(
+                    width=min(size.width, max_width or size.width),
+                    height=min(size.height, max_height or size.height),
+                ),
+                modality,
+            )
+            for size in (
+                [*extra_sizes, *sizes] if within_hint else [*sizes, *extra_sizes]
+            )
+        )
+        sizes_by_tokens: dict[int, ImageSize] = {}
+        padded_by_tokens: dict[int, int] = {}
+        for size in fitted_sizes:
+            grids, source_tokens, patch_tokens = self._compute_visual_tokens(
+                size,
+                max_slice_nums,
+                downsample_mode=downsample_mode,
+                image_processor=image_processor,
+            )
+            tokens = source_tokens + grids[0] * grids[1] * patch_tokens
+            padded = (1 + grids[0] * grids[1]) * max(source_tokens, patch_tokens)
+            if padded > padded_by_tokens.get(tokens, -1):
+                sizes_by_tokens[tokens] = size
+                padded_by_tokens[tokens] = padded
+        return sizes_by_tokens
+
     def get_video_max_slice_num(self) -> int:
         # Override the base class default of 1: transformers v5.7+
         # `MiniCPMV4_6VideoProcessor` keeps the same max_slice_nums (default 9)
@@ -725,6 +1051,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         image_size: ImageSize,
         max_slice_nums: int | None = None,
         downsample_mode: str | None = None,
+        image_processor: Any = None,
     ) -> tuple[list[int], int, int]:
         """Compute grid, source_image_visual_tokens and patch_visual_tokens.
 
@@ -733,13 +1060,15 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             max_slice_nums: Maximum number of slices, or None for the default.
             downsample_mode: `"16x"` (default, full merge) or `"4x"`
                 (skip vit_merger, 4x more visual tokens).
+            image_processor: Image processor to use, or None to look it up.
 
         Returns:
             (grids, source_image_visual_tokens, patch_visual_tokens)
             grids is [0, 0] when no slicing occurs.
 
         """
-        image_processor = self.get_image_processor()
+        if image_processor is None:
+            image_processor = self.get_image_processor()
         if max_slice_nums is None:
             max_slice_nums = image_processor.max_slice_nums
 
@@ -1214,7 +1543,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         # --- Vision tower ---
-        with self._mark_tower_model(vllm_config, {"image"}):
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vpm = Idefics2VisionTransformer(
                 config.vision_config,
                 quant_config=quant_config,

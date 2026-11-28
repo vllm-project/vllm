@@ -77,6 +77,17 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    /// The prompt has no placeholder left for some media items: the request's
+    /// token IDs or chat template leave it out, or the media sits where the
+    /// template renders none. Python's `PromptUpdateMismatchError`.
+    #[error(
+        "placeholder token `{placeholder}` was not found in tokenized prompt for {remaining} remaining `{modality}` item(s)"
+    )]
+    MissingMultimodalPlaceholder {
+        placeholder: String,
+        remaining: usize,
+        modality: llm_multimodal::Modality,
+    },
     #[error(
         "failed to prepare media after the last preprocessed feature range, ending at offset {offset}"
     )]
@@ -191,7 +202,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     /// Classify this error as a client request-validation failure (with its
-    /// canonical OpenAI `param`, if any) or an internal server failure.
+    /// canonical OpenAI `param`, if any), a request that cannot be taken now,
+    /// or an internal server failure.
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::Text(error) => error.kind(),
@@ -227,6 +239,7 @@ impl Error {
             | Self::UnsupportedModality { .. }
             | Self::RustFrontendUnsupportedModality { .. }
             | Self::MmLimitExceeded { .. }
+            | Self::MissingMultimodalPlaceholder { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => {
                 ErrorKind::invalid_request()
@@ -258,12 +271,6 @@ impl Error {
                 ErrorKind::Internal
             }
         }
-    }
-
-    /// Whether the request could not be taken now, so retrying later may
-    /// succeed.
-    pub fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Text(error) if error.is_unavailable())
     }
 }
 

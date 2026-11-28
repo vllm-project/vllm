@@ -253,10 +253,13 @@ def collection_to_kwargs(type_hints: set[TypeHint], type: TypeHint) -> dict[str,
         )
         elem_type = str
 
-    return {
+    kwargs = {
         "type": elem_type,
         "nargs": "+" if type is not tuple or Ellipsis in types else len(types),
     }
+    if get_origin(elem_type) is Literal:
+        kwargs.update(literal_to_kwargs({elem_type}))
+    return kwargs
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
@@ -678,9 +681,11 @@ class EngineArgs:
     max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
+    lora_split_k_reduction: Literal["atomic", "kernel"] = LoRAConfig.split_k_reduction
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
     lora_target_modules: list[str] | None = LoRAConfig.target_modules
+    enable_lora_embedding_modules: bool = LoRAConfig.enable_embedding_modules
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
     enable_mixed_moe_lora_format: bool = LoRAConfig.enable_mixed_moe_lora_format
@@ -1614,6 +1619,9 @@ class EngineArgs:
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
+            "--lora-split-k-reduction", **lora_kwargs["split_k_reduction"]
+        )
+        lora_group.add_argument(
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
@@ -1627,6 +1635,10 @@ class EngineArgs:
         )
         lora_group.add_argument(
             "--lora-target-modules", **lora_kwargs["target_modules"]
+        )
+        lora_group.add_argument(
+            "--enable-lora-embedding-modules",
+            **lora_kwargs["enable_embedding_modules"],
         )
         lora_group.add_argument("--default-mm-loras", **lora_kwargs["default_mm_loras"])
         lora_group.add_argument(
@@ -2724,8 +2736,10 @@ class EngineArgs:
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,
+                split_k_reduction=self.lora_split_k_reduction,
                 lora_dtype=self.lora_dtype,
                 target_modules=self.lora_target_modules,
+                enable_embedding_modules=self.enable_lora_embedding_modules,
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
                 enable_mixed_moe_lora_format=self.enable_mixed_moe_lora_format,

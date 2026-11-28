@@ -108,6 +108,7 @@ class ServingScores(PoolingServing):
                 ctx.request.documents,
                 ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
                 num_prompt_tokens,
+                return_documents=ctx.request.return_documents is not False,
             )
         else:
             raise ValueError(f"Invalid {self.request_id_prefix} request type")
@@ -154,6 +155,8 @@ class ServingScores(PoolingServing):
         documents: ScoreInput | list[ScoreInput],
         top_n: int,
         num_prompt_tokens: int,
+        *,
+        return_documents: bool,
     ) -> JSONResponse:
         if not isinstance(documents, list):
             documents = [documents]
@@ -162,13 +165,15 @@ class ServingScores(PoolingServing):
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
-            document = documents[idx]
-            if isinstance(document, str):
-                rerank_document = RerankDocument(text=document)
-            else:
-                rerank_document = RerankDocument(
-                    multi_modal=document.get("content", [])
-                )
+            rerank_document = None
+            if return_documents:
+                document = documents[idx]
+                if isinstance(document, str):
+                    rerank_document = RerankDocument(text=document)
+                else:
+                    rerank_document = RerankDocument(
+                        multi_modal=document.get("content", [])
+                    )
 
             result = RerankResult(
                 index=idx,
