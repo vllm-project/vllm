@@ -114,6 +114,12 @@ class ShapeDynamicSkinnyGemm:
 
         return current_platform.is_arch_support_pdl()
 
+    @staticmethod
+    def _use_elect_one() -> bool:
+        from vllm.platforms import current_platform
+
+        return current_platform.has_device_capability(90)
+
     def _compile(
         self,
         dtype: torch.dtype,
@@ -153,6 +159,7 @@ class ShapeDynamicSkinnyGemm:
             k_unroll=config.k_unroll,
             has_residual=has_residual,
             use_pdl=self._use_pdl(),
+            use_elect_one=self._use_elect_one(),
             static_k=config.static_k,
         )
         self._compiled[(dtype, config, has_residual)] = cute.compile(
