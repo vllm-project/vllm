@@ -29,6 +29,32 @@ See [feature docs](https://docs.vllm.ai/en/latest/features/structured_outputs.ht
 !!! tip
     If vLLM is running remotely, then set `OPENAI_BASE_URL=<remote_url>` before running the script.
 
+## Chimera-style edit programs
+
+`chimera_edit_program.py` shows how to combine structured outputs with a
+deterministic client-side renderer for coding-agent workloads. Instead of asking
+the model to repeat every edited source file, the model emits a compact JSON edit
+program such as "prepend this shared text to these paths", and the client
+validates and renders the final files locally.
+
+Start a vLLM server:
+
+```bash
+vllm serve Qwen/Qwen2.5-3B-Instruct
+```
+
+Run the edit-program example:
+
+```bash
+uv run chimera_edit_program.py
+```
+
+Run only the deterministic renderer without a vLLM server:
+
+```bash
+uv run chimera_edit_program.py --dry-run
+```
+
 ## Usage
 
 Run all constraints, non-streaming:
