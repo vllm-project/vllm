@@ -338,6 +338,11 @@ class SchedulerOutput:
     encoder_cache_events: "list[ECCacheEvent] | None" = None
     encoder_cache_epoch: int = 0
 
+    # Multimodal features of requests that finished before they were ever
+    # scheduled. Workers never read them, so they release the shared memory
+    # cache references the producer holds on them.
+    unread_mm_features: list[MultiModalFeatureSpec] = field(default_factory=list)
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

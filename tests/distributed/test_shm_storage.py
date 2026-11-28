@@ -404,6 +404,85 @@ class TestShmObjectStorageReferenceCounting(unittest.TestCase):
         self.writer.release_touches()
         self.assertTrue(self._is_evictable("image"))
 
+    def _fill_ring_with_read_items(self) -> int:
+        """Store items that every reader reads, until the ring is full."""
+        count = 0
+        while True:
+            try:
+                reference = self._reference(f"filler_{count}")
+            except MemoryError:
+                return count
+            for reader in self.readers:
+                reader.get(*reference)
+            count += 1
+
+    def test_unread_item_blocks_reclaim_until_released(self):
+        """An item no reader will ever fetch must not pin the ring forever."""
+        unread = self._reference("aborted")
+        self._fill_ring_with_read_items()
+
+        # FIFO reclaim stops at the unread item, so nothing can be stored.
+        with self.assertRaises(MemoryError):
+            self._reference("next")
+
+        for reader in self.readers:
+            reader.release_unread(*unread[:3], key=unread[3])
+
+        self.assertTrue(self._is_evictable("aborted"))
+        self._reference("next")
+
+    def test_release_unread_waits_for_every_reader(self):
+        unread = self._reference("aborted")
+        for reader in self.readers[:-1]:
+            reader.release_unread(*unread[:3], key=unread[3])
+        self.assertFalse(self._is_evictable("aborted"))
+
+        self.readers[-1].release_unread(*unread[:3], key=unread[3])
+        self.assertTrue(self._is_evictable("aborted"))
+
+    def test_release_unread_requires_valid_signature(self):
+        address, monotonic_id, signature, key = self._reference("aborted")
+        flipped = [signature[0] ^ 1, *signature[1:]]
+        for bad in (None, flipped):
+            with self.assertRaisesRegex(ValueError, "SHM handle signature"):
+                self.readers[0].release_unread(address, monotonic_id, bad, key)
+        self.assertFalse(self._is_evictable("aborted"))
+
+    def test_writer_cannot_release_unread(self):
+        address, monotonic_id, signature, key = self._reference("aborted")
+        with self.assertRaises(RuntimeError):
+            self.writer.release_unread(address, monotonic_id, signature, key)
+
+    def test_release_unsent_makes_never_read_item_evictable(self):
+        self._reference("image")  # a hand-out that is never sent to a reader
+        self.assertFalse(self._is_evictable("image"))
+
+        self.assertTrue(self.writer.release_unsent("image"))
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_release_unsent_cancels_exactly_one_hand_out(self):
+        sent = self._reference("image")
+        self._reference("image")  # a second hand-out that is never sent
+
+        self.assertTrue(self.writer.release_unsent("image"))
+        # The hand-out that was sent is still owed its reads.
+        self.assertFalse(self._is_evictable("image"))
+        for reader in self.readers:
+            reader.get(*sent)
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_release_unsent_ignores_unknown_keys_readers_and_extra_calls(self):
+        self.assertFalse(self.writer.release_unsent("missing"))
+
+        self._reference("image")
+        # Readers do not own hand-outs.
+        self.assertFalse(self.readers[0].release_unsent("image"))
+        self.assertFalse(self._is_evictable("image"))
+
+        self.assertTrue(self.writer.release_unsent("image"))
+        # More releases than hand-outs cannot drive the count negative.
+        self.assertFalse(self.writer.release_unsent("image"))
+
 
 # Reader process function
 def reader_process(process_id, storage_handle, items_to_read):

@@ -36,7 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStat
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
 from vllm.utils.math_utils import cdiv
@@ -273,6 +273,9 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+        # Multimodal features of requests that finished before being
+        # dispatched to the workers. Flushed with `finished_req_ids`.
+        self._unread_mm_features: list[MultiModalFeatureSpec] = []
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
@@ -1722,6 +1725,8 @@ class Scheduler(SchedulerInterface):
             )
             for req in scheduled_new_reqs
         ]
+        for req in scheduled_new_reqs:
+            req.mm_features_dispatched = True
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -1802,6 +1807,7 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
+            unread_mm_features=self._unread_mm_features,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             encoder_cache_events=self.encoder_cache_manager.take_events() or None,
             encoder_cache_epoch=self._encoder_cache_epoch,
@@ -1954,6 +1960,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't just clear() here because it will also affect
         # the scheduler output.
         self.finished_req_ids = set()
+        self._unread_mm_features = []
         self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
@@ -3304,6 +3311,21 @@ class Scheduler(SchedulerInterface):
 
         return valid_requests
 
+    def release_unread_mm_features(
+        self, mm_features: list[MultiModalFeatureSpec] | None
+    ) -> None:
+        """Hand multimodal features that no worker will read to the workers.
+
+        Used for requests that finish, or are rejected, before being dispatched.
+        Only shared memory cache handles need releasing; payloads of other caches
+        would be needlessly sent to the workers.
+        """
+        self._unread_mm_features.extend(
+            feature
+            for feature in mm_features or ()
+            if feature.data is not None and "address" in feature.data
+        )
+
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -3328,6 +3350,8 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
         request_id = request.request_id
+        if not request.mm_features_dispatched:
+            self.release_unread_mm_features(request.mm_features)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
@@ -3432,7 +3456,7 @@ class Scheduler(SchedulerInterface):
         return num_waiting + num_running
 
     def has_finished_requests(self) -> bool:
-        if self.finished_req_ids:
+        if self.finished_req_ids or self._unread_mm_features:
             return True
         if self.connector is None:
             return False

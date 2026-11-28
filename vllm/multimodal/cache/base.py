@@ -337,6 +337,14 @@ class BaseMultiModalProcessorCache(
         """
         return None
 
+    def release_unsent_items(self, mm_hashes: Sequence[str]) -> None:
+        """Cancel the hand-outs of items whose request was never sent.
+
+        One entry per hand-out, so an item handed out twice appears twice.
+        Only caches that count hand-outs (the shared memory cache) act on it.
+        """
+        return None
+
     def invalidate(self, mm_hash: str) -> None:
         """Drop `mm_hash` from this P0 shadow cache to recover from P0/P1 drift.
 
@@ -445,6 +453,17 @@ class BaseMultiModalReceiverCache(
     BaseMultiModalCache[MultiModalKwargsItem | None, MultiModalKwargsItem]
 ):
     """The required interface for caches on P1."""
+
+    def release_unread_features(
+        self,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> None:
+        """Release features whose request was dropped before being read.
+
+        Only caches that hold a per-read reference on the producer side
+        (the shared memory cache) need to do anything here.
+        """
+        return None
 
     def get_and_update_features(
         self,

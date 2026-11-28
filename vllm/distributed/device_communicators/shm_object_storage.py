@@ -766,6 +766,51 @@ class SingleWriterShmObjectStorage:
 
         return obj
 
+    def release_unsent(self, key: str) -> bool:
+        """Cancel one hand-out of `key` that was never sent to any reader.
+
+        `put` and `get_cached` each count as a hand-out that expects every
+        reader to fetch the item. When the request holding that hand-out is
+        dropped before it reaches the engine, no reader will ever fetch it.
+        Only call this for a hand-out that was not sent; releasing one that
+        was sent lets the slot be reused before a worker reads it.
+
+        Returns:
+            True if a hand-out was cancelled.
+
+        """
+        if self._reader_lock is not None or key not in self.key_index:
+            return False
+        monotonic_id = self.key_index[key][1]
+        writer_count = self.writer_flag.get(monotonic_id, 0)
+        if writer_count <= 0:
+            return False
+        self.writer_flag[monotonic_id] = writer_count - 1
+        return True
+
+    def release_unread(
+        self,
+        address: int,
+        monotonic_id: int,
+        signature: list[int] | None = None,
+        key: str | None = None,
+    ) -> None:
+        """Acknowledge an item as consumed without reading it.
+
+        A reader calls this for an item whose handle it received but will
+        never read (e.g. the request was aborted before it was scheduled), so
+        the writer can reclaim the slot. It counts like a `get` for the
+        reader-count check in `default_is_free_check`.
+        """
+        if self.is_writer:
+            raise RuntimeError("release_unread() is a reader-side operation.")
+        self.verify_signature(key, address, monotonic_id, signature)
+        with self.ring_buffer.access_buf(address) as (data_view, buf_metadata):
+            self._validate_monotonic_id(address, monotonic_id, buf_metadata)
+            assert self._reader_lock is not None
+            with self._reader_lock:
+                self.increment_reader_flag(data_view[: self.flag_bytes])
+
     def touch(
         self,
         key: str,
