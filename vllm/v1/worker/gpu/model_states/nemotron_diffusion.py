@@ -1,39 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Nemotron Labs Diffusion: masked block denoising or causal AR generation."""
+"""Worker state and sampling for Nemotron masked block diffusion."""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import torch
 from torch import nn
-from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.config import NemotronDiffusionOptions
-from vllm.model_executor.models.llama import (
-    LlamaAttention,
-    LlamaDecoderLayer,
-    LlamaModel,
-)
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    maybe_prefix,
-)
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
-from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.utils.torch_version import is_torch_equal_or_newer
@@ -52,171 +35,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
 from vllm.v1.worker.gpu.states import RequestState
 
-from .interfaces import SupportsPP, SupportsQuant
-
 logger = init_logger(__name__)
-
-
-def _hf_yarn_get_mscale(scale: float, mscale: float = 1.0) -> float:
-    """`get_mscale` from HF `_compute_yarn_parameters`."""
-    if scale <= 1.0:
-        return 1.0
-    return 0.1 * mscale * math.log(scale) + 1.0
-
-
-class NemotronLabsDiffusionAttention(LlamaAttention):
-    """Llama attention + YaRN RoPE (HF attention factor) + per-token
-    llama-4 Q scaling applied after RoPE."""
-
-    def __init__(self, *, config: PreTrainedConfig, **kwargs: Any) -> None:
-        super().__init__(config=config, **kwargs)
-        rope_parameters = getattr(config, "rope_parameters", None) or {}
-        self.llama4_scaling_beta: float | None = rope_parameters.get(
-            "llama_4_scaling_beta"
-        )
-        self.llama4_original_max_pos: int = rope_parameters.get(
-            "original_max_position_embeddings",
-            getattr(config, "max_position_embeddings", 16384),
-        )
-
-    def _init_rotary_emb(
-        self,
-        config: PreTrainedConfig,
-        quant_config: QuantizationConfig | None,
-    ) -> None:
-        rope_parameters = dict(getattr(config, "rope_parameters", None) or {})
-        if rope_parameters.get("rope_type") == "yarn":
-            # The HF reference scales cos/sin by
-            # get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim)
-            # (== 1.0 for this model), while vLLM's YaRN would apply
-            # 0.1*ln(factor)+1. Compute the HF factor and pass it via
-            # attn_factor with vLLM's own yarn scaling disabled.
-            if "attn_factor" not in rope_parameters:
-                factor = rope_parameters["factor"]
-                mscale = rope_parameters.get("mscale")
-                mscale_all_dim = rope_parameters.get("mscale_all_dim")
-                if mscale and mscale_all_dim:
-                    attn_factor = _hf_yarn_get_mscale(
-                        factor, mscale
-                    ) / _hf_yarn_get_mscale(factor, mscale_all_dim)
-                else:
-                    attn_factor = _hf_yarn_get_mscale(factor)
-                rope_parameters["attn_factor"] = float(attn_factor)
-            rope_parameters["apply_yarn_scaling"] = False
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
-            is_neox_style=True,
-        )
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        if self.llama4_scaling_beta is not None:
-            # scale = 1 + beta * log(1 + floor(pos / original_max_pos)),
-            # applied AFTER RoPE (matches HF `_get_llama_4_attn_scale`).
-            scale = 1.0 + self.llama4_scaling_beta * torch.log(
-                1.0 + torch.floor(positions.float() / self.llama4_original_max_pos)
-            )
-            q = q * scale.unsqueeze(-1).to(q.dtype)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
-
-
-class NemotronLabsDiffusionDecoderLayer(LlamaDecoderLayer):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        config: PreTrainedConfig | None = None,
-    ) -> None:
-        super().__init__(
-            vllm_config,
-            prefix=prefix,
-            config=config,
-            attn_layer_type=NemotronLabsDiffusionAttention,
-        )
-
-
-class NemotronLabsDiffusionForBlockDiffusion(nn.Module, SupportsPP, SupportsQuant):
-    """Ministral masked block-diffusion LM for vLLM.
-
-    The backbone is a stock `LlamaModel` with Ministral parameters; the
-    only architectural deltas live in the attention layer (YaRN factor and
-    llama-4 Q scale). Mixed causal/bidirectional attention is driven by
-    `NemotronLabsDiffusionModelState.prepare_attn` via a per-request causal tensor.
-    """
-
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "encoder.": "model.",
-        }
-    )
-
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-
-    def get_model_state_cls(self):
-        if self.ar_mode:
-            from vllm.v1.worker.gpu.model_states.default import DefaultModelState
-
-            return DefaultModelState
-        return NemotronLabsDiffusionModelState
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.ar_mode = not vllm_config.model_config.is_diffusion
-
-        self.model = LlamaModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-            layer_type=NemotronLabsDiffusionDecoderLayer,
-        )
-        # The LM head is named diffusion_head in the checkpoint and is NOT
-        # tied to the embeddings.
-        self.diffusion_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "diffusion_head"),
-        )
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
-
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        return self.logits_processor(self.diffusion_head, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
 
 # torch < 2.14 Inductor can reuse an indirect load from inside a reduction loop
 # after the loop closes (pytorch#194490). Drop once ROCm uses torch >= 2.14.

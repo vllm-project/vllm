@@ -44,29 +44,33 @@ requires_gpu = pytest.mark.skipif(
 # CPU-only: registration & diffusion detection
 # ---------------------------------------------------------------------------
 def test_config_registration():
-    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
+    from transformers import NemotronLabsDiffusionConfig
 
     cfg = NemotronLabsDiffusionConfig(block_size=32, mask_token_id=100)
-    # canvas_length is the field ModelConfig.is_diffusion keys off of.
-    assert cfg.canvas_length == 32
+    assert cfg.block_size == 32
     assert cfg.mask_token_id == 100
 
 
 @pytest.mark.parametrize(
-    "hidden_size,intermediate_size,num_layers,rope_factor",
-    [(3072, 9216, 26, 16.0), (4096, 14336, 34, 8.0)],
+    "hidden_size,intermediate_size,num_layers,rope_factor,trust_remote_code",
+    [(3072, 9216, 26, 16.0, False), (4096, 14336, 34, 8.0, True)],
     ids=["3b", "8b"],
 )
 def test_checkpoint_dimensions_and_rope(
-    tmp_path, hidden_size, intermediate_size, num_layers, rope_factor
+    tmp_path, hidden_size, intermediate_size, num_layers, rope_factor, trust_remote_code
 ):
     """Loading 8B must preserve its dimensions and RoPE, not 3B defaults."""
-    from vllm.transformers_utils.config import get_config
-    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
+    from transformers import NemotronLabsDiffusionConfig
+
+    from vllm.config import ModelConfig
 
     checkpoint = {
         "model_type": "nemotron_labs_diffusion",
         "architectures": ["NemotronLabsDiffusionModel"],
+        "auto_map": {
+            "AutoConfig": "configuration_nemotron.NemotronLabsDiffusionConfig",
+            "AutoModel": "modeling_nemotron.NemotronLabsDiffusionModel",
+        },
         "hidden_size": hidden_size,
         "intermediate_size": intermediate_size,
         "num_hidden_layers": num_layers,
@@ -87,8 +91,16 @@ def test_checkpoint_dimensions_and_rope(
         },
     }
     (tmp_path / "config.json").write_text(json.dumps(checkpoint))
-    config = get_config(str(tmp_path), trust_remote_code=False)
+    model_config = ModelConfig(
+        model=str(tmp_path),
+        trust_remote_code=trust_remote_code,
+        tokenizer_mode="skip",
+        max_model_len=1024,
+    )
+    config = model_config.hf_config
     assert isinstance(config, NemotronLabsDiffusionConfig)
+    auto_map = checkpoint.pop("auto_map")
+    assert config.auto_map == {"AutoConfig": auto_map["AutoConfig"]}
     for key, value in checkpoint.items():
         assert getattr(config, key) == value, key
     assert config.canvas_length == checkpoint["block_size"]
@@ -105,24 +117,27 @@ def test_attention_backend_supports_mixed_causality(flash_version):
     from types import SimpleNamespace
     from typing import cast
 
+    from transformers import NemotronLabsDiffusionConfig
+
     from vllm.config import VllmConfig
     from vllm.config.attention import AttentionConfig
     from vllm.model_executor.models.config import (
         NemotronLabsDiffusionForBlockDiffusionConfig,
     )
-    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     attention = AttentionConfig()
     if flash_version is not None:
         attention.backend = AttentionBackendEnum.FLASH_ATTN
         attention.flash_attn_version = flash_version
+    hf_config = NemotronLabsDiffusionConfig()
+    hf_config.canvas_length = 32
     config = cast(
         VllmConfig,
         SimpleNamespace(
             attention_config=attention,
             model_config=SimpleNamespace(
-                hf_config=NemotronLabsDiffusionConfig(),
+                hf_config=hf_config,
                 override_generation_config={},
                 is_diffusion=True,
             ),
@@ -141,39 +156,70 @@ def test_attention_backend_supports_mixed_causality(flash_version):
 
 
 @pytest.mark.parametrize(
-    "architecture,ar_mode,expected",
+    "architecture,overrides,expected",
     [
-        ("NemotronLabsDiffusionModel", False, True),
-        ("NemotronLabsDiffusionModel", True, False),
-        ("NemotronLabsDiffusionForCausalLM", False, False),
-        ("LLaDAModelLM", True, True),
+        ("NemotronLabsDiffusionModel", {}, 32),
+        ("NemotronLabsDiffusionModel", {"block_size": 16}, 16),
+        ("NemotronLabsDiffusionModel", {"canvas_length": 16}, 16),
+        ("NemotronLabsDiffusionModel", {"ar_mode": True}, None),
+        ("NemotronLabsDiffusionForCausalLM", {}, None),
     ],
 )
-def test_ar_mode_diffusion_detection(architecture, ar_mode, expected):
-    from types import SimpleNamespace
-    from typing import cast
-
-    from vllm.config import ModelConfig
-    from vllm.config.model_arch import ModelArchitectureConfig
-    from vllm.transformers_utils.configs import NemotronLabsDiffusionConfig
-
-    # The Nemotron config drops its canvas for the AR selectors, so the
-    # generic canvas_length check in ModelConfig.is_diffusion applies.
-    # Other models keep a canvas regardless of an unrelated ar_mode flag.
-    if architecture.startswith("NemotronLabsDiffusion"):
-        hf_config = NemotronLabsDiffusionConfig(
-            block_size=32, architectures=[architecture]
-        )
-        hf_config.ar_mode = ar_mode
-        assert (hf_config.canvas_length is not None) is expected
-    else:
-        hf_config = SimpleNamespace(canvas_length=32, ar_mode=ar_mode)
-    config = object.__new__(ModelConfig)
-    config.hf_config = hf_config
-    config.model_arch_config = cast(
-        ModelArchitectureConfig, SimpleNamespace(architectures=[architecture])
+@pytest.mark.parametrize("model_impl", ["auto", "transformers"])
+def test_ar_mode_diffusion_detection(
+    tmp_path, architecture, overrides, expected, model_impl
+):
+    from vllm.config import DeviceConfig, ModelConfig, VllmConfig
+    from vllm.model_executor.models.config import (
+        NemotronDiffusionOptions,
+        get_model_config_cls,
     )
-    assert config.is_diffusion is expected
+    from vllm.platforms import current_platform
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.worker.gpu.model_states.nemotron_diffusion import (
+        NemotronLabsDiffusionModelState,
+    )
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "nemotron_labs_diffusion",
+                "architectures": [architecture],
+                "block_size": 32,
+            }
+        )
+    )
+    config = ModelConfig(
+        model=str(tmp_path),
+        model_impl=model_impl,
+        tokenizer_mode="skip",
+        hf_overrides=overrides,
+        max_model_len=1024,
+    )
+    assert config.using_transformers_backend()
+    assert getattr(config.hf_config, "canvas_length", None) == expected
+    assert config.is_diffusion is (expected is not None)
+    engine_config = VllmConfig(
+        model_config=config,
+        device_config=DeviceConfig(device=current_platform.device_type or "cpu"),
+    )
+    assert config.override_generation_config["max_new_tokens"] is None
+    config_cls = get_model_config_cls(config)
+    assert config_cls is not None
+    if expected is None:
+        assert engine_config.diffusion_config is None
+        assert config_cls.get_model_state_cls(engine_config) is None
+    else:
+        diffusion = engine_config.diffusion_config
+        assert diffusion is not None and diffusion.canvas_length == expected
+        assert isinstance(diffusion.model_options, NemotronDiffusionOptions)
+        assert (
+            engine_config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+        )
+        assert (
+            config_cls.get_model_state_cls(engine_config)
+            is NemotronLabsDiffusionModelState
+        )
 
 
 @pytest.mark.parametrize("explicit_diffusion_config", [False, True])
@@ -258,7 +304,7 @@ def eager_sampler():
 
 
 def test_masked_step_sampling_semantics(eager_sampler):
-    from vllm.model_executor.models.nemotron_dllm import _compiled_masked_step
+    from vllm.v1.worker.gpu.model_states.nemotron_diffusion import _compiled_masked_step
 
     device = "cpu"
     CL, V, MAX_REQS = 4, 12, 2
@@ -374,7 +420,7 @@ def test_threshold_unmasking_and_commit(max_steps, valid_length, eager_sampler):
     """Threshold decoding progresses, preserves revealed tokens, and clips padding."""
     import math
 
-    from vllm.model_executor.models.nemotron_dllm import _compiled_masked_step
+    from vllm.v1.worker.gpu.model_states.nemotron_diffusion import _compiled_masked_step
 
     device = "cpu"
     width, vocab, mask = 4, 8, 7
@@ -505,6 +551,8 @@ def _vllm_manual_forward(obj, token_ids, causal_flag):
     (KV-cache slots, attn metadata, forward context). Returns fp32 logits
     `[len(token_ids), vocab]` on CPU. Runs under `collective_rpc`.
     """
+    from transformers import NemotronLabsDiffusionModel
+
     from vllm.forward_context import set_forward_context
     from vllm.v1.worker.gpu.attn_utils import (
         build_attn_metadata,
@@ -513,6 +561,7 @@ def _vllm_manual_forward(obj, token_ids, causal_flag):
 
     worker = getattr(obj, "worker", obj)
     runner = worker.model_runner
+    assert isinstance(runner.model.model, NemotronLabsDiffusionModel)
     device = runner.device
     kv_cache_config = runner.kv_cache_config
     assert len(kv_cache_config.kv_cache_groups) == 1
@@ -599,7 +648,7 @@ def test_logits_parity(monkeypatch, fp32_reference):
         max_num_batched_tokens=128,
         max_num_seqs=4,
         attention_config={"backend": "TRITON_ATTN"},
-        trust_remote_code=True,
+        trust_remote_code=False,
         enforce_eager=True,
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=0.6,
@@ -629,8 +678,10 @@ def test_logits_parity(monkeypatch, fp32_reference):
 # ---------------------------------------------------------------------------
 @requires_gpu
 @requires_weights
-def test_greedy_generation(monkeypatch):
+@pytest.mark.parametrize("model_impl", ["auto", "transformers"])
+def test_greedy_generation(monkeypatch, model_impl):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     from vllm import LLM, SamplingParams
     from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.inputs import TokensPrompt
@@ -640,8 +691,9 @@ def test_greedy_generation(monkeypatch):
 
     llm = LLM(
         model=MODEL_PATH,
+        model_impl=model_impl,
         attention_config={"backend": "TRITON_ATTN"},
-        trust_remote_code=True,
+        trust_remote_code=False,
         enforce_eager=True,
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=0.6,
@@ -651,6 +703,7 @@ def test_greedy_generation(monkeypatch):
         for n in (None, 0, 5)
     ]
     outs = llm.generate([TokensPrompt(prompt_token_ids=prompt_ids)] * 3, params)
+    llm.llm_engine.collective_rpc(_assert_diffusion_runner)
     del llm
     cleanup_dist_env_and_memory()
     for o in outs:
@@ -684,7 +737,7 @@ def test_stochastic_rollouts(monkeypatch):
     llm = LLM(
         model=MODEL_PATH,
         attention_config={"backend": "TRITON_ATTN"},
-        trust_remote_code=True,
+        trust_remote_code=False,
         enforce_eager=True,
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=0.6,
@@ -724,6 +777,20 @@ def _assert_ar_runner(obj):
     assert type(runner.sampler) is Sampler
 
 
+def _assert_diffusion_runner(obj):
+    from transformers import NemotronLabsDiffusionModel
+
+    from vllm.v1.worker.gpu.model_states.nemotron_diffusion import (
+        MaskedDiffusionSampler,
+        NemotronLabsDiffusionModelState,
+    )
+
+    runner = getattr(obj, "worker", obj).model_runner
+    assert isinstance(runner.model.model, NemotronLabsDiffusionModel)
+    assert isinstance(runner.model_state, NemotronLabsDiffusionModelState)
+    assert isinstance(runner.sampler, MaskedDiffusionSampler)
+
+
 @requires_gpu
 @requires_weights
 @pytest.mark.parametrize(
@@ -760,7 +827,7 @@ def test_ar_logits_and_generation(monkeypatch, hf_overrides, fp32_reference):
         max_num_seqs=4,
         hf_overrides=hf_overrides,
         attention_config={"backend": "TRITON_ATTN"},
-        trust_remote_code=True,
+        trust_remote_code=False,
         enforce_eager=True,
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=0.6,
@@ -809,12 +876,14 @@ def test_ar_logits_and_generation(monkeypatch, hf_overrides, fp32_reference):
 
 
 def test_temperature_precedes_top_p(monkeypatch):
-    from vllm.model_executor.models import nemotron_dllm
     from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
+    from vllm.v1.worker.gpu.model_states import nemotron_diffusion
 
-    monkeypatch.setattr(nemotron_dllm, "apply_top_k_top_p", apply_top_k_top_p_pytorch)
+    monkeypatch.setattr(
+        nemotron_diffusion, "apply_top_k_top_p", apply_top_k_top_p_pytorch
+    )
     logits = torch.tensor([[0.6, 0.3, 0.1, 10.0]]).log().repeat(3, 1)
-    filtered = nemotron_dllm._filter_sampling_logits(
+    filtered = nemotron_diffusion._filter_sampling_logits(
         logits, torch.tensor([0.0, 0.5, 2.0]), None, torch.full((3,), 0.7), 3
     )
     # At T=0.5 the leading token alone exceeds top_p; at T=1 or T=2 it
@@ -831,7 +900,7 @@ def test_temperature_precedes_top_p(monkeypatch):
 
 
 def test_mixed_temperature_distribution_and_logprobs(eager_sampler):
-    from vllm.model_executor.models.nemotron_dllm import _compiled_masked_step
+    from vllm.v1.worker.gpu.model_states.nemotron_diffusion import _compiled_masked_step
 
     # Many independent positions give a low-variance check of the actual
     # sampling law, not just the temperatures attached to returned logprobs.

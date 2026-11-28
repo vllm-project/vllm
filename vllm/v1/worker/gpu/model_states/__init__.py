@@ -28,9 +28,16 @@ def init_model_state(
 def resolve_model_state_cls(
     vllm_config: VllmConfig, model: nn.Module
 ) -> type[ModelState]:
-    # Let the model provide its own ModelState if it defines one.
+    # Let the model or its config hook provide a custom ModelState.
     if hasattr(model, "get_model_state_cls"):
         return model.get_model_state_cls()
+
+    from vllm.model_executor.models.config import get_model_config_cls
+
+    if (config_cls := get_model_config_cls(vllm_config.model_config)) is not None and (
+        state_cls := config_cls.get_model_state_cls(vllm_config)
+    ) is not None:
+        return state_cls
 
     # Cross-attention encoder-decoder models (Whisper, CohereASR, NemotronParse, ...)
     if any(isinstance(m, CrossAttention) for m in model.modules()):

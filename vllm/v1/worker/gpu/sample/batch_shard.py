@@ -61,6 +61,7 @@ def batch_sharded_sampling_enabled(
     """Whether the target's sampling and verification are batch-sharded."""
     return bool(
         vllm_config.parallel_config.enable_batch_sharded_sampling
+        and not vllm_config.model_config.is_diffusion
         and hasattr(target_model, "compute_logits_local")
     )
 

@@ -10,10 +10,10 @@ import pytest
 import torch
 
 import vllm.utils.gpu_sync_debug as gsd
-from vllm.model_executor.models import nemotron_dllm as nd
 from vllm.sampling_params import SamplingParams
 from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.gpu.model_states import nemotron_diffusion as nd
 from vllm.v1.worker.gpu.sample.states import SamplingStates
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

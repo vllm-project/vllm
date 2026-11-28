@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
     from vllm.config.cache import MambaDType
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 
 logger = init_logger(__name__)
@@ -30,6 +31,10 @@ class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         return
+
+    @staticmethod
+    def get_model_state_cls(vllm_config: "VllmConfig") -> type["ModelState"] | None:
+        return None
 
 
 class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
@@ -963,6 +968,33 @@ class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         if "max_new_tokens" not in model_config.override_generation_config:
             model_config.override_generation_config["max_new_tokens"] = None
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        # Drop AutoModel from auto_map so trust_remote_code=True still
+        # resolves Transformers' hidden-state NemotronLabsDiffusionModel
+        # instead of the checkpoint's logit-returning remote class.
+        auto_map = getattr(hf_config, "auto_map", None)
+        if isinstance(auto_map, dict):
+            auto_map.pop("AutoModel", None)
+
+        if getattr(hf_config, "ar_mode", False) or (
+            "NemotronLabsDiffusionForCausalLM" in (model_config.architectures or ())
+        ):
+            hf_config.canvas_length = None
+        elif getattr(hf_config, "canvas_length", None) is None:
+            hf_config.canvas_length = hf_config.block_size
+
+    @staticmethod
+    def get_model_state_cls(vllm_config: "VllmConfig") -> type["ModelState"] | None:
+        if not vllm_config.model_config.is_diffusion:
+            return None
+        from vllm.v1.worker.gpu.model_states.nemotron_diffusion import (
+            NemotronLabsDiffusionModelState,
+        )
+
+        return NemotronLabsDiffusionModelState
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
@@ -1963,6 +1995,21 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }
+
+
+def get_model_config_cls(
+    model_config: "ModelConfig",
+) -> type[VerifyAndUpdateConfig] | None:
+    """Resolve the config hook from the resolved or checkpoint architectures."""
+    if (
+        model_config.architecture is not None
+        and (cls := MODELS_CONFIG_MAP.get(model_config.architecture)) is not None
+    ):
+        return cls
+    for architecture in model_config.architectures or ():
+        if (cls := MODELS_CONFIG_MAP.get(architecture)) is not None:
+            return cls
+    return None
 
 
 def register_model_config(

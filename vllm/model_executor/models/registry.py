@@ -179,14 +179,6 @@ _TEXT_GENERATION_MODELS = {
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "NemotronHPuzzleForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
-    "NemotronLabsDiffusionForCausalLM": (
-        "nemotron_dllm",
-        "NemotronLabsDiffusionForBlockDiffusion",
-    ),
-    "NemotronLabsDiffusionModel": (
-        "nemotron_dllm",
-        "NemotronLabsDiffusionForBlockDiffusion",
-    ),
     "MuseGlimmerForCausalLM": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OlmoHybridForCausalLM": ("olmo_hybrid", "OlmoHybridForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
@@ -807,6 +799,8 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "LlamaForCausalLM": ("transformers", "TransformersForCausalLM"),
     "MellumForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "NemotronLabsDiffusionForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "NemotronLabsDiffusionModel": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo3ForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -1390,10 +1384,8 @@ class _ModelRegistry:
         architecture: str,
         model_config: ModelConfig,
     ) -> str | None:
-        if architecture in _TRANSFORMERS_BACKEND_MODELS:
-            return architecture
-        if supported := _TRANSFORMERS_SUPPORTED_MODELS.get(architecture):
-            return supported[1]
+        if backend_cls := self.get_registered_transformers_backend_cls(architecture):
+            return backend_cls
 
         if not model_config.trust_remote_code:
             # `architectures` may name a class that Transformers doesn't have, so use
@@ -1468,6 +1460,15 @@ class _ModelRegistry:
             )
 
         return model_config._get_transformers_backend_cls()
+
+    @staticmethod
+    def get_registered_transformers_backend_cls(architecture: str) -> str | None:
+        """Return the Transformers backend explicitly registered for an architecture."""
+        if architecture in _TRANSFORMERS_BACKEND_MODELS:
+            return architecture
+        if supported := _TRANSFORMERS_SUPPORTED_MODELS.get(architecture):
+            return supported[1]
+        return None
 
     def _normalize_arch(
         self,
