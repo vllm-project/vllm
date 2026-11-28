@@ -184,6 +184,8 @@ class ServingTokenization(BaseServing):
             lora_request=lora_request,
         )
 
+        self.renderer.validate_token_ids(request.tokens, parameter="tokens")
+
         tok_prompt = await self.renderer.tokenize_prompt_async(
             TokensPrompt(prompt_token_ids=request.tokens),
             tok_params,
