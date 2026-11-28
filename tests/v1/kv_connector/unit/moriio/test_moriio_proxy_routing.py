@@ -287,7 +287,9 @@ sys.stdin.read()
                 try:
                     if stat.read_text().split(") ")[1].startswith("Z "):
                         break
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
+                    # Reaped between the check and the read: open() fails with
+                    # ENOENT, read() with ESRCH.
                     break
                 assert time.monotonic() < deadline, "Orphan heartbeat survived worker"
                 time.sleep(0.01)
