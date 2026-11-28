@@ -165,6 +165,58 @@ def test_fused_recurrent_kda_strided_inputs_bit_identical_to_contiguous(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Deferred spec states are ROCm-only"
+)
+@pytest.mark.parametrize("num_seqs", [1, 5])
+@pytest.mark.parametrize("num_spec", [1, 3, 7])
+@torch.inference_mode()
+def test_fused_recurrent_kda_defer_spec_state(num_seqs: int, num_spec: int):
+    """Deferred spec states give the same outputs, step after step, as states
+    stored after every token."""
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    query_len = num_spec + 1
+    inputs, state = make_inputs(num_seqs, query_len, device)
+    state *= 0.1
+    state_defer = state.clone()
+    indices = inputs["ssm_state_indices"]
+    query_lens = [1] * num_seqs
+    for step in range(8):
+        # Accept a prefix of the previous step's tokens, then run a new step
+        # of random length.
+        accepted = [int(torch.randint(1, n + 1, ())) for n in query_lens]
+        query_lens = torch.randint(1, query_len + 1, (num_seqs,)).tolist()
+        step_inputs, _ = make_inputs(1, sum(query_lens), device)
+        step_inputs.update(
+            ssm_state_indices=indices,
+            num_accepted_tokens=torch.tensor(
+                accepted, dtype=torch.int32, device=device
+            ),
+            cu_seqlens=torch.tensor([0] + query_lens, device=device)
+            .cumsum(0)
+            .to(torch.int32),
+            a_log=inputs["a_log"],
+            g_bias=inputs["g_bias"],
+        )
+        out = run_kernel(step_inputs, state)
+        out_defer, _ = fused_recurrent_kda(
+            **step_inputs,
+            initial_state=state_defer,
+            use_qk_l2norm_in_kernel=True,
+            sigmoid_beta=True,
+            compute_gate=True,
+            lower_bound=LOWER_BOUND,
+            defer_spec_state=True,
+        )
+        torch.testing.assert_close(out_defer, out, rtol=1e-2, atol=1e-3)
+        # Slot 0 holds the state after the first token in both modes.
+        first = indices[:, 0].long()
+        torch.testing.assert_close(
+            state_defer[first], state[first], rtol=1e-5, atol=1e-5
+        )
+
+
+@pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Both implementations require zero-copy token-strided layouts",
 )
