@@ -92,6 +92,23 @@ mknod /dev/nvidia-caps-imex-channels/channel0 c "$major" 0
 
 Check the transport with `UCX_PROTO_INFO=y`: KV reads should show `cuda_ipc`, not `tcp`. Transfers across hosts use RDMA and need no channel: pass `--enable-extensible-kv-cache` to keep the feature on.
 
+#### Intel XPU
+
+The XPU Docker image builds UCX with Level Zero support, so NIXL can move KV cache directly between XPU device memory:
+
+- **Intra-node:** Level Zero IPC (`ze_ipc`), GPU-to-GPU.
+- **Inter-node:** GPUDirect RDMA over InfiniBand/RoCE (e.g. `UCX_TLS=ib,rc,ze_copy`). Without an RDMA NIC, UCX falls back to host staging over TCP.
+
+`ze_ipc` currently requires:
+
+- **Same `ZE_AFFINITY_MASK` for P and D; pick cards with `--device-ids`** (e.g. both `ZE_AFFINITY_MASK=0,1`, P `--device-ids 0`, D `--device-ids 1`). With per-instance masks, D cannot see P's GPU and the copy fails with `0x70000003` (`GET_ZCOPY failed`).
+- **`--cap-add SYS_PTRACE`** (or `--privileged`) in containers. Otherwise: `pidfd_getfd ... Operation not permitted`.
+- **Separate containers on one node:** also `--pid=host` and all participating GPUs mounted. Otherwise: `pidfd_open(<pid>) failed: No such process`.
+
+See [run_xpu_disagg_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh) for a full example.
+
+If these can't be met, set `UCX_TLS=^ze_ipc`: intra-node transfers are then staged through host memory (`ze_copy` + `cma`), which is slower.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
