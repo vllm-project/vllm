@@ -21,6 +21,10 @@ class INCFp8LinearScheme(INCLinearScheme):
     def get_min_capability(cls) -> int:
         return Fp8Config.get_min_capability()
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:
+        return self.linear_method.supports_pre_processed_weights
+
     def create_weights(
         self,
         layer: torch.nn.Module,
