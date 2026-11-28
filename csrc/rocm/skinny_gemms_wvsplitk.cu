@@ -156,6 +156,20 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
       case 5:
         WVSPLIT_TILE(sYT, 5)
         break;
+      // 6-8 rows: wave32 only (gfx1100 decode). YTILE 1 keeps the
+      // per-row accumulators within the VGPR budget.
+      case 6:
+        if (!on_gfx1x()) TORCH_CHECK(false, "wvSplitK: N > 5 needs wave32");
+        WVSPLITK_CFG(32, 16, 1, 2, 6)
+        break;
+      case 7:
+        if (!on_gfx1x()) TORCH_CHECK(false, "wvSplitK: N > 5 needs wave32");
+        WVSPLITK_CFG(32, 16, 1, 2, 7)
+        break;
+      case 8:
+        if (!on_gfx1x()) TORCH_CHECK(false, "wvSplitK: N > 5 needs wave32");
+        WVSPLITK_CFG(32, 16, 1, 2, 8)
+        break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +

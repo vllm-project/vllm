@@ -487,7 +487,14 @@ def rocm_unquantized_gemm_impl(
 
         return linear_batch_invariant(x, weight, bias)
 
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950, on_rdna4
+    from vllm.platforms.rocm import (
+        on_gfx1x,
+        on_gfx9,
+        on_gfx11,
+        on_gfx950,
+        on_gfx1100,
+        on_rdna4,
+    )
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -568,8 +575,10 @@ def rocm_unquantized_gemm_impl(
         and weight_ok_for_wvsplitk
         and (bias is None or bias.is_contiguous())
         and (m == 1 or m > 8)
-        and 0 < n <= 5
-        and lmhead_skinny_guard_permits(weight, n)
+        and 0 < n <= (8 if on_gfx1100() else 5)
+        # On gfx1100 wvSplitK stays within 1.11x of the DRAM floor up to n=8 even on
+        # a 2 GB lm_head, so the MI355X cache cap does not apply.
+        and (on_gfx1100() or lmhead_skinny_guard_permits(weight, n))
     )
 
     use_llmm1 = (

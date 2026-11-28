@@ -12,7 +12,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950, on_rdna4
+from vllm.platforms.rocm import on_gfx950, on_gfx1100, on_rdna4
 from vllm.utils.platform_utils import num_compute_units
 
 # Global per-test cleanup costs more than the tests themselves.
@@ -394,6 +394,38 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     out = ops.LLMM1(B, A, rows_per_block)
 
     torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+
+
+# 6-8 rows run on gfx1100 only; covers the LDS-resident, marginal and K-chunked
+# (activations larger than LDS) variants and odd output counts.
+NKM_FACTORS_WVSPLITK_WIDE = [
+    (6, 4096, 4096),
+    (7, 1000, 2048),
+    (8, 4096, 4096 + 1),
+    (8, 4096 + 16, 12288),
+    (8, 12288, 4096),
+    (6, 4096, 24576),
+    (7, 4096 + 16, 4096 + 1),
+    (8, 16384 * 2, 8192),
+]
+
+
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_WIDE)
+@pytest.mark.parametrize(
+    "dtype,padded_a,padded_b,bias_mode,xnorm",
+    OPTIONS_WVSPLITK,
+)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and on_gfx1100()),
+    reason="6-8 rows are only enabled on gfx1100",
+)
+def test_rocm_wvsplitk_wide_kernel(
+    n, k, m, dtype, padded_a, padded_b, bias_mode, xnorm, seed
+):
+    test_rocm_wvsplitk_kernel(
+        n, k, m, dtype, padded_a, padded_b, bias_mode, xnorm, seed
+    )
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
