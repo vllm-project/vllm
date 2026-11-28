@@ -56,26 +56,24 @@ enum ShutdownReason {
     EngineExited(ExitStatus),
 }
 
-/// Cancellation token tripped by Ctrl-C or SIGTERM.
+/// Cancellation token tripped by Ctrl-C, SIGTERM, or SIGHUP.
 fn shutdown_signal() -> CancellationToken {
     let token = CancellationToken::new();
     let shutdown = token.clone();
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM signal handler");
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("failed to install SIGHUP signal handler");
 
     tokio::spawn(async move {
         let ctrl_c = async {
             tokio::signal::ctrl_c().await.expect("failed to install Ctrl-C signal handler");
         };
 
-        let sigterm = async {
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM signal handler")
-                .recv()
-                .await;
-        };
-
         tokio::select! {
             _ = ctrl_c => info!("received shutdown signal (Ctrl-C), shutting down..."),
-            _ = sigterm => info!("received shutdown signal (SIGTERM), shutting down..."),
+            _ = sigterm.recv() => info!("received shutdown signal (SIGTERM), shutting down..."),
+            _ = sighup.recv() => info!("received shutdown signal (SIGHUP), shutting down..."),
         }
 
         shutdown.cancel();
@@ -226,7 +224,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             let shutdown_reason = tokio::select! {
                 biased;
 
-                // Received shutdown signal via Ctrl-C or SIGTERM.
+                // Received shutdown signal via Ctrl-C, SIGTERM, or SIGHUP.
                 _ = shutdown.cancelled() => ShutdownReason::Signal,
 
                 // Engine process exited unexpectedly.
@@ -277,5 +275,31 @@ async fn async_main(cli: Cli) -> Result<()> {
         Command::Render(args) => {
             vllm_server::serve_render(args.into_config(), shutdown_signal()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command as StdCommand;
+    use std::time::Duration;
+
+    use super::shutdown_signal;
+
+    #[tokio::test]
+    async fn sighup_requests_shutdown() {
+        let _signal_guard =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap();
+        let shutdown = shutdown_signal();
+
+        let status = StdCommand::new("kill")
+            .arg("-HUP")
+            .arg(std::process::id().to_string())
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+        tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled())
+            .await
+            .expect("SIGHUP did not request shutdown");
     }
 }
