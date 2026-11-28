@@ -37,7 +37,9 @@ from vllm.profiler.wrapper import (
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.output_processor import OutputProcessorOutput
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
     LoggingStatLogger,
@@ -166,6 +168,44 @@ def test_retryable_request_error_reaches_caller(
 
     with pytest.raises(RetryableRequestError):
         asyncio.run(run())
+
+
+def test_output_handler_yields_between_queued_engine_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A backlog of engine outputs must not starve other tasks on the event
+    loop: getting an already queued output does not suspend, so the handler
+    has to yield once per engine step."""
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config.should_profile_frontend = False
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+
+    async def run() -> int:
+        backlog: asyncio.Queue[EngineCoreOutputs] = asyncio.Queue()
+        for _ in range(3):
+            backlog.put_nowait(
+                EngineCoreOutputs(
+                    outputs=[EngineCoreOutput(request_id="r", new_token_ids=[0])]
+                )
+            )
+        engine_core.get_output_async = backlog.get
+
+        async def queued_when_another_task_runs() -> int:
+            return backlog.qsize()
+
+        # Created inside the event loop, so the output handler starts here.
+        engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+        engine.output_processor.process_outputs.return_value = OutputProcessorOutput(
+            request_outputs=[], reqs_to_abort=[]
+        )
+        other_task = asyncio.create_task(queued_when_another_task_runs())
+        try:
+            return await asyncio.wait_for(other_task, timeout=5)
+        finally:
+            engine.shutdown()
+
+    # The other task gets its turn after the first engine step, not after all.
+    assert asyncio.run(run()) == 2
 
 
 def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):

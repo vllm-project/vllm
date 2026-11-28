@@ -960,6 +960,10 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
+
+                    # Getting an already queued output does not suspend, so
+                    # yield once per step to let other asyncio tasks run.
+                    await asyncio.sleep(0)
             except Exception as e:
                 if not isinstance(e, EngineDeadError):
                     logger.exception("AsyncLLM output_handler failed.")
