@@ -16,15 +16,16 @@ bits per weight.
 
 import torch
 
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
+
 LUT_B_BLOCK_N = 8
 LUT_B_BLOCK_K = 64
 LUT_B_SCALE_BLOCK_K = 32
 LUT_B_CODEBOOK_SIZE = 8
 LUT_B_PACKED_TILE_BYTES = LUT_B_BLOCK_N * LUT_B_BLOCK_K * 3 // 8
-LUT_B_LLOYD_ITERATIONS = 16
-LUT_B_SCALE_ROUNDS = 4
-LUT_B_SCALE_ROUND_ITERATIONS = 4
-LUT_B_MAX_TILES_PER_CHUNK = 4096
+LUT_B_SCALE_ROUNDS = 1
+LUT_B_MAX_TILES_PER_CHUNK = 1024
 
 _E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 _UE8M0_BIAS = 127
@@ -76,92 +77,136 @@ def _normalize_centers(
     return centers.sort(dim=1).values
 
 
-def _init_farthest(values: torch.Tensor) -> torch.Tensor:
-    centers = values.new_empty(values.shape[0], LUT_B_CODEBOOK_SIZE)
-    centers[:, 0] = values.mean(dim=1)
-    distance = (values - centers[:, :1]).square()
-    for i in range(1, LUT_B_CODEBOOK_SIZE):
-        center = torch.gather(values, 1, distance.argmax(dim=1, keepdim=True))
-        centers[:, i] = center.squeeze(1)
-        distance = torch.minimum(distance, (values - center).square())
-    return centers
+def _circle_exponents(blocks: torch.Tensor) -> torch.Tensor:
+    """Block exponents that put every block amax in `[2**cut, 2**(cut + 1))`.
 
-
-def _init_quantile(values: torch.Tensor) -> torch.Tensor:
-    ranks = (torch.arange(LUT_B_CODEBOOK_SIZE, device=values.device) + 0.5) * (
-        values.shape[1] / LUT_B_CODEBOOK_SIZE
-    )
-    return values.sort(dim=1).values[:, ranks.long()]
-
-
-def _init_uniform(values: torch.Tensor) -> torch.Tensor:
-    fractions = torch.linspace(0, 1, LUT_B_CODEBOOK_SIZE, device=values.device)
-    low = values.amin(dim=1, keepdim=True)
-    high = values.amax(dim=1, keepdim=True)
-    return low + (high - low) * fractions
-
-
-def _lloyd(
-    values: torch.Tensor,
-    weights: torch.Tensor,
-    centers: torch.Tensor,
-    preserve_zero: torch.Tensor,
-    num_iterations: int,
-) -> torch.Tensor:
-    for _ in range(num_iterations):
-        indices = _assign(values, centers)
-        sums = torch.zeros_like(centers).scatter_add_(1, indices, values * weights)
-        counts = torch.zeros_like(centers).scatter_add_(1, indices, weights)
-        centers = torch.where(counts > 0, sums / counts.clamp_min(_FP32_TINY), centers)
-        centers = _normalize_centers(centers, preserve_zero)
-    return centers
-
-
-def _fit_tiles(
-    values: torch.Tensor, weights: torch.Tensor, num_iterations: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fit one E4M3 codebook per row of `values` with weighted Lloyd iterations.
-
-    Three initializations are tried and the lowest-error fit per tile is kept.
-    Returns `(indices, centers, loss)`, where `loss` is the weighted squared
-    error per tile.
+    `cut` starts the largest gap between the fractional parts of the block
+    log2 amaxes around the unit circle, so blocks whose amaxes differ only by
+    noise share an alignment instead of straddling a power of two.
     """
-    preserve_zero = (values == 0).any(dim=1)
-    best_loss = values.new_full((values.shape[0],), torch.inf)
-    best_indices = torch.empty_like(values, dtype=torch.uint8)
-    best_centers = values.new_empty(values.shape[0], LUT_B_CODEBOOK_SIZE)
-
-    for init in (_init_farthest, _init_quantile, _init_uniform):
-        centers = _normalize_centers(init(values), preserve_zero)
-        centers = _lloyd(values, weights, centers, preserve_zero, num_iterations)
-        indices = _assign(values, centers)
-        error = (torch.gather(centers, 1, indices) - values).square()
-        loss = (error * weights).sum(dim=1)
-        better = loss < best_loss
-        best_loss = torch.where(better, loss, best_loss)
-        best_indices[better] = indices[better].to(torch.uint8)
-        best_centers[better] = centers[better]
-
-    return best_indices, best_centers, best_loss
-
-
-def _ue8m0_exponent(amax: torch.Tensor) -> torch.Tensor:
-    """Power of two that puts `amax` in (E4M3_MAX / 2, E4M3_MAX], as MXFP8."""
-    exponent = torch.ceil(torch.log2(amax.clamp_min(_FP32_TINY) / _E4M3_MAX))
+    amax = blocks.abs().amax(dim=-1)
+    valid = amax > 0
+    log_amax = torch.log2(amax.clamp_min(_FP32_TINY))
+    phases = torch.where(valid, log_amax - torch.floor(log_amax), torch.inf)
+    phases = phases.sort(dim=1).values
+    count = valid.sum(dim=1, keepdim=True)
+    safe_count = count.clamp_min(1)
+    position = torch.arange(phases.shape[1], device=blocks.device)
+    following = phases.gather(1, (position + 1) % safe_count)
+    gaps = torch.where(position == count - 1, following + 1, following) - phases
+    gaps = torch.where(position < count, gaps, -1.0)
+    cut = phases.gather(1, (gaps.argmax(dim=1, keepdim=True) + 1) % safe_count)
+    cut = torch.where(count > 0, cut, 0.0)
+    exponent = torch.where(valid, torch.floor(log_amax - cut), 0.0)
     return exponent.clamp(-_UE8M0_BIAS, _UE8M0_BIAS)
 
 
-def _rescale(
-    blocks: torch.Tensor, exponent: torch.Tensor, tile_exponent: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-tile values divided by their block scales, and Lloyd weights.
+def _segment_cost(
+    prefixes: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    start: torch.Tensor,
+    end: torch.Tensor,
+) -> torch.Tensor:
+    """Weighted squared deviation of sorted values `[start, end)` from their mean."""
+    mass, delta, spread = (p.gather(1, end) - p.gather(1, start) for p in prefixes)
+    cost = spread - delta.square() / mass.clamp_min(_FP32_TINY)
+    return torch.where(mass > 0, cost, 0.0)
 
-    Each value is weighed by its scale squared, relative to the tile scale, so
-    a codebook fit minimizes the error of the rescaled weights.
+
+def _dp_stage(
+    prefixes: tuple[torch.Tensor, ...], previous: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One more segment: the best cost and last split for every prefix.
+
+    The best split is monotone in the prefix length, so prefixes are solved
+    coarse to fine: each lies between the splits of its two neighbors.
+    """
+    tiles, size = previous.shape[0], previous.shape[1] - 1
+    current = torch.full_like(previous, torch.inf)
+    split = torch.zeros_like(previous, dtype=torch.long)
+    half = size // 2
+    while half:
+        nodes = torch.arange(half, size, 2 * half, device=previous.device)
+        low = split[:, nodes - half]
+        right = nodes + half
+        high = torch.where(right < size, split[:, right.clamp(max=size - 1)], size - 1)
+        high = torch.minimum(high, nodes - 1)
+        candidates = low[..., None] + torch.arange(
+            int((high - low).max()) + 1, device=previous.device
+        )
+        valid = candidates <= high[..., None]
+        candidates = torch.minimum(candidates, high[..., None]).flatten(1)
+        ends = nodes[:, None].expand(-1, candidates.shape[1] // nodes.numel())
+        cost = previous.gather(1, candidates) + _segment_cost(
+            prefixes, candidates, ends.flatten().expand(tiles, -1)
+        )
+        cost = cost.view(valid.shape).masked_fill(~valid, torch.inf)
+        best, index = cost.min(dim=-1)
+        current[:, nodes] = best
+        split[:, nodes] = low + index
+        half //= 2
+    return current, split
+
+
+def _fit_codebooks(
+    values: torch.Tensor, weights: torch.Tensor, preserve_zero: torch.Tensor
+) -> torch.Tensor:
+    """Exact weighted k-means codebook for each row of `values`.
+
+    The optimal clusters are runs of the sorted values, so dynamic programming
+    over the split points finds the global optimum before E4M3 snapping.
+    """
+    values, order = values.sort(dim=1)
+    weights = weights.gather(1, order)
+    tiles, size = values.shape
+    mean = (weights * values).sum(1, keepdim=True) / weights.sum(
+        1, keepdim=True
+    ).clamp_min(_FP32_TINY)
+    centered = values - mean
+    zero = values.new_zeros(tiles, 1)
+    prefixes = tuple(
+        torch.cat((zero, (weights * centered**power).cumsum(1)), dim=1)
+        for power in range(3)
+    )
+
+    ends = torch.arange(size + 1, device=values.device).expand(tiles, -1)
+    cost = _segment_cost(prefixes, torch.zeros_like(ends), ends)
+    cost[:, 0] = torch.inf
+    splits = []
+    for _ in range(2, LUT_B_CODEBOOK_SIZE):
+        cost, split = _dp_stage(prefixes, cost)
+        splits.append(split)
+
+    starts = torch.arange(size, device=values.device).expand(tiles, -1)
+    last = cost[:, :size] + _segment_cost(
+        prefixes, starts, torch.full_like(starts, size)
+    )
+    start = last.argmin(dim=1, keepdim=True)
+    end = torch.full_like(start, size)
+    centers = values.new_empty(tiles, LUT_B_CODEBOOK_SIZE)
+    for stage in range(LUT_B_CODEBOOK_SIZE, 0, -1):
+        if stage == 1:
+            start = torch.zeros_like(end)
+        elif stage < LUT_B_CODEBOOK_SIZE:
+            start = splits[stage - 2].gather(1, end)
+        mass, delta = (p.gather(1, end) - p.gather(1, start) for p in prefixes[:2])
+        center = torch.where(mass > 0, delta / mass.clamp_min(_FP32_TINY), 0.0)
+        centers[:, stage - 1] = (mean + center).squeeze(1)
+        end = start
+    return _normalize_centers(centers, preserve_zero)
+
+
+def _fit_tiles(
+    blocks: torch.Tensor, exponent: torch.Tensor, preserve_zero: torch.Tensor
+) -> torch.Tensor:
+    """Codebooks for `blocks` divided by their block scales.
+
+    Each value is weighed by its scale squared, so the fit minimizes the error
+    of the original weights.
     """
     values = (blocks * torch.exp2(-exponent).unsqueeze(-1)).flatten(1)
-    weights = torch.exp2(2 * (exponent - tile_exponent)).unsqueeze(-1)
-    return values, weights.expand_as(blocks).flatten(1)
+    weights = torch.exp2(2 * (exponent - exponent.amax(dim=1, keepdim=True)))
+    weights = weights.unsqueeze(-1).expand_as(blocks).flatten(1)
+    return _fit_codebooks(values, weights, preserve_zero)
 
 
 def _block_errors(
@@ -178,39 +223,30 @@ def _block_errors(
     return ((decoded - values) * relative_scale).square().sum(-1), indices
 
 
-def _refine_scales(
-    blocks: torch.Tensor,
-    exponent: torch.Tensor,
-    tile_exponent: torch.Tensor,
-    centers: torch.Tensor,
-    num_rounds: int,
+def _quantize_tiles(
+    blocks: torch.Tensor, num_scale_rounds: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Coordinate descent over block exponents and the tile codebook.
-
-    Each round moves every block exponent by -1, 0 or +1, whichever decodes
-    that block best with the current codebook, then refits the codebook for
-    the new exponents. Each step is kept only where it lowers the error.
-    """
+    """Fit `[tiles, 16, 32]` K32 blocks; returns indices, codebooks, exponents."""
     preserve_zero = (blocks == 0).flatten(1).any(dim=1)
-    error, _ = _block_errors(blocks, exponent, tile_exponent, centers)
-    for _ in range(num_rounds):
+    exponent = _circle_exponents(blocks)
+    tile_exponent = exponent.amax(dim=1, keepdim=True)
+    centers = _fit_tiles(blocks, exponent, preserve_zero)
+    for round in range(num_scale_rounds):
+        error, _ = _block_errors(blocks, exponent, tile_exponent, centers)
         base = exponent
-        for delta in (-1, 1):
+        radius = 2 if round == 0 else 1
+        for delta in range(-radius, radius + 1):
+            if delta == 0:
+                continue
             trial = (base + delta).clamp(-_UE8M0_BIAS, _UE8M0_BIAS)
             trial_error, _ = _block_errors(blocks, trial, tile_exponent, centers)
             better = trial_error < error
             exponent = torch.where(better, trial, exponent)
             error = torch.where(better, trial_error, error)
-
-        values, weights = _rescale(blocks, exponent, tile_exponent)
-        trial_centers = _lloyd(
-            values, weights, centers, preserve_zero, LUT_B_SCALE_ROUND_ITERATIONS
-        )
-        trial_error, _ = _block_errors(blocks, exponent, tile_exponent, trial_centers)
-        better = trial_error.sum((1, 2)) < error.sum((1, 2))
-        centers = torch.where(better[:, None], trial_centers, centers)
-        error = torch.where(better[:, None, None], trial_error, error)
-
+        refit = _fit_tiles(blocks, exponent, preserve_zero)
+        refit_error, _ = _block_errors(blocks, exponent, tile_exponent, refit)
+        keep = refit_error.sum(dim=1) <= error.sum(dim=1)
+        centers = torch.where(keep[:, None], refit, centers)
     _, indices = _block_errors(blocks, exponent, tile_exponent, centers)
     return indices, centers, exponent
 
@@ -219,7 +255,6 @@ def _refine_scales(
 def quantize_lut_b(
     weight: torch.Tensor,
     *,
-    num_iterations: int = LUT_B_LLOYD_ITERATIONS,
     num_scale_rounds: int = LUT_B_SCALE_ROUNDS,
     max_tiles_per_chunk: int = LUT_B_MAX_TILES_PER_CHUNK,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -230,12 +265,11 @@ def quantize_lut_b(
     and `[E, N, K/32]` (uint8 UE8M0). The expert dim is dropped for 2D
     inputs.
 
-    Each tile is fitted twice: once with its 16 block scales tied to one
-    exponent for the whole tile, and once with each block's exponent taken
-    from its own amax. Starting from the better fit, `num_scale_rounds` rounds
-    of coordinate descent then adjust the block exponents and the codebook
-    together. Every step only lowers the reconstruction error, so the result
-    is never worse than a single scale per tile.
+    Block exponents start from the circular cut of the block amax phases, and
+    each tile's codebook is the exact weighted k-means fit, snapped to E4M3.
+    Each of the `num_scale_rounds` rounds then moves every block exponent
+    within +-2 (later rounds +-1) against the fixed codebook and refits the
+    codebook, keeping it only if the reconstruction error does not grow.
     """
     squeeze = weight.ndim == 2
     if squeeze:
@@ -248,6 +282,14 @@ def quantize_lut_b(
             f"LUT-B requires dims divisible by ({LUT_B_BLOCK_N}, {LUT_B_BLOCK_K}),"
             f" got ({n}, {k})"
         )
+
+    if weight.is_cuda and HAS_TRITON and current_platform.is_cuda():
+        from vllm.kernels.triton.lut_b_quantize import quantize_lut_b_triton
+
+        packed, codebooks, scales = quantize_lut_b_triton(weight, num_scale_rounds)
+        if squeeze:
+            return packed[0], codebooks[0], scales[0]
+        return packed, codebooks, scales
 
     n_tiles, k_tiles = n // LUT_B_BLOCK_N, k // LUT_B_BLOCK_K
     tile_shape = (num_experts * n_tiles, k_tiles)
@@ -267,31 +309,15 @@ def quantize_lut_b(
     rows_per_chunk = max(1, max_tiles_per_chunk // k_tiles)
     for start in range(0, rows.shape[0], rows_per_chunk):
         end = min(start + rows_per_chunk, rows.shape[0])
-        # [tiles, 8 rows, 2 K32 blocks, 32]
+        # [tiles, 16 K32 blocks (row-major over 8 rows x 2), 32]
         blocks = (
             rows[start:end]
             .to(torch.float32)
             .reshape(end - start, LUT_B_BLOCK_N, k_tiles, LUT_B_BLOCK_K)
             .transpose(1, 2)
-            .reshape(-1, LUT_B_BLOCK_N, blocks_per_row, LUT_B_SCALE_BLOCK_K)
+            .reshape(-1, LUT_B_BLOCK_N * blocks_per_row, LUT_B_SCALE_BLOCK_K)
         )
-        block_exponent = _ue8m0_exponent(blocks.abs().amax(dim=-1))
-        tile_exponent = block_exponent.amax(dim=(1, 2), keepdim=True)
-
-        best: tuple[torch.Tensor, ...] | None = None
-        for exponent in (tile_exponent.expand_as(block_exponent), block_exponent):
-            fit = _fit_tiles(*_rescale(blocks, exponent, tile_exponent), num_iterations)
-            if best is None:
-                best = (*fit, exponent.clone())
-                continue
-            better = fit[2] < best[2]
-            for kept, new in zip(best, (*fit, exponent)):
-                kept[better] = new[better]
-        assert best is not None
-        _, centers, _, exponent = best
-        indices, centers, exponent = _refine_scales(
-            blocks, exponent, tile_exponent, centers, num_scale_rounds
-        )
+        indices, centers, exponent = _quantize_tiles(blocks, num_scale_rounds)
 
         packed[start:end] = pack_lut_b_indices(indices).view(end - start, k_tiles, -1)
         codebooks[start:end] = centers.to(torch.float8_e4m3fn).view(

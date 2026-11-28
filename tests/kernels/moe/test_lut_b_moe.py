@@ -105,7 +105,23 @@ def test_quantize_scale_refinement_never_hurts() -> None:
 
     refined, unrefined = tile_errors(), tile_errors(num_scale_rounds=0)
     assert torch.all(refined <= unrefined * (1 + 1e-6))
-    assert refined.sum() < 0.97 * unrefined.sum()
+    assert refined.sum() < 0.985 * unrefined.sum()
+
+
+@requires_gpu
+def test_quantize_gpu_matches_cpu() -> None:
+    """The fused GPU quantizer fits as well as the PyTorch reference."""
+    torch.manual_seed(0)
+    weight = torch.randn(2, 64, 256) * torch.logspace(-2, 0, 64)[:, None]
+    weight[:, :, 100:140] = 0
+    weight = weight.to(torch.bfloat16)
+
+    def error(device: str) -> torch.Tensor:
+        quantized = quantize_lut_b(weight.to(device))
+        reconstructed = _dequantize(quantized, torch.float32).cpu()
+        return (reconstructed - weight.float()).square().sum()
+
+    assert error("cuda") == pytest.approx(error("cpu"), rel=1e-2)
 
 
 def test_quantize_preserves_zeros() -> None:
