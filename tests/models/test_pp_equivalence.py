@@ -33,7 +33,7 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.platforms import current_platform
 
-from ..utils import multi_gpu_test
+from ..utils import _SPAWN_CHILD_ENV, multi_gpu_test
 from .registry import (
     _TEXT_GENERATION_EXAMPLE_MODELS,
     HF_EXAMPLE_MODELS,
@@ -63,6 +63,7 @@ MINIMAL_PP_ARCH_LIST = [
 KNOWN_PP_DEFECTS: dict[str, str] = {
     "Glm5NextForCausalLM": "Declares PP without implementing it; fixed by #57121",
     "LongcatFlashNgramForCausalLM": "Later stages build n-gram embeddings; see #66290",
+    "NemotronLabsDiffusionModel": "Prompt logprobs arrive on a step with no output",
 }
 # Decoders that modify their input before the layers, run with the Transformers
 # modeling backend
@@ -90,7 +91,8 @@ SPLIT_KV_SHARING: dict[str, tuple[int, str]] = {
     "Gemma4ForCausalLM": (4, "3,1"),
 }
 
-# Sparse MLA backends need Hopper or newer, as in test_initialization.py.
+# Sparse MLA backends need Hopper or newer, as in test_initialization.py, or
+# AITER on ROCm.
 SPARSE_MLA_ARCHS = (
     "DeepseekV32ForCausalLM",
     "Glm5NextForCausalLM",
@@ -102,8 +104,23 @@ SPARSE_MLA_ARCHS = (
 CUDA_SM90_ARCHS = {
     "InklingForCausalLM": "Inkling's FA4 attention (SM8x support: #55078)",
 }
+# Architectures whose model raises on ROCm.
+CUDA_ONLY_ARCHS = {"HYV4FlashForCausalLM": "HYV4 Flash requires NVIDIA CUDA"}
 
-ModelRegistry.fill_model_info_cache()
+
+def _sparse_mla_supported() -> bool:
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        # Without AITER the ROCm sparse attention indexer either raises
+        # (gfx942) or reads back to the host (gfx950).
+        return rocm_aiter_ops.is_enabled()
+    return current_platform.has_device_capability(90)
+
+
+# A spawned test child reads the cache its pytest parent filled.
+if os.environ.get(_SPAWN_CHILD_ENV) != "1":
+    ModelRegistry.fill_model_info_cache()
 # Examples that need remote code are left out until a CI run shows their status.
 PP_ARCHS = sorted(
     arch
@@ -291,8 +308,9 @@ def _marks(arch: str) -> list[pytest.MarkDecorator]:
     if arch in SPARSE_MLA_ARCHS:
         marks.append(
             pytest.mark.skipif(
-                not current_platform.has_device_capability(90),
-                reason="Sparse MLA needs compute capability 9.0 or newer",
+                not _sparse_mla_supported(),
+                reason="Sparse MLA needs compute capability 9.0 or newer, "
+                "or AITER on ROCm",
             )
         )
     if arch in CUDA_SM90_ARCHS:
@@ -302,6 +320,10 @@ def _marks(arch: str) -> list[pytest.MarkDecorator]:
                 and not current_platform.has_device_capability(90),
                 reason=f"{CUDA_SM90_ARCHS[arch]} needs compute capability 9.0 or newer",
             )
+        )
+    if arch in CUDA_ONLY_ARCHS:
+        marks.append(
+            pytest.mark.skipif(current_platform.is_rocm(), reason=CUDA_ONLY_ARCHS[arch])
         )
     return marks
 
