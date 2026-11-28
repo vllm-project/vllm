@@ -479,7 +479,8 @@ class Qwen4ExpQSAImpl(
     def forward(
         self,
         layer: torch.nn.Module,
-        query: torch.Tensor,
+        decode_query: torch.Tensor,
+        prefill_query: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: Qwen4ExpQSANvidiaMetadata | Qwen4ExpQSAHiSparseMetadata,
         output: torch.Tensor,
@@ -489,12 +490,11 @@ class Qwen4ExpQSAImpl(
         output_gate: torch.Tensor,
         block_indices: torch.Tensor,
         positions: torch.Tensor,
-        prefill_query: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run sparse attention over the owner's indexer-selected K/V rows.
 
-        With `prefill_query` (FlashInfer prefill Q), `query` has only the
-        decode rows.
+        Q comes as the leading decode rows and the prefill rows, the latter in
+        the prefill kernel's dtype.
         """
         num_tokens = attn_metadata.num_actual_tokens
         # No zero fill: the kernel writes every actual row (empty selections
@@ -506,17 +506,18 @@ class Qwen4ExpQSAImpl(
         if topk_buffer is None:
             raise RuntimeError("QSA owner did not provide its top-k buffer")
         selected = topk_buffer[:num_tokens]
-        query = query[:num_tokens]
         token_to_req = token_to_req[:num_tokens]
         out = output[:num_tokens]
         output_gate = output_gate[:num_tokens]
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        assert decode_query.shape[0] == num_decode_tokens
+        assert num_decode_tokens + prefill_query.shape[0] == num_tokens
         if self.index_group is None:
             nvidia_metadata = cast(Qwen4ExpQSANvidiaMetadata, attn_metadata)
-            num_decode_tokens = nvidia_metadata.num_decode_tokens
             if num_decode_tokens:
                 self.attend(
                     layer,
-                    query[:num_decode_tokens],
+                    decode_query,
                     kv_cache,
                     selected[:num_decode_tokens],
                     nvidia_metadata.block_table,
@@ -532,7 +533,7 @@ class Qwen4ExpQSAImpl(
             if flashinfer_prefill is None:
                 self.attend(
                     layer,
-                    query[prefill_rows],
+                    prefill_query,
                     kv_cache,
                     selected[prefill_rows],
                     nvidia_metadata.block_table,
@@ -546,14 +547,7 @@ class Qwen4ExpQSAImpl(
                 if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                     k_scale = cast(float, layer._k_scale_float)
                     v_scale = cast(float, layer._v_scale_float)
-                q_dtype = cast(torch.dtype, layer.flashinfer_q_dtype)
-                if prefill_query is None:
-                    prefill_query = query[prefill_rows]
-                    if prefill_query.dtype != q_dtype:
-                        # Unfused prepare writes BF16 Q; unit scale as in
-                        # qsa_prepare.
-                        prefill_query = prefill_query.to(q_dtype)
-                assert prefill_query.dtype == q_dtype
+                assert prefill_query.dtype == layer.flashinfer_q_dtype
                 qsa_sparse_paged_prefill(
                     prefill_query,
                     kv_cache,
@@ -578,23 +572,28 @@ class Qwen4ExpQSAImpl(
         group = self.index_group
         metadata = cast(Qwen4ExpQSAHiSparseMetadata, attn_metadata)
         cache = group.cache(0)
-        num_decode_tokens = metadata.num_decode_tokens
         if cache.all_context_pages_resident and num_decode_tokens < num_tokens:
             # The kernel resolves logical indices against the resident view.
             state_indices = cache.runtime.request_state_indices
             assert cache.view is not None and cache.block_table is not None
             assert state_indices is not None
-            self.attend(
-                layer,
-                query,
-                self.kv_view(cache.view.cache),
-                selected,
-                cache.block_table,
-                state_indices[token_to_req],
-                use_prefill_config,
-                out,
-                output_gate,
-            )
+            req_rows = state_indices[token_to_req]
+            for rows, query in (
+                (slice(0, num_decode_tokens), decode_query),
+                (slice(num_decode_tokens, num_tokens), prefill_query),
+            ):
+                if query.shape[0]:
+                    self.attend(
+                        layer,
+                        query,
+                        self.kv_view(cache.view.cache),
+                        selected[rows],
+                        cache.block_table,
+                        req_rows[rows],
+                        use_prefill_config,
+                        out[rows],
+                        output_gate[rows],
+                    )
             return output
         if num_decode_tokens:
             physical = group.convert_logical_to_physical_topk(
@@ -607,7 +606,7 @@ class Qwen4ExpQSAImpl(
             assert isinstance(physical, torch.Tensor)
             self.attend(
                 layer,
-                query[:num_decode_tokens],
+                decode_query,
                 self.kv_view(group.physical_kv_cache(0)),
                 physical,
                 metadata.block_table,
@@ -626,7 +625,7 @@ class Qwen4ExpQSAImpl(
             )
             self.attend(
                 layer,
-                query[num_decode_tokens:],
+                prefill_query,
                 self.kv_view(staged_cache),
                 selected[num_decode_tokens:],
                 block_table,
@@ -1041,34 +1040,35 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 num_tokens, slot_mapping.shape[0]
             )
             main_kv_cache = self.impl.kv_view(resident)
-        # Prefill Q goes straight to FP8 for FlashInfer FP8 prefill; otherwise
-        # both buffers view one BF16 Q.
-        prefill_query = None
-        decode_q_out = prefill_q_out = None
+        # Decode Q stays BF16; prefill Q is FP8 for FlashInfer FP8 prefill,
+        # else a view of the same BF16 Q.
+        num_decode_tokens = main_metadata.num_decode_tokens
+        flashinfer_prefill = getattr(main_metadata, "flashinfer_prefill", None)
+        fp8_prefill = (
+            self.index_group is None
+            and flashinfer_prefill is not None
+            and self.flashinfer_q_dtype == torch.float8_e4m3fn
+        )
         if self.use_fused_qsa_prepare:
-            num_decode_tokens = main_metadata.num_decode_tokens
-            flashinfer_prefill = getattr(main_metadata, "flashinfer_prefill", None)
-            fp8_prefill = (
-                self.index_group is None
-                and flashinfer_prefill is not None
-                and self.flashinfer_q_dtype == torch.float8_e4m3fn
-            )
             query = qkv.new_empty(
                 num_decode_tokens if fp8_prefill else num_tokens,
                 self.num_heads,
                 self.head_dim,
             )
-            decode_q_out = query[:num_decode_tokens]
+        assert query is not None
+        decode_query = query[:num_decode_tokens]
+        if fp8_prefill and self.use_fused_qsa_prepare:
+            prefill_query = qkv.new_empty(
+                num_tokens - num_decode_tokens,
+                self.num_heads,
+                self.head_dim,
+                dtype=torch.float8_e4m3fn,
+            )
+        else:
+            prefill_query = query[num_decode_tokens:num_tokens]
             if fp8_prefill:
-                prefill_query = qkv.new_empty(
-                    num_tokens - num_decode_tokens,
-                    self.num_heads,
-                    self.head_dim,
-                    dtype=torch.float8_e4m3fn,
-                )
-                prefill_q_out = prefill_query
-            else:
-                prefill_q_out = query[num_decode_tokens:]
+                # The unfused path writes BF16 Q; unit scale as in qsa_prepare.
+                prefill_query = prefill_query.to(torch.float8_e4m3fn)
         selected, main_gate = self.indexer(
             projected_qk,
             positions,
@@ -1077,8 +1077,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             qkv=qkv,
             slot_mapping=slot_mapping,
             main_kv_cache=main_kv_cache,
-            main_decode_q_out=decode_q_out,
-            main_prefill_q_out=prefill_q_out,
+            main_decode_q_out=decode_query,
+            main_prefill_q_out=prefill_query,
             block_indices=block_indices,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
@@ -1095,10 +1095,11 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             output_gate = main_gate
         if self.index_group is not None:
             self.index_group.cache(0).finish_kv_update()
-        assert query is not None and output_gate is not None
+        assert output_gate is not None
         self.impl.forward(
             self,
-            query,
+            decode_query,
+            prefill_query,
             self.kv_cache,
             main_metadata,
             output,
@@ -1107,7 +1108,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             output_gate=output_gate,
             block_indices=block_indices,
             positions=indexer_metadata.logical_positions,
-            prefill_query=prefill_query,
         )
 
     def forward(
