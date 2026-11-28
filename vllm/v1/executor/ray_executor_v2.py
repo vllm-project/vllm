@@ -518,15 +518,16 @@ class RayExecutorV2(MultiprocExecutor):
                 executor = self_ref()
                 if not executor:
                     return
-                executor.is_failed = True
+                # Claim the flag and callback atomically so a concurrent
+                # register_failure_callback() can never orphan the
+                # notification (see #69292).
+                callback = executor._claim_failure()
                 logger.error(
                     "RayWorkerProc rank=%s died unexpectedly, shutting down executor.",
                     dead_ranks,
                 )
                 executor.shutdown()
-                if executor.failure_callback is not None:
-                    callback = executor.failure_callback
-                    executor.failure_callback = None
+                if callback is not None:
                     callback()
                 return
 

@@ -226,14 +226,15 @@ class CUDACheckpointExecutor(MultiprocExecutor):
                 logger.exception("Failed to close CUDA checkpoint helper")
 
     def _stop_failed(self):
-        self.is_failed = True
+        # Claim the flag and callback atomically so a concurrent
+        # register_failure_callback() can never orphan the notification
+        # (see #69292).
+        callback = self._claim_failure()
         # Terminate worker processes even if a CUDA API is blocked. Never try
         # to continue serving a partially checkpointed rank set.
         super().shutdown()
         self._close_checkpoint()
-        callback = self.failure_callback
         if callback is not None:
-            self.failure_callback = None
             callback()
 
     @_serialized

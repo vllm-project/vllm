@@ -160,6 +160,9 @@ class MultiprocExecutor(Executor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.failure_callback: FailureCallback | None = None
+        # Guards the (is_failed, failure_callback) pair so a worker failure
+        # racing with callback registration can never drop the notification.
+        self._failure_lock = threading.Lock()
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
         assert self.world_size == tp_size * pp_size * pcp_size, (
@@ -400,7 +403,7 @@ class MultiprocExecutor(Executor):
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
-            _self.is_failed = True
+            callback = _self._claim_failure()
             proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
             logger.error(
                 "Worker proc %s died unexpectedly (exit code: %s), "
@@ -409,9 +412,7 @@ class MultiprocExecutor(Executor):
                 proc.exitcode,
             )
             _self.shutdown()
-            callback = _self.failure_callback
             if callback is not None:
-                _self.failure_callback = None
                 callback()
 
         if not inline:
@@ -422,11 +423,30 @@ class MultiprocExecutor(Executor):
 
         monitor_workers()
 
+    def _claim_failure(self) -> FailureCallback | None:
+        """Atomically claim the failure flag and any registered callback.
+
+        The callback is either fetched here or invoked by the registering
+        thread, never neither; callers must invoke any returned callback
+        after shutdown work, outside the lock.
+        """
+        with self._failure_lock:
+            self.is_failed = True
+            callback = self.failure_callback
+            self.failure_callback = None
+        return callback
+
     def register_failure_callback(self, callback: FailureCallback):
-        if self.is_failed:
+        invoke_now = False
+        with self._failure_lock:
+            if self.is_failed:
+                # The monitor already claimed the failure and will not run
+                # this callback; invoke it here, outside the lock.
+                invoke_now = True
+            else:
+                self.failure_callback = callback
+        if invoke_now:
             callback()
-        else:
-            self.failure_callback = callback
 
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
