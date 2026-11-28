@@ -175,6 +175,13 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         kv_cache_dtype: str,
     ) -> None:
         """Initialize QSA state and preserve the optional Octave cache path."""
+        self.use_flydsl = (
+            get_current_vllm_config().attention_config.qwen4_exp_qsa_backend == "flydsl"
+        )
+        if self.use_flydsl:
+            from .ops.qsa_flydsl import flydsl_qsa
+
+            flydsl_qsa()  # fail at startup if AITER has no FlyDSL QSA module
         if self.dcp_world_size != 1:
             raise NotImplementedError(
                 "Qwen4Exp QSA does not support decode context parallelism"
@@ -364,7 +371,18 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
             )
 
         from .ops.qsa import qsa_sparse_paged_attention
+        from .ops.qsa_flydsl import flydsl_sparse_paged_attention
 
+        if self.use_flydsl and flydsl_sparse_paged_attention(
+            query[:num_tokens],
+            key_cache,
+            value_cache,
+            logical_indices,
+            attn_metadata.block_table,
+            token_to_req,
+            output[:num_tokens],
+        ):
+            return output
         qsa_sparse_paged_attention(
             query[:num_tokens],
             key_cache,

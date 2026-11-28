@@ -505,6 +505,7 @@ steps:
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
       - pytest -v -s models/qwen4_exp/test_qsa_reference.py
+      - pytest -v -s models/qwen4_exp/test_qsa_flydsl.py
 
 - label: ":nvidia: (B200) Qwen4 Exp Kernels"
   key: qwen4-exp-kernels-b200
