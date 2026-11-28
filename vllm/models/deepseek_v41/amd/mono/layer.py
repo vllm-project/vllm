@@ -101,6 +101,9 @@ class MonoBuild:
     swa_width: int = WINDOW
     # the generic code where the tuned paths would apply (the tests' reference)
     generic: bool = False
+    # plain fp8 KV rows (--kv-cache-dtype fp8_e4m3) and fp8 q, with fp8 MFMAs in
+    # the attention (`back.stage_split_plain`), instead of fp8_ds_mla records
+    plain_fp8_kv: bool = False
 
     @property
     def tuned(self) -> bool:
@@ -156,13 +159,20 @@ def _ffn_symbol_params(key: MonoBuild) -> dict:
 
 def _front_key(key: MonoBuild):
     return mb_front.FrontBuild(
-        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width, key.tuned_front
+        key.tokens,
+        key.tp,
+        key.ratio,
+        key.timeline,
+        key.swa_width,
+        key.tuned_front,
+        key.plain_fp8_kv,
     )
 
 
 def _symbol_params(key: MonoBuild) -> dict:
-    """The kernel symbol's draft-only parameters (none for a target layer)."""
-    out = {}
+    """The kernel symbol's draft-only parameters and the KV format (none for
+    a target layer over fp8_ds_mla records)."""
+    out: dict[str, int | str] = {}
     if key.experts != EXPERTS:
         out["e"] = key.experts
     if key.topk != TOPK:
@@ -171,11 +181,15 @@ def _symbol_params(key: MonoBuild) -> dict:
         out["g"] = key.ug_groups
     if key.swa_width != WINDOW:
         out["w"] = key.swa_width
+    if key.plain_fp8_kv:
+        out["kv"] = "fp8"
     return out
 
 
 def _back_key(key: MonoBuild):
-    return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline, key.tuned)
+    return mb_back.BackBuild(
+        key.tokens, key.tp, key.ratio, key.timeline, key.tuned, key.plain_fp8_kv
+    )
 
 
 def scratch_layout(
@@ -367,6 +381,8 @@ def _k1_body(
         "kt": A["kt"],
         "klen": A["klen"],
         "qr_out": A["qr_out"],
+        "kv_scale": A["kv_scale"],
+        "q_scale_inv": A["q_scale_inv"],
     }
     flayout = {n: layout[n] for n in front_scratch(s, Dims(tp), key.tuned_front)}
     c = mb_front.front_context(fkey, front_view(), fargs, scratch, tag, flayout)
@@ -506,6 +522,8 @@ def build_mono_k1(key: MonoBuild):
         klen: Int64,
         normed_out: Int64,
         qr_out: Int64,
+        kv_scale: Int64,
+        q_scale_inv: Int64,
         scratch: Int64,
         epoch: Int64,
         tl: Int64,
@@ -550,6 +568,8 @@ def build_mono_k1(key: MonoBuild):
             klen=klen,
             normed_out=normed_out,
             qr_out=qr_out,
+            kv_scale=kv_scale,
+            q_scale_inv=q_scale_inv,
             scratch=scratch,
             tl=tl,
         )
@@ -600,6 +620,8 @@ def build_mono_k1(key: MonoBuild):
         klen: Int64,
         normed_out: Int64,
         qr_out: Int64,
+        kv_scale: Int64,
+        q_scale_inv: Int64,
         scratch: Int64,
         epoch: Int64,
         tl: Int64,
@@ -644,6 +666,8 @@ def build_mono_k1(key: MonoBuild):
             klen,
             normed_out,
             qr_out,
+            kv_scale,
+            q_scale_inv,
             scratch,
             epoch,
             tl,
@@ -909,6 +933,8 @@ def _k2_body(key: MonoBuild, lds, A: dict, ep, fuse=False):
             "pos",
             "sink",
             "qk_scale",
+            "kv_scale",
+            "q_scale",
             "cos_sin",
             "woa",
             "woa_s",
@@ -1063,6 +1089,8 @@ def build_mono_k2(key: MonoBuild):
         pos: Int64,
         sink: Int64,
         qk_scale: Int32,
+        kv_scale: Int64,
+        q_scale: Int64,
         cos_sin: Int64,
         woa: Int64,
         woa_s: Int64,
@@ -1121,6 +1149,8 @@ def build_mono_k2(key: MonoBuild):
             pos=pos,
             sink=sink,
             qk_scale=qk_scale,
+            kv_scale=kv_scale,
+            q_scale=q_scale,
             cos_sin=cos_sin,
             woa=woa,
             woa_s=woa_s,
@@ -1180,6 +1210,8 @@ def build_mono_k2(key: MonoBuild):
         pos: Int64,
         sink: Int64,
         qk_scale: Int32,
+        kv_scale: Int64,
+        q_scale: Int64,
         cos_sin: Int64,
         woa: Int64,
         woa_s: Int64,
@@ -1238,6 +1270,8 @@ def build_mono_k2(key: MonoBuild):
             pos,
             sink,
             qk_scale,
+            kv_scale,
+            q_scale,
             cos_sin,
             woa,
             woa_s,
@@ -1478,6 +1512,8 @@ K2K1_ARGS = (
     "klen",
     "normed_out",
     "qr_out",
+    "kv_scale",
+    "q_scale_inv",
     "tl",
     "res_in",
     "pend",
@@ -1513,6 +1549,8 @@ def build_mono_k2k1(key: MonoBuild, nkey: MonoBuild):
     assert (nkey.tokens, nkey.tp) == (s, tp) and nkey.fold
     assert (key.tuned, key.tuned_front) == (nkey.tuned, nkey.tuned_front)
     assert key.tuned_front and key.tuned_seam
+    # plain fp8 KV runs as two launches (`DSV41MonoLayer.merges`)
+    assert not (key.plain_fp8_kv or nkey.plain_fp8_kv)
     assert (key.experts, key.topk, key.ug_groups, key.swa_width) == (
         nkey.experts,
         nkey.topk,
@@ -1576,6 +1614,8 @@ def build_mono_k2k1(key: MonoBuild, nkey: MonoBuild):
         pos: Int64,
         sink: Int64,
         qk_scale: Int32,
+        kv_scale: Int64,
+        q_scale: Int64,
         cos_sin: Int64,
         woa: Int64,
         woa_s: Int64,
@@ -1636,6 +1676,8 @@ def build_mono_k2k1(key: MonoBuild, nkey: MonoBuild):
             pos=pos,
             sink=sink,
             qk_scale=qk_scale,
+            kv_scale=kv_scale,
+            q_scale=q_scale,
             cos_sin=cos_sin,
             woa=woa,
             woa_s=woa_s,
@@ -1714,6 +1756,8 @@ def build_mono_k2k1(key: MonoBuild, nkey: MonoBuild):
         pos: Int64,
         sink: Int64,
         qk_scale: Int32,
+        kv_scale: Int64,
+        q_scale: Int64,
         cos_sin: Int64,
         woa: Int64,
         woa_s: Int64,
@@ -1773,6 +1817,8 @@ def build_mono_k2k1(key: MonoBuild, nkey: MonoBuild):
             pos,
             sink,
             qk_scale,
+            kv_scale,
+            q_scale,
             cos_sin,
             woa,
             woa_s,
