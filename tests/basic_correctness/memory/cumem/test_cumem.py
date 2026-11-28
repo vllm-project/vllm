@@ -166,7 +166,7 @@ def test_python_error():
 @create_new_process_for_each_test("fork")
 def test_allocation_after_driver_error():
     """A rejected native allocation must not poison the next CuMem allocation."""
-    allocator = get_mem_allocator_instance()
+    allocator = _get_allocator()
     torch.cuda.init()
     native = ctypes.CDLL(cumem.lib_name)
     native.my_malloc.argtypes = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_void_p]
