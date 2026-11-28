@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import logging
 import random
 import time
 import uuid
+from collections import deque
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -23,10 +24,18 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.engines.base import CopyBatch, CopyEngine, CopyStream
+from vllm.v1.kv_offload.cpu.engines.torch import TorchCopyEngine
+from vllm.v1.kv_offload.cpu.platforms import cuda as cuda_module
+from vllm.v1.kv_offload.cpu.platforms.cuda import CudaRuntime
+from vllm.v1.kv_offload.cpu.platforms.factory import get_device_runtime
+from vllm.v1.kv_offload.cpu.platforms.rocm import RocmRuntime
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.worker import (
+    CPUOffloadingWorker,
+    SingleDirectionOffloadingHandler,
+)
 from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 NUM_GPU_BLOCKS = [64]
@@ -41,32 +50,98 @@ NUM_MAPPINGS = [3]
 NUM_MAPPINGS_PER_GROUP = [2]
 
 
+class FakeCopyStream(CopyStream):
+    def __init__(self, submit_fn=None) -> None:
+        self.submit_fn = submit_fn or (lambda batch, num_ops: None)
+        self.ready = False
+        self.synchronized = 0
+        self.elapsed_called = False
+        self.waited_compute = 0
+        self.waited_for: list[FakeCopyStream] = []
+        self.aborted = 0
+        self.abort_error: Exception | None = None
+        self.synchronize_error: Exception | None = None
+        self.submitted: list[tuple[CopyBatch, int]] = []
+
+    def wait_for_compute(self) -> None:
+        self.waited_compute += 1
+
+    def wait_for(self, previous: CopyStream) -> None:
+        assert isinstance(previous, FakeCopyStream)
+        self.waited_for.append(previous)
+
+    def submit(self, batch: CopyBatch, num_ops: int) -> None:
+        self.submitted.append((batch, num_ops))
+        self.submit_fn(batch, num_ops)
+
+    def abort(self) -> None:
+        self.aborted += 1
+        if self.abort_error is not None:
+            raise self.abort_error
+
+    def done(self) -> bool:
+        return self.ready
+
+    def synchronize(self) -> None:
+        self.synchronized += 1
+        if self.synchronize_error is not None:
+            raise self.synchronize_error
+
+    def elapsed_seconds(self) -> float:
+        self.elapsed_called = True
+        return 0.002
+
+
+class FakeCopyEngine(CopyEngine):
+    """Copy engine with fake streams, for the failure paths."""
+
+    def __init__(self, submit_fn=None) -> None:
+        self.submit_fn = submit_fn
+
+    def new_stream(self) -> FakeCopyStream:
+        return FakeCopyStream(self.submit_fn)
+
+    def new_batch(self, num_ops: int) -> CopyBatch:
+        return CopyBatch(
+            src_ptrs=np.zeros(num_ops, dtype=np.uint64),
+            dst_ptrs=np.zeros(num_ops, dtype=np.uint64),
+            sizes=np.zeros(num_ops, dtype=np.int64),
+        )
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
-def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
-    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: True)
-
-    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
-    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is (
-        ops.swap_blocks_batch
+def test_rocm_cpu_to_device_uses_dma() -> None:
+    engine = RocmRuntime().create_copy_engine(
+        device_to_cpu=False,
+        host_memory_is_pinned=True,
+        page_sizes=(512,),
     )
+    assert isinstance(engine, TorchCopyEngine)
+    assert engine.config.copy_fn is ops.swap_blocks_batch
 
 
-@pytest.mark.skipif(not gpu_worker.HAS_TRITON, reason="Requires Triton")
-def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and cuda_module.HAS_TRITON),
+    reason="Requires NVIDIA CUDA with Triton",
+)
+def test_unpinned_cpu_to_device_uses_dma() -> None:
     """The Triton load path dereferences CPU pointers on the GPU, so pageable
     host memory takes the DMA path even for pages where Triton would win."""
-    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
-
-    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
-    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is not (
-        ops.swap_blocks_batch
+    runtime = CudaRuntime()
+    engine = runtime.create_copy_engine(
+        device_to_cpu=False,
+        host_memory_is_pinned=True,
+        page_sizes=(512,),
     )
-    assert gpu_worker._select_swap_blocks_fn(
-        refs, gpu_to_cpu=False, host_memory_is_pinned=False
-    ) is (ops.swap_blocks_batch)
+    assert isinstance(engine, TorchCopyEngine)
+    assert engine.config.copy_fn is not ops.swap_blocks_batch
+    engine = runtime.create_copy_engine(
+        device_to_cpu=False,
+        host_memory_is_pinned=False,
+        page_sizes=(512,),
+    )
+    assert isinstance(engine, TorchCopyEngine)
+    assert engine.config.copy_fn is ops.swap_blocks_batch
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
@@ -160,9 +235,7 @@ def test_worker_logs_handler_error_and_cleans_region(
     worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
-    with caplog_vllm.at_level(
-        logging.ERROR, logger="vllm.v1.kv_offload.cpu.gpu_worker"
-    ):
+    with caplog_vllm.at_level(logging.ERROR, logger="vllm.v1.kv_offload.cpu.worker"):
         worker.shutdown()
 
     other = "load" if failing_handler == "store" else "store"
@@ -176,64 +249,52 @@ def test_worker_logs_handler_error_and_cleans_region(
 
 
 def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
-    handler = gpu_worker.SingleDirectionOffloadingHandler.__new__(
-        gpu_worker.SingleDirectionOffloadingHandler
-    )
-    failed_event = MagicMock()
-    failed_event.synchronize.side_effect = RuntimeError("device lost")
-    skipped_event = MagicMock()
-    handler._transfers = gpu_worker.deque(
+    handler = SingleDirectionOffloadingHandler.__new__(SingleDirectionOffloadingHandler)
+    failed_stream = MagicMock()
+    failed_stream.synchronize.side_effect = RuntimeError("device lost")
+    skipped_stream = MagicMock()
+    handler._transfers = deque(
         [
-            MagicMock(end_event=failed_event),
-            MagicMock(end_event=skipped_event),
+            MagicMock(stream=failed_stream),
+            MagicMock(stream=skipped_stream),
         ]
     )
-    handler._transfer_events = {1: failed_event, 2: skipped_event}
+    handler._job_streams = {1: failed_stream, 2: skipped_stream}
     handler._stream_pool = [MagicMock()]
-    handler._event_pool = [MagicMock()]
-    handler._buffer_pool = [(MagicMock(), MagicMock(), MagicMock())]
+    handler._buffer_pool = [MagicMock()]
     handler.cpu_tensors = [MagicMock()]
 
     with pytest.raises(RuntimeError, match="device lost"):
         handler.shutdown()
-    failed_event.synchronize.assert_called_once_with()
-    skipped_event.synchronize.assert_not_called()
+    failed_stream.synchronize.assert_called_once_with()
+    skipped_stream.synchronize.assert_not_called()
     assert not handler._transfers
-    assert not handler._transfer_events
+    assert not handler._job_streams
     assert not handler._stream_pool
-    assert not handler._event_pool
     assert not handler._buffer_pool
     assert not handler.cpu_tensors
 
 
-def _bare_handler(gpu_to_cpu: bool = True):
+def _bare_handler(device_to_cpu: bool = True):
     """Handler with only the state the failure paths touch."""
-    handler = gpu_worker.SingleDirectionOffloadingHandler.__new__(
-        gpu_worker.SingleDirectionOffloadingHandler
-    )
-    handler.gpu_to_cpu = gpu_to_cpu
-    handler._transfers = gpu_worker.deque()
-    handler._transfer_events = {}
+    handler = SingleDirectionOffloadingHandler.__new__(SingleDirectionOffloadingHandler)
+    handler.device_to_cpu = device_to_cpu
+    handler._transfers = deque()
+    handler._job_streams = {}
     handler._stream_pool = []
-    handler._event_pool = []
     handler._buffer_pool = []
+    handler._engine = FakeCopyEngine()
     return handler
 
 
-def _submittable_handler(monkeypatch: pytest.MonkeyPatch, gpu_to_cpu: bool = True):
+def _submittable_handler(copy_fn=None, device_to_cpu: bool = True):
     """Bare handler wired up far enough to run transfer_async off-device."""
-    handler = _bare_handler(gpu_to_cpu)
+    handler = _bare_handler(device_to_cpu)
     handler.layer_refs_per_group = [MagicMock()]
     handler.blocks_per_chunk = 1
     handler._estimate_max_copy_ops = lambda group_sizes: 4
     handler._fill_group_ops = lambda g_idx, **kwargs: (1, 128)
-    handler._swap_blocks_batch = MagicMock()
-    handler._buffer_pool = [tuple(torch.zeros(4, dtype=torch.int64) for _ in range(3))]
-
-    platform = MagicMock()
-    platform.stream.return_value = contextlib.nullcontext()
-    platform.is_cuda_alike.return_value = False
-    monkeypatch.setattr(gpu_worker, "current_platform", platform)
+    handler._engine = FakeCopyEngine(copy_fn)
     return handler
 
 
@@ -249,9 +310,7 @@ def _submit(handler, job_id: int) -> bool:
     return handler.transfer_async(job_id, device_ptrs, cpu_spec)
 
 
-def test_submit_failure_is_not_reported_until_stream_drains(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_submit_failure_is_not_reported_until_stream_drains() -> None:
     """A submit fault leaves copies in flight, so the job completes only later.
 
     swap_blocks_batch submits the descriptor list in chunks and the driver's
@@ -259,112 +318,103 @@ def test_submit_failure_is_not_reported_until_stream_drains(
     job may still be touching its blocks. Reporting the job before the stream
     drains would let the scheduler reuse blocks that are still being written.
     """
-    handler = _submittable_handler(monkeypatch)
-    stream, start_event, end_event = MagicMock(), MagicMock(), MagicMock()
+
+    def fail_submit(batch, num_ops):
+        raise RuntimeError("failed at index 1")
+
+    handler = _submittable_handler(fail_submit)
+    stream = FakeCopyStream(fail_submit)
     handler._stream_pool = [stream]
-    handler._event_pool = [end_event, start_event]
-    handler._swap_blocks_batch.side_effect = RuntimeError("failed at index 1")
-    clear = MagicMock()
-    monkeypatch.setattr(gpu_worker, "_clear_pending_device_error", clear)
 
     assert _submit(handler, 7) is True
 
-    clear.assert_called_once_with()
-    end_event.record.assert_called_once_with(stream)
+    assert stream.aborted == 1
     (transfer,) = handler._transfers
-    assert (transfer.job_id, transfer.failed) == (7, True)
-    assert handler._transfer_events == {7: end_event}
+    assert (transfer.job_id, transfer.stream, transfer.failed) == (7, stream, True)
+    assert handler._job_streams == {7: stream}
     assert not handler._stream_pool
-    assert not handler._event_pool
     assert not handler._buffer_pool
 
-    end_event.query.return_value = False
     assert handler.get_finished() == []
 
-    end_event.query.return_value = True
+    stream.ready = True
     results = handler.get_finished()
 
     assert [(r.job_id, r.success) for r in results] == [(7, False)]
     assert not handler._transfers
-    assert not handler._transfer_events
+    assert not handler._job_streams
     assert not handler._stream_pool
-    assert not handler._event_pool
     assert not handler._buffer_pool
-    start_event.elapsed_time.assert_not_called()
+    assert not stream.elapsed_called
 
 
-def test_submit_failure_still_fences_wait_and_next_submission(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_submit_failure_still_fences_wait_and_next_submission() -> None:
     """The faulted job keeps ordering the work that follows it.
 
     wait() is the store-flush fence and every submission chains onto the
-    previous transfer's end event; a faulted job that left neither would let
-    both run ahead of its in-flight copies.
+    previous transfer; a faulted job that left neither would let both run
+    ahead of its in-flight copies.
     """
-    handler = _submittable_handler(monkeypatch)
-    failed_stream, failed_start, failed_end = MagicMock(), MagicMock(), MagicMock()
+
+    def fail_submit(batch, num_ops):
+        raise RuntimeError("failed at index 1")
+
+    handler = _submittable_handler(fail_submit)
+    failed_stream = FakeCopyStream(fail_submit)
     handler._stream_pool = [failed_stream]
-    handler._event_pool = [failed_end, failed_start]
-    handler._swap_blocks_batch.side_effect = RuntimeError("failed at index 1")
     _submit(handler, 7)
 
     handler.wait({7})
-    failed_end.synchronize.assert_called_once_with()
+    assert failed_stream.synchronized == 1
 
-    next_stream = MagicMock()
+    next_stream = FakeCopyStream()
     handler._stream_pool = [next_stream]
-    handler._event_pool = [MagicMock(), MagicMock()]
-    handler._buffer_pool = [tuple(torch.zeros(4, dtype=torch.int64) for _ in range(3))]
-    handler._swap_blocks_batch.side_effect = None
     _submit(handler, 8)
 
-    next_stream.wait_event.assert_called_once_with(failed_end)
+    assert next_stream.waited_for == [failed_stream]
 
 
-def test_submit_failure_propagates_when_the_end_event_cannot_be_recorded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without an end event the in-flight copies cannot be bounded.
+def test_submit_failure_propagates_when_the_stream_cannot_be_aborted() -> None:
+    """Without a usable end state the in-flight copies cannot be bounded.
 
     The device is unrecoverable at that point, so failing loudly beats
     reporting a completion the blocks have not actually reached.
     """
-    handler = _submittable_handler(monkeypatch)
-    end_event = MagicMock()
-    end_event.record.side_effect = RuntimeError("device lost")
-    handler._stream_pool = [MagicMock()]
-    handler._event_pool = [end_event, MagicMock()]
-    handler._swap_blocks_batch.side_effect = RuntimeError("failed at index 1")
+
+    def fail_submit(batch, num_ops):
+        raise RuntimeError("failed at index 1")
+
+    handler = _submittable_handler(fail_submit)
+    stream = FakeCopyStream(fail_submit)
+    stream.abort_error = RuntimeError("device lost")
+    handler._stream_pool = [stream]
 
     with pytest.raises(RuntimeError, match="device lost"):
         _submit(handler, 7)
 
 
-def test_get_finished_reports_failure_when_event_query_raises() -> None:
+def test_get_finished_reports_failure_when_poll_raises() -> None:
     """A device error latched after submit surfaces at poll time, not as a raise."""
     handler = _bare_handler()
     failing = MagicMock()
-    failing.end_event.query.side_effect = RuntimeError("device lost")
+    failing.stream.done.side_effect = RuntimeError("device lost")
     failing.job_id = 3
     ready = MagicMock()
     ready.job_id = 4
     ready.failed = False
-    ready.end_event.query.return_value = True
-    ready.start_event.elapsed_time.return_value = 2.0
+    ready.stream.done.return_value = True
+    ready.stream.elapsed_seconds.return_value = 0.002
     ready.num_bytes = 512
     handler._transfers.extend([failing, ready])
-    handler._transfer_events = {3: failing.end_event, 4: ready.end_event}
+    handler._job_streams = {3: failing.stream, 4: ready.stream}
 
     results = handler.get_finished()
 
     assert [(r.job_id, r.success) for r in results] == [(3, False), (4, True)]
     assert not handler._transfers
-    assert not handler._transfer_events
+    assert not handler._job_streams
     assert handler._stream_pool == [ready.stream]
-    assert handler._buffer_pool == [
-        (ready.batch_src, ready.batch_dst, ready.batch_sizes)
-    ]
+    assert handler._buffer_pool == [ready.batch]
 
 
 def test_get_finished_propagates_non_runtime_errors() -> None:
@@ -376,36 +426,36 @@ def test_get_finished_propagates_non_runtime_errors() -> None:
     handler = _bare_handler()
     broken = MagicMock()
     broken.job_id = 5
-    broken.end_event.query.side_effect = AttributeError("no such op")
+    broken.stream.done.side_effect = AttributeError("no such op")
     handler._transfers.append(broken)
 
     with pytest.raises(AttributeError, match="no such op"):
         handler.get_finished()
 
 
-def test_submit_propagates_non_runtime_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    handler = _submittable_handler(monkeypatch)
-    handler._stream_pool = [MagicMock()]
-    handler._event_pool = [MagicMock(), MagicMock()]
-    handler._swap_blocks_batch.side_effect = AttributeError("no such op")
-    clear = MagicMock()
-    monkeypatch.setattr(gpu_worker, "_clear_pending_device_error", clear)
+def test_submit_propagates_non_runtime_errors() -> None:
+    def bad_submit(batch, num_ops):
+        raise AttributeError("no such op")
+
+    handler = _submittable_handler(bad_submit)
+    stream = FakeCopyStream(bad_submit)
+    handler._stream_pool = [stream]
 
     with pytest.raises(AttributeError, match="no such op"):
         _submit(handler, 7)
-    clear.assert_not_called()
+    assert stream.aborted == 0
 
 
 def test_wait_swallows_synchronize_failure() -> None:
     """wait() must not raise; the failure is reported by the next poll."""
     handler = _bare_handler()
-    event = MagicMock()
-    event.synchronize.side_effect = RuntimeError("device lost")
-    handler._transfer_events[9] = event
+    stream = MagicMock()
+    stream.synchronize.side_effect = RuntimeError("device lost")
+    handler._job_streams[9] = stream
 
     handler.wait({9})
 
-    event.synchronize.assert_called_once_with()
+    stream.synchronize.assert_called_once_with()
 
 
 @pytest.mark.parametrize("device_sync_fails", [False, True])
@@ -438,9 +488,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
-    with caplog_vllm.at_level(
-        logging.WARNING, logger="vllm.v1.kv_offload.cpu.gpu_worker"
-    ):
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm.v1.kv_offload.cpu.worker"):
         worker.shutdown()
 
     assert calls == ["sync", "region"]
@@ -449,7 +497,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
         assert "Device sync before mmap cleanup failed" in caplog_vllm.text
 
 
-@pytest.mark.parametrize("gpu_to_cpu", [True, False])
+@pytest.mark.parametrize("device_to_cpu", [True, False])
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
 @pytest.mark.parametrize("gpu_page_size_bytes", GPU_PAGE_SIZES)
 @pytest.mark.parametrize("blocks_per_chunk", BLOCKS_PER_CHUNK_VALUES)
@@ -465,7 +513,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
 @torch.inference_mode()
 def test_transfer(
     default_vllm_config,
-    gpu_to_cpu: bool,
+    device_to_cpu: bool,
     num_mappings: int,
     gpu_page_size_bytes: int,
     blocks_per_chunk: int,
@@ -526,6 +574,7 @@ def test_transfer(
             rank=0,
             kv_bytes_per_chunk=kv_bytes_per_chunk,
             cpu_page_size=cpu_page_size,
+            registrar=get_device_runtime(),
         )
 
     worker = CPUOffloadingWorker(
@@ -534,6 +583,8 @@ def test_transfer(
         num_cpu_chunks=num_cpu_chunks,
         mmap_region=mmap_region,
     )
+    if mmap_region is not None:
+        assert mmap_region.is_pinned
 
     # select block mappings
     gpu_blocks = random.sample(range(num_gpu_blocks), num_mappings * blocks_per_chunk)
@@ -560,8 +611,8 @@ def test_transfer(
     cpu_spec = CPULoadStoreSpec(cpu_chunks)
     device_ptrs = resolve_device_pointers(gpu_spec, kv_caches)
 
-    handler = worker._store_handler if gpu_to_cpu else worker._load_handler
-    if gpu_to_cpu:
+    handler = worker._store_handler if device_to_cpu else worker._load_handler
+    if device_to_cpu:
         dst_to_src = dict(zip(cpu_chunks_expanded, gpu_blocks))
     else:
         dst_to_src = dict(zip(gpu_blocks, cpu_chunks_expanded))
@@ -583,7 +634,7 @@ def test_transfer(
 
     # call transfer function via public API
     start_time = time.time()
-    if gpu_to_cpu:
+    if device_to_cpu:
         assert worker.submit_store(1, device_ptrs, cpu_spec)
     else:
         assert worker.submit_load(1, cpu_spec, device_ptrs)
@@ -609,7 +660,7 @@ def test_transfer(
         time.sleep(0.1)
 
     # determine src/dst by direction
-    if gpu_to_cpu:
+    if device_to_cpu:
         src_tensors, dst_tensors = gpu_tensors, cpu_tensors
         orig_src_tensors, orig_dst_tensors = orig_gpu_tensors, orig_cpu_tensors
     else:
@@ -643,7 +694,7 @@ def test_transfer(
     worker.shutdown()
 
 
-@pytest.mark.parametrize("gpu_to_cpu", [True, False])
+@pytest.mark.parametrize("device_to_cpu", [True, False])
 @pytest.mark.parametrize("num_mappings_per_group", NUM_MAPPINGS_PER_GROUP)
 @pytest.mark.parametrize("gpu_page_size_bytes", GPU_PAGE_SIZES)
 @pytest.mark.parametrize("blocks_per_chunk", BLOCKS_PER_CHUNK_VALUES)
@@ -654,7 +705,7 @@ def test_transfer(
 @torch.inference_mode()
 def test_transfer_multi_group(
     default_vllm_config,
-    gpu_to_cpu: bool,
+    device_to_cpu: bool,
     num_mappings_per_group: int,
     gpu_page_size_bytes: int,
     blocks_per_chunk: int,
@@ -773,8 +824,8 @@ def test_transfer_multi_group(
     cpu_spec = CPULoadStoreSpec(cpu_chunks)
     device_ptrs = resolve_device_pointers(gpu_spec, canonical_kv_caches)
 
-    handler = worker._store_handler if gpu_to_cpu else worker._load_handler
-    if gpu_to_cpu:
+    handler = worker._store_handler if device_to_cpu else worker._load_handler
+    if device_to_cpu:
         # per-group mapping: cpu sub-block -> gpu sub-block
         dst_to_src_per_group = [
             dict(zip(expanded, gpu_blks))
@@ -806,7 +857,7 @@ def test_transfer_multi_group(
     orig_gpu_tensors = [x.clone() for x in gpu_tensors]
     orig_cpu_tensors = [x.clone() for x in cpu_tensors]
 
-    if gpu_to_cpu:
+    if device_to_cpu:
         assert worker.submit_store(1, device_ptrs, cpu_spec)
     else:
         assert worker.submit_load(1, cpu_spec, device_ptrs)
@@ -829,7 +880,7 @@ def test_transfer_multi_group(
         time.sleep(0.1)
 
     # determine src/dst by direction
-    if gpu_to_cpu:
+    if device_to_cpu:
         src_tensors, dst_tensors = gpu_tensors, cpu_tensors
         orig_src_tensors, orig_dst_tensors = orig_gpu_tensors, orig_cpu_tensors
     else:
@@ -937,12 +988,12 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
     not current_platform.is_rocm(),
     reason="faults a real hipMemcpyBatchAsync call",
 )
-@pytest.mark.parametrize("gpu_to_cpu", [True, False])
+@pytest.mark.parametrize("device_to_cpu", [True, False])
 @pytest.mark.parametrize(
     "num_blocks", [16, 9000], ids=["one_batch", "fault_in_second_batch"]
 )
 def test_device_fault_does_not_fail_the_next_kernel_launch(
-    default_vllm_config, gpu_to_cpu: bool, num_blocks: int
+    default_vllm_config, device_to_cpu: bool, num_blocks: int
 ) -> None:
     """A caught copy fault must not leave its error pending on the thread.
 
@@ -967,26 +1018,28 @@ def test_device_fault_does_not_fail_the_next_kernel_launch(
         blocks_per_chunk=1,
         num_cpu_chunks=num_blocks,
     )
-    handler = worker._store_handler if gpu_to_cpu else worker._load_handler
-    swap_blocks_batch = handler._swap_blocks_batch
+    handler = worker._store_handler if device_to_cpu else worker._load_handler
+    engine = handler._engine
+    assert isinstance(engine, TorchCopyEngine)
+    copy = engine.config.copy_fn
     faulted = []
 
     def zero_one_copy(src, dst, sizes, **kwargs):
         sizes[len(sizes) - 500 if num_blocks > 8192 else len(sizes) // 2] = 0
         try:
-            swap_blocks_batch(src, dst, sizes, **kwargs)
+            copy(src, dst, sizes, **kwargs)
         except RuntimeError:
             faulted.append(True)
             raise
 
-    handler._swap_blocks_batch = zero_one_copy
+    engine.config = replace(engine.config, copy_fn=zero_one_copy)
     gpu_spec = GPULoadStoreSpec(
         list(range(num_blocks)), group_sizes=(num_blocks,), block_indices=(0,)
     )
     device_ptrs = resolve_device_pointers(gpu_spec, kv_caches)
     cpu_spec = CPULoadStoreSpec(list(range(num_blocks)))
     try:
-        if gpu_to_cpu:
+        if device_to_cpu:
             assert worker.submit_store(1, device_ptrs, cpu_spec)
         else:
             assert worker.submit_load(1, cpu_spec, device_ptrs)
@@ -1002,5 +1055,6 @@ def test_device_fault_does_not_fail_the_next_kernel_launch(
             finished = worker.get_finished()
         assert [(r.job_id, r.success) for r in finished] == [(1, False)]
     finally:
-        gpu_worker._clear_pending_device_error()
+        if engine.config.clear_error is not None:
+            engine.config.clear_error()
         worker.shutdown()

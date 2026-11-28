@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ctypes
-import functools
+"""Platform-independent CPU offloading worker.
+
+Copy planning, transfer queues and local host-memory allocation live here.
+Copies, streams/events and host registration go through the `CopyEngine` and
+`DeviceRuntime` contracts; device selection, synchronization and pinned host
+allocation use `torch` directly.
+"""
+
 import threading
 import time
 from collections import deque
@@ -12,11 +18,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
@@ -28,74 +30,36 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
+from vllm.v1.kv_offload.cpu.engines.base import CopyBatch, CopyEngine, CopyStream
+from vllm.v1.kv_offload.cpu.platforms.base import DeviceRuntime
+from vllm.v1.kv_offload.cpu.platforms.factory import get_device_runtime
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
-    THRESHOLD_BYTES,
-    swap_blocks_batch,
-)
 from vllm.v1.kv_offload.pointer_utils import iter_pointer_groups
 
 logger = init_logger(__name__)
 
 
-def _clear_pending_device_error() -> None:
-    """Clear the error a failed copy left pending for the next kernel launch."""
-    if not current_platform.is_cuda_alike():
-        return
-    try:
-        CudaRTLibrary().cudaGetLastError()
-    except (AssertionError, AttributeError, OSError):
-        logger.warning("Could not clear the pending device error", exc_info=True)
+class TensorRows(NamedTuple):
+    """Where the rows of a 2D int8 KV tensor are: row i starts at
+    `base + i * stride` and holds `size` bytes. Copy plans need nothing
+    more, so they can address memory that this process has not allocated."""
 
+    base: int
+    stride: int
+    size: int
+    num_rows: int
 
-def _select_swap_blocks_fn(
-    layer_refs_per_group: list[list[CanonicalKVCacheRef]],
-    gpu_to_cpu: bool,
-    host_memory_is_pinned: bool = True,
-):
-    """Resolve the swap_blocks function for a handler at init time."""
-    # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
-    # The Triton kernel dereferences CPU pointers on the GPU, which is only
-    # valid for pinned host memory.
-    if gpu_to_cpu or not host_memory_is_pinned:
-        return ops.swap_blocks_batch
-    # Fall back to the C++ DMA path on platforms where Triton isn't usable
-    # (e.g. ROCm host mappings) or where GPU kernels cannot directly
-    # dereference CPU pointers (XPU lacks CUDA's unified virtual address space,
-    # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
-    if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
-        return ops.swap_blocks_batch
-    page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
-    # Triton wins only on small, 8-byte-aligned payloads.
-    if (
-        not page_sizes
-        or max(page_sizes) >= THRESHOLD_BYTES
-        or any(s % 8 for s in page_sizes)
-    ):
-        return ops.swap_blocks_batch
-    chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
-    return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
-
-
-@dataclass(slots=True)
-class Transfer:
-    job_id: int
-    stream: torch.cuda.Stream
-    start_event: torch.Event
-    end_event: torch.Event
-    num_bytes: int
-    batch_src: torch.Tensor
-    batch_dst: torch.Tensor
-    batch_sizes: torch.Tensor
-    failed: bool = False
+    @classmethod
+    def of(cls, tensor: torch.Tensor) -> "TensorRows":
+        num_rows, size = tensor.shape
+        return cls(tensor.data_ptr(), tensor.stride(0), size, num_rows)
 
 
 def compute_sub_block_ptrs(
     block_ids: np.ndarray,
     blocks_per_chunk: int,
     output: np.ndarray,
-    tensor: torch.Tensor,
+    rows: TensorRows,
     skip_count: int = 0,
 ):
     """Compute byte pointers for sub-blocks of the given block IDs.
@@ -104,7 +68,7 @@ def compute_sub_block_ptrs(
     The pointer for sub-block j of block b is:
         base_ptr + b * row_stride + j * block_page_size
 
-    where block_page_size = tensor.shape[1] // blocks_per_chunk (gpu page size).
+    where block_page_size = rows.size // blocks_per_chunk (device page size).
 
     This handles tensors where row_stride != blocks_per_chunk * block_page_size
     (e.g. non-contiguous CPU tensors).
@@ -113,15 +77,15 @@ def compute_sub_block_ptrs(
         block_ids: array of block IDs at the tensor's native granularity.
         blocks_per_chunk: number of sub-blocks per block.
         output: pre-allocated pointer array to write pointers into.
-        tensor: the source or destination tensor.
+        rows: the rows of the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
 
     """
     assert skip_count < blocks_per_chunk
 
     num_sub_blocks = len(output)
-    base_ptr = tensor.data_ptr()
-    row_stride = tensor.stride(0)
+    base_ptr = rows.base
+    row_stride = rows.stride
 
     if blocks_per_chunk == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
@@ -129,8 +93,8 @@ def compute_sub_block_ptrs(
         return
 
     # Vectorized expansion for blocks_per_chunk > 1.
-    assert tensor.shape[1] % blocks_per_chunk == 0
-    block_page_size = tensor.shape[1] // blocks_per_chunk
+    assert rows.size % blocks_per_chunk == 0
+    block_page_size = rows.size // blocks_per_chunk
     sub_offsets = np.arange(blocks_per_chunk, dtype=np.uint64) * block_page_size
     # (num_blocks, 1) + (1, blocks_per_chunk) -> (num_blocks, blocks_per_chunk)
     all_ptrs = (
@@ -156,7 +120,7 @@ class CopyPlan(NamedTuple):
         return len(self.frag_sizes)
 
 
-def _build_copy_plan(ref: CanonicalKVCacheRef, gpu_to_cpu: bool) -> CopyPlan:
+def _build_copy_plan(ref: CanonicalKVCacheRef, device_to_cpu: bool) -> CopyPlan:
     """Unroll one data ref's mapped runs into a per-fragment CopyPlan."""
     mapping = ref.mapping
     assert mapping is not None
@@ -168,7 +132,7 @@ def _build_copy_plan(ref: CanonicalKVCacheRef, gpu_to_cpu: bool) -> CopyPlan:
             local.append(run.local_offset + i * run.local_stride)
             canonical.append(run.canonical_offset + i * run.canonical_stride)
             sizes.append(run.fragment_size)
-    src, dst = (local, canonical) if gpu_to_cpu else (canonical, local)
+    src, dst = (local, canonical) if device_to_cpu else (canonical, local)
     return CopyPlan(
         frag_offsets_src=np.asarray(src, dtype=np.uint64),
         frag_offsets_dst=np.asarray(dst, dtype=np.uint64),
@@ -194,7 +158,7 @@ def _canonical_page_ids(
 def _canonical_block_sizes(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]], num_tensors: int
 ) -> list[int]:
-    """Canonical CPU bytes per GPU block for each tensor, taken from the refs'
+    """Canonical CPU bytes per device block for each tensor, taken from the refs'
     mappings. Requires every ref to carry a mapping."""
     canonical_bytes_per_block = [0] * num_tensors
     for layer_refs in layer_refs_per_group:
@@ -228,6 +192,7 @@ def pin_mmap_region(
     back-to-back registrations hold a CUDA driver lock that starves other
     threads' CUDA calls, which stalls serving while this runs in the background.
     """
+    registrar = region.registrar
     rank = region.rank
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
@@ -270,7 +235,7 @@ def pin_mmap_region(
         address = base_ptr + offset
         t0 = time.monotonic()
         stopped = should_stop is not None and should_stop()
-        if not stopped and host_register(address, size):
+        if not stopped and registrar.register_host(address, size):
             addresses.append(address)
             registered_bytes += size
             if pace > 0:
@@ -285,7 +250,7 @@ def pin_mmap_region(
                 total_size / 1e9,
             )
         for registered in reversed(addresses):
-            host_unregister(registered)
+            registrar.unregister_host(registered)
         return
 
     region.pinned_addresses.extend(addresses)
@@ -298,68 +263,51 @@ def pin_mmap_region(
     )
 
 
-def _new_descriptor_buffers(
-    num_copy_ops: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    pin = PIN_MEMORY
-    # CUDA cache_kernels.cu requires int64; XPU DMA engine requires uint64.
-    ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
-    return (
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
-    )
+@dataclass(slots=True)
+class Transfer:
+    job_id: int
+    stream: CopyStream
+    num_bytes: int
+    batch: CopyBatch
+    failed: bool = False
 
 
-class SingleDirectionOffloadingHandler:
-    """Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
-    Transfers are guaranteed to be executed in order of their submission.
-    Each transfer uses a unique CUDA stream, and its stream will start
-    executing only after the streams of previous transfers have finished.
-    """
+class CopyPlanner:
+    """Computes the copy descriptors of transfers in one direction, either
+    CPU->device or device->CPU, from the resolved device pointers and where the
+    rows of each CPU KV tensor are."""
 
     def __init__(
         self,
-        cpu_tensors: list[torch.Tensor],
+        cpu_rows: list[TensorRows],
         blocks_per_chunk: int,
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
-        gpu_to_cpu: bool,
+        device_to_cpu: bool,
         canonical_layout: bool = False,
-        host_memory_is_pinned: bool = True,
     ):
-        """Initialize a SingleDirectionOffloadingHandler.
+        """Initialize a CopyPlanner.
 
         Args:
-            cpu_tensors: list of CPU KV cache tensors.
-                Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
-            blocks_per_chunk: number of GPU blocks per CPU chunk.
+            cpu_rows: rows of each CPU KV cache tensor, one CPU chunk each.
+            blocks_per_chunk: number of device blocks per CPU chunk.
             layer_refs_per_group: list of CanonicalKVCacheRef per group.
-            gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
+            device_to_cpu: if True, transfer from device to CPU; otherwise CPU
+                to device.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
-            host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
-                kernels may dereference them directly.
 
         """
-        assert len(cpu_tensors) > 0
+        assert len(cpu_rows) > 0
 
-        for cpu_tensor in cpu_tensors:
-            assert cpu_tensor.dtype == torch.int8
-            assert cpu_tensor.ndim == 2
-            assert cpu_tensor.device.type == "cpu"
-
-        self.cpu_tensors = cpu_tensors
-        self.gpu_to_cpu: bool = gpu_to_cpu
+        self.cpu_rows = cpu_rows
+        self.device_to_cpu: bool = device_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
-        self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
-        )
         self.blocks_per_chunk = blocks_per_chunk
 
         # Per (group, ref) static copy plans for the canonical layout
         self._canonical_copy_plans: list[list[CopyPlan]] | None = (
             [
-                [_build_copy_plan(ref, gpu_to_cpu) for ref in layer_refs]
+                [_build_copy_plan(ref, device_to_cpu) for ref in layer_refs]
                 for layer_refs in layer_refs_per_group
             ]
             if canonical_layout
@@ -370,19 +318,8 @@ class SingleDirectionOffloadingHandler:
         )
         # Reusable per-block base-pointer scratch for the canonical fill,
         # sized to the largest possible group (grown on demand)
-        num_scratch_blocks = cpu_tensors[0].shape[0] if canonical_layout else 0
+        num_scratch_blocks = cpu_rows[0].num_rows if canonical_layout else 0
         self._scratch_bases_cpu = np.empty(num_scratch_blocks, dtype=np.uint64)
-
-        # job_id -> event
-        self._transfer_events: dict[int, torch.Event] = {}
-        # queue of transfers (job_id, stream, event)
-        self._transfers: deque[Transfer] = deque()
-        # list of CUDA streams available for re-use
-        self._stream_pool: list[torch.cuda.Stream] = []
-        # list of CUDA events available for re-use
-        self._event_pool: list[torch.Event] = []
-        # list of pinned descriptor buffer sets available for re-use
-        self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     def _estimate_max_copy_ops(self, group_sizes: Sequence[int]) -> int:
         """Upper bound on the number of copy descriptors for a transfer.
@@ -424,16 +361,16 @@ class SingleDirectionOffloadingHandler:
             end_idx = op_idx + group_size
 
             ptr_start = dev_ptr_offset + d * group_size
-            gpu_ptrs = device_ptrs.ptrs[ptr_start : ptr_start + group_size]
-            gpu_out, cpu_out = (
-                (all_src, all_dst) if self.gpu_to_cpu else (all_dst, all_src)
+            dev_ptrs = device_ptrs.ptrs[ptr_start : ptr_start + group_size]
+            dev_out, cpu_out = (
+                (all_src, all_dst) if self.device_to_cpu else (all_dst, all_src)
             )
-            gpu_out[op_idx:end_idx] = gpu_ptrs
+            dev_out[op_idx:end_idx] = dev_ptrs
             compute_sub_block_ptrs(
                 cpu_block_ids,
                 self.blocks_per_chunk,
                 cpu_out[op_idx:end_idx],
-                self.cpu_tensors[t_idx],
+                self.cpu_rows[t_idx],
                 skip_count=cpu_skip_count,
             )
             all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
@@ -460,10 +397,6 @@ class SingleDirectionOffloadingHandler:
 
         Returns (op_idx past the filled descriptors, bytes added)."""
         assert self._canonical_copy_plans is not None
-        # Zero-copy reinterpretation for pointer arithmetic: uint64 and the
-        # buffers' int64 are bit-equivalent for addresses
-        all_src_u64 = all_src.view(np.uint64)
-        all_dst_u64 = all_dst.view(np.uint64)
         if group_size > len(self._scratch_bases_cpu):
             self._scratch_bases_cpu = np.empty(group_size, dtype=np.uint64)
 
@@ -480,27 +413,27 @@ class SingleDirectionOffloadingHandler:
 
             # 1. Base byte pointer of every block on each side
             ptr_start = dev_ptr_offset + d * group_size
-            gpu_bases = device_ptrs.ptrs[ptr_start : ptr_start + group_size]
+            dev_bases = device_ptrs.ptrs[ptr_start : ptr_start + group_size]
             cpu_bases = self._scratch_bases_cpu[:group_size]
             compute_sub_block_ptrs(
                 cpu_block_ids,
                 self.blocks_per_chunk,
                 cpu_bases,
-                self.cpu_tensors[t_idx],
+                self.cpu_rows[t_idx],
                 skip_count=cpu_skip_count,
             )
 
-            if self.gpu_to_cpu:
-                block_bases_src = gpu_bases
+            if self.device_to_cpu:
+                block_bases_src = dev_bases
                 block_bases_dst = cpu_bases
             else:
                 block_bases_src = cpu_bases
-                block_bases_dst = gpu_bases
+                block_bases_dst = dev_bases
 
             # 2. On store, keep only the blocks this rank is elected to write
             mapping = data_ref.mapping
             assert mapping is not None
-            if self.gpu_to_cpu and mapping.num_writers > 1:
+            if self.device_to_cpu and mapping.num_writers > 1:
                 block_bases_src, block_bases_dst = self._filter_writer_blocks(
                     block_bases_src,
                     block_bases_dst,
@@ -519,16 +452,12 @@ class SingleDirectionOffloadingHandler:
             np.add(
                 block_bases_src[:, None],
                 plan.frag_offsets_src[None, :],
-                out=all_src_u64[op_idx:end_idx].reshape(
-                    num_active_blocks, plan.num_frags
-                ),
+                out=all_src[op_idx:end_idx].reshape(num_active_blocks, plan.num_frags),
             )
             np.add(
                 block_bases_dst[:, None],
                 plan.frag_offsets_dst[None, :],
-                out=all_dst_u64[op_idx:end_idx].reshape(
-                    num_active_blocks, plan.num_frags
-                ),
+                out=all_dst[op_idx:end_idx].reshape(num_active_blocks, plan.num_frags),
             )
             all_sizes[op_idx:end_idx].reshape(num_active_blocks, plan.num_frags)[:] = (
                 plan.frag_sizes
@@ -555,36 +484,23 @@ class SingleDirectionOffloadingHandler:
             group_size,
             cpu_skip_count,
         )
-        writer_mask = cpu_page_ids % mapping.num_writers == mapping.writer_index
+        writer_mask = mapping.is_writer(cpu_page_ids)
         return block_bases_src[writer_mask], block_bases_dst[writer_mask]
 
-    def transfer_async(
+    def _fill_ops(
         self,
-        job_id: int,
         device_ptrs: DevicePointers,
         cpu_spec: BlockIDsLoadStoreSpec,
-    ) -> bool:
+        all_src: np.ndarray,
+        all_dst: np.ndarray,
+        all_sizes: np.ndarray,
+    ) -> tuple[int, int]:
+        """Fill the copy descriptors of one transfer.
+
+        Returns (number of descriptors filled, bytes they copy)."""
         cpu_blocks = cpu_spec.block_ids
         assert cpu_blocks.ndim == 1
         num_cpu_blocks = len(cpu_blocks)
-
-        num_copy_ops = self._estimate_max_copy_ops(device_ptrs.group_block_counts)
-
-        # reuse a pooled buffer set, growing it if this transfer needs more room
-        batch_src, batch_dst, batch_sizes = (
-            self._buffer_pool.pop()
-            if self._buffer_pool
-            else _new_descriptor_buffers(num_copy_ops)
-        )
-        if batch_src.numel() < num_copy_ops:
-            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
-
-        src = batch_src[:num_copy_ops]
-        dst = batch_dst[:num_copy_ops]
-        sizes = batch_sizes[:num_copy_ops]
-        all_src = src.numpy()
-        all_dst = dst.numpy()
-        all_sizes = sizes.numpy()
 
         cpu_offset = 0
         op_idx = 0
@@ -609,25 +525,88 @@ class SingleDirectionOffloadingHandler:
             cpu_offset = cpu_end_offset
 
         assert cpu_offset == num_cpu_blocks
+        assert op_idx <= len(all_sizes)
+        return op_idx, num_transfer_bytes
+
+
+class SingleDirectionOffloadingHandler(CopyPlanner):
+    """Handles transfers for a single direction, either CPU->device or
+    device->CPU.
+    Transfers are guaranteed to be executed in order of their submission.
+    Each transfer uses a unique stream, and its stream will start
+    executing only after the streams of previous transfers have finished.
+    """
+
+    def __init__(
+        self,
+        cpu_tensors: list[torch.Tensor],
+        blocks_per_chunk: int,
+        layer_refs_per_group: list[list[CanonicalKVCacheRef]],
+        device_to_cpu: bool,
+        canonical_layout: bool = False,
+        *,
+        engine: CopyEngine,
+    ):
+        """Initialize a SingleDirectionOffloadingHandler.
+
+        Args:
+            cpu_tensors: list of CPU KV cache tensors.
+                Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
+            blocks_per_chunk: number of device blocks per CPU chunk.
+            layer_refs_per_group: list of CanonicalKVCacheRef per group.
+            device_to_cpu: if True, transfer from device to CPU; otherwise CPU
+                to device.
+            canonical_layout: if True, CPU pages use the canonical layout
+                described by the refs' mappings.
+            engine: copy engine for this direction.
+
+        """
+        for cpu_tensor in cpu_tensors:
+            assert cpu_tensor.dtype == torch.int8
+            assert cpu_tensor.ndim == 2
+            assert cpu_tensor.device.type == "cpu"
+        super().__init__(
+            [TensorRows.of(t) for t in cpu_tensors],
+            blocks_per_chunk,
+            layer_refs_per_group,
+            device_to_cpu,
+            canonical_layout,
+        )
+        # Kept alive while their rows are addressed.
+        self.cpu_tensors = cpu_tensors
+        self._engine = engine
+
+        # job_id -> stream
+        self._job_streams: dict[int, CopyStream] = {}
+        # queue of transfers
+        self._transfers: deque[Transfer] = deque()
+        # streams available for re-use
+        self._stream_pool: list[CopyStream] = []
+        # descriptor batches available for re-use
+        self._buffer_pool: list[CopyBatch] = []
+
+    def transfer_async(
+        self,
+        job_id: int,
+        device_ptrs: DevicePointers,
+        cpu_spec: BlockIDsLoadStoreSpec,
+    ) -> bool:
+        num_copy_ops = self._estimate_max_copy_ops(device_ptrs.group_block_counts)
+
+        # reuse a pooled batch, growing it if this transfer needs more room
+        batch = self._buffer_pool.pop() if self._buffer_pool else None
+        if batch is None or batch.capacity < num_copy_ops:
+            batch = self._engine.new_batch(num_copy_ops)
+
+        op_idx, num_transfer_bytes = self._fill_ops(
+            device_ptrs, cpu_spec, batch.src_ptrs, batch.dst_ptrs, batch.sizes
+        )
         # Writer rotation may skip non-writer blocks, leaving op_idx below
         # the sized upper bound
-        assert op_idx <= num_copy_ops
-        src = src[:op_idx]
-        dst = dst[:op_idx]
-        sizes = sizes[:op_idx]
+        assert op_idx <= batch.capacity
 
         stream = (
-            self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
-        )
-        start_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.Event(enable_timing=True)
-        )
-        end_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.Event(enable_timing=True)
+            self._stream_pool.pop() if self._stream_pool else self._engine.new_stream()
         )
 
         # Stores must wait for the model to finish writing the KV they read.
@@ -636,65 +615,32 @@ class SingleDirectionOffloadingHandler:
         # the step that allocates it for the load and cannot retract zeroing
         # shipped in an earlier step for a since-reallocated block; with async
         # scheduling nothing else orders that zeroing against this copy.
-        stream.wait_stream(current_platform.current_stream())
+        stream.wait_for_compute()
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
-            last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
-            stream.wait_event(last_event)
-        # CPU->GPU reads from host memory, which is never written
-        # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
-        # safe and lets the driver pipeline source reads. GPU->CPU reads
-        # from the live GPU KV cache, which the compute stream keeps
-        # writing; we must keep STREAM ordering so source reads are gated
-        # by the transfer stream's wait_stream(compute) barrier.
-        is_src_access_order_any = not self.gpu_to_cpu
+            stream.wait_for(last_transfer.stream)
+
+        failed = False
         try:
-            with current_platform.stream(stream):
-                start_event.record(stream)
-                if op_idx > 0:
-                    self._swap_blocks_batch(
-                        src,
-                        dst,
-                        sizes,
-                        is_src_access_order_any=is_src_access_order_any,
-                    )
-                end_event.record(stream)
+            stream.submit(batch, op_idx)
         except RuntimeError:
-            _clear_pending_device_error()
             logger.exception(
                 "KV offload %s transfer failed for job %d",
-                "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                "device->CPU" if self.device_to_cpu else "CPU->device",
                 job_id,
             )
-            end_event.record(stream)
-            self._transfer_events[job_id] = end_event
-            self._transfers.append(
-                Transfer(
-                    job_id=job_id,
-                    stream=stream,
-                    start_event=start_event,
-                    end_event=end_event,
-                    num_bytes=0,
-                    batch_src=batch_src,
-                    batch_dst=batch_dst,
-                    batch_sizes=batch_sizes,
-                    failed=True,
-                )
-            )
-            return True
+            stream.abort()
+            failed = True
 
-        self._transfer_events[job_id] = end_event
+        self._job_streams[job_id] = stream
         self._transfers.append(
             Transfer(
                 job_id=job_id,
                 stream=stream,
-                start_event=start_event,
-                end_event=end_event,
-                num_bytes=num_transfer_bytes,
-                batch_src=batch_src,
-                batch_dst=batch_dst,
-                batch_sizes=batch_sizes,
+                num_bytes=0 if failed else num_transfer_bytes,
+                batch=batch,
+                failed=failed,
             )
         )
 
@@ -706,28 +652,25 @@ class SingleDirectionOffloadingHandler:
         while self._transfers:
             transfer = self._transfers[0]
             try:
-                if not transfer.end_event.query():
+                if not transfer.stream.done():
                     break
                 transfer_time = (
-                    None
-                    if transfer.failed
-                    # elapsed_time is in milliseconds
-                    else transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
+                    None if transfer.failed else transfer.stream.elapsed_seconds()
                 )
             except RuntimeError:
                 logger.exception(
                     "KV offload %s transfer failed for job %d while polling "
                     "for completion",
-                    "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                    "device->CPU" if self.device_to_cpu else "CPU->device",
                     transfer.job_id,
                 )
                 self._transfers.popleft()
-                self._transfer_events.pop(transfer.job_id, None)
+                self._job_streams.pop(transfer.job_id, None)
                 results.append(TransferResult(job_id=transfer.job_id, success=False))
                 continue
 
             self._transfers.popleft()
-            self._transfer_events.pop(transfer.job_id, None)
+            self._job_streams.pop(transfer.job_id, None)
             if transfer.failed:
                 results.append(TransferResult(job_id=transfer.job_id, success=False))
                 continue
@@ -741,19 +684,15 @@ class SingleDirectionOffloadingHandler:
                 )
             )
             self._stream_pool.append(transfer.stream)
-            self._event_pool.append(transfer.end_event)
-            self._event_pool.append(transfer.start_event)
-            self._buffer_pool.append(
-                (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
-            )
+            self._buffer_pool.append(transfer.batch)
         return results
 
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
-            event = self._transfer_events.get(job_id)
-            if event is not None:
+            stream = self._job_streams.get(job_id)
+            if stream is not None:
                 try:
-                    event.synchronize()
+                    stream.synchronize()
                 except RuntimeError:
                     logger.exception(
                         "KV offload transfer for job %d failed while waiting "
@@ -767,7 +706,7 @@ class SingleDirectionOffloadingHandler:
         while self._transfers:
             transfer = self._transfers[0]
             try:
-                transfer.end_event.synchronize()
+                transfer.stream.synchronize()
             except Exception as e:
                 logger.exception(
                     "Failed to synchronize transfer end event; "
@@ -779,9 +718,8 @@ class SingleDirectionOffloadingHandler:
                 break
             self._transfers.popleft()
 
-        self._transfer_events.clear()
+        self._job_streams.clear()
         self._stream_pool.clear()
-        self._event_pool.clear()
         self._buffer_pool.clear()
         self.cpu_tensors.clear()
         if sync_error is not None:
@@ -793,19 +731,6 @@ _PREFAULT_STEP_BYTES = 1 << 30
 # Deferred pinning registers small chunks (never less than one block row or
 # worker slot) to shorten each hold of the CUDA driver lock while serving.
 _DEFERRED_PIN_CHUNK_BYTES = 8 << 20
-
-
-def _relax_stream_capture() -> None:
-    """Let this thread call cudaHostRegister while another captures a graph.
-
-    A global-mode capture otherwise fails on such a call from any thread.
-    """
-    mode = ctypes.c_int(2)  # cudaStreamCaptureModeRelaxed
-    lib = CudaRTLibrary().lib
-    rc = lib.cudaThreadExchangeStreamCaptureMode(ctypes.byref(mode))
-    if rc != 0:
-        lib.cudaGetLastError()
-        raise RuntimeError(f"cudaThreadExchangeStreamCaptureMode failed (code={rc})")
 
 
 class CPUOffloadingWorker(OffloadingWorker):
@@ -828,11 +753,13 @@ class CPUOffloadingWorker(OffloadingWorker):
         defer_host_setup: bool = False,
         prefault_shard: tuple[int, int] | None = None,
         pin_pace: float = 2.0,
+        runtime: DeviceRuntime | None = None,
     ):
         """defer_host_setup leaves pre-faulting and pinning mmap_region to
         start_deferred_setup(); prefault_shard is then the share this worker
         pre-faults first, and pin_pace paces its pinning (see pin_mmap_region)."""
         assert not canonical_layout or mmap_region is not None
+        self._runtime = runtime if runtime is not None else get_device_runtime()
         # The caller owns mmap_region until this constructor returns. After a
         # successful construction, the worker is the sole owner and releases
         # it after both transfer directions have stopped.
@@ -865,8 +792,8 @@ class CPUOffloadingWorker(OffloadingWorker):
 
         cpu_tensors: list[torch.Tensor] = []
         for t_idx, kv_cache_tensor in enumerate(kv_caches.tensors):
-            gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
-            cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
+            device_page_size_bytes = kv_cache_tensor.page_size_bytes
+            cpu_page_size_bytes = device_page_size_bytes * blocks_per_chunk
 
             if canonical_bytes_per_block is not None:
                 assert mmap_region is not None
@@ -893,18 +820,28 @@ class CPUOffloadingWorker(OffloadingWorker):
 
             cpu_tensors.append(cpu_tensor)
 
-        make_handler = functools.partial(
-            SingleDirectionOffloadingHandler,
-            cpu_tensors=cpu_tensors,
-            blocks_per_chunk=blocks_per_chunk,
-            layer_refs_per_group=kv_caches.group_data_refs,
-            canonical_layout=canonical_layout,
-            host_memory_is_pinned=host_memory_is_pinned,
-        )
-        self._store_handler = make_handler(gpu_to_cpu=True)
-        self._load_handler = make_handler(gpu_to_cpu=False)
+        page_sizes = [
+            r.page_size_bytes for refs in kv_caches.group_data_refs for r in refs
+        ]
+
+        def make_handler(device_to_cpu: bool) -> SingleDirectionOffloadingHandler:
+            return SingleDirectionOffloadingHandler(
+                cpu_tensors=cpu_tensors,
+                blocks_per_chunk=blocks_per_chunk,
+                layer_refs_per_group=kv_caches.group_data_refs,
+                device_to_cpu=device_to_cpu,
+                canonical_layout=canonical_layout,
+                engine=self._runtime.create_copy_engine(
+                    device_to_cpu=device_to_cpu,
+                    host_memory_is_pinned=host_memory_is_pinned,
+                    page_sizes=page_sizes,
+                ),
+            )
+
+        self._store_handler = make_handler(device_to_cpu=True)
+        self._load_handler = make_handler(device_to_cpu=False)
         # Own stream, so expedited loads do not queue behind regular loads.
-        self._expedited_load_handler = make_handler(gpu_to_cpu=False)
+        self._expedited_load_handler = make_handler(device_to_cpu=False)
 
     def start_deferred_setup(self) -> None:
         if self._defer_host_setup and self._setup_thread is None:
@@ -922,7 +859,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         t0 = time.monotonic()
         try:
             torch.accelerator.set_device_index(self._device)
-            _relax_stream_capture()
+            self._runtime.relax_stream_capture()
             for offset, length in region.prefault_ranges(self._prefault_shard):
                 for start in range(offset, offset + length, _PREFAULT_STEP_BYTES):
                     if self._setup_stop.is_set():
@@ -958,7 +895,7 @@ class CPUOffloadingWorker(OffloadingWorker):
     def submit_store(
         self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        """Async GPU -> CPU."""
+        """Async device -> CPU."""
         assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
         return self._store_handler.transfer_async(job_id, device_ptrs, dst_spec)
 
@@ -969,7 +906,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         device_ptrs: DevicePointers,
         expedited: bool = False,
     ) -> bool:
-        """Async CPU -> GPU."""
+        """Async CPU -> device."""
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
         handler = self._expedited_load_handler if expedited else self._load_handler
         return handler.transfer_async(job_id, device_ptrs, src_spec)

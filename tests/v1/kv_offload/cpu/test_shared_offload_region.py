@@ -15,12 +15,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
+import torch
 
 from tests.utils import core_dumped_bytes
 from vllm.utils.system_utils import get_mp_context
-from vllm.v1.kv_offload.cpu import gpu_worker
-from vllm.v1.kv_offload.cpu import host_register as host_register_module
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
+from vllm.v1.kv_offload.cpu import worker as worker_module
+from vllm.v1.kv_offload.cpu.platforms import cuda as cuda_module
+from vllm.v1.kv_offload.cpu.platforms.base import DeviceRuntime
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
     _wait_for_file_size,
@@ -1098,17 +1100,17 @@ def test_cleanup_idempotent(iid):
     r.cleanup()  # must be a no-op
 
 
-def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
+def test_cleanup_unregisters_every_pinned_chunk(iid):
     """cleanup() must release every chunk from a split host registration."""
     r = _make_region(iid)
-    unregister = MagicMock()
-    monkeypatch.setattr(region_module, "host_unregister", unregister)
+    registrar = MagicMock(spec=DeviceRuntime)
+    r._registrar = registrar
     r.pinned_addresses = [0x100000, 0x200000, 0x300000]
     r.is_pinned = True
 
     r.cleanup()
 
-    assert unregister.call_args_list == [
+    assert registrar.unregister_host.call_args_list == [
         call(0x300000),
         call(0x200000),
         call(0x100000),
@@ -1117,18 +1119,17 @@ def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
 
 @pytest.fixture
 def host_register(monkeypatch):
-    """Mock the cross-platform host_register/host_unregister helpers with
-    registrations capped at seven pages. The same unregister mock backs both
-    pin_mmap_region's rollback path and the region's cleanup() on exit from
-    `_region`.
+    """Mock the platform runtime's host registration with registrations capped
+    at seven pages. The same unregister mock backs both pin_mmap_region's
+    rollback path and the region's cleanup() on exit from `_region`.
     """
-    register = MagicMock(return_value=True)
-    unregister = MagicMock()
-    monkeypatch.setattr(gpu_worker, "MAX_HOST_REGISTER_CHUNK_BYTES", 7 * PAGE_SIZE)
-    monkeypatch.setattr(gpu_worker, "MIN_HOST_REGISTER_SAVED_BYTES", PAGE_SIZE)
-    monkeypatch.setattr(gpu_worker, "host_register", register)
-    monkeypatch.setattr(gpu_worker, "host_unregister", unregister)
-    monkeypatch.setattr(region_module, "host_unregister", unregister)
+    runtime = MagicMock(spec=DeviceRuntime)
+    register = runtime.register_host
+    register.return_value = True
+    unregister = runtime.unregister_host
+    monkeypatch.setattr(worker_module, "MAX_HOST_REGISTER_CHUNK_BYTES", 7 * PAGE_SIZE)
+    monkeypatch.setattr(worker_module, "MIN_HOST_REGISTER_SAVED_BYTES", PAGE_SIZE)
+    monkeypatch.setattr(region_module, "_NOOP_REGISTRAR", runtime)
     return register, unregister
 
 
@@ -1141,7 +1142,7 @@ def test_pin_mmap_region_registers_row_aligned_chunks(
     spanning the whole row registers the same way."""
     register, unregister = host_register
     with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
-        gpu_worker.pin_mmap_region(region, worker_slot_only=worker_slot_only)
+        worker_module.pin_mmap_region(region, worker_slot_only=worker_slot_only)
         base = region._base.data_ptr()
         assert register.call_args_list == [
             call(base, 6 * PAGE_SIZE),
@@ -1166,9 +1167,9 @@ def test_pin_mmap_region_paces_and_caps_chunks(iid, host_register, monkeypatch):
     fake_time = SimpleNamespace(
         monotonic=lambda: next(clock) / 1000, sleep=sleeps.append
     )
-    monkeypatch.setattr(gpu_worker, "time", fake_time)
+    monkeypatch.setattr(worker_module, "time", fake_time)
     with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
-        gpu_worker.pin_mmap_region(region, max_chunk_bytes=4 * PAGE_SIZE, pace=2.0)
+        worker_module.pin_mmap_region(region, max_chunk_bytes=4 * PAGE_SIZE, pace=2.0)
         assert [c.args[1] for c in register.call_args_list] == [3 * PAGE_SIZE] * 5
         assert sleeps == pytest.approx([0.002] * 5)
 
@@ -1188,7 +1189,7 @@ def test_pin_mmap_region_worker_slot_only_registers_own_slots(
         cpu_page_size=PAGE_SIZE + PAGE_SIZE // 2,
     )
     try:
-        gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+        worker_module.pin_mmap_region(region, worker_slot_only=True)
         base = region._base.data_ptr() + PAGE_SIZE
         assert register.call_args_list == [
             call(base + row * 4 * PAGE_SIZE, 2 * PAGE_SIZE) for row in range(3)
@@ -1223,7 +1224,7 @@ def _unmapped_registration_region(num_chunks, slot_size, num_workers):
     [(2, 2, False), (2, 3, True), ((1 << 16) + 1, 3, True)],
 )
 def test_pin_mmap_region_selects_by_savings_not_row_count(
-    monkeypatch, num_rows, slot_mib, own_slots
+    num_rows, slot_mib, own_slots
 ):
     """Small savings favor whole-region calls; large row counts do not disable slots."""
     slot = slot_mib * 1024**2
@@ -1234,8 +1235,10 @@ def test_pin_mmap_region_selects_by_savings_not_row_count(
         registrations.append((ptr, size))
         return True
 
-    monkeypatch.setattr(gpu_worker, "host_register", register)
-    gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+    runtime = MagicMock(spec=DeviceRuntime)
+    runtime.register_host.side_effect = register
+    region._registrar = runtime
+    worker_module.pin_mmap_region(region, worker_slot_only=True)
 
     assert region.is_pinned
     assert registrations == (
@@ -1251,20 +1254,18 @@ def test_host_registration_reuses_cudart(monkeypatch):
     cudart.cudaHostRegister.return_value = 0
     cudart.cudaHostUnregister.return_value = 0
     constructor = MagicMock(return_value=cudart)
-    monkeypatch.setattr(host_register_module, "CudaRTLibrary", constructor)
-    monkeypatch.setattr(
-        host_register_module.current_platform, "is_cuda_alike", lambda: True
-    )
-    host_register_module._get_cudart.cache_clear()
+    monkeypatch.setattr(cuda_module, "CudaRTLibrary", constructor)
+    cuda_module._get_cudart.cache_clear()
     try:
+        runtime = cuda_module.CudaRuntime()
         for ptr in (0x100000, 0x200000):
-            assert host_register_module.host_register(ptr, PAGE_SIZE)
-            host_register_module.host_unregister(ptr)
+            assert runtime.register_host(ptr, PAGE_SIZE)
+            runtime.unregister_host(ptr)
         constructor.assert_called_once_with()
         assert cudart.cudaHostRegister.call_count == 2
         assert cudart.cudaHostUnregister.call_count == 2
     finally:
-        host_register_module._get_cudart.cache_clear()
+        cuda_module._get_cudart.cache_clear()
 
 
 @pytest.mark.parametrize("fail_at", [0, 1, 2])
@@ -1274,7 +1275,7 @@ def test_pin_mmap_region_failure_leaves_region_pageable(iid, host_register, fail
     register, unregister = host_register
     register.side_effect = [True] * fail_at + [False]
     with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
-        gpu_worker.pin_mmap_region(region)
+        worker_module.pin_mmap_region(region)
         base = region._base.data_ptr()
         assert not region.is_pinned
         assert region.pinned_addresses == []
@@ -1293,7 +1294,9 @@ def test_pin_mmap_region_failure_leaves_region_pageable(iid, host_register, fail
 def test_pin_mmap_region_stop_leaves_region_pageable(iid, host_register):
     register, unregister = host_register
     with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
-        gpu_worker.pin_mmap_region(region, should_stop=lambda: register.call_count == 2)
+        worker_module.pin_mmap_region(
+            region, should_stop=lambda: register.call_count == 2
+        )
         base = region._base.data_ptr()
         assert not region.is_pinned
     assert register.call_count == 2
@@ -1305,12 +1308,15 @@ def test_deferred_host_setup(iid, host_register, monkeypatch, case):
     """The worker turns ready only after its region is pre-faulted and pinned."""
     register, _ = host_register
     register.return_value = case != "pin_fails"
-    monkeypatch.setattr(gpu_worker, "_relax_stream_capture", lambda: None)
-    monkeypatch.setattr(
-        gpu_worker.torch.accelerator, "set_device_index", lambda _: None
-    )
+    monkeypatch.setattr(torch.accelerator, "set_device_index", lambda _: None)
     with _region(iid, num_chunks=3, num_workers=2, rank=1, populate=False) as region:
-        worker = gpu_worker.CPUOffloadingWorker.__new__(gpu_worker.CPUOffloadingWorker)
+        # Pinning goes through the region's registrar; the worker runtime only
+        # provides the capture-relaxation hook here.
+        worker_runtime = MagicMock(spec=DeviceRuntime)
+        worker = worker_module.CPUOffloadingWorker.__new__(
+            worker_module.CPUOffloadingWorker
+        )
+        worker._runtime = worker_runtime
         worker._mmap_region = region
         worker._defer_host_setup = True
         worker._device = 0
@@ -1332,14 +1338,15 @@ def test_deferred_host_setup(iid, host_register, monkeypatch, case):
 
 
 def test_pin_mmap_region_when_host_register_unsupported_stays_pageable(
-    iid, monkeypatch
+    iid, host_register
 ):
-    """A platform without host registration support (host_register()
+    """A platform without host registration support (register_host()
     returning False) leaves the region pageable instead of failing worker
     startup."""
-    monkeypatch.setattr(gpu_worker, "host_register", lambda ptr, num_bytes: False)
+    register, _ = host_register
+    register.return_value = False
     with _region(iid) as region:
-        gpu_worker.pin_mmap_region(region)
+        worker_module.pin_mmap_region(region)
         assert not region.is_pinned
         assert region.pinned_addresses == []
 

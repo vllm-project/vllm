@@ -6,7 +6,6 @@ from typing_extensions import override
 
 from vllm.distributed.device_communicators.shm_broadcast import check_shm_free_space
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
@@ -20,12 +19,13 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.platforms.factory import get_device_runtime
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     REGION_SEGMENTS,
     SharedOffloadRegion,
 )
+from vllm.v1.kv_offload.cpu.worker import CPUOffloadingWorker
 
 logger = init_logger(__name__)
 
@@ -100,13 +100,17 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+        self._runtime = get_device_runtime()
 
         # Pre-fault and pin the region in the background; the engine serves
         # without offloading until every worker is ready.
         self.async_init = bool(self.extra_config.get("async_init", False))
-        if self.async_init and not current_platform.is_cuda():
+        if self.async_init and not self._runtime.capabilities.async_init:
             # Pinning would race graph capture without a capture-mode guard.
-            logger.warning("async_init needs CUDA; setting the CPU tier up now")
+            logger.warning(
+                "async_init is not supported on this platform; "
+                "setting the CPU tier up now"
+            )
             self.async_init = False
         # Pause between background pin calls, as a multiple of each call's time.
         self.async_init_pin_pace = float(
@@ -217,9 +221,7 @@ class CPUOffloadingSpec(OffloadingSpec):
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
-        return (
-            current_platform.is_cuda_alike() and not current_platform.is_rocm()
-        ) or current_platform.is_xpu()
+        return self._runtime.capabilities.shared_region
 
     @property
     def _replicated_prefault_shard(self) -> tuple[int, int] | None:
@@ -229,6 +231,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         return parallel.rank % parallel.local_world_size, parallel.local_world_size
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        runtime = self._runtime
         mmap_region: SharedOffloadRegion | None = None
         prefault_shard: tuple[int, int] | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
@@ -266,6 +269,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 private=not self.replicated_layout,
                 populate_shard=None if self.async_init else prefault_shard,
                 populate=not self.async_init,
+                registrar=runtime,
             )
         try:
             return CPUOffloadingWorker(
@@ -276,6 +280,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 defer_host_setup=self.async_init,
                 prefault_shard=prefault_shard,
                 pin_pace=self.async_init_pin_pace,
+                runtime=runtime,
             )
         except Exception:
             if mmap_region is not None:
@@ -285,10 +290,10 @@ class CPUOffloadingSpec(OffloadingSpec):
     @override
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         if not self._worker:
-            if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+            if not self._runtime.capabilities.cpu_offload:
                 raise Exception(
-                    "CPU Offloading is currently only supported on CUDA-alike "
-                    "and XPU GPUs"
+                    "CPU offloading is not supported on this platform "
+                    "(no device runtime is registered)"
                 )
             self._worker = self.create_worker(kv_caches)
 

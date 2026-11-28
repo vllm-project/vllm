@@ -66,12 +66,13 @@ from vllm.v1.kv_offload.base import (
     OffloadingMetricMetadata,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.platforms.factory import get_device_runtime
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     REGION_SEGMENTS,
     SharedOffloadRegion,
 )
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
     SecondaryTierManager,
@@ -560,13 +561,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     def _uses_shared_region(self) -> bool:
         # Tiering always allocates on the shared region (every platform), so the
         # replicated-layout gate must not be narrowed by the CPU spec's
-        # CUDA-alike check.
+        # capabilities check.
         return True
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         if self.secondary_tier_configs and self.config.parallel.world_size > 1:
             _reject_workers_across_nodes()
+        runtime = get_device_runtime()
         worker_index = self.config.parallel.rank
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
@@ -576,6 +578,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             cpu_page_size=self.cpu_page_size_per_worker,
             num_segments=REGION_SEGMENTS,
             populate_shard=self._replicated_prefault_shard,
+            registrar=runtime,
         )
         try:
             if self.config.canonical_layout:
@@ -586,6 +589,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
+                runtime=runtime,
             )
         except Exception:
             worker_mmap.cleanup()

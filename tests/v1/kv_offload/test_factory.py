@@ -23,11 +23,34 @@ from vllm.v1.kv_offload.config import (
     OffloadingGroupConfig,
 )
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
+from vllm.v1.kv_offload.cpu.platforms.base import RuntimeCapabilities
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+
+
+def _install_runtime(
+    monkeypatch,
+    *,
+    shared_region: bool,
+    cpu_offload: bool = True,
+    async_init: bool = False,
+):
+    """Install a fake platform runtime with the requested capabilities."""
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec
+
+    runtime = MagicMock()
+    runtime.capabilities = RuntimeCapabilities(
+        cpu_offload=cpu_offload,
+        shared_region=shared_region,
+        async_init=async_init,
+    )
+    monkeypatch.setattr(cpu_spec, "get_device_runtime", lambda: runtime)
+    monkeypatch.setattr(tiering_spec, "get_device_runtime", lambda: runtime)
+    return runtime
 
 
 @pytest.fixture(autouse=True)
@@ -180,12 +203,7 @@ def test_cpu_config_info_capacity_dedups_a_replicated_layout(
     monkeypatch, local_world_size, chunks
 ):
     """One page-aligned copy per host counts against the engine's budget."""
-    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
-
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
-    # Pin the ROCm answer too: on a ROCm runner the shared-region path is off,
-    # and the dedup under test never engages.
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
+    _install_runtime(monkeypatch, shared_region=True)
     alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     tokens_per_block = 8
     spec = _create_spec(
@@ -500,10 +518,8 @@ def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
 def test_cpu_spec_replicated_sizing_on_shared_region(monkeypatch, world_size: int):
     # On CUDA the default spec honors
     # replicated layout: a single MLA copy (num_copies=1), matching tiering.
-    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
+    _install_runtime(monkeypatch, shared_region=True)
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
@@ -519,20 +535,16 @@ def test_cpu_spec_replicated_sizing_on_shared_region(monkeypatch, world_size: in
     assert spec.num_chunks == 8
 
 
-@pytest.mark.parametrize("rocm", [False, True], ids=["non-cuda-alike", "rocm"])
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_cpu_spec_replicated_disabled_without_shared_region(
-    monkeypatch, world_size: int, rocm: bool
+    monkeypatch, world_size: int
 ):
     # Data-loss guard: platforms without shared regions keep a private pinned
     # tensor (no shared medium), so replicated layout MUST stay off. Otherwise
     # the rank-0 writer gate would ack rank>0 stores without writing, leaving
     # those private buffers empty and corrupting subsequent loads.
-    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: rocm)
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
+    _install_runtime(monkeypatch, shared_region=False)
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         cpu_bytes_to_use=worker_kv_bytes_per_block * world_size * 2,
@@ -563,13 +575,8 @@ def test_cpu_spec_replicated_layout_truth_matrix(
 ):
     # replicated_layout is enabled iff the config gate passes AND the deployment
     # actually allocates on the shared region.
-    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(
-        cpu_spec_module.current_platform, "is_cuda_alike", lambda: cuda_alike
-    )
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
+    _install_runtime(monkeypatch, shared_region=cuda_alike and not rocm)
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
@@ -585,6 +592,7 @@ def test_cpu_spec_replicated_layout_truth_matrix(
 def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
+    _install_runtime(monkeypatch, shared_region=True)
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
@@ -605,8 +613,6 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
         worker_calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
     monkeypatch.setattr(cpu_spec_module, "check_shm_free_space", MagicMock())
@@ -624,12 +630,10 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     assert worker_calls[0]["mmap_region"] is region
 
 
-@pytest.mark.parametrize("rocm", [False, True], ids=["non-cuda-alike", "rocm"])
-def test_cpu_spec_create_worker_uses_tensor_path_without_shared_region(
-    monkeypatch, rocm
-):
+def test_cpu_spec_create_worker_uses_tensor_path_without_shared_region(monkeypatch):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
+    _install_runtime(monkeypatch, shared_region=False)
     spec = _create_spec(worker_kv_bytes_per_block=4096, world_size=4)
     assert isinstance(spec, CPUOffloadingSpec)
 
@@ -644,9 +648,6 @@ def test_cpu_spec_create_worker_uses_tensor_path_without_shared_region(
         worker_calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: rocm)
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
 
@@ -662,6 +663,7 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
     # worker_kv_bytes_per_block=0 yields num_chunks=0; a zero-byte region cannot
     # be mmap'd, so even on CUDA this must fall back to the tensor path.
+    _install_runtime(monkeypatch, shared_region=True)
     spec = _create_spec(worker_kv_bytes_per_block=0, world_size=4)
     assert isinstance(spec, CPUOffloadingSpec)
     assert spec.num_chunks == 0
@@ -669,8 +671,6 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
     region_calls: list[dict[str, Any]] = []
     worker_calls: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(
         cpu_spec_module,
         "SharedOffloadRegion",
@@ -722,8 +722,7 @@ def test_cpu_spec_create_worker_region_assignment(
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
-    monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
+    _install_runtime(monkeypatch, shared_region=True)
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,

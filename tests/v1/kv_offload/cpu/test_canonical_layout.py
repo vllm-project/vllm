@@ -16,14 +16,15 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.gpu_worker import (
+from vllm.v1.kv_offload.cpu.platforms.factory import get_device_runtime
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.worker import (
     SingleDirectionOffloadingHandler,
     _build_copy_plan,
     _canonical_block_sizes,
     _canonical_page_ids,
     pin_mmap_region,
 )
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 
@@ -45,7 +46,7 @@ def _nhd_mapping() -> CanonicalPageMapping:
 
 
 def test_copy_plan_unrolls_runs():
-    plan = _build_copy_plan(_ref(_nhd_mapping()), gpu_to_cpu=True)
+    plan = _build_copy_plan(_ref(_nhd_mapping()), device_to_cpu=True)
     k_dst = [256, 768, 1280, 1792]
     assert plan.frag_offsets_src.tolist() == [0, 128, 256, 384, 512, 640, 768, 896]
     assert plan.frag_offsets_dst.tolist() == k_dst + [2048 + o for o in k_dst]
@@ -54,8 +55,8 @@ def test_copy_plan_unrolls_runs():
 
 
 def test_load_direction_swaps_offsets():
-    store = _build_copy_plan(_ref(_nhd_mapping()), gpu_to_cpu=True)
-    load = _build_copy_plan(_ref(_nhd_mapping()), gpu_to_cpu=False)
+    store = _build_copy_plan(_ref(_nhd_mapping()), device_to_cpu=True)
+    load = _build_copy_plan(_ref(_nhd_mapping()), device_to_cpu=False)
     assert np.array_equal(store.frag_offsets_src, load.frag_offsets_dst)
     assert np.array_equal(store.frag_offsets_dst, load.frag_offsets_src)
     assert np.array_equal(store.frag_sizes, load.frag_sizes)
@@ -122,15 +123,20 @@ def _make_kv_caches(gpu_tensor, mapping):
     )
 
 
-def _canonical_handler(cpu_tensor, mapping, gpu_to_cpu):
+def _canonical_handler(cpu_tensor, mapping, device_to_cpu):
     page = mapping.local_page_size_bytes
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page, mapping=mapping)]]
     return SingleDirectionOffloadingHandler(
         cpu_tensors=[cpu_tensor],
         blocks_per_chunk=1,
         layer_refs_per_group=refs,
-        gpu_to_cpu=gpu_to_cpu,
+        device_to_cpu=device_to_cpu,
         canonical_layout=True,
+        engine=get_device_runtime().create_copy_engine(
+            device_to_cpu=device_to_cpu,
+            host_memory_is_pinned=True,
+            page_sizes=(page,),
+        ),
     )
 
 
@@ -150,7 +156,7 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     for rank in (0, 1):
         mapping = _tp2_rank_mapping(rank)
         kv_caches = _make_kv_caches(gpu_rank[rank], mapping)
-        store = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=True)
+        store = _canonical_handler(cpu_canonical, mapping, device_to_cpu=True)
         _transfer(store, kv_caches, num_blocks)
     torch.accelerator.synchronize()
 
@@ -171,7 +177,7 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     gpu_back = torch.zeros(num_blocks, 1024, dtype=torch.int8, device="cuda")
     mapping = _tp2_rank_mapping(0)
     kv_caches = _make_kv_caches(gpu_back, mapping)
-    load = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=False)
+    load = _canonical_handler(cpu_canonical, mapping, device_to_cpu=False)
     _transfer(load, kv_caches, num_blocks)
     torch.accelerator.synchronize()
     assert torch.equal(gpu_back, gpu_rank[0])
@@ -180,7 +186,7 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     gpu_full = torch.zeros(num_blocks, 2048, dtype=torch.int8, device="cuda")
     mapping = _whole_page_mapping()
     kv_caches = _make_kv_caches(gpu_full, mapping)
-    load_full = _canonical_handler(cpu_canonical, mapping, gpu_to_cpu=False)
+    load_full = _canonical_handler(cpu_canonical, mapping, device_to_cpu=False)
     _transfer(load_full, kv_caches, num_blocks)
     torch.accelerator.synchronize()
     assert torch.equal(gpu_full.cpu(), cpu_canonical)
@@ -248,6 +254,7 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
             rank=rank,
             kv_bytes_per_chunk=row_stride,
             cpu_page_size=row_stride // world_size,
+            registrar=get_device_runtime(),
         )
         regions.append(region)
         # The Triton load path dereferences CPU pointers on the GPU, which is
@@ -264,7 +271,7 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
             store = _canonical_handler(
                 canonical_view(rank, writer_tp),
                 mapping,
-                gpu_to_cpu=True,
+                device_to_cpu=True,
             )
             _transfer(store, kv_caches, num_blocks)
         torch.accelerator.synchronize()
@@ -277,7 +284,7 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
             load = _canonical_handler(
                 canonical_view(rank, reader_tp),
                 mapping,
-                gpu_to_cpu=False,
+                device_to_cpu=False,
             )
             _transfer(load, kv_caches, num_blocks)
             torch.accelerator.synchronize()
