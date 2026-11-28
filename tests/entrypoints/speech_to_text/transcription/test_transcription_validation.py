@@ -159,7 +159,8 @@ async def transcription_token_usage(remote_server):
 
 
 def check_diarized_stream_events(events, expected, usage_before, usage_after):
-    """Delta-only clients must receive the same text as the completed transcript."""
+    """Delta-only clients must receive the same text and duration as the completed
+    transcript."""
     assert expected.segments
     assert [event.type for event in events] == [
         event_type
@@ -186,6 +187,8 @@ def check_diarized_stream_events(events, expected, usage_before, usage_after):
     assert done.usage.total_tokens == (
         done.usage.input_tokens + done.usage.output_tokens
     )
+    assert done.duration > 0
+    assert done.duration == expected.duration
 
 
 @pytest.mark.asyncio
