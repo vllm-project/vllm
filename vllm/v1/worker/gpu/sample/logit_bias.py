@@ -7,7 +7,11 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import (
+    FusedStagedWriter,
+    StagedWriteTensor,
+    UvaBackedTensor,
+)
 from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsContext,
     LogitsProcessor,
@@ -53,6 +57,27 @@ class LogitBiasState(LogitsProcessor):
 
         # Using any of the above.
         self.use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
+
+        # allowed_token_ids, logit_bias_token_ids, and stop_token_ids are all
+        # int32; apply their writes with one fused kernel. logit_bias itself
+        # is float32 and FusedStagedWriter only supports int32 contents, so
+        # it keeps its own separate apply_write() call.
+        self._write_tensors = [
+            self.allowed_token_ids,
+            self.logit_bias_token_ids,
+            self.stop_token_ids,
+        ]
+        self._write_ptrs = torch.tensor(
+            [t.gpu.data_ptr() for t in self._write_tensors],
+            dtype=torch.uint64,
+            device=device,
+        )
+        self._write_strides = torch.tensor(
+            [t.gpu.stride(0) for t in self._write_tensors],
+            dtype=torch.int64,
+            device=device,
+        )
+        self._fused_writer = FusedStagedWriter(device, 3 * max_num_reqs)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         prompt_len = int(self.prompt_len_np[req_idx])
@@ -117,16 +142,15 @@ class LogitBiasState(LogitsProcessor):
 
     def apply_staged_writes(self) -> None:
         self.num_allowed_token_ids.copy_to_uva()
-        self.allowed_token_ids.apply_write()
-
         self.num_logit_bias.copy_to_uva()
-        self.logit_bias_token_ids.apply_write()
-        self.logit_bias.apply_write()
-
         self.min_lens.copy_to_uva()
         self.num_stop_token_ids.copy_to_uva()
         self.restore_when_all_masked.copy_to_uva()
-        self.stop_token_ids.apply_write()
+
+        self._fused_writer.apply(
+            self._write_tensors, self._write_ptrs, self._write_strides
+        )
+        self.logit_bias.apply_write()
 
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
         if not np.any(self.use_logit_bias[ctx.idx_mapping_np]):
