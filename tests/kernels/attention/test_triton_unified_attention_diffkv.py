@@ -353,3 +353,209 @@ def test_spec_verify_block_m_grouping_and_launch_kwargs() -> None:
     assert "num_warps" not in decode_kwargs
     assert "num_stages" not in decode_kwargs
     assert decode_reduce
+
+
+def _decode_batch(kv_lens, num_query_heads, num_kv_heads, head_sizes):
+    """One query per sequence; each sequence owns distinct, shuffled blocks."""
+    head_size_qk, head_size_v = head_sizes
+    block_size = BLOCK_SIZES[0]
+    blocks_per_seq = [(n + block_size - 1) // block_size for n in kv_lens]
+    num_blocks = sum(blocks_per_seq)
+    kv_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size_qk + head_size_v,
+        dtype=torch.bfloat16,
+    )
+    block_ids = torch.randperm(num_blocks, dtype=torch.int32)
+    block_tables = torch.zeros(len(kv_lens), max(blocks_per_seq), dtype=torch.int32)
+    start = 0
+    for i, n in enumerate(blocks_per_seq):
+        block_tables[i, :n] = block_ids[start : start + n]
+        start += n
+    query = torch.randn(
+        len(kv_lens), num_query_heads, head_size_qk, dtype=torch.bfloat16
+    )
+    return query, kv_cache, block_tables
+
+
+def _run_decode(
+    query, kv_cache, block_tables, kv_lens, window, sinks, num_segments, query_len=1
+):
+    num_tokens, num_query_heads, head_size_qk = query.shape
+    num_seqs = len(kv_lens)
+    head_size_v = kv_cache.shape[-1] - head_size_qk
+    out = torch.empty(num_tokens, num_query_heads, head_size_v, dtype=query.dtype)
+    segm_output, segm_max, segm_expsum = _alloc_segm_buffers(
+        num_seqs, num_query_heads, head_size_v
+    )
+    unified_attention_diffkv(
+        q=query,
+        k=kv_cache[..., :head_size_qk],
+        v=kv_cache[..., head_size_qk:],
+        out=out,
+        cu_seqlens_q=torch.arange(num_seqs + 1, dtype=torch.int32) * query_len,
+        seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
+        softmax_scale=head_size_qk**-0.5,
+        causal=True,
+        window_size=(window - 1, 0),
+        block_table=block_tables,
+        softcap=0,
+        max_seqlen_q=query_len,
+        sinks=sinks,
+        seq_threshold_3D=num_seqs if num_segments else 0,
+        num_par_softmax_segments=num_segments or NUM_PAR_SOFTMAX_SEGMENTS,
+        softmax_segm_output=segm_output,
+        softmax_segm_max=segm_max,
+        softmax_segm_expsum=segm_expsum,
+    )
+    return out
+
+
+def _ref_window_decode(query, kv_cache, block_tables, kv_lens, window, sinks):
+    num_kv_heads = kv_cache.shape[2]
+    head_size_qk = query.shape[-1]
+    flat = kv_cache.float()
+    outs = []
+    for i, kv_len in enumerate(kv_lens):
+        kv = flat[block_tables[i]].flatten(0, 1)[max(0, kv_len - window) : kv_len]
+        k = kv[..., :head_size_qk].repeat_interleave(
+            query.shape[1] // num_kv_heads, dim=1
+        )
+        v = kv[..., head_size_qk:].repeat_interleave(
+            query.shape[1] // num_kv_heads, dim=1
+        )
+        scores = torch.einsum("hd,khd->hk", query[i].float(), k) * head_size_qk**-0.5
+        if sinks is not None:
+            scores = torch.cat([scores, sinks[:, None]], dim=1)
+        probs = scores.softmax(dim=-1)[:, : k.shape[0]]
+        outs.append(torch.einsum("hk,khd->hd", probs, v))
+    return torch.stack(outs).to(query.dtype)
+
+
+@pytest.mark.parametrize("num_heads", [(8, 1), (16, 2)])
+@pytest.mark.parametrize("sliding_window", [128, 1024])
+@pytest.mark.parametrize("use_sinks", [False, True])
+@pytest.mark.parametrize("num_segments", [4, 16])
+@pytest.mark.parametrize("tuned_arch", [False, True])
+@torch.inference_mode()
+def test_triton_unified_attn_diffkv_3d_decode_past_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tuned_arch: bool,
+    num_heads: tuple[int, int],
+    sliding_window: int,
+    use_sinks: bool,
+    num_segments: int,
+) -> None:
+    """Window-relative 3D segments must cover exactly the window, however far
+    past it the context runs. Blocks before the window may be freed and reused,
+    so they are poisoned: any read outside the window yields NaN."""
+    monkeypatch.setattr(diffkv_module, "_is_tuned_arch", lambda: tuned_arch)
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    w = sliding_window
+    kv_lens = [1, 17, w - 1, w, w + 1, w + 23, 5000, 32768, 131072]
+    query, kv_cache, block_tables = _decode_batch(kv_lens, *num_heads, (192, 128))
+    sinks = torch.randn(num_heads[0]) if use_sinks else None
+    expected = _ref_window_decode(query, kv_cache, block_tables, kv_lens, w, sinks)
+    block_size = kv_cache.shape[1]
+    for i, kv_len in enumerate(kv_lens):
+        kv_cache[block_tables[i, : max(0, kv_len - w) // block_size]] = float("nan")
+
+    actual = _run_decode(query, kv_cache, block_tables, kv_lens, w, sinks, num_segments)
+
+    assert not actual.isnan().any()
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("query_len", [1, 37])
+@pytest.mark.parametrize("window", [0, 128])
+@torch.inference_mode()
+def test_triton_unified_attn_diffkv_launch_config_is_bitwise_invariant(
+    monkeypatch: pytest.MonkeyPatch, query_len: int, window: int
+) -> None:
+    """The single-wave 2D launch is chosen by grid occupancy, so it must not
+    change numerics, or outputs would depend on batch composition."""
+    import vllm.v1.attention.ops.triton_unified_attention_diffkv as diffkv
+
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    kv_lens = [2000, 9000, 131, 4096]
+    _, kv_cache, block_tables = _decode_batch(kv_lens, 16, 2, (192, 128))
+    query = torch.randn(len(kv_lens) * query_len, 16, 192, dtype=torch.bfloat16)
+
+    outs = []
+    for single_wave in (False, True):
+        monkeypatch.setattr(
+            diffkv, "_use_single_wave_2d", lambda *_, sw=single_wave: sw
+        )
+        outs.append(
+            _run_decode(
+                query, kv_cache, block_tables, kv_lens, window, None, 0, query_len
+            )
+        )
+    assert torch.equal(outs[0], outs[1])
+
+
+@pytest.mark.parametrize("tuned_arch", [False, True])
+def test_num_kv_segments(monkeypatch: pytest.MonkeyPatch, tuned_arch: bool) -> None:
+    """Full attention and untuned archs keep every segment."""
+    import vllm.v1.attention.ops.triton_unified_attention_diffkv as diffkv
+
+    monkeypatch.setattr(diffkv, "_is_tuned_arch", lambda: tuned_arch)
+
+    def segments(num_seqs, window, num_query_heads=16):
+        return diffkv._num_kv_segments(16, num_seqs, num_query_heads, window, 16)
+
+    assert segments(1, 0) == 16
+    if not tuned_arch:
+        assert segments(64, 128) == 16
+        return
+    # Every segment must get at least one tile of the window.
+    assert segments(1, 128) == 8
+    assert segments(1, 1024) == 16
+    # Larger batches amortize fewer partials per window token, down to 2D.
+    counts = [segments(b, 1024) for b in (1, 8, 16, 32, 64, 128)]
+    assert counts == sorted(counts, reverse=True)
+    assert segments(64, 128) == 0
+
+
+@pytest.mark.parametrize("tuned_arch", [False, True])
+def test_window_split_is_gated_to_tuned_arch(
+    monkeypatch: pytest.MonkeyPatch, tuned_arch: bool
+) -> None:
+    """Off CDNA4 both kernels keep the whole-sequence split (`WINDOW_SPLIT=0`)."""
+    monkeypatch.setattr(diffkv_module, "_is_tuned_arch", lambda: tuned_arch)
+    monkeypatch.setattr(diffkv_module, "_num_compute_units", lambda _: 256)
+    num_query_heads, num_kv_heads, head_size = 8, 1, 128
+    query = torch.zeros(1, num_query_heads, head_size, device="cpu")
+    kv_cache = torch.zeros(4, BLOCK_SIZES[0], num_kv_heads, 2 * head_size, device="cpu")
+    segm = _alloc_segm_buffers(1, num_query_heads, head_size)
+    with (
+        patch.object(diffkv_module, "kernel_unified_attention_diffkv") as attn,
+        patch.object(diffkv_module, "kernel_reduce_segments_diffkv") as reduce,
+    ):
+        unified_attention_diffkv(
+            q=query,
+            k=kv_cache[..., :head_size],
+            v=kv_cache[..., head_size:],
+            out=torch.zeros(1, num_query_heads, head_size, device="cpu"),
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            seqused_k=torch.tensor([64], dtype=torch.int32),
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            window_size=(127, 0),
+            block_table=torch.zeros(1, 4, dtype=torch.int32),
+            softcap=0,
+            seq_threshold_3D=1,
+            num_par_softmax_segments=NUM_PAR_SOFTMAX_SEGMENTS,
+            softmax_segm_output=segm[0],
+            softmax_segm_max=segm[1],
+            softmax_segm_expsum=segm[2],
+        )
+    attn_kwargs = attn.__getitem__.return_value.call_args.kwargs
+    reduce_kwargs = reduce.__getitem__.return_value.call_args.kwargs
+    assert attn_kwargs["SLIDING_WINDOW"] == 128
+    expected = 128 if tuned_arch else 0
+    assert attn_kwargs["WINDOW_SPLIT"] == reduce_kwargs["WINDOW_SPLIT"] == expected
