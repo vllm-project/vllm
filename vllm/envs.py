@@ -167,6 +167,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_FUSED_MOE_GATE_TOPK: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1479,6 +1480,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
+    ),
+    # Whether MoE layers whose runner holds an fp32 gate and routes by sigmoid
+    # top-k with a score-correction bias (MiniMax-M3) compute the gate GEMM and
+    # the top-k in two fused Triton kernels for small batches (decode).
+    # By default is disabled.
+    "VLLM_ROCM_FUSED_MOE_GATE_TOPK": lambda: (
+        os.getenv("VLLM_ROCM_FUSED_MOE_GATE_TOPK", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
