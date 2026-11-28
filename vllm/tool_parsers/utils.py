@@ -332,6 +332,13 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+def _extract_properties(params: Any) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        return {}
+    properties = params.get("properties")
+    return properties if isinstance(properties, dict) else {}
+
+
 def find_tool_properties(
     tools: list[Tool] | None,
     tool_name: str,
@@ -343,13 +350,13 @@ def find_tool_properties(
         if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
-                    return (params or {}).get("properties", {})
+                    return _extract_properties(params)
             continue
         if not _is_function_tool(tool):
             continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
-            return (params or {}).get("properties", {})
+            return _extract_properties(params)
     return {}
 
 
