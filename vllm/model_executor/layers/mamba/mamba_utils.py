@@ -75,6 +75,10 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
+        if mamba_cache_dtype == "auto" and mamba_ssm_cache_dtype == "auto":
+            # Decode rounds the state to this dtype on every token; in 16 bits
+            # that loses slow decay, so decode drifts from the fp32 prefill.
+            mamba_ssm_cache_dtype = "float32"
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
