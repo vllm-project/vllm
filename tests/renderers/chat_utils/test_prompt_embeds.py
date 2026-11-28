@@ -231,9 +231,7 @@ async def test_reasoning_embeds_render_before_content(
         _, prompt = await _maybe_await(render, request.messages, params)
         mask = torch.tensor(prompt["prompt_is_token_ids"])
         assert len(mask) == len(prompt["prompt_token_ids"])
-        assert torch.equal(
-            prompt["prompt_embeds"][~mask], torch.cat([reasoning, content])
-        )
+        assert torch.equal(prompt["prompt_embeds"], torch.cat([reasoning, content]))
         text_ids = [
             t for t, is_token in zip(prompt["prompt_token_ids"], mask) if is_token
         ]
@@ -288,10 +286,7 @@ async def test_content_embeds_render_before_reasoning(tokenizer, is_async):
             renderer.render_messages_async if is_async else renderer.render_messages
         )
         _, prompt = await _maybe_await(render, request.messages, params)
-        mask = torch.tensor(prompt["prompt_is_token_ids"])
-        assert torch.equal(
-            prompt["prompt_embeds"][~mask], torch.cat([content, reasoning])
-        )
+        assert torch.equal(prompt["prompt_embeds"], torch.cat([content, reasoning]))
     finally:
         renderer.shutdown()
 
@@ -359,8 +354,7 @@ async def test_omitted_reasoning_embed_does_not_shift_content_embed(
             renderer.render_messages_async if is_async else renderer.render_messages
         )
         _, prompt = await _maybe_await(render, request.messages, params)
-        mask = torch.tensor(prompt["prompt_is_token_ids"])
-        assert torch.equal(prompt["prompt_embeds"][~mask], content)
+        assert torch.equal(prompt["prompt_embeds"], content)
     finally:
         renderer.shutdown()
 
@@ -641,23 +635,35 @@ def test_build_mixed_prompt_embeds(stream):
             token_ids.append(item)
             cursor += 1
 
-    embeds, mask = _build_mixed_prompt_embeds(token_ids, tensors, positions)
-
-    assert embeds.shape == (len(token_ids), H)
-    assert len(mask) == len(token_ids)
+    mixed = _build_mixed_prompt_embeds(token_ids, tensors, positions)
 
     # Mask: False exactly at embed positions, True everywhere else.
     expected_mask = torch.ones(len(token_ids), dtype=torch.bool)
     for start, length in positions:
         expected_mask[start : start + length] = False
-    assert mask == expected_mask.tolist()
+    assert mixed.is_token_ids == expected_mask.tolist()
 
-    # Embed rows match input tensors at the right positions.
-    for tensor, (start, length) in zip(tensors, positions):
-        assert torch.equal(embeds[start : start + length], tensor)
+    # Compact: only the embed rows, in position order, so token-id positions
+    # add no placeholder rows to what is sent to the engine.
+    assert torch.equal(mixed.embeds, torch.cat(tensors))
 
-    # Non-embed positions remain zero-filled.
-    assert torch.all(embeds[expected_mask] == 0)
+
+def test_build_mixed_prompt_embeds_casts_to_the_first_dtype():
+    """Parts of different dtypes take the first part's dtype, as when they were
+    written into one tensor of that dtype."""
+    tensors = [torch.randn(2, 8, dtype=torch.bfloat16), torch.randn(1, 8)]
+
+    mixed = _build_mixed_prompt_embeds([0, 0, 1, 0], tensors, [(0, 2), (3, 1)])
+
+    assert mixed.embeds.dtype == torch.bfloat16
+    assert torch.equal(mixed.embeds[2], tensors[1][0].bfloat16())
+
+
+def test_build_mixed_prompt_embeds_rejects_a_span_of_the_wrong_length():
+    """A span whose length differs from its tensor's rows fails where it is
+    built, not later as a row-count mismatch."""
+    with pytest.raises(ValueError, match="2 positions but 3 rows"):
+        _build_mixed_prompt_embeds([0, 0, 1], [torch.randn(3, 8)], [(0, 2)])
 
 
 # End-to-end tests: each runs both sync and async parse paths via the
@@ -713,11 +719,10 @@ async def test_end_to_end_expand_and_build(tokenizer, parse_fn, role):
     assert positions[0][1] == LEN_A
     assert positions[1][1] == LEN_B
 
-    embeds, mask = _build_mixed_prompt_embeds(expanded, tensors, positions)
-    assert embeds.shape == (len(expanded), _MOCK_HIDDEN_SIZE)
-    assert mask.count(False) == LEN_A + LEN_B
-    assert torch.equal(embeds[positions[0][0] : positions[0][0] + LEN_A], t_a)
-    assert torch.equal(embeds[positions[1][0] : positions[1][0] + LEN_B], t_b)
+    mixed = _build_mixed_prompt_embeds(expanded, tensors, positions)
+    assert len(mixed.is_token_ids) == len(expanded)
+    assert mixed.is_token_ids.count(False) == LEN_A + LEN_B
+    assert torch.equal(mixed.embeds, torch.cat([t_a, t_b]))
 
 
 @pytest.mark.asyncio
@@ -770,11 +775,10 @@ async def test_end_to_end_multi_message_conversation(tokenizer, parse_fn):
     # System embed must appear before user embed in the token stream.
     assert positions[0][0] < positions[1][0]
 
-    embeds, mask = _build_mixed_prompt_embeds(expanded, tensors, positions)
-    assert embeds.shape == (len(expanded), _MOCK_HIDDEN_SIZE)
-    assert mask.count(False) == LEN_SYS + LEN_USR
-    assert torch.equal(embeds[positions[0][0] : positions[0][0] + LEN_SYS], t_sys)
-    assert torch.equal(embeds[positions[1][0] : positions[1][0] + LEN_USR], t_usr)
+    mixed = _build_mixed_prompt_embeds(expanded, tensors, positions)
+    assert len(mixed.is_token_ids) == len(expanded)
+    assert mixed.is_token_ids.count(False) == LEN_SYS + LEN_USR
+    assert torch.equal(mixed.embeds, torch.cat([t_sys, t_usr]))
 
 
 def test_truncation_keeps_the_mixed_mask_aligned_with_the_prompt():
@@ -797,12 +801,12 @@ def test_truncation_keeps_the_mixed_mask_aligned_with_the_prompt():
     )
     tensors = [torch.randn(embed_len, hidden_size)]
     positions = [(num_head, embed_len)]
-    embeds, mask = _build_mixed_prompt_embeds(token_ids, tensors, positions)
+    mixed = _build_mixed_prompt_embeds(token_ids, tensors, positions)
 
     prompt: EmbedsPrompt = {
         "prompt_token_ids": token_ids,
-        "prompt_embeds": embeds,
-        "prompt_is_token_ids": mask,
+        "prompt_embeds": mixed.embeds,
+        "prompt_is_token_ids": mixed.is_token_ids,
     }
     keep = 8
     tok_params = TokenizeParams(
@@ -820,4 +824,21 @@ def test_truncation_keeps_the_mixed_mask_aligned_with_the_prompt():
     # describes the wrong positions.
     assert result["prompt_is_token_ids"] == [False] * 3 + [True] * num_tail
     assert result["prompt_token_ids"] == token_ids[-keep:]
-    assert torch.equal(result["prompt_embeds"], embeds[-keep:])
+    # The compact embeds keep exactly the rows of the surviving embed positions.
+    assert torch.equal(result["prompt_embeds"], tensors[0][-3:])
+
+
+def test_padding_a_mixed_prompt_is_rejected(tokenizer):
+    """Embedding inputs cannot be padded: a mixed prompt fails as one with a row
+    per position would, not later with a mask-length error."""
+    token_ids = [1, 2, 0, 0, 3]
+    mixed = _build_mixed_prompt_embeds(token_ids, [torch.randn(2, 8)], [(2, 2)])
+    prompt: EmbedsPrompt = {
+        "prompt_token_ids": token_ids,
+        "prompt_embeds": mixed.embeds,
+        "prompt_is_token_ids": mixed.is_token_ids,
+    }
+    tok_params = TokenizeParams(max_total_tokens=100, pad_prompt_tokens=8)
+
+    with pytest.raises(VLLMValidationError, match="Cannot pad tokens for embedding"):
+        tok_params.apply_post_tokenization(tokenizer, prompt)

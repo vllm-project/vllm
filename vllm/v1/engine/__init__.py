@@ -208,8 +208,9 @@ class EngineCoreRequest(
 
     # Per-position mask for mixed-mode inputs (e.g chat completion with
     # prompt_embeds content parts). `True` means the position is a real
-    # token ID; `False` means the position uses a pre-computed entry from
-    # `prompt_embeds`. `None` for pure-tokens and pure-embeds requests.
+    # token ID; `False` means the position uses the next row of
+    # `prompt_embeds`, which holds rows only for those positions. `None` for
+    # pure-tokens and pure-embeds requests.
     prompt_is_token_ids: list[bool] | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same

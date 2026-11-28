@@ -206,6 +206,7 @@ class RequestState:
         temperature: float | None = None,
         stream_input: bool = False,
         remote_prefill_cached_tokens: int | None = None,
+        prompt_is_token_ids: list[bool] | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -220,7 +221,7 @@ class RequestState:
         self.prompt_token_ids = gc_untrack(prompt_token_ids)
         self.prompt_embeds = prompt_embeds
         self.prompt_len = length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, self.prompt_embeds
+            self.prompt_token_ids, self.prompt_embeds, prompt_is_token_ids
         )
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
@@ -357,6 +358,7 @@ class RequestState:
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
+            prompt_is_token_ids=request.prompt_is_token_ids,
             logprobs_processor=logprobs_processor,
             detokenizer=detokenizer,
             max_tokens_param=max_tokens_param,
@@ -978,9 +980,7 @@ class OutputProcessor:
         metrics = req_state.stats
         arrival_time_ns = int(metrics.arrival_time * 1e9)
         trace_context = extract_trace_context(engine_core_output.trace_headers)
-        prompt_length = length_from_prompt_token_ids_or_embeds(
-            req_state.prompt_token_ids, req_state.prompt_embeds
-        )
+        prompt_length = req_state.prompt_len
 
         # Calculate timing metrics
         e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time

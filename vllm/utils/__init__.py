@@ -15,9 +15,15 @@ def random_uuid() -> str:
 def length_from_prompt_token_ids_or_embeds(
     prompt_token_ids: list[int] | torch.Tensor | None,
     prompt_embeds: torch.Tensor | None,
+    prompt_is_token_ids: list[bool] | None = None,
 ) -> int:
     """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.
+
+    With both set, the token ids give the length, and `prompt_embeds` must
+    have one row per token id, unless `prompt_is_token_ids` marks a mixed
+    prompt, whose `prompt_embeds` may hold only the rows of its `False`
+    positions.
     """
     prompt_token_len = None if prompt_token_ids is None else len(prompt_token_ids)
     prompt_embeds_len = None if prompt_embeds is None else len(prompt_embeds)
@@ -27,13 +33,27 @@ def length_from_prompt_token_ids_or_embeds(
             raise ValueError("Neither prompt_token_ids nor prompt_embeds were defined.")
         return prompt_embeds_len
     else:
-        if prompt_embeds_len is not None and prompt_embeds_len != prompt_token_len:
+        if prompt_embeds_len is not None and (
+            prompt_embeds_len > prompt_token_len
+            if prompt_is_token_ids is not None
+            else prompt_embeds_len != prompt_token_len
+        ):
             raise ValueError(
                 "Prompt token ids and prompt embeds had different lengths"
                 f" prompt_token_ids={prompt_token_len}"
                 f" prompt_embeds={prompt_embeds_len}"
             )
         return prompt_token_len
+
+
+def compact_mixed_prompt_embeds(
+    prompt_embeds: torch.Tensor, prompt_is_token_ids: list[bool]
+) -> torch.Tensor:
+    """The rows of a mixed prompt's `False` positions, given `prompt_embeds`
+    with one row per position or already only those rows."""
+    if len(prompt_embeds) == prompt_is_token_ids.count(False):
+        return prompt_embeds
+    return prompt_embeds[~torch.tensor(prompt_is_token_ids, dtype=torch.bool)]
 
 
 def is_moe_layer(module: torch.nn.Module) -> bool:

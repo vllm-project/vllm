@@ -76,7 +76,8 @@ class EmbedsInput(_InputOptions):
     """The type of input."""
 
     prompt_embeds: "torch.Tensor"
-    """The embeddings of the prompt."""
+    """The embeddings of the prompt. For mixed-mode inputs, either one row per
+    position or only the rows of the `False` positions of `is_token_ids`."""
 
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""

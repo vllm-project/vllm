@@ -9,6 +9,7 @@ from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers import TokenizerLike
+from vllm.utils import compact_mixed_prompt_embeds
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
@@ -587,6 +588,29 @@ class TokenizeParams:
 
         return tokens
 
+    def _truncate_compact_embeds(
+        self,
+        tokenizer: TokenizerLike | None,
+        embeds: "torch.Tensor",
+        is_token_ids: list[bool],
+    ) -> "torch.Tensor":
+        """Truncate the compact `prompt_embeds` of a mixed prompt, which hold
+        only the rows of its embeds positions, to the rows of the embeds
+        positions that survive truncation of the prompt."""
+        num_positions = len(is_token_ids)
+        start, stop = 0, num_positions
+        truncation = self._truncation_slice(tokenizer, num_positions)
+        if truncation is not None:
+            start, stop, _ = truncation.indices(num_positions)
+        # Embedding inputs cannot be padded: reject padding as for one row per
+        # position of the truncated prompt.
+        self._token_padding(tokenizer, range(stop - start))
+        if truncation is None:
+            return embeds
+        first = is_token_ids[:start].count(False)
+        kept = is_token_ids[start:stop].count(False)
+        return embeds[first : first + kept]
+
     def _validate_tokens(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
         # Truncation runs before padding, matching the Transformers pipeline
@@ -631,12 +655,19 @@ class TokenizeParams:
                 tokenizer,
                 prompt["prompt_token_ids"],
             )
-        if "prompt_embeds" in prompt:
-            prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
-                tokenizer,
-                prompt["prompt_embeds"],  # type: ignore[typeddict-item]
-            )
         prompt_dict = cast(dict, prompt)
+        embeds = prompt_dict.get("prompt_embeds")
+        if embeds is not None:
+            is_token_ids = prompt_dict.get("prompt_is_token_ids")
+            if is_token_ids is None:
+                embeds = self._validate_tokens(tokenizer, embeds)
+            else:
+                embeds = self._truncate_compact_embeds(
+                    tokenizer,
+                    compact_mixed_prompt_embeds(embeds, is_token_ids),
+                    is_token_ids,
+                )
+            prompt_dict["prompt_embeds"] = embeds
         for key in _PARALLEL_TO_PROMPT_TOKENS:
             parallel = prompt_dict.get(key)
             if parallel is None:

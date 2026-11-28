@@ -134,7 +134,9 @@ class EmbedsPrompt(_PromptOptions):
     """Schema for a prompt provided via token embeddings."""
 
     prompt_embeds: "torch.Tensor"
-    """The embeddings of the prompt."""
+    """The embeddings of the prompt. For a mixed prompt, either one row per
+    position or only the rows of the positions where `prompt_is_token_ids` is
+    `False`, in order."""
 
     prompt: NotRequired[str]
     """The prompt text corresponding to the token embeddings, if available."""
