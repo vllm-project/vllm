@@ -2796,6 +2796,8 @@ class EngineArgs:
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
         # UltraQuant subclasses that impl, so it inherits the same limit.
+        if uses_packed_kv_backend and attention_config.flash_attn_version == 2:
+            attention_config.tq_prefill_allow_fa3 = False
         if uses_packed_kv_backend and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3

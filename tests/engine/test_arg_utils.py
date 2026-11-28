@@ -1233,3 +1233,15 @@ def test_get_batch_defaults_gb10_stays_on_small_tier(
     tokens, seqs = EngineArgs.get_batch_defaults(1)
     assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
     assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs
+
+
+@pytest.mark.parametrize(
+    "attention_config,allow_fa3",
+    [({}, True), ({"flash_attn_version": 3}, True), ({"flash_attn_version": 2}, False)],
+)
+def test_turboquant_prefill_fa3_respects_explicit_fa2(attention_config, allow_fa3):
+    vllm_config = EngineArgs(
+        kv_cache_dtype="turboquant_k8v4", attention_config=attention_config
+    ).create_engine_config()
+    assert vllm_config.attention_config.flash_attn_version == 2
+    assert vllm_config.attention_config.tq_prefill_allow_fa3 is allow_fa3
