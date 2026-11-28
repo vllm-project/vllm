@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use super::types::CompletionRequest;
+use super::types::{CompletionPrompt, CompletionRequest};
 use crate::error::{ApiError, bail_invalid_request};
 
 /// Validate OpenAI completions protocol invariants and reject unimplemented
@@ -51,6 +51,23 @@ pub(super) fn validate_request(request: &CompletionRequest) -> Result<(), ApiErr
         }
     }
 
+    let batch_size = match &request.prompt {
+        Some(CompletionPrompt::Texts(texts)) => Some(texts.len()),
+        Some(CompletionPrompt::TokenIds(token_ids)) => Some(token_ids.len()),
+        Some(CompletionPrompt::Single(_)) | None => None,
+    };
+    let max_prompts = max_completion_prompts();
+    if let Some(prompt_count) = batch_size
+        && prompt_count > max_prompts
+    {
+        bail_invalid_request!(
+            param = "prompt",
+            "prompt list length {prompt_count} exceeds the maximum allowed count of \
+             {max_prompts}. To increase this limit, set the \
+             VLLM_MAX_COMPLETION_PROMPTS environment variable."
+        );
+    }
+
     reject_unsupported_fields(request)?;
 
     Ok(())
@@ -82,11 +99,20 @@ fn reject_unsupported_fields(request: &CompletionRequest) -> Result<(), ApiError
     Ok(())
 }
 
+fn max_completion_prompts() -> usize {
+    parse_max_completion_prompts(std::env::var("VLLM_MAX_COMPLETION_PROMPTS").ok().as_deref())
+}
+
+/// Python reads the value with `int()`, which ignores surrounding whitespace.
+fn parse_max_completion_prompts(value: Option<&str>) -> usize {
+    value.and_then(|value| value.trim().parse().ok()).unwrap_or(1024)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::validate_request;
+    use super::{parse_max_completion_prompts, validate_request};
     use crate::routes::openai::completions::types::CompletionRequest;
 
     fn base_request() -> CompletionRequest {
@@ -244,5 +270,18 @@ mod tests {
             ..base_request()
         };
         assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn max_completion_prompts_parses_like_python_int() {
+        for (value, expected) in [
+            (None, 1024),
+            (Some("2"), 2),
+            (Some("2 "), 2),
+            (Some(" 2\n"), 2),
+            (Some("not a number"), 1024),
+        ] {
+            assert_eq!(parse_max_completion_prompts(value), expected, "{value:?}");
+        }
     }
 }
