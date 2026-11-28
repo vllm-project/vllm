@@ -1445,11 +1445,9 @@ class VllmConfig:
             return False
         if self.speculative_config is not None:
             speculative_config = self.speculative_config
-            if speculative_config.draft_sample_method != "probabilistic":
-                raise ValueError(
-                    "Speculative decoding with watermarking requires "
-                    "draft_sample_method='probabilistic'."
-                )
+            probabilistic_drafts = (
+                speculative_config.draft_sample_method == "probabilistic"
+            )
             if speculative_config.rejection_sample_method != "standard":
                 raise ValueError(
                     "Speculative decoding with watermarking requires "
@@ -1462,17 +1460,20 @@ class VllmConfig:
                     "candidate-head drafters yet."
                 )
             if (
-                not watermark_config.allow_target_only_watermarking
+                probabilistic_drafts
+                and not watermark_config.allow_target_only_watermarking
                 and not watermark_config.supports_speculative_decoding
             ):
                 raise ValueError(
                     f"The '{watermark_config.algorithm}' watermarking algorithm "
-                    "does not support speculative decoding. Set "
+                    "does not support speculative decoding with probabilistic "
+                    "drafts. Use draft_sample_method='greedy', or set "
                     "allow_target_only_watermarking=true to leave draft tokens "
                     "unwatermarked."
                 )
             if (
-                watermark_config.allow_target_only_watermarking
+                probabilistic_drafts
+                and watermark_config.allow_target_only_watermarking
                 and not watermark_config.supports_speculative_decoding
             ):
                 logger.warning_once(
@@ -1481,8 +1482,11 @@ class VllmConfig:
                     "share of output tokens supplied by accepted drafts.",
                     scope="global",
                 )
-            if watermark_config.algorithm == "dual_key_gumbel" and (
-                watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
+            if (
+                probabilistic_drafts
+                and watermark_config.algorithm == "dual_key_gumbel"
+                and watermark_config.alpha
+                != get_field(WatermarkConfig, "alpha").default
             ):
                 logger.warning_once(
                     "Speculative decoding selects the watermark key by token role: "
