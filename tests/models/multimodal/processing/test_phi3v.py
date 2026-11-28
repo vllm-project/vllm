@@ -56,3 +56,35 @@ def test_processor_override(
     # Ensure we have the right number of placeholders per num_crops size
     img_tok_count = processed_inputs["prompt_token_ids"].count(_IMAGE_TOKEN_ID)
     assert img_tok_count == expected_toks_per_img * num_imgs
+
+
+@pytest.mark.parametrize("model_id", ["microsoft/Phi-3.5-vision-instruct"])
+def test_out_of_order_image_tags(model_id: str):
+    """`<|image_N|>` binds to the N-th image regardless of its prompt position."""
+    from PIL import Image
+
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 2})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+
+    images = [Image.new("RGB", (336, 336)), Image.new("RGB", (1344, 672))]
+    num_tokens = [
+        processor.info.get_num_image_tokens(
+            image_width=image.width,
+            image_height=image.height,
+            processor=hf_processor,
+        )
+        for image in images
+    ]
+    assert num_tokens[0] != num_tokens[1]
+
+    prompt = "<|user|>\n<|image_2|>\n<|image_1|>\n<|end|>\n<|assistant|>\n"
+    processed_inputs = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"image": images}),
+        hf_processor_mm_kwargs={},
+    )
+
+    image_1, image_2 = processed_inputs["mm_placeholders"]["image"]
+    assert image_2.offset < image_1.offset
+    assert [image_1.length, image_2.length] == num_tokens

@@ -675,6 +675,30 @@ def test_apply_token_matches_with_placeholders(
             } == expected_placeholders
 
 
+def test_apply_token_matches_with_placeholders_out_of_order_items():
+    """Placeholders are indexed by item even if items appear out of order."""
+    mm_prompt_updates = {
+        "image": [
+            [PromptReplacement("image", [10], [-1]).resolve(0)],
+            [PromptReplacement("image", [20], [-2, -2]).resolve(1)],
+        ]
+    }
+
+    new_prompt, result, placeholders = _apply_token_matches_with_placeholders(
+        [1, 20, 2, 10, 3],
+        mm_prompt_updates,
+    )
+
+    assert new_prompt == [1, -2, -2, 2, -1, 3]
+    assert result == {"image": [0, 0]}
+    assert placeholders == {
+        "image": [
+            _placeholder("image", 0, 4, [-1]),
+            _placeholder("image", 1, 1, [-2, -2]),
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     "repl_by_key",
     [
