@@ -3591,6 +3591,11 @@ class Scheduler(SchedulerInterface):
         queued_workload = None
         if self.queued_workload_tally is not None:
             queued_workload = self.queued_workload_tally.summary()
+        # Every request in kv_holding_waiting holds KV blocks: async loads in
+        # flight, and finished loads not yet admitted.
+        kv_token_slots = self.kv_cache_manager.get_token_slots(
+            itertools.chain(self.running, self.kv_holding_waiting)
+        )
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
@@ -3601,6 +3606,7 @@ class Scheduler(SchedulerInterface):
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
+            kv_token_slots=kv_token_slots,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
