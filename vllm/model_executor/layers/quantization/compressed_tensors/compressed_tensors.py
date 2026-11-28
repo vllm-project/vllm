@@ -14,7 +14,6 @@ from compressed_tensors.quantization import (
 )
 from compressed_tensors.transform import TransformConfig
 
-from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -1026,26 +1025,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
             if self._is_fp8_w8a8(weight_quant, input_quant):
-                if current_platform.is_xpu():
-                    # On XPU, --linear-backend xpu or torch opts into W8A8 FP8
-                    # linear kernel; otherwise default to W8A16.
-                    config = get_current_vllm_config_or_none()
-                    is_fp8_w8a8_supported = config is not None and (
-                        config.kernel_config.linear_backend in ("xpu", "torch")
-                    )
-                    weight_quant_is_block_strategy = (
-                        weight_quant
-                        and weight_quant.strategy == QuantizationStrategy.BLOCK
-                    )
-                    if weight_quant_is_block_strategy and not is_fp8_w8a8_supported:
-                        # On XPU, block quantized weights always use the
-                        # W8A8 kernel, due to lack of w8a16 support.
-                        is_fp8_w8a8_supported = True
-
-                else:
-                    is_fp8_w8a8_supported = self._check_scheme_supported(
-                        CompressedTensorsW8A8Fp8.get_min_capability(), error=False
-                    )
+                is_fp8_w8a8_supported = self._check_scheme_supported(
+                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False
+                )
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
                         weight_quant=weight_quant,

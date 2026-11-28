@@ -1353,3 +1353,49 @@ def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
     )
 
     assert isinstance(layer.quant_method, CompressedTensorsW4A4Mxfp4MoEMethod)
+
+
+@pytest.mark.parametrize(
+    "strategy,block_structure,dynamic",
+    [
+        (QuantizationStrategy.TENSOR, None, False),
+        (QuantizationStrategy.BLOCK, [128, 128], True),
+    ],
+)
+@pytest.mark.parametrize("linear_backend", ["auto", "xpu", "torch"])
+def test_xpu_compressed_tensors_fp8_scheme_selection(
+    monkeypatch,
+    strategy: QuantizationStrategy,
+    block_structure: list[int] | None,
+    dynamic: bool,
+    linear_backend: str,
+):
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "get_device_capability", lambda: None)
+
+    weights = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.FLOAT,
+        strategy=strategy,
+        block_structure=block_structure,
+        symmetric=True,
+        dynamic=False,
+    )
+    inputs = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.FLOAT,
+        strategy=QuantizationStrategy.GROUP if block_structure else strategy,
+        group_size=block_structure[0] if block_structure else None,
+        symmetric=True,
+        dynamic=dynamic,
+    )
+    ct_config = CompressedTensorsConfig.from_config(
+        {"format": "naive-quantized", "config_groups": {}}
+    )
+    vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend=linear_backend))
+    vllm_config.model_config = Mock(dtype=torch.bfloat16)
+
+    with set_current_vllm_config(vllm_config):
+        scheme = ct_config._get_scheme_from_parts(weights, inputs)
+
+    assert isinstance(scheme, CompressedTensorsW8A8Fp8)

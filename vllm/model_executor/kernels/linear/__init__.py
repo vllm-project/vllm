@@ -250,6 +250,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFp8BlockScaledMMKernel,
+    XPUFp8W8A16BlockScaledMMKernel,
     XPUW8A8FP8LinearKernel,
     XPUW8A16FP8LinearKernel,
 )
@@ -411,6 +412,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
     },
     "xpu_woq": {
         XPUW8A16FP8LinearKernel,
+        XPUFp8W8A16BlockScaledMMKernel,
     },
 }
 
@@ -539,6 +541,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         CPUFp8BlockScaledMMKernel,
     ],
     PlatformEnum.XPU: [
+        XPUFp8W8A16BlockScaledMMKernel,
         XPUFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -674,6 +675,17 @@ _OPS_REGISTERED = False
 
 
 class xpu_ops:
+    @staticmethod
+    @functools.cache
+    def supports_fp8_compute() -> bool:
+        """Whether the device computes FP8 natively (Xe3p: CRI, Nova Lake-P);
+        older XPUs convert FP8 to 16-bit. False if the installed
+        vllm-xpu-kernels lacks the arch query."""
+        try:
+            return bool(torch.ops._xpu_C.is_xe3p_arch())
+        except (AttributeError, RuntimeError):
+            return False
+
     @staticmethod
     @torch.compile
     def dynamic_per_token_int8_quant_ref(

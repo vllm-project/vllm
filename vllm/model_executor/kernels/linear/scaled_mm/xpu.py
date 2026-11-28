@@ -122,6 +122,16 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
         return output.view(*output_shape)
 
 
+def _is_xpu_woq_supported(kernel_name: str) -> tuple[bool, str | None]:
+    if not current_platform.is_xpu():
+        return False, f"{kernel_name} only support on XPU"
+    from vllm._xpu_ops import xpu_ops
+
+    if xpu_ops.supports_fp8_compute():
+        return False, f"{kernel_name} is only used on XPUs without native FP8"
+    return True, None
+
+
 class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def executed_activation_key(
@@ -133,9 +143,7 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.is_xpu():
-            return False, "XPUW8A16FP8Linear only support on XPU"
-        return True, None
+        return _is_xpu_woq_supported("XPUW8A16FP8Linear")
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -296,3 +304,46 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs.t(),
             torch.Tensor(),
         )
+
+
+class XPUFp8W8A16BlockScaledMMKernel(XPUFp8BlockScaledMMKernel):
+    """Weight-only block FP8 for XPUs without native FP8 (e.g. Arc B-series).
+
+    Reuses the weight/scale preparation of XPUFp8BlockScaledMMKernel but feeds
+    the 16-bit activation straight into oneDNN fp8_gemm_w8a16 with the
+    checkpoint block scales, skipping the activation quantization.
+    """
+
+    apply_input_quant = False
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return _is_xpu_woq_supported("XPUFp8W8A16BlockScaledMM")
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        if config.input_dtype not in (torch.float16, torch.bfloat16):
+            return False, "XPUFp8W8A16BlockScaledMM needs fp16/bf16 activations"
+        return super().can_implement(config)
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        # A is the unquantized 16-bit activation (As is an unused placeholder).
+        # B.t() is the [K, N] view and Bs.t() the contiguous [k_blocks,
+        # n_blocks] scale, as in the W8A8 kernel.
+        return torch.ops._xpu_C.fp8_gemm_w8a16(A, B.t(), Bs.t(), None)

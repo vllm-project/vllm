@@ -610,10 +610,9 @@ class XPUPlatform(Platform):
         """
         if envs.VLLM_XPU_SUPPORT_FP8_QUERY is not None:
             return envs.VLLM_XPU_SUPPORT_FP8_QUERY
-        try:
-            return bool(torch.ops._xpu_C.is_xe3p_arch())
-        except (AttributeError, RuntimeError):
-            return False
+        from vllm._xpu_ops import xpu_ops
+
+        return xpu_ops.supports_fp8_compute()
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
