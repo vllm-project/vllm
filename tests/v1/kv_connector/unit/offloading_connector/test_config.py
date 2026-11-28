@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -1291,6 +1292,46 @@ def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
     mapper = FileMapper.from_offloading_spec("/cache", spec, parallel_agnostic=True)
     assert mapper.get_run_config()["tp_size"] == 1
     assert mapper.get_run_config()["replicated_layout"] is True
+
+
+@pytest.mark.parametrize(
+    "total_kv_heads,tp_size,canonical",
+    [(4, 2, True), (1, 4, True), (2, 4, True), (1, 4, False)],
+    ids=["sharded", "fully-replicated", "partially-replicated", "noncanonical"],
+)
+def test_canonical_gqa_file_size_matches_across_tp(total_kv_heads, tp_size, canonical):
+    """A shared file namespace must not grow when TP replicates KV heads."""
+    config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        extra_config={"canonical_layout": canonical, "cpu_bytes_to_use": 1 << 20},
+    )
+    get_kv_heads = config.model_config.get_total_num_kv_heads
+    assert isinstance(get_kv_heads, MagicMock)
+    get_kv_heads.return_value = total_kv_heads
+    config.cache_config.kv_cache_layout = "LBNHC"
+    config.parallel_config.distributed_executor_backend = "mp"
+    cache_spec = AttentionSpec(
+        block_size=16,
+        num_kv_heads=max(1, total_kv_heads // tp_size),
+        head_size=128,
+        dtype=torch.float16,
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[make_kv_cache_group(["layer"], cache_spec)],
+    )
+    off_config = build_offloading_config(config, kv_config)
+    off = TieringOffloadingSpec(off_config)
+    replicas = max(1, tp_size // total_kv_heads) if canonical else 1
+    assert off_config.canonical_kv_replicas == replicas
+    expected_bytes = 8192 * (
+        total_kv_heads if canonical else max(total_kv_heads, tp_size)
+    )
+    expected_bytes = round_up(expected_bytes, off.BLOCK_SIZE_ALIGNMENT)
+    assert off.kv_bytes_per_chunk == expected_bytes
+    assert off.num_chunks == (1 << 20) // expected_bytes
+    assert off.cpu_page_size_per_worker == cache_spec.page_size_bytes
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():

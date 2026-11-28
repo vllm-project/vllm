@@ -133,7 +133,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             if self.replicated_layout:
                 region_copies = world_size // config.parallel.local_world_size
             region_budget = int(cpu_bytes_to_use) // region_copies
-            num_copies = 1 if self.replicated_layout else world_size
+            num_copies = self._num_kv_copies()
             kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
             kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
 
@@ -213,6 +213,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 info=self.cpu_info,
             )
         return self._manager
+
+    def _num_kv_copies(self) -> int:
+        return 1 if self.replicated_layout else self.config.parallel.world_size
 
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
