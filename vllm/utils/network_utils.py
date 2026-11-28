@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
 import contextlib
+import functools
 import ipaddress
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -172,9 +175,32 @@ def get_tcp_uri(ip: str, port: int) -> str:
         return f"tcp://{ip}:{port}"
 
 
+# Longest socket path that fits in sockaddr_un.sun_path.
+_IPC_PATH_MAX_LEN = getattr(zmq, "IPC_PATH_MAX_LEN", 107)
+
+
+@functools.cache
+def _short_private_ipc_dir() -> str:
+    path = tempfile.mkdtemp(prefix="vllm-", dir="/tmp")
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
+    return path
+
+
 def get_open_zmq_ipc_path() -> str:
     base_rpc_path = envs.VLLM_RPC_BASE_PATH
-    return f"ipc://{base_rpc_path}/{uuid4()}"
+    name = str(uuid4())
+    path = os.path.join(base_rpc_path, name)
+    if len(os.fsencode(path)) > _IPC_PATH_MAX_LEN:
+        fallback_dir = _short_private_ipc_dir()
+        logger.warning_once(
+            "IPC socket directory %r is too long for a Unix socket path; "
+            "using %r instead. Set VLLM_RPC_BASE_PATH to a shorter directory "
+            "to silence this warning.",
+            base_rpc_path,
+            fallback_dir,
+        )
+        path = os.path.join(fallback_dir, name)
+    return f"ipc://{path}"
 
 
 def get_open_zmq_inproc_path() -> str:
