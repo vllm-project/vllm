@@ -110,3 +110,42 @@ def test_from_config_uses_checkpoint_module_name():
     lora = LoRALayerWeights.from_config("model.layers.1.self_attn.q_proj", peft_helper)
     assert lora.rank == RANK
     assert lora.scaling == pytest.approx(ALPHA / RANK)
+
+
+def test_optimize_does_not_mutate_caller_lora_b():
+    """`optimize()` must scale `lora_b` out of place so caller-owned tensors
+    passed by reference (e.g. via `from_lora_tensors` when `to()` is a no-op)
+    do not compound scaling across reloads."""
+    g = torch.Generator().manual_seed(0)
+    caller_a = torch.randn(RANK, 64, generator=g).to(torch.bfloat16)
+    caller_b = (torch.randn(256, RANK, generator=g) * 0.02).to(torch.bfloat16)
+    before_b = caller_b.clone()
+    expected_b = before_b * RSLORA_SCALING
+
+    for _ in range(2):
+        lora = LoRALayerWeights(
+            module_name="model.layers.0.self_attn.o_proj",
+            rank=RANK,
+            lora_alpha=ALPHA,
+            lora_a=caller_a.to(dtype=torch.bfloat16),
+            lora_b=caller_b.to(dtype=torch.bfloat16),
+            scaling=RSLORA_SCALING,
+        ).optimize()
+        assert lora.scaling == 1
+        torch.testing.assert_close(lora.lora_b, expected_b, rtol=0, atol=0)
+
+    torch.testing.assert_close(caller_b, before_b, rtol=0, atol=0)
+
+
+def test_packed_moe_stacked_optimize_does_not_mutate_caller_lora_b():
+    """`PackedLoRALayerWeights.optimize()` must also avoid mutating pre-stacked
+    3D `lora_b` tensors passed by reference through `pack_moe_stacked`."""
+    loras = moe_loras(RSLORA_SCALING, stacked=True)
+    caller_bs = [lora.lora_b for lora in loras]
+    before_bs = [b.clone() for b in caller_bs]
+
+    packed = PackedLoRALayerWeights.pack_moe_stacked(loras, "experts").optimize()
+
+    for caller_b, before_b, packed_b in zip(caller_bs, before_bs, packed.lora_b):
+        torch.testing.assert_close(caller_b, before_b, rtol=0, atol=0)
+        torch.testing.assert_close(packed_b, before_b * RSLORA_SCALING, rtol=0, atol=0)
