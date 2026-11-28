@@ -19,6 +19,7 @@ from types import FunctionType, MethodType
 
 import torch
 
+from vllm.config import CompilationMode, get_cached_compilation_config
 from vllm.model_executor.layers.activation import (
     GELU,
     ReLUSquaredActivation,
@@ -35,11 +36,16 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
     relu_squared_static_fp8_quant,
 )
+from vllm.model_executor.layers.fusion.silu_mul_mxfp8_quant import (
+    _SILU_MXFP8_TRITON_SUPPORTED,
+    _silu_mxfp8_max_rows,
+)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kMxfp8Dynamic,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
@@ -234,6 +240,86 @@ def _relu_squared_nvfp4_quant_supported(
     )
 
 
+def _silu_and_mul_mxfp8(x: torch.Tensor, linear: LinearBase) -> QuantizedActivation:
+    data, scale = torch.ops.vllm.silu_mul_mxfp8_quant(x, "compiled_native")
+    return QuantizedActivation(
+        data=data,
+        scale=scale,
+        orig_dtype=x.dtype,
+        orig_shape=x.shape[:-1] + (x.shape[-1] // 2,),
+        quant_key=kMxfp8Dynamic,
+    )
+
+
+def _uses_compiled_native_silu(act_fn: torch.nn.Module) -> bool:
+    """Recognize the static native function wrapped by CustomOp.maybe_compile."""
+    forward = act_fn._forward_method
+    if type(forward) is not FunctionType:
+        return False
+    try:
+        native = forward._torchdynamo_inline  # type: ignore[attr-defined]
+    except AttributeError:
+        return False
+    if native is not SiluAndMul.forward_native:
+        return False
+
+    from torch._inductor import config as inductor_config
+
+    config = get_cached_compilation_config()
+    eager_numerics = getattr(inductor_config, "eager_numerics", None)
+    triton_config = getattr(inductor_config, "triton", None)
+    # Precision emulation retains an extra BF16 rounding boundary. Unknown
+    # model compiler overrides or custom passes can also change this contract.
+    allowed_options = {
+        "enable_auto_functionalized_v2",
+        "combo_kernels",
+        "benchmark_combo_kernel",
+    }
+    return (
+        config.mode != CompilationMode.NONE
+        and config.backend == "inductor"
+        and current_platform.simple_compile_backend == "inductor"
+        and not config.inductor_passes
+        and not (config.inductor_compile_config.keys() - allowed_options)
+        # Missing or unknown numerical options must retain the unfused path.
+        and getattr(inductor_config, "emulate_precision_casts", None) is False
+        and getattr(triton_config, "codegen_upcast_to_fp32", None) is True
+        and getattr(inductor_config, "use_fast_math", None) is False
+        and getattr(eager_numerics, "division_rounding", None) is False
+        and getattr(eager_numerics, "disable_ftz", None) is False
+        and getattr(eager_numerics, "use_pytorch_libdevice", None) is False
+    )
+
+
+def _silu_mxfp8_quant_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+
+    # QuantKey does not yet describe scale layout. Match the actual consumer,
+    # including ModelOpt, compressed-tensors, and INC's scheme wrappers.
+    method = linear.quant_method
+    scheme = getattr(linear, "scheme", getattr(method, "scheme", None))
+    kernel = getattr(method, "kernel", getattr(scheme, "kernel", None))
+    return (
+        type(kernel) is FlashInferCutlassMxfp8LinearKernel
+        and _SILU_MXFP8_TRITON_SUPPORTED
+        and _uses_compiled_native_silu(act_fn)
+        and not x.requires_grad
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.ndim == 2
+        and x.shape[1] > 0
+        and x.shape[1] % 64 == 0
+        and 0 < x.shape[0] <= _silu_mxfp8_max_rows(x.shape[1] // 2)
+        and x.is_contiguous()
+    )
+
+
 # Optional per-entry predicates preserve the unconditional fallback contract
 # for producers whose supported inputs are narrower than their registry key.
 _FUSED_ACT_QUANT_SUPPORT: dict[
@@ -258,6 +344,9 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quan
 
 # The Triton act + NVFP4 producer uses Blackwell FP4/FP8 conversion PTX.
 if current_platform.is_cuda() and current_platform.has_device_capability(100):
+    _SILU_MXFP8_KEY = (SiluAndMul, kMxfp8Dynamic)
+    _FUSED_ACT_QUANT[_SILU_MXFP8_KEY] = _silu_and_mul_mxfp8
+    _FUSED_ACT_QUANT_SUPPORT[_SILU_MXFP8_KEY] = _silu_mxfp8_quant_supported
     _RELU2_NVFP4_KEY = (ReLUSquaredActivation, kNvfp4Dynamic)
     _FUSED_ACT_QUANT[_RELU2_NVFP4_KEY] = partial(act_nvfp4_quant, act="relu2")
     _FUSED_ACT_QUANT_SUPPORT[_RELU2_NVFP4_KEY] = _relu_squared_nvfp4_quant_supported

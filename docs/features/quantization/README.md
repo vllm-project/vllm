@@ -31,6 +31,19 @@ To choose the kernel backend of quantized linear layers, for all of them with
 `--linear-backend` or per quantization type with `linear_backend_per_quant`,
 see [Kernel Backends](kernels.md#selecting-a-backend).
 
+### Qwen3 SiLU and MXFP8 Fusion
+
+Qwen3 dense MLPs automatically fuse SiLU-and-multiply with dynamic MXFP8
+activation quantization on Blackwell when using BF16 activations, compiled
+native SiLU with the supported default Inductor numerical settings, and the
+`flashinfer_cutlass` linear backend. No additional fusion flag is needed.
+This path requires Triton 3.8 or newer with the CUDA `enable_reflect_ftz` and
+`enable_fp_fusion` options. Numerical validation used PyTorch 2.14.0 and
+Triton 3.8.0 on SM100 and SM120. Missing compiler options disable fusion.
+The fused producer writes FP8 values and swizzled block scales directly for
+the downstream matrix multiplication. Eager or CUDA-custom-op SiLU, other
+linear backends, and unsupported compiler settings use the existing path.
+
 ## Hadamard Input Transforms (QuIP)
 
 Compressed-tensors NVFP4 checkpoints with a QuIP-style Hadamard input transform (`transform_config` with `type: hadamard` and `head_dim` of 16, 32, 64, or 128) run on the Humming backend by default on compute capability 10.0 and newer. The Hadamard is fused with input quantization, and the activation dtype declared by the checkpoint is used, with no fallback to 16-bit activations.
