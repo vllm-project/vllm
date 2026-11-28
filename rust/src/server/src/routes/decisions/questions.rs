@@ -32,6 +32,20 @@ impl QuestionType {
     /// Every type, in Python's registration order.
     pub(super) const ALL: [Self; 3] = [Self::Choice, Self::Noul, Self::Score];
 
+    /// The name requests use for the type.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Choice => "choice",
+            Self::Noul => "noul",
+            Self::Score => "score",
+        }
+    }
+
+    /// The type a request names, if any.
+    pub(super) fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|question_type| question_type.name() == name)
+    }
+
     /// The labels of a question's options, in option order.
     pub(super) fn label_set(self) -> &'static [&'static str] {
         match self {
