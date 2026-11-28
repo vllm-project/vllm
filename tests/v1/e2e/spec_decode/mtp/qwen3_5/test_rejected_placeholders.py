@@ -20,13 +20,31 @@ PLACEHOLDER_REGRESSION_NUM_SPEC_TOKENS = 3
 
 
 @pytest.mark.parametrize(
-    "cudagraph_mode",
-    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE],
-    ids=["piecewise", "full-and-piecewise"],
+    "cudagraph_mode,attention_backend",
+    [
+        pytest.param(CUDAGraphMode.PIECEWISE, "auto", id="piecewise"),
+        pytest.param(CUDAGraphMode.FULL_AND_PIECEWISE, "auto", id="full-and-piecewise"),
+        *(
+            [
+                pytest.param(
+                    CUDAGraphMode.FULL_AND_PIECEWISE,
+                    "FLASHINFER",
+                    id="full-and-piecewise-xqa",
+                )
+            ]
+            if current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(120)
+            )
+            else []
+        ),
+    ],
 )
 @single_gpu_only
 def test_mtp_rejected_placeholders_match_greedy_token_ids(
     cudagraph_mode: CUDAGraphMode,
+    attention_backend: str,
     vllm_runner,
 ):
     """Rejected MTP padding must not alter the non-speculative token stream."""
@@ -36,7 +54,9 @@ def test_mtp_rejected_placeholders_match_greedy_token_ids(
         "max_num_seqs": 1,
         "enable_chunked_prefill": None,
         "limit_mm_per_prompt": {"image": 0, "video": 0},
-        "attention_backend": ("TRITON_ATTN" if current_platform.is_rocm() else "auto"),
+        "attention_backend": (
+            "TRITON_ATTN" if current_platform.is_rocm() else attention_backend
+        ),
     }
     sampling_params = SamplingParams(
         temperature=0.0,

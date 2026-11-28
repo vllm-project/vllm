@@ -1205,10 +1205,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             vllm_config, self.flashinfer_trtllm_api_decode_kernel, self.use_dcp
         )
         # Fused draft steps advance seq_lens in place and keep block tables fixed,
-        # so one trtllm-gen decode build serves every step (not DCP-local seq_lens).
+        # so one trtllm-gen/XQA decode build serves every step (not DCP-local seq_lens).
         self.supports_draft_decode_metadata_update = (
             self.flashinfer_trtllm_api_decode_kernel
-            == FlashInferDecodeKernel.TRTLLM_GEN
+            in (FlashInferDecodeKernel.TRTLLM_GEN, FlashInferDecodeKernel.XQA)
             and not self.use_dcp
         )
         self.use_fa2_native_decode = _use_fa2_native_decode()

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from functools import partial
 from types import SimpleNamespace
 
@@ -1337,6 +1337,79 @@ def test_flashinfer_resolves_layerwise_cache_dtype(
     assert layer.kv_cache_dtype == expected
     assert builder.cache_dtype == expected
     assert config.cache_config.cache_dtype == global_dtype
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and AttentionBackendEnum.FLASHINFER in BACKENDS_TO_TEST
+        and (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(120)
+        )
+    ),
+    reason="Requires CUDA SM90 or SM12x with FlashInfer.",
+)
+@pytest.mark.parametrize("head_size,expected", [(256, True), (512, False)])
+@torch.inference_mode()
+def test_flashinfer_xqa_draft_decode_metadata_update(
+    monkeypatch: pytest.MonkeyPatch, head_size: int, expected: bool
+):
+    """XQA decode metadata tracks in-place seq_lens updates; native decode does not."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "get_per_layer_parameters",
+        lambda *args: {
+            "layer.0": PerLayerParameters(
+                window_left=-1, logits_soft_cap=0.0, sm_scale=head_size**-0.5
+            )
+        },
+    )
+    block_size = 16
+    device = torch.device(DEVICE_TYPE)
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B-Base",
+        dtype="bfloat16",
+        max_model_len=512,
+        block_size=block_size,
+        num_gpu_blocks=64,
+    )
+    spec = AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=2,
+        head_size=head_size,
+        dtype=torch.bfloat16,
+    )
+    with set_current_vllm_config(config):
+        builder = flashinfer_backend.FlashInferMetadataBuilder(
+            spec, ["layer.0"], config, device
+        )
+
+    assert builder.use_xqa is expected
+    assert builder.supports_draft_decode_metadata_update is expected
+    if not expected:
+        return
+
+    step1 = create_common_attn_metadata(
+        BatchSpec(seq_lens=[block_size, 40], query_lens=[1, 1]), block_size, device
+    )
+    reused = builder.build(common_prefix_len=0, common_attn_metadata=step1)
+    step1.seq_lens.add_(1)
+    builder.update_draft_decode_metadata(reused)
+    step2 = replace(step1, seq_lens_cpu_upper_bound=step1.seq_lens.cpu())
+    rebuilt = builder.build(common_prefix_len=0, common_attn_metadata=step2)
+
+    assert isinstance(reused.decode, flashinfer_backend.FlashInferTrtllmAPIDecode)
+    for field in fields(reused.decode):
+        value = getattr(reused.decode, field.name)
+        expected_val = getattr(rebuilt.decode, field.name)
+        if isinstance(value, torch.Tensor):
+            assert torch.equal(value, expected_val), field.name
+        else:
+            assert value == expected_val, field.name
 
 
 @pytest.mark.skipif(
